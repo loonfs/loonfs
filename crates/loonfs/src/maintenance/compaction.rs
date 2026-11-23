@@ -9,9 +9,9 @@ use crate::{Error, Result};
 use crate::{
     MetadataMaintenanceOutcome, MetadataMaintenanceResponse, NamespaceId, SharedObjectStore,
 };
-use loonfs_core::control::{ensure_namespace_live, Held, LoadedManifest};
+use loonfs_core::control::{ensure_namespace_live, Checked, Held, LoadedManifest};
 use loonfs_core::publish::WriterPosition;
-use loonfs_core::{CoreError, MetadataCompactionCancellation, Phase};
+use loonfs_core::{MetadataCompactionCancellation, Phase};
 use loonfs_types::CompactorEpoch;
 use std::ops::ControlFlow;
 use tracing::Instrument;
@@ -41,7 +41,7 @@ fn compaction_outcome(outcome: loonfs_core::CompactionUnitOutcome) -> MetadataCo
             skipped,
             ..
         } => MetadataCompactionOutcome::Published {
-            manifest_no: manifest.manifest.manifest_no,
+            manifest_no: manifest.manifest_no(),
             rows_read,
             rows_written,
             input_bytes,
@@ -311,26 +311,16 @@ impl Maintenance {
                 None => self.load_live_basis(namespace_id).await?,
             }
         } else {
-            let namespace = self.core.namespace_store(namespace_id);
-            let manifest_no = basis.manifest().manifest().manifest_no;
-            if namespace
-                .manifest_has_successor(manifest_no)
-                .await
-                .map_err(CoreError::from)?
-            {
-                self.load_live_basis(namespace_id).await?
-            } else {
-                let (above, boundary) = namespace
-                    .above_boundary(manifest_no, basis.boundary().clone())
-                    .await?;
-                if !above {
-                    self.load_live_basis(namespace_id).await?
-                } else {
-                    let mut basis = basis;
-                    basis.raise_boundary(boundary);
-                    return Ok(ControlFlow::Continue(Some(basis)));
-                }
+            let mut basis = basis;
+            let checked = self
+                .core
+                .namespace_store(namespace_id)
+                .check_newest(&mut basis, self.core.observation())
+                .await?;
+            if checked == Checked::Newest {
+                return Ok(ControlFlow::Continue(Some(basis)));
             }
+            self.load_live_basis(namespace_id).await?
         };
         Ok(self.screen(namespace_id, claimed, basis))
     }

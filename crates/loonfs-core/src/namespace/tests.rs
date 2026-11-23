@@ -1460,14 +1460,13 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
     let other_finisher = async {
         store.wait_until_blocked().await;
         let namespace = crate::test_support::namespace_store(store.inner(), &target);
-        let crate::namespace::control::NewestManifest::Manifest(current, boundary) = namespace
-            .find_newest_manifest()
+        let crate::namespace::control::NewestManifest::Manifest(current) = namespace
+            .find_newest_manifest(crate::test_support::observed_now())
             .await
             .expect("find manifest 1")
         else {
             panic!("manifest 1 is the newest manifest");
         };
-        let current = Held::new(current, crate::test_support::observed_now(), boundary);
         namespace
             .update_manifest(Some(current), &context().clock(), |current| async move {
                 Ok(crate::manifest::publish::ManifestChange::Next(

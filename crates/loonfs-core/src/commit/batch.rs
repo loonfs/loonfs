@@ -419,7 +419,7 @@ mod tests {
             .expect("acquire writer");
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         let view = namespace
-            .load_publish_metadata_view(acquired, None, None)
+            .load_publish_metadata_view(acquired, None, None, crate::test_support::observed_now())
             .await
             .expect("publish view");
         let candidates = [("expired", 1_001), ("valid", 2_000)].map(|(name, expires_at_ms)| {
@@ -495,7 +495,12 @@ mod tests {
             .expect("acquire writer");
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         let mut view = namespace
-            .load_publish_metadata_view(acquired_writer, None, None)
+            .load_publish_metadata_view(
+                acquired_writer,
+                None,
+                None,
+                crate::test_support::observed_now(),
+            )
             .await
             .expect("load publish view");
 
@@ -506,7 +511,7 @@ mod tests {
 
         // Change only the in-memory head so this exercises the sequence limit
         // without modifying the stored metadata.
-        view.position.read_basis.head.seq = CommitSeq(MAX_PUBLIC_INTEGER);
+        view.position.basis.read_basis_mut().head.seq = CommitSeq(MAX_PUBLIC_INTEGER);
         let candidate = CommitCandidate::new(CommitIntent::single(
             CommitId::parse("past-sequence-limit").expect("commit id"),
             loonfs_test_support::test_actor(),

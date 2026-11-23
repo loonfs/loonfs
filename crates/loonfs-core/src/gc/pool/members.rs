@@ -340,18 +340,17 @@ async fn load_member_roots<S: ObjectStore>(
     roots: &Mutex<SharedRoots<'_>>,
 ) -> Result<Option<RetirementStatus>> {
     let observed = Observation::now(Arc::clone(&member.timer));
-    let reason = match member.find_newest_manifest().await? {
-        NewestManifest::Manifest(current, boundary) if current.payload().pool_id == *pool_id => {
-            let found = NamespaceRoots::new(member, current.payload(), now_ms).status;
+    let reason = match member.find_newest_manifest(observed).await? {
+        NewestManifest::Manifest(current) if current.manifest().payload().pool_id == *pool_id => {
+            let found = NamespaceRoots::new(member, current.manifest().payload(), now_ms).status;
             let status = if matches!(found, RetirementStatus::Initializing { .. }) {
                 found
             } else {
-                let current = Held::new(current, observed, boundary);
                 read_member_roots(member, current, now_ms, roots).await?
             };
             return Ok(Some(status));
         }
-        NewestManifest::Manifest(..) => "other_pool",
+        NewestManifest::Manifest(_) => "other_pool",
         NewestManifest::Retired => "retired",
         NewestManifest::Absent => "absent",
     };

@@ -64,8 +64,9 @@ pub(crate) enum NewestManifest {
     Absent,
     /// The namespace's boundary is retired.
     Retired,
-    /// The namespace's newest manifest, with the boundary of the last read.
-    Manifest(LoadedManifest, KeptBoundary),
+    /// The namespace's newest manifest, with the boundary of the last read,
+    /// checked at the observation that the caller passed.
+    Manifest(Held<LoadedManifest>),
 }
 
 pub(crate) fn ensure_head_identity(
@@ -96,13 +97,11 @@ pub fn ensure_namespace_live(
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Loads the namespace's current manifest from the manifest boundary.
+    /// Loads the namespace's current manifest from the manifest boundary, for
+    /// a caller that doesn't keep it (see [`Self::load_current_basis`]).
     pub async fn load_current_manifest(&self) -> crate::error::Result<LoadedManifest> {
-        match self.find_newest_manifest().await? {
-            NewestManifest::Absent => Err(self.namespace_not_found()),
-            NewestManifest::Retired => Err(self.namespace_deleted()),
-            NewestManifest::Manifest(manifest, _) => Ok(manifest),
-        }
+        let observed = Observation::now(Arc::clone(&self.timer));
+        Ok(self.load_current_basis(observed).await?.into_manifest())
     }
 
     /// Loads the namespace's current manifest from the manifest boundary,
@@ -117,12 +116,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         observed: Observation,
     ) -> crate::error::Result<Held<LoadedManifest>> {
-        match self.find_newest_manifest().await? {
+        match self.find_newest_manifest(observed).await? {
             NewestManifest::Absent => Err(self.namespace_not_found()),
             NewestManifest::Retired => Err(self.namespace_deleted()),
-            NewestManifest::Manifest(manifest, boundary) => {
-                Ok(Held::new(manifest, observed, boundary))
-            }
+            NewestManifest::Manifest(current) => Ok(current),
         }
     }
 
@@ -158,9 +155,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// under an unchanged boundary object it means a corrupt store, because
     /// a collection never leaves a namespace without a manifest above its
     /// boundary. The call returns the manifest with the boundary of its last
-    /// read, and returns `store_contention` after [`MAX_CONTENTION_ATTEMPTS`]
-    /// attempts.
-    pub(crate) async fn find_newest_manifest(&self) -> crate::error::Result<NewestManifest> {
+    /// read, checked at `observed`, an observation that the caller read
+    /// before the call: every attempt lists the manifests after `observed`,
+    /// so every manifest published before it is at or below the one
+    /// returned. The call returns `store_contention` after
+    /// [`MAX_CONTENTION_ATTEMPTS`] attempts.
+    pub(crate) async fn find_newest_manifest(
+        &self,
+        observed: Observation,
+    ) -> crate::error::Result<NewestManifest> {
         let prefix = metadata_manifest_prefix(&self.namespace_id);
         for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
             let boundary = self.load_boundary().await?;
@@ -179,7 +182,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     Ok::<_, CoreError>(manifest_no_of(&entry.key).max(highest))
                 })
                 .await?;
-            let kept = KeptBoundary::from(boundary);
+            let kept = KeptBoundary::read(boundary);
             let Some(manifest_no) = highest else {
                 if self.reload_boundary(kept.clone()).await? != kept {
                     continue;
@@ -198,7 +201,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
             };
             let reloaded = self.reload_boundary(kept).await?;
             if !reloaded.covers(manifest_no) {
-                return Ok(NewestManifest::Manifest(manifest, reloaded));
+                return Ok(NewestManifest::Manifest(Held::new(
+                    manifest, observed, reloaded,
+                )));
             }
         }
         Err(CoreError::contention_exhausted(

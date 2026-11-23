@@ -425,14 +425,14 @@ async fn a_second_find_of_one_manifest_reads_the_manifest_from_the_segment_cache
     ] {
         store.reset();
         for gets_manifest in [true, second_find_gets_manifest] {
-            let crate::namespace::control::NewestManifest::Manifest(found, _) = namespace
-                .find_newest_manifest()
+            let crate::namespace::control::NewestManifest::Manifest(found) = namespace
+                .find_newest_manifest(crate::test_support::observed_now())
                 .await
                 .expect("find the newest manifest")
             else {
                 panic!("the namespace has a manifest");
             };
-            assert_eq!(found.object_key, manifest_key);
+            assert_eq!(found.manifest().object_key, manifest_key);
             assert_eq!(
                 control_requests(&namespace_id, &store.take()),
                 find(gets_manifest)

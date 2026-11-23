@@ -34,7 +34,7 @@ impl ForkPointTail {
         projection: &ManifestProjection<'_, S>,
     ) -> Self {
         Self {
-            seq: projection.head.seq,
+            seq: projection.head().seq,
             tail: Arc::clone(&projection.tail_state),
         }
     }
@@ -120,11 +120,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
             "a fork publishes manifest 2 only for a tail with commits"
         );
         let projection = ManifestProjection {
-            head: NamespaceReadState {
+            basis: manifest_1.with_head(NamespaceReadState {
                 seq: tail.seq,
                 ..NamespaceReadState::from(payload)
-            },
-            held: manifest_1.clone(),
+            }),
             manifest_segments: metadata_basis_from_manifest(
                 &self.store,
                 Some(&self.segment_cache),

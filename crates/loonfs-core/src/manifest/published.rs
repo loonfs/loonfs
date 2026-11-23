@@ -1,64 +1,12 @@
-//! A manifest that a writer session's commit engine moves its position
-//! onto (one that this runtime published or found current, or one that a
-//! read found above the position), and the rule for a manifest at the head
-//! of an earlier one.
+//! The rule that moves a head held above one manifest onto a later one, and
+//! the report of a maintenance call's publication.
 
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
-use crate::namespace::boundary::KeptBoundary;
+use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::Held;
 use crate::namespace::state::NamespaceReadState;
-use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
-use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
-use loonfs_types::format::manifest::NamespaceManifestEnvelope;
-use loonfs_types::{CommitSeq, WalNo, WriterEpoch};
 use std::sync::Arc;
-
-/// A manifest above a writer session's position, with the fields that
-/// determine whether the position can move onto it.
-///
-/// The session's commit engine moves its position onto the manifest instead
-/// of reloading the namespace (see
-/// [`NamespaceCommitEngine::record_manifest_published`](crate::publish::NamespaceCommitEngine::record_manifest_published)).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublishedManifest {
-    pub manifest: ManifestRef,
-    pub writer_epoch: WriterEpoch,
-    pub status: NamespaceStatus,
-    /// The WAL number that the manifest folds through.
-    pub folded_wal_no: WalNo,
-    /// The manifest's retention floor. A head that moves onto the manifest
-    /// keeps the higher of this floor and its own.
-    pub retention_floor_seq: CommitSeq,
-    /// When this runtime started the call that published the manifest, or
-    /// that found it current. No manifest followed it then, so a position
-    /// that moves onto it takes this as its last successor check. `None`
-    /// for a manifest that a read found above the position, because the read
-    /// records its own check.
-    pub started: Option<Observation>,
-    /// The manifest boundary that the call read after it published the
-    /// manifest or found it current, which a position or a cached head that
-    /// moves onto the manifest keeps.
-    pub boundary: KeptBoundary,
-}
-
-impl PublishedManifest {
-    pub(crate) fn new(
-        manifest: &NamespaceManifestEnvelope,
-        started: Option<Observation>,
-        boundary: KeptBoundary,
-    ) -> Self {
-        let payload = manifest.payload();
-        Self {
-            manifest: super::publish::manifest_ref_for(manifest),
-            writer_epoch: payload.writer_epoch,
-            status: payload.status,
-            folded_wal_no: payload.folded_wal_no,
-            retention_floor_seq: payload.retention_floor_seq,
-            started,
-            boundary,
-        }
-    }
-}
 
 /// Whether `manifest`, a manifest above `basis`, is at the basis's head: an
 /// active manifest with the same writer epoch that folds the WAL through
@@ -78,17 +26,22 @@ impl PublishedManifest {
 pub(crate) fn same_head(
     basis: &MetadataBasis,
     head: &NamespaceReadState,
-    manifest: &PublishedManifest,
+    manifest: &LoadedManifest,
 ) -> bool {
-    manifest.status.is_active()
-        && manifest.writer_epoch == head.writer_epoch
-        && manifest.folded_wal_no == head.folded_wal_no
-        && manifest.manifest.head_seq == basis.manifest().head_seq
+    let payload = manifest.payload();
+    payload.status.is_active()
+        && payload.writer_epoch == head.writer_epoch
+        && payload.folded_wal_no == head.folded_wal_no
+        && payload.head_seq == basis.manifest().head_seq
 }
 
-/// Moves `read_basis` and `tail`, the WAL tail projected above the basis,
-/// onto `manifest`, a manifest above the basis, and returns `false` when the
-/// head can't move there.
+/// Moves `held`, a head and its basis, and `tail`, the WAL tail projected
+/// above the basis, onto `manifest`, and returns `false` when the head can't
+/// move there.
+///
+/// A manifest at or below the basis's number leaves the head and the tail
+/// where they are. After a move, and for such a manifest, `held` merges
+/// `manifest`'s check (see [`Held::merge`]).
 ///
 /// A manifest at the basis's head (see [`same_head`]) keeps the tail. A fold
 /// moves the head when it's active, has the head's writer epoch, folds a WAL
@@ -122,27 +75,32 @@ pub(crate) fn same_head(
 /// the manifests between. A manifest between the two that arrives later is
 /// below the new basis, so it leaves the head where it is.
 pub(crate) fn move_read_basis(
-    read_basis: &mut ReadBasis,
+    held: &mut Held<ReadBasis>,
     tail: &mut Arc<ProjectedWalTail>,
-    manifest: &PublishedManifest,
+    manifest: &Held<LoadedManifest>,
 ) -> bool {
-    let ReadBasis { head, basis } = read_basis;
-    if !same_head(basis, head, manifest) {
-        if !manifest.status.is_active()
-            || manifest.writer_epoch != head.writer_epoch
-            || manifest.folded_wal_no <= head.folded_wal_no
-            || manifest.folded_wal_no > head.wal_no
-        {
-            return false;
+    if manifest.manifest_no() > held.manifest_no() {
+        let ReadBasis { head, basis } = held.read_basis_mut();
+        let loaded = manifest.manifest();
+        let payload = loaded.payload();
+        if !same_head(basis, head, loaded) {
+            if !payload.status.is_active()
+                || payload.writer_epoch != head.writer_epoch
+                || payload.folded_wal_no <= head.folded_wal_no
+                || payload.folded_wal_no > head.wal_no
+            {
+                return false;
+            }
+            let Some(after) = tail.after_seq(payload.head_seq, head.seq) else {
+                return false;
+            };
+            head.folded_wal_no = payload.folded_wal_no;
+            *tail = Arc::new(after);
         }
-        let Some(after) = tail.after_seq(manifest.manifest.head_seq, head.seq) else {
-            return false;
-        };
-        head.folded_wal_no = manifest.folded_wal_no;
-        *tail = Arc::new(after);
+        head.retention_floor_seq = head.retention_floor_seq.max(payload.retention_floor_seq);
+        *basis = MetadataBasis::new(loaded.manifest());
     }
-    head.retention_floor_seq = head.retention_floor_seq.max(manifest.retention_floor_seq);
-    *basis = MetadataBasis::new(manifest.manifest.clone());
+    held.merge(manifest);
     true
 }
 
@@ -152,7 +110,7 @@ pub struct PublicationReport<T> {
     pub response: T,
     /// The manifest this call published, or `None` when it published none
     /// (for example, a fold of a tail that a manifest already covered).
-    pub published: Option<PublishedManifest>,
+    pub published: Option<Held<LoadedManifest>>,
 }
 
 impl<T> PublicationReport<T> {

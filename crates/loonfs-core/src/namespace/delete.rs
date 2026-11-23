@@ -49,9 +49,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     .lock()
                     .expect("the deletion's position lock should not be poisoned")
                     .clone()
-                    .filter(|held| held.read_basis.basis.manifest() == &current.manifest());
+                    .filter(|held| held.read_basis().basis.manifest() == &current.manifest());
                 let head = match &held {
-                    Some(held) => held.read_basis.head.clone(),
+                    Some(held) => held.read_basis().head.clone(),
                     None => self.load_read_anchor(clock.observe()).await?.read_state,
                 };
                 super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
@@ -70,7 +70,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     *position
                         .lock()
                         .expect("the deletion's position lock should not be poisoned") =
-                        held.and_then(|mut held| held.move_to(&folded.manifest).then_some(held));
+                        held.and_then(|mut held| held.move_to(&folded.current).then_some(held));
                     return Ok(ManifestChange::Again);
                 }
                 let payload = current.payload().tombstone(clock.request_at_ms());

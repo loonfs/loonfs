@@ -4,12 +4,11 @@
 use crate::cache::CachedHead;
 use crate::error::Result;
 use crate::manifest::publish::ManifestChange;
-use crate::namespace::basis::{MetadataBasis, ReadBasis};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
-use crate::time::{Observation, OperationClock};
+use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
 
@@ -39,7 +38,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 async move { changed }
             })
             .await?;
-        self.install_active_head(&update.current, clock.origin());
+        self.install_active_head(&update.current);
         Ok(update.current)
     }
 
@@ -48,18 +47,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// first read and first writer claim start from it. A read replays the
     /// empty WAL tail above `active` without a request.
     ///
-    /// `started` is when the create or the fork started. The namespace wasn't
-    /// active then, so no commit had been acknowledged and no manifest
-    /// followed `active`. Both checks of the head are at `started`.
-    pub(crate) fn install_active_head(&self, active: &Held<LoadedManifest>, started: Observation) {
-        self.head_and_wal_tail_cache.replace_head(CachedHead {
-            read_basis: ReadBasis {
-                head: NamespaceReadState::from(active.manifest().payload()),
-                basis: MetadataBasis::new(active.manifest().manifest().clone()),
-            },
-            basis_checked: started.clone(),
-            head_confirmed: started,
-            boundary: active.boundary().clone(),
-        });
+    /// Both of the head's times, its manifest check and its head
+    /// confirmation, are `active`'s check time. When this call published
+    /// `active`, no writer had claimed the namespace before that check, so no
+    /// commit followed it.
+    pub(crate) fn install_active_head(&self, active: &Held<LoadedManifest>) {
+        let head = NamespaceReadState::from(active.manifest().payload());
+        self.head_and_wal_tail_cache.replace_head(CachedHead::new(
+            active.with_head(head),
+            active.checked().clone(),
+        ));
     }
 }

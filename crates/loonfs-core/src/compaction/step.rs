@@ -20,7 +20,7 @@ use crate::engine::{NamespaceEngine, Writable};
 use crate::error::Result;
 use crate::manifest::load::metadata_basis_from_manifest;
 use crate::manifest::publish::ManifestChange;
-use crate::manifest::published::{PublicationReport, PublishedManifest};
+use crate::manifest::published::PublicationReport;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::held::Held;
 use crate::phase::Phase;
@@ -49,7 +49,7 @@ pub enum CompactionUnitOutcome {
         /// [`MetadataFamilyGroup::families`].
         group: MetadataFamilyGroup,
         /// The published manifest.
-        manifest: PublishedManifest,
+        manifest: Held<LoadedManifest>,
         input_runs: usize,
         rows_read: u64,
         rows_written: u64,
@@ -215,7 +215,7 @@ fn log_unit_outcome(
             output_bytes,
             output_segments,
             ?skipped,
-            manifest_no = manifest.manifest.manifest_no.0,
+            manifest_no = manifest.manifest_no().0,
             "metadata compaction unit published"
         ),
         CompactionUnitOutcome::Cancelled => tracing::info!(
@@ -315,7 +315,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 },
             )
             .await?;
-        let published = update.published.then(|| update.current_manifest());
+        let published = update.published.then(|| update.current.clone());
         Ok(PublicationReport {
             response: update.current,
             published,

@@ -11,9 +11,9 @@ use crate::{
     WriterState,
 };
 use futures::future::BoxFuture;
-use loonfs_core::control::LoadedManifest;
+use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::WriterPosition;
-use loonfs_core::{Administrator, FloorObjectReport, Phase, PublicationReport, PublishedManifest};
+use loonfs_core::{Administrator, FloorObjectReport, Phase, PublicationReport};
 use loonfs_types::Commit;
 use loonfs_types::{CommitSeq, NamespaceId};
 use std::collections::HashMap;
@@ -268,7 +268,7 @@ impl HeadPositions for RegistryShared {
     fn move_position<'a>(
         &'a self,
         namespace_id: &'a NamespaceId,
-        published: PublishedManifest,
+        published: Held<LoadedManifest>,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             if let Some(publisher) = self.live_publisher(namespace_id) {
@@ -432,7 +432,7 @@ impl PublisherRegistry {
     pub(crate) async fn record_manifest_published(
         &self,
         namespace_id: &NamespaceId,
-        published: PublishedManifest,
+        published: Held<LoadedManifest>,
     ) {
         self.move_views(namespace_id, published).await;
     }
@@ -446,7 +446,7 @@ impl PublisherRegistry {
     pub(super) async fn move_views(
         &self,
         namespace_id: &NamespaceId,
-        published: PublishedManifest,
+        published: Held<LoadedManifest>,
     ) {
         self.shared
             .context
@@ -603,7 +603,7 @@ pub(crate) enum NamespaceChange {
     /// The mutation published this manifest. The publisher's position and
     /// the cached head move to it, or each one that can't move there is
     /// dropped.
-    Published(Box<PublishedManifest>),
+    Published(Box<Held<LoadedManifest>>),
     /// The mutation published no manifest that the views move onto, such as
     /// a garbage collection, a change to a snapshot, or a create (which
     /// installs the new namespace's cached head in core). The publisher keeps

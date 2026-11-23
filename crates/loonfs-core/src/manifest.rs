@@ -25,7 +25,7 @@ pub use self::extension::{ExtensionBasis, ExtensionPublication};
 pub use self::fold::{FoldWalOutcome, FoldWalResponse, FoldedWalTail};
 pub(crate) use self::fork_tail::ForkPointTail;
 pub(crate) use self::published::move_read_basis;
-pub use self::published::{PublicationReport, PublishedManifest};
+pub use self::published::PublicationReport;
 pub use self::retention::{FloorObjectReport, RetentionPlan, RetentionTarget};
 pub use self::statistics::NamespaceStatistics;
 

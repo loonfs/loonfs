@@ -6,13 +6,10 @@ use crate::trace::phase_span;
 use crate::NamespaceId;
 use futures::future::BoxFuture;
 use loonfs_core::cache::{CachedHead, HeadAndWalTailCache, SharedCheck, WalTailCacheKey};
-use loonfs_core::control::KeptBoundary;
+use loonfs_core::control::{Checked, Held, HeldManifestForm, LoadedManifest};
 use loonfs_core::publish::WriterPosition;
-use loonfs_core::time::Observation;
+use loonfs_core::CoreError;
 use loonfs_core::Phase;
-use loonfs_core::PublishedManifest;
-use loonfs_core::{CoreError, MetadataProjectionLoadError};
-use loonfs_types::ManifestNo;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::Instrument;
 
@@ -37,7 +34,7 @@ pub(crate) trait HeadPositions: Send + Sync {
     fn move_position<'a>(
         &'a self,
         namespace_id: &'a NamespaceId,
-        published: PublishedManifest,
+        published: Held<LoadedManifest>,
     ) -> BoxFuture<'a, ()>;
 }
 
@@ -86,17 +83,11 @@ impl ReadPositionSlot {
     /// Returns the engine's position as the slot will store it.
     ///
     /// A read's check of the position that the slot has now stays when the
-    /// engine's own check is older. A check that found no successor of a
-    /// manifest also confirms every later manifest, because each later
-    /// manifest was published after the check. The position keeps the
-    /// higher of the two manifest boundaries.
+    /// engine's own check is older (see [`Held::merge`]).
     pub(crate) fn prepare(&self, position: Option<WriterPosition>) -> Option<Arc<WriterPosition>> {
         let mut position = position?;
         if let Some(current) = self.current() {
-            if current.basis_checked.age_ms() < position.basis_checked.age_ms() {
-                position.basis_checked = current.basis_checked.clone();
-            }
-            position.boundary = position.boundary.higher(current.boundary.clone());
+            position.merge_check(current.basis());
         }
         Some(Arc::new(position))
     }
@@ -131,46 +122,35 @@ impl ReadPositionSlot {
         let Some(position) = self.current() else {
             return false;
         };
+        let read_basis = position.read_basis();
         self.head_and_wal_tail_cache.insert_tail(
             WalTailCacheKey {
-                namespace_id: position.read_basis.head.namespace_id.clone(),
-                manifest_no: position.read_basis.basis.manifest_no(),
-                head_seq: position.read_basis.head.seq,
-                wal_no: position.read_basis.head.wal_no,
+                namespace_id: read_basis.head.namespace_id.clone(),
+                manifest_no: read_basis.basis.manifest_no(),
+                head_seq: read_basis.head.seq,
+                wal_no: read_basis.head.wal_no,
             },
-            Arc::clone(&position.tail),
+            Arc::clone(position.tail()),
         );
-        self.head_and_wal_tail_cache.replace_head(CachedHead {
-            read_basis: position.read_basis.clone(),
-            basis_checked: position.basis_checked.clone(),
-            head_confirmed: position.basis_checked.clone(),
-            boundary: position.boundary.clone(),
-        });
+        self.head_and_wal_tail_cache.replace_head(CachedHead::new(
+            position.basis().clone(),
+            position.basis().checked().clone(),
+        ));
         *self.lock() = None;
         true
     }
 
-    /// Records that a check at `checked` found no successor of manifest
-    /// `manifest_no`, and found the manifest above `boundary`.
-    ///
-    /// The check applies to the position that the slot has now if that
-    /// position's manifest is `manifest_no` or a later one, as
-    /// [`Self::prepare`] explains, unless the position has a later check
-    /// already.
-    fn record_check(&self, checked: Observation, manifest_no: ManifestNo, boundary: KeptBoundary) {
+    /// Records `check`, a check that found its manifest the newest, on the
+    /// position that the slot has now (see [`Held::merge`]).
+    fn record_check<M: HeldManifestForm>(&self, check: &Held<M>) {
         let Some(current) = self.current() else {
             return;
         };
-        if current.read_basis.basis.manifest_no() < manifest_no
-            || current.basis_checked.age_ms() <= checked.age_ms()
-        {
+        let mut updated = WriterPosition::clone(&current);
+        if !updated.merge_check(check) {
             return;
         }
-        let updated = Arc::new(WriterPosition {
-            basis_checked: checked,
-            boundary: current.boundary.clone().higher(boundary),
-            ..WriterPosition::clone(&current)
-        });
+        let updated = Arc::new(updated);
         let mut slot = self.lock();
         if slot
             .as_ref()
@@ -214,8 +194,9 @@ impl RuntimeCore {
             return Ok(None);
         };
         let fresh = |position: &WriterPosition| {
-            max_staleness_ms
-                .is_some_and(|max_staleness_ms| position.basis_checked.age_ms() < max_staleness_ms)
+            max_staleness_ms.is_some_and(|max_staleness_ms| {
+                position.basis().checked().age_ms() < max_staleness_ms
+            })
         };
         if fresh(&position) {
             return Ok(Some(position));
@@ -240,22 +221,20 @@ impl RuntimeCore {
         Ok(slot.current())
     }
 
-    /// Records on the position of the namespace's writer session that a
-    /// check at `checked` found manifest `manifest_no` the newest, above
-    /// `boundary` (see [`ReadPositionSlot::record_check`]), and returns the
-    /// position when a check at or after `checked` confirms it.
+    /// Records `check`, a check that found its manifest the newest, on the
+    /// position of the namespace's writer session (see
+    /// [`ReadPositionSlot::record_check`]), and returns the position when a
+    /// check that began at or after `check`'s confirms it.
     ///
     /// A check by another call, such as a snapshot's verification after its
     /// record write, then serves a `strong` read that started before
-    /// `checked`, as the session's own check does. A runtime without the
+    /// `check`, as the session's own check does. A runtime without the
     /// namespace's writer session, a position on an older manifest, and a
     /// position that the check doesn't confirm return `None`.
     pub(crate) fn record_writer_position_check(
         &self,
         namespace_id: &NamespaceId,
-        checked: Observation,
-        manifest_no: ManifestNo,
-        boundary: KeptBoundary,
+        check: &Held<LoadedManifest>,
     ) -> Option<Arc<WriterPosition>> {
         let slot = self
             .inner
@@ -263,33 +242,29 @@ impl RuntimeCore {
             .get()
             .and_then(std::sync::Weak::upgrade)?
             .read_position_slot(namespace_id)?;
-        let checked_age_ms = checked.age_ms();
-        slot.record_check(checked, manifest_no, boundary);
-        slot.current().filter(|position| {
-            position.read_basis.basis.manifest_no() >= manifest_no
-                && position.basis_checked.age_ms() <= checked_age_ms
-        })
+        slot.record_check(check);
+        slot.current()
+            .filter(|position| position.basis().is_confirmed_by(check))
     }
 
-    /// Checks the position's manifest for a successor with one HEAD.
+    /// Checks the position's manifest with
+    /// [`NamespaceStore::check_newest`](loonfs_core::NamespaceStore::check_newest).
     ///
-    /// A HEAD that finds nothing records the check. A HEAD that finds a
-    /// successor starts the walk of [`same_epoch_manifests_above`]. The
-    /// position moves onto each manifest with the position's writer epoch (a
-    /// fold, a compaction, or a snapshot, by this runtime or by
-    /// another process) in order, as it moves onto the manifests this
-    /// runtime publishes (see [`HeadPositions::move_position`]). A fold that
-    /// folds past the position's tip covered a WAL object that the session
-    /// hasn't read, such as another process's floor object, so it drops the
-    /// position instead. The walk
-    /// that ends on the newest manifest is that manifest's successor check,
-    /// so a position that moved onto it records the check. After the walk,
-    /// the check reads the manifest boundary (see
-    /// [`NamespaceStore::above_boundary`](loonfs_core::NamespaceStore::above_boundary)),
-    /// and a newest manifest at or below the boundary drops the position,
-    /// because a collection may have deleted the manifests above it.
-    /// Anything else the walk finds drops the position too. A move or a
-    /// drop waits for a publish that has the engine locked.
+    /// A check that finds the manifest the newest records the check. A check
+    /// that finds a successor starts the walk of
+    /// [`same_epoch_manifests_above`](loonfs_core::NamespaceStore::same_epoch_manifests_above),
+    /// which loads each manifest after the position's while each has the
+    /// position's writer epoch (a fold, a compaction, or a snapshot, by this
+    /// runtime or by another process), and then reads the manifest boundary.
+    /// The position moves onto the newest of them, as it moves onto the
+    /// manifests this runtime publishes (see [`HeadPositions::move_position`]),
+    /// with the walk as that manifest's check. A fold that folds past the
+    /// position's tip covered a WAL object that the session hasn't read, such
+    /// as another process's floor object, so the move drops the position
+    /// instead. A manifest at or below the boundary drops the position,
+    /// because a collection may have deleted the manifests above it, and so
+    /// does anything else that the walk finds. A move or a drop waits for a
+    /// publish that has the engine locked.
     async fn check_writer_position(
         &self,
         namespace_id: &NamespaceId,
@@ -301,36 +276,20 @@ impl RuntimeCore {
         };
         let observed = self.observation();
         let namespace = self.namespace_store(namespace_id);
-        let successor = namespace
-            .manifest_has_successor(position.read_basis.basis.manifest_no())
-            .await
-            .map_err(MetadataProjectionLoadError::LoadHead)?;
-        let moves = if successor {
-            namespace
-                .same_epoch_manifests_above(
-                    position.read_basis.basis.manifest(),
-                    position.read_basis.head.writer_epoch,
-                )
-                .await
-                .map_err(MetadataProjectionLoadError::LoadHead)?
-        } else {
-            Some(Vec::new())
-        };
-        let checked = match moves {
-            Some(moves) => {
-                let newest = moves
-                    .last()
-                    .map_or(position.read_basis.basis.manifest_no(), |moved| {
-                        moved.manifest.manifest_no
-                    });
-                let (above, boundary) = namespace
-                    .above_boundary(newest, position.boundary.clone())
-                    .await?;
-                above.then_some((moves, newest, boundary))
+        let mut held = position.basis().clone();
+        let newest = match namespace.check_newest(&mut held, observed.clone()).await? {
+            Checked::Newest => {
+                slot.record_check(&held);
+                return Ok(());
             }
-            None => None,
+            Checked::Successor => {
+                namespace
+                    .same_epoch_manifests_above(&held, observed)
+                    .await?
+            }
+            Checked::AtOrBelowBoundary => None,
         };
-        let Some((moves, newest, boundary)) = checked else {
+        let Some(newest) = newest else {
             // The position becomes the cached head, which a successor or a
             // manifest at or below the boundary makes out of date, so the head
             // is dropped after it, and the next read loads the namespace by
@@ -339,10 +298,8 @@ impl RuntimeCore {
             self.invalidate_namespace_read_cache(namespace_id);
             return Ok(());
         };
-        for published in moves {
-            positions.move_position(namespace_id, published).await;
-        }
-        slot.record_check(observed, newest, boundary);
+        positions.move_position(namespace_id, newest.clone()).await;
+        slot.record_check(&newest);
         Ok(())
     }
 }

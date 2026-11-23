@@ -41,6 +41,12 @@ impl HeapBytes for LoadedBoundary {
 pub struct KeptBoundary(Option<LoadedBoundary>);
 
 impl KeptBoundary {
+    /// Returns the boundary that a read of the boundary object returned:
+    /// the object, or nothing when the object is missing.
+    pub(crate) fn read(loaded: Option<LoadedBoundary>) -> Self {
+        Self(loaded)
+    }
+
     /// Returns the boundary object that the process keeps, or `None` when it
     /// keeps nothing.
     pub(crate) fn object(&self) -> Option<&LoadedBoundary> {
@@ -57,17 +63,11 @@ impl KeptBoundary {
     /// Returns the higher of this boundary and `other`, two boundaries of one
     /// namespace. Because the boundary only rises, the higher one is the
     /// newer.
-    pub fn higher(self, other: Self) -> Self {
+    pub(crate) fn higher(self, other: Self) -> Self {
         match other.0 {
             Some(other) if !reaches(self.object(), other.state.boundary) => Self(Some(other)),
             _ => self,
         }
-    }
-}
-
-impl From<Option<LoadedBoundary>> for KeptBoundary {
-    fn from(loaded: Option<LoadedBoundary>) -> Self {
-        Self(loaded)
     }
 }
 

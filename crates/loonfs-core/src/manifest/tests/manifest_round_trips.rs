@@ -75,15 +75,12 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     // The view's discovery confirms its basis after this observation.
     let basis_checked = crate::test_support::observed_now();
     let position = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_publish_metadata_view(acquired_writer, None, None)
+        .load_publish_metadata_view(acquired_writer, None, None, basis_checked)
         .await
         .expect("load publish position")
         .into_position();
 
-    let input = crate::publish::WriterPosition {
-        basis_checked,
-        ..position
-    };
+    let input = position;
     let response = crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal_tail(
             Some(input),

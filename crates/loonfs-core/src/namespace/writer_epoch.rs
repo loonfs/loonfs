@@ -3,8 +3,9 @@
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::publish::ManifestChange;
-use crate::manifest::{PublicationReport, PublishedManifest};
+use crate::manifest::PublicationReport;
 use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::Checked;
 use crate::namespace::held::Held;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::store::NamespaceStore;
@@ -29,7 +30,7 @@ pub struct AcquiredWriter {
 #[derive(Debug)]
 pub(crate) struct WriterAcquisition {
     pub(crate) writer: AcquiredWriter,
-    pub(crate) claim: PublishedManifest,
+    pub(crate) claim: Held<LoadedManifest>,
     pub(crate) anchor: NamespaceReadAnchor,
 }
 
@@ -93,7 +94,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 },
             )
             .await?;
-        let claim = update.current_manifest();
+        let claim = update.current.clone();
         let acquired = update.response;
         // The tail read before the fence put doesn't check the manifest: the
         // check after the put does, and it also tells whether the fence is
@@ -144,7 +145,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
             match publish_wal_object(&self.store, &fence).await {
                 Ok(()) => {
                     let fenced_head = head.after_wal_object(fence.envelope().payload());
-                    if self.check_anchor_manifest(&mut anchor).await? {
+                    if self.check_newest(&mut anchor.held, clock.origin()).await? == Checked::Newest
+                    {
                         anchor.read_state = fenced_head;
                         anchor
                             .tail
@@ -197,20 +199,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let Some(head) = self.head_and_wal_tail_cache.get_head(&self.namespace_id) else {
             return Ok(None);
         };
-        let state = &head.read_basis.head;
+        let state = &head.read_basis().head;
         if state.writer.is_some() || !state.status.is_active() {
             return Ok(None);
         }
         let segments = self
-            .load_held_manifest(head.read_basis.basis.manifest(), head.boundary.clone())
-            .await?;
-        Ok(segments.map(|segments| {
-            Held::new(
-                segments.loaded_manifest(),
-                head.basis_checked.clone(),
-                head.boundary.clone(),
+            .load_held_manifest(
+                head.read_basis().basis.manifest(),
+                head.basis().boundary().clone(),
             )
-        }))
+            .await?;
+        Ok(segments.map(|segments| head.basis().decoded(segments.loaded_manifest())))
     }
 }
 

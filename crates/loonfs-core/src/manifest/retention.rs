@@ -11,6 +11,7 @@ use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::{GC_GRACE_WINDOW_MS, MAX_CONTENTION_ATTEMPTS};
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
+use crate::namespace::held::Checked;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::cache::MetadataSegmentCache;
 use crate::time::Observation;
@@ -208,9 +209,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<FloorObjectReport> {
         let mut last_error = None;
         for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
-            let mut anchor = self
-                .load_live_read_anchor(Observation::now(Arc::clone(&self.timer)))
-                .await?;
+            let observed = Observation::now(Arc::clone(&self.timer));
+            let mut anchor = self.load_live_read_anchor(observed.clone()).await?;
             let head = &anchor.read_state;
             let manifest_retention_floor_seq = anchor.current_manifest().retention_floor_seq();
             if head.retention_floor_seq >= target {
@@ -224,7 +224,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 Ok(()) => {
                     let floored_head = head.after_wal_object(floor_object.envelope().payload());
                     if self
-                        .floor_object_is_live(&mut anchor, &floored_head)
+                        .floor_object_is_live(&mut anchor, &floored_head, observed)
                         .await?
                     {
                         return Ok(FloorObjectReport {
@@ -253,14 +253,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         anchor: &mut crate::namespace::read_anchor::NamespaceReadAnchor,
         floored_head: &crate::namespace::state::NamespaceReadState,
+        observed: Observation,
     ) -> Result<bool> {
-        if self.check_anchor_manifest(anchor).await? {
+        if self
+            .check_newest(&mut anchor.held, observed.clone())
+            .await?
+            == Checked::Newest
+        {
             return Ok(true);
         }
-        let newest = self.load_current_manifest().await?;
+        let newest = self.load_current_basis(observed).await?;
         Ok(wal_no_is_unfolded(
             floored_head.wal_no,
-            newest.folded_wal_no(),
+            newest.manifest().folded_wal_no(),
         ))
     }
 }

@@ -278,21 +278,15 @@ fn compaction_instruments_register_the_closed_vocabularies() {
         &Ok(CompactionUnitOutcome::Published {
             group: loonfs_core::MetadataFamilyGroup::Bindings,
             input_runs: 2,
-            manifest: loonfs_core::PublishedManifest {
-                manifest: loonfs_types::format::control::ManifestRef {
-                    owner_namespace_id: loonfs_types::NamespaceId::parse("demo")
-                        .expect("valid namespace id"),
-                    manifest_no: loonfs_types::ManifestNo(1),
-                    head_seq: loonfs_types::CommitSeq(1),
-                    payload_checksum: loonfs_types::sha256_digest(b""),
-                },
-                writer_epoch: loonfs_types::WriterEpoch(1),
-                status: loonfs_types::format::control::NamespaceStatus::Active {},
-                folded_wal_no: loonfs_types::WalNo(1),
-                retention_floor_seq: loonfs_types::CommitSeq(0),
-                started: None,
-                boundary: Default::default(),
-            },
+            manifest: loonfs_core::test_support::held_manifest(
+                loonfs_types::format::manifest::NamespaceManifestPayload::initial(
+                    loonfs_types::NamespaceId::parse("demo").expect("valid namespace id"),
+                    loonfs_test_support::ids::numbered_pool_id(1),
+                    0,
+                    loonfs_test_support::test_actor(),
+                ),
+                loonfs_core::test_support::observed_now(),
+            ),
             rows_read: 20,
             rows_written: 10,
             input_bytes: 2_000,

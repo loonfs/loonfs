@@ -195,8 +195,9 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         .await;
     assert!(result.results[0].is_ok());
     let state = publisher.read_position().expect("published state");
+    let read_basis = state.read_basis().clone();
     let tail = state.tail;
-    let context = RuntimeReadContext::new(state.read_basis, Some(Arc::clone(&tail)));
+    let context = RuntimeReadContext::new(read_basis, Some(Arc::clone(&tail)));
     let tail_bytes = tail.decoded_bytes();
     assert_eq!(tail.inline_bytes(), value.bytes().len());
     assert!(
@@ -358,8 +359,8 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     let newest = publisher.writer_position().expect("publish tail");
     namespace.head_and_wal_tail_cache.insert_tail(
         WalTailCacheKey {
-            head_seq: newest.read_basis.head.seq,
-            wal_no: newest.read_basis.head.wal_no,
+            head_seq: newest.read_basis().head.seq,
+            wal_no: newest.read_basis().head.wal_no,
             ..cache_key(&context)
         },
         Arc::clone(&newest.tail),
@@ -475,7 +476,7 @@ async fn inline_checksum_failures_match_object_validation() {
         .get(
             &wal_object(
                 &publisher.namespace.namespace_id,
-                &input.read_basis.head.wal_no,
+                &input.read_basis().head.wal_no,
             ),
             None,
         )
@@ -485,8 +486,8 @@ async fn inline_checksum_failures_match_object_validation() {
     let mut payload = decode_wal_object_envelope_zstd(&bytes)
         .expect("decode")
         .into_payload();
-    payload.wal_no = WalNo(input.read_basis.head.wal_no.0 + 1);
-    payload.head_seq = CommitSeq(input.read_basis.head.seq.0 + 1);
+    payload.wal_no = WalNo(input.read_basis().head.wal_no.0 + 1);
+    payload.head_seq = CommitSeq(input.read_basis().head.seq.0 + 1);
     let mut corrupt_ref = value.content_ref().clone();
     corrupt_ref.content_id = ContentId::generate();
     let record = &mut payload.records[0];
