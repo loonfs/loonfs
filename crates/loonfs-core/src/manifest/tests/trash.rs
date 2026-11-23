@@ -1216,13 +1216,7 @@ async fn fresh_read_context<S: ObjectStore + ?Sized>(
         .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("load read basis");
-    RuntimeReadContext::new(
-        crate::control::ReadBasis {
-            basis: loaded.basis(),
-            head: loaded.read_state,
-        },
-        None,
-    )
+    RuntimeReadContext::new(&loaded.held_basis(), None)
 }
 
 #[tokio::test]

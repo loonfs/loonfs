@@ -36,7 +36,7 @@ impl<M: crate::Mode> Namespace<M> {
                     .engine
                     .get_snapshot(
                         &administrator,
-                        &pinned.context.read_basis().head,
+                        pinned.context.read_basis().head(),
                         snapshot_id,
                     )
                     .await
@@ -70,7 +70,11 @@ impl<M: crate::Mode> Namespace<M> {
                 } = self.administrator_read().await?;
                 let page = pinned
                     .engine
-                    .list_snapshots_page(&administrator, &pinned.context.read_basis().head, request)
+                    .list_snapshots_page(
+                        &administrator,
+                        pinned.context.read_basis().head(),
+                        request,
+                    )
                     .await
                     .map_err(Error::from)?;
                 Ok(ListSnapshotsResponse {

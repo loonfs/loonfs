@@ -25,7 +25,8 @@ pub fn content_writes() -> crate::Permits {
 /// Returns `payload` encoded as a manifest that a check at `checked` found
 /// the newest, with no boundary kept, for a test that moves a head onto a
 /// manifest that it builds in memory.
-pub fn held_manifest(
+#[cfg(test)]
+pub(crate) fn held_manifest(
     payload: loonfs_types::format::manifest::NamespaceManifestPayload,
     checked: crate::time::Observation,
 ) -> crate::namespace::Held<crate::control::LoadedManifest> {

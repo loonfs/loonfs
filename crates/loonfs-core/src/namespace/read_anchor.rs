@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct NamespaceReadAnchor {
-    pub read_state: NamespaceReadState,
+    pub(crate) read_state: NamespaceReadState,
     /// The manifest that the anchor read the WAL tail above. Its check time
     /// was read before the anchor loaded the manifest and confirmed it with a
     /// successor check, and its boundary is the one the last check read.
@@ -29,6 +29,12 @@ pub struct NamespaceReadAnchor {
 }
 
 impl NamespaceReadAnchor {
+    /// Returns the head that replaying the WAL tail above the anchor's
+    /// manifest reached.
+    pub fn read_state(&self) -> &NamespaceReadState {
+        &self.read_state
+    }
+
     /// Returns the retention floor of the anchor's view: the manifest's
     /// floor, raised by the floor objects in the anchor's WAL tail.
     pub fn retention_floor_seq(&self) -> CommitSeq {
@@ -61,6 +67,17 @@ impl NamespaceReadAnchor {
     /// Returns the anchor's head and the manifest it was read above, kept by
     /// reference with the same check, as a cached head or a writer position
     /// keeps them.
+    ///
+    /// The head is the one that the anchor's load replayed, and code outside
+    /// this crate can't replace that head:
+    ///
+    /// ```compile_fail
+    /// use loonfs_core::control::{NamespaceReadAnchor, NamespaceReadState};
+    ///
+    /// fn rewind(anchor: &mut NamespaceReadAnchor, head: NamespaceReadState) {
+    ///     anchor.read_state = head;
+    /// }
+    /// ```
     pub fn held_basis(&self) -> Held<ReadBasis> {
         self.held.with_head(self.read_state.clone())
     }
@@ -110,23 +127,18 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// An initializing namespace has no WAL objects, so the basis's head is
     /// the manifest's own.
     ///
-    /// `observed` is an observation that the caller read before the call.
+    /// `observed` is an observation that the caller read before the call, and
+    /// the returned basis is checked at that observation.
     pub async fn find_initializing_read_basis(
         &self,
         observed: Observation,
-    ) -> CoreResult<Option<ReadBasis>> {
+    ) -> CoreResult<Option<Held<ReadBasis>>> {
         let NewestManifest::Manifest(current) = self.find_newest_manifest(observed).await? else {
             return Ok(None);
         };
-        let manifest = current.manifest();
-        Ok(
-            matches!(manifest.payload().status, NamespaceStatus::Initializing {}).then(|| {
-                ReadBasis {
-                    head: NamespaceReadState::from(manifest.payload()),
-                    basis: MetadataBasis::new(manifest.manifest()),
-                }
-            }),
-        )
+        let payload = current.manifest().payload();
+        Ok(matches!(payload.status, NamespaceStatus::Initializing {})
+            .then(|| current.with_head(NamespaceReadState::from(payload))))
     }
 
     /// Loads the read anchor at `held`'s manifest, a manifest that the caller

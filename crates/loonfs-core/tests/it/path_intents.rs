@@ -197,7 +197,7 @@ async fn list_file_revisions_by_inode<S: ObjectStore + ?Sized>(
             return Ok(loonfs_types::ListFileRevisionsResponse {
                 namespace_id: namespace_id.clone(),
                 inode_id,
-                head_seq: context.read_basis().head.seq,
+                head_seq: context.read_basis().head().seq,
                 revisions,
                 next_cursor: None,
             });

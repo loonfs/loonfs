@@ -658,13 +658,7 @@ mod tests {
             .load_read_anchor(crate::test_support::observed_now())
             .await
             .expect("load read basis");
-        let context = RuntimeReadContext::new(
-            crate::control::ReadBasis {
-                basis: loaded.basis(),
-                head: loaded.read_state,
-            },
-            None,
-        );
+        let context = RuntimeReadContext::new(&loaded.held_basis(), None);
         let engine =
             NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
 

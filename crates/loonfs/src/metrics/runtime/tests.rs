@@ -269,24 +269,31 @@ fn a_handle_with_no_recorder_installs_nothing() {
     instruments.publisher.publish(PublishOutcome::Ok);
 }
 
-#[test]
-fn compaction_instruments_register_the_closed_vocabularies() {
+#[tokio::test]
+async fn compaction_instruments_register_the_closed_vocabularies() {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let instruments = RuntimeInstruments::new(Some(recorder.clone()));
+    let store =
+        loonfs_test_support::stores::MemoryStore::new(loonfs_types::ChecksumAlgorithm::Crc64nvme);
+    let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("valid namespace id");
+    loonfs_core::test_support::NamespaceFixture::new(
+        &store,
+        &namespace_id,
+        &loonfs_core::test_support::writer_at("writer", 1_000),
+    )
+    .create()
+    .await
+    .expect("create");
+    let manifest = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .load_current_basis(loonfs_core::test_support::observed_now())
+        .await
+        .expect("the current manifest");
 
     instruments.compactions.finished(
         &Ok(CompactionUnitOutcome::Published {
             group: loonfs_core::MetadataFamilyGroup::Bindings,
             input_runs: 2,
-            manifest: loonfs_core::test_support::held_manifest(
-                loonfs_types::format::manifest::NamespaceManifestPayload::initial(
-                    loonfs_types::NamespaceId::parse("demo").expect("valid namespace id"),
-                    loonfs_test_support::ids::numbered_pool_id(1),
-                    0,
-                    loonfs_test_support::test_actor(),
-                ),
-                loonfs_core::test_support::observed_now(),
-            ),
+            manifest,
             rows_read: 20,
             rows_written: 10,
             input_bytes: 2_000,

@@ -2514,7 +2514,7 @@ async fn a_fold_with_no_read_cache_moves_the_position_to_its_manifest() {
         .writer_position(&namespace_id)
         .expect("the fold moved the position");
     assert_eq!(
-        Some(position.read_basis().basis.manifest_no()),
+        Some(position.read_basis().basis().manifest_no()),
         status.current_manifest_no
     );
     writer.shutdown().await.expect("shut down writer");

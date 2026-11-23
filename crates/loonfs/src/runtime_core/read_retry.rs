@@ -37,9 +37,9 @@ pub(crate) async fn classify_read_result<T>(
     };
     if missing_manifest
         && core
-            .namespace_store(&context.read_basis().head.namespace_id)
+            .namespace_store(&context.read_basis().head().namespace_id)
             .above_boundary(
-                context.read_basis().basis.manifest_no(),
+                context.read_basis().basis().manifest_no(),
                 KeptBoundary::default(),
             )
             .await?
@@ -60,10 +60,10 @@ pub(crate) async fn ensure_source_current(
     context: &RuntimeReadContext,
     source: &ReadSource,
 ) -> Result<()> {
-    let namespace = core.namespace_store(&context.read_basis().head.namespace_id);
+    let namespace = core.namespace_store(&context.read_basis().head().namespace_id);
     match source {
         ReadSource::Head => {
-            let replaced_manifest_no = context.read_basis().basis.manifest_no();
+            let replaced_manifest_no = context.read_basis().basis().manifest_no();
             let current = namespace.load_current_manifest().await?;
             let current_manifest_no = current.payload().manifest_no;
             if current_manifest_no > replaced_manifest_no {
@@ -76,7 +76,7 @@ pub(crate) async fn ensure_source_current(
         }
         ReadSource::Snapshot(snapshot_id) => {
             namespace
-                .load_snapshot_read_basis(&context.read_basis().head, snapshot_id)
+                .load_snapshot_read_basis(context.read_basis().head(), snapshot_id)
                 .await?;
         }
     }

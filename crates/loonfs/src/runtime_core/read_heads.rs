@@ -166,15 +166,15 @@ impl RuntimeCore {
             .load_read_anchor(observed.clone())
             .instrument(phase_span!(self, Phase::ValidationAnchorLoad, namespace_id))
             .await?;
-        if loaded.read_state.status.is_active() {
+        if loaded.read_state().status.is_active() {
             let tail =
                 project_anchor_tail(self.store(), &self.inner.metadata_segment_cache, &loaded)?;
             self.inner.head_and_wal_tail_cache.insert_tail(
                 WalTailCacheKey {
                     namespace_id: namespace_id.clone(),
                     manifest_no: loaded.basis().manifest_no(),
-                    head_seq: loaded.read_state.seq,
-                    wal_no: loaded.read_state.wal_no,
+                    head_seq: loaded.read_state().seq,
+                    wal_no: loaded.read_state().wal_no,
                 },
                 tail,
             );
@@ -218,10 +218,7 @@ impl RuntimeCore {
             .await?
         {
             Some(position) => (
-                self.read_context(
-                    position.read_basis().clone(),
-                    Some(Arc::clone(position.tail())),
-                ),
+                self.read_context(position.basis(), Some(Arc::clone(position.tail()))),
                 ReadHeadSource::Position,
             ),
             None => {
@@ -239,7 +236,7 @@ impl RuntimeCore {
                         (head, source)
                     }
                 };
-                (self.read_context(head.read_basis().clone(), None), source)
+                (self.read_context(head.basis(), None), source)
             }
         };
         self.inner.instruments.read_head(source);
@@ -296,17 +293,18 @@ impl RuntimeCore {
         Ok(Some(max_staleness_ms))
     }
 
-    /// Returns the read context of `head` and `basis`.
+    /// Returns the read context of `basis`, which is a cached head's basis or
+    /// a writer position's basis.
     ///
     /// `tail` is the WAL tail of a writer session's position, which reads
     /// from the position take instead of a tail from the read cache. Every
     /// other read passes `None` and looks its tail up in the read cache.
     pub(crate) fn read_context(
         &self,
-        read_basis: ReadBasis,
+        basis: &Held<ReadBasis>,
         tail: Option<Arc<ProjectedWalTail>>,
     ) -> RuntimeReadContext {
-        RuntimeReadContext::new(read_basis, tail)
+        RuntimeReadContext::new(basis, tail)
     }
 
     /// The shared preamble of every pinned read: the read context of the
@@ -339,7 +337,7 @@ impl RuntimeCore {
             .await?;
         let basis = self
             .namespace_store(namespace_id)
-            .load_snapshot_read_basis(&live.read_basis().head, snapshot_id)
+            .load_snapshot_read_basis(live.read_basis().head(), snapshot_id)
             .await
             .map_err(Error::from)?;
         Ok(self.pinned_read_at_basis(namespace_id, basis, live))
@@ -363,10 +361,7 @@ impl RuntimeCore {
         let live = match checked_position {
             Some(position) => {
                 self.inner.instruments.read_head(ReadHeadSource::Position);
-                self.read_context(
-                    position.read_basis().clone(),
-                    Some(Arc::clone(position.tail())),
-                )
+                self.read_context(position.basis(), Some(Arc::clone(position.tail())))
             }
             None => {
                 self.current_read_context(namespace_id, Consistency::Strong)
@@ -375,7 +370,7 @@ impl RuntimeCore {
         };
         let basis = self
             .namespace_store(namespace_id)
-            .load_created_snapshot_read_basis(&live.read_basis().head, created.record.clone())
+            .load_created_snapshot_read_basis(live.read_basis().head(), created.record.clone())
             .await
             .map_err(Error::from)?;
         Ok(self.pinned_read_at_basis(namespace_id, basis, live))
@@ -403,7 +398,7 @@ impl RuntimeCore {
             .current_read_context(namespace_id, HeadConfirmation::View)
             .await?;
         Ok(VerifiedNamespaceCatalogEntry::from_head(
-            &context.read_basis().head,
+            context.read_basis().head(),
         ))
     }
 
@@ -421,7 +416,7 @@ impl RuntimeCore {
         let context = self
             .current_read_context(namespace_id, HeadConfirmation::View)
             .await?;
-        ActiveNamespaceCatalogEntry::from_head(&context.read_basis().head).map_err(Error::from)
+        ActiveNamespaceCatalogEntry::from_head(context.read_basis().head()).map_err(Error::from)
     }
 
     /// Drops the namespace's cached head, after this runtime learns of a
