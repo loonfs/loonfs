@@ -231,7 +231,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
   | `get` | Call `ObjectStore`, or read one control object by ID |
   | `find_*` | Return an `Option` |
   | `validate` | Check the shape of input |
-  | `verify` | Check bytes or durable state against stored evidence |
+  | `verify` | Check bytes or durable state against stored evidence, returning `Result<()>` or the value that the check produced |
   | `ensure` | Check a precondition on state, returning `Result<()>` |
   | `resolve` | Turn a reference into the referenced object |
   | `effective_*` | Combine defaults with overrides |
