@@ -1,6 +1,6 @@
 //! Publisher batching, shutdown, retry, and observability tests.
 
-use super::admission::AdmittedWaiter;
+use super::admission::{AdmittedWaiter, PublicationAdmission};
 use super::queue::{queued_candidates, PreparedCandidate, SubmissionAdmission};
 use super::*;
 use crate::content_tokens::ContentTokenError;
@@ -639,6 +639,42 @@ fn try_admit_prepared_candidate(
         candidate,
         semantic_identity,
         AdmittedWaiter::new(sender, &permit),
+        publisher.context.runtime_core.timer().monotonic_now_ms(),
+    )?;
+    assert!(matches!(
+        admitted.admission,
+        SubmissionAdmission::OwnOutcome
+    ));
+    Ok(receiver)
+}
+
+/// Admits a merge as a merge's commit is admitted: under a reservation of
+/// the merge allowance, which the merge's size is checked against.
+fn try_admit_merge(
+    publisher: &NamespacePublisher,
+    namespace_id: &NamespaceId,
+    candidate: CommitCandidate,
+) -> Result<oneshot::Receiver<crate::Result<Commit>>, CoreError> {
+    let merges = publisher
+        .context
+        .runtime_core
+        .merges_enabled()
+        .expect("merges are on");
+    let reservation = publisher.reserve_merge(merges)?;
+    let candidate = PreparedCandidate::new(candidate);
+    PublicationAdmission::validate_merge(
+        &candidate.candidate,
+        candidate.wal_record_bytes_upper_bound,
+        &reservation.allowance(),
+    )?;
+    let commit_id = candidate.candidate.commit_id().clone();
+    let semantic_identity = candidate.candidate.semantic_identity(namespace_id);
+    let (sender, receiver) = oneshot::channel();
+    let admitted = publisher.admit(
+        commit_id,
+        candidate,
+        semantic_identity,
+        AdmittedWaiter::new(sender, &reservation.permit),
         publisher.context.runtime_core.timer().monotonic_now_ms(),
     )?;
     assert!(matches!(

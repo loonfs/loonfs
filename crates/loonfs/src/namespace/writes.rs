@@ -555,6 +555,11 @@ impl Namespace<Writable> {
     /// batching is adaptive, every submitter receives its own durable result,
     /// and admitted work is owned by the service's worker, so a cancelled
     /// caller abandons only its result delivery, never the publication.
+    ///
+    /// A merge candidate is admitted under a reservation of the merge
+    /// allowance, as a merge route's commit is, so a runtime whose merge
+    /// allowance is zero returns `not_supported` for `filesystem.merges`
+    /// before it checks anything else.
     pub async fn commit_candidate(&self, candidate: CommitCandidate) -> Result<Commit> {
         trace::in_operation(
             operation_span!(self.core, "commit_candidate", self.namespace_id),
@@ -567,6 +572,11 @@ impl Namespace<Writable> {
         &self,
         candidate: CommitCandidate,
     ) -> Result<Commit> {
+        if candidate.is_merge() {
+            let merges = self.core.merges_enabled()?;
+            let reservation = self.session().reserve_merge(merges)?;
+            return self.submit_merge(candidate, &reservation).await;
+        }
         let candidate = match self.core.subject() {
             Some(subject) => candidate.with_subject(subject.clone()),
             None => candidate,

@@ -5,6 +5,7 @@
 use super::{MergeOutcome, PlannedCommit, PlannedMerge};
 use crate::publish::{CommitIntent, FilesystemOperation};
 use crate::publisher::MergeReservation;
+use crate::runtime_core::MergesEnabled;
 use crate::{
     ActorId, Commit, CommitId, CoreError, DeleteOptions, ErrorCode, ExecutionBudget, LoonFs,
     MergeForkOptions, MoveOptions, Namespace, NamespaceSessionStatus, Result, Writable,
@@ -17,8 +18,8 @@ use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{request_lines, KeyPredicate, RecordingStore};
 use loonfs_types::{
-    AbsolutePath, ContentId, ContentLayout, DeleteDirectoryBehavior, ExtentObject, ManifestNo,
-    MergeConflictKind, FEATURE_MERGES,
+    AbsolutePath, CommitSeq, ContentId, ContentLayout, DeleteDirectoryBehavior, ExtentObject,
+    ManifestNo, MergeConflictKind, FEATURE_MERGES,
 };
 use std::assert_matches;
 use std::num::NonZeroU64;
@@ -31,6 +32,11 @@ struct Family {
     runtime: LoonFs<Writable>,
     main: Namespace<Writable>,
     fork: Namespace<Writable>,
+}
+
+/// Returns the proof that merges are on in `namespace`'s runtime.
+fn merges_on(namespace: &Namespace<Writable>) -> MergesEnabled {
+    namespace.core.merges_enabled().expect("merges are on")
 }
 
 fn actor() -> ActorId {
@@ -101,7 +107,12 @@ impl Family {
 
     /// Plans `request` under a reservation that the plan takes.
     async fn plan(&self, request: &MergeRequest) -> PlannedCommit {
-        match self.main.plan_merge(request, None).await.expect("plan") {
+        match self
+            .main
+            .plan_merge(request, merges_on(&self.main), None)
+            .await
+            .expect("plan")
+        {
             PlannedMerge::Candidate(planned) => *planned,
             PlannedMerge::Committed { commit, .. } => panic!("expected a plan, got {commit:?}"),
         }
@@ -252,11 +263,15 @@ impl Family {
 }
 
 /// Checks that a runtime whose merge allowance is zero answers a merge, a
-/// rebase, and the next-range query with `not_supported` for
-/// `filesystem.merges`, and that the rebase creates no new fork.
+/// replay, a rebase, the next-range query, and the commit of a merge
+/// candidate with `not_supported` for `filesystem.merges`, that the rebase
+/// creates no new fork, and that the merge candidate publishes nothing.
 #[tokio::test]
 async fn a_zero_allowance_answers_every_merge_route_with_not_supported() {
     let family = family().await;
+    let planned = family.plan(&family.request("merge")).await;
+    drop(planned.reservation);
+    let head_seq = family.main.metadata().await.expect("metadata").head_seq;
     let store = Arc::new(LocalFsStore::new(family._directory.path()).expect("store"));
     let runtime = LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(writer_id("merges-off"))
@@ -271,6 +286,10 @@ async fn a_zero_allowance_answers_every_merge_route_with_not_supported() {
             .await
             .map(drop)
             .expect_err("a merge"),
+        main.replay_fork(family.fork.id(), &actor())
+            .await
+            .map(drop)
+            .expect_err("a replay"),
         runtime
             .fork_namespace_for_rebase(family.main.id(), family.fork.id(), &new_fork_id, &actor())
             .await
@@ -280,6 +299,10 @@ async fn a_zero_allowance_answers_every_merge_route_with_not_supported() {
             .await
             .map(drop)
             .expect_err("the next-range query"),
+        main.commit_candidate(planned.candidate)
+            .await
+            .map(drop)
+            .expect_err("a merge candidate's commit"),
     ];
     for error in refused {
         let response = error.to_error_response();
@@ -292,6 +315,41 @@ async fn a_zero_allowance_answers_every_merge_route_with_not_supported() {
         .await
         .expect_err("no new fork");
     assert_eq!(missing.code(), ErrorCode::NamespaceNotFound);
+    assert_eq!(
+        main.metadata().await.expect("metadata").head_seq,
+        head_seq,
+        "the merge candidate publishes nothing"
+    );
+}
+
+/// Checks that a merge candidate committed through `commit_candidate` on a
+/// runtime with merges on commits as the next commit of this namespace,
+/// with the merge record of its plan, under a reservation of the merge
+/// allowance that it releases when the commit settles.
+#[tokio::test]
+async fn a_merge_candidate_commits_through_commit_candidate() {
+    let family = family().await;
+    let planned = family.plan(&family.request("merge")).await;
+    drop(planned.reservation);
+    let budget = family.runtime.execution_budget().clone();
+    assert_eq!(budget.stats().admitted_merge_bytes, 0);
+    let head_seq = family.main.metadata().await.expect("metadata").head_seq;
+    let commit = family
+        .main
+        .commit_candidate(planned.candidate)
+        .await
+        .expect("the merge commits");
+    assert_eq!(commit.committed_seq, CommitSeq(head_seq.0 + 1));
+    let merge = commit.merge.expect("a merge commit");
+    assert_eq!(&merge.source_namespace_id, family.fork.id());
+    assert_eq!(
+        (merge.source_after_seq, merge.source_through_seq),
+        (
+            planned.record.source_after_seq,
+            planned.record.source_through_seq
+        )
+    );
+    assert_eq!(budget.stats().admitted_merge_bytes, 0);
 }
 
 /// Checks that a merge planned before another merge of the same fork
@@ -319,7 +377,7 @@ async fn a_merge_planned_before_another_commits_fails_the_range_check() {
     let reservation = family
         .main
         .session()
-        .reserve_merge()
+        .reserve_merge(merges_on(&family.main))
         .expect("a reservation");
     let error = family
         .main
@@ -360,7 +418,7 @@ async fn a_merge_keeps_its_reservation_from_its_plan() {
             family
                 .main
                 .session()
-                .reserve_merge()
+                .reserve_merge(merges_on(&family.main))
                 .expect("a reservation")
         })
         .collect::<Vec<_>>();
@@ -423,7 +481,7 @@ async fn a_merge_whose_plan_memory_doesnt_fit_beside_other_reservations_is_busy(
             family
                 .main
                 .session()
-                .reserve_merge()
+                .reserve_merge(merges_on(&family.main))
                 .expect("a reservation")
         })
         .collect::<Vec<_>>();
@@ -553,7 +611,10 @@ async fn a_merge_releases_the_snapshot_its_plan_took_on_the_fork() {
         .commit(&request, planned, |request, reservation| {
             replans += 1;
             let main = &family.main;
-            Box::pin(async move { main.plan_merge(&request, Some(reservation)).await })
+            Box::pin(async move {
+                main.plan_merge(&request, merges_on(main), Some(reservation))
+                    .await
+            })
         })
         .await
         .expect("the merge");
@@ -713,7 +774,7 @@ async fn a_merge_that_deletes_a_file_plans_again_after_a_write() {
     assert_eq!(error.code(), ErrorCode::StaleRevision);
     let Err(error) = family
         .main
-        .plan_merge(&request, Some(planned.reservation))
+        .plan_merge(&request, merges_on(&family.main), Some(planned.reservation))
         .await
     else {
         panic!("the second plan finds the conflict");
@@ -745,7 +806,7 @@ async fn a_merge_that_deletes_a_directory_plans_again_after_the_head_moves() {
     assert_eq!(error.code(), ErrorCode::StaleHead);
     let Err(error) = family
         .main
-        .plan_merge(&request, Some(planned.reservation))
+        .plan_merge(&request, merges_on(&family.main), Some(planned.reservation))
         .await
     else {
         panic!("the second plan finds the conflict");
@@ -815,7 +876,7 @@ async fn a_merge_through_a_temporary_name_plans_again_after_a_rename() {
     assert_eq!(error.code(), ErrorCode::StaleHead);
     let PlannedMerge::Candidate(planned) = family
         .main
-        .plan_merge(&request, Some(planned.reservation))
+        .plan_merge(&request, merges_on(&family.main), Some(planned.reservation))
         .await
         .expect("the second plan")
     else {
@@ -860,7 +921,10 @@ async fn a_merge_commits_on_its_second_plan() {
         .commit(&request, planned, |request, reservation| {
             plans += 1;
             let main = &family.main;
-            Box::pin(async move { main.plan_merge(&request, Some(reservation)).await })
+            Box::pin(async move {
+                main.plan_merge(&request, merges_on(main), Some(reservation))
+                    .await
+            })
         })
         .await
         .expect("the second plan commits");
@@ -906,7 +970,10 @@ async fn a_merge_plans_again_after_a_stale_revision() {
     let error = family
         .commit(&request, planned, |request, reservation| {
             let main = &family.main;
-            Box::pin(async move { main.plan_merge(&request, Some(reservation)).await })
+            Box::pin(async move {
+                main.plan_merge(&request, merges_on(main), Some(reservation))
+                    .await
+            })
         })
         .await
         .expect_err("the second plan finds the conflict");
@@ -934,7 +1001,10 @@ async fn a_merge_plans_again_after_another_writer_takes_its_name() {
     let error = family
         .commit(&request, planned, |request, reservation| {
             let main = &family.main;
-            Box::pin(async move { main.plan_merge(&request, Some(reservation)).await })
+            Box::pin(async move {
+                main.plan_merge(&request, merges_on(main), Some(reservation))
+                    .await
+            })
         })
         .await
         .expect_err("the second plan finds the conflict");
@@ -961,7 +1031,10 @@ async fn a_merge_returns_stale_head_after_four_plans() {
             let path = format!("/other-{plans}.txt");
             let family = &family;
             Box::pin(async move {
-                let planned = family.main.plan_merge(&request, Some(reservation)).await;
+                let planned = family
+                    .main
+                    .plan_merge(&request, merges_on(&family.main), Some(reservation))
+                    .await;
                 family.write_main(&path).await;
                 planned
             })
@@ -998,7 +1071,10 @@ async fn a_second_plan_returns_the_merge_that_a_retry_committed() {
                     .await
                     .expect("the retry commits");
                 *retried.lock().expect("lock") = Some(commit);
-                family.main.plan_merge(&request, None).await
+                family
+                    .main
+                    .plan_merge(&request, merges_on(&family.main), None)
+                    .await
             })
         })
         .await
@@ -1026,7 +1102,10 @@ async fn a_second_plan_after_another_merge_is_a_range_conflict() {
                     .merge_fork(family.fork.id(), &actor())
                     .await
                     .expect("another merge of the fork");
-                family.main.plan_merge(&request, None).await
+                family
+                    .main
+                    .plan_merge(&request, merges_on(&family.main), None)
+                    .await
             })
         })
         .await

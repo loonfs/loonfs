@@ -10,6 +10,7 @@ use loonfs_core::{MergeAllowance, MergeReservation, MERGE_COMMITS_PAGE_BYTES};
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::NamespaceId;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::oneshot;
@@ -97,47 +98,44 @@ impl PublicationAdmission {
         namespace_id: &NamespaceId,
         candidate: &PreparedCandidate,
     ) -> Result<Arc<AdmissionPermit>, CoreError> {
-        if candidate.candidate.is_merge() {
-            let permit = self.reserve_merge(namespace_id)?;
-            Self::validate_merge(
-                &candidate.candidate,
-                candidate.wal_record_bytes_upper_bound,
-                &permit,
-            )?;
-            return Ok(permit);
-        }
+        assert!(
+            !candidate.candidate.is_merge(),
+            "a merge candidate is admitted under its reservation of the merge allowance"
+        );
         Self::validate_candidate(candidate)?;
         let estimated_bytes =
             estimated_admission_bytes(namespace_id, candidate.estimated_retained_bytes);
         self.charge(namespace_id, AdmissionCharge::Request { estimated_bytes })
     }
 
-    /// Reserves [`MIN_MERGE_RESERVED_BYTES`] of the merge allowance, or the
-    /// whole allowance when it's smaller, for a merge into `namespace_id`.
-    /// When the other merges' reservations leave no room, the merge gets
-    /// `server_busy`. The reservation lasts until the permit is dropped.
+    /// Reserves [`MIN_MERGE_RESERVED_BYTES`] of the merge allowance
+    /// `max_merge_bytes`, or the whole allowance when it's smaller, for a
+    /// merge into `namespace_id`. When the other merges' reservations leave
+    /// no room, the merge gets `server_busy`. The reservation lasts until the
+    /// permit is dropped.
     pub(super) fn reserve_merge(
         self: &Arc<Self>,
         namespace_id: &NamespaceId,
+        max_merge_bytes: NonZeroUsize,
     ) -> Result<Arc<AdmissionPermit>, CoreError> {
-        let reserved_bytes = MIN_MERGE_RESERVED_BYTES.min(self.budget.max_merge_bytes());
+        let reserved_bytes = MIN_MERGE_RESERVED_BYTES.min(max_merge_bytes.get());
         self.charge(namespace_id, AdmissionCharge::Merge { reserved_bytes })
     }
 
     /// Refuses a merge whose planned WAL bytes, `planned_bytes`, wouldn't fit
-    /// one WAL object, or whose estimated peak exceeds the merge allowance,
-    /// with `merge_too_large`, and grows the reservation that `permit` keeps
-    /// to the estimate. The estimate is [`MERGE_PEAK_PER_PLANNED_BYTE`] times
+    /// one WAL object, or whose estimated peak exceeds `allowance`, with
+    /// `merge_too_large`, and grows the reservation in `allowance` to the
+    /// estimate. The estimate is [`MERGE_PEAK_PER_PLANNED_BYTE`] times
     /// the planned bytes. A merge that's too large would be refused on every
     /// retry, so its caller merges a smaller range of the fork's commits
     /// instead.
     pub(super) fn validate_merge(
         candidate: &CommitCandidate,
         planned_bytes: usize,
-        permit: &Arc<AdmissionPermit>,
+        allowance: &MergeAllowance,
     ) -> Result<(), CoreError> {
         candidate.validate_appended_content()?;
-        permit.merge_allowance().check(planned_bytes, 0)
+        allowance.check(planned_bytes, 0)
     }
 
     pub(super) fn validate_candidate(candidate: &PreparedCandidate) -> Result<(), CoreError> {
@@ -295,11 +293,15 @@ impl AdmissionPermit {
         Ok(())
     }
 
-    /// Returns the merge allowance, with the reservation of the merge that
-    /// this permit admits, which the merge planner and admission check.
-    pub(super) fn merge_allowance(self: &Arc<Self>) -> MergeAllowance {
+    /// Returns the merge allowance of `max_merge_bytes`, with the
+    /// reservation of the merge that this permit admits, which the merge
+    /// planner and admission check.
+    pub(super) fn merge_allowance(
+        self: &Arc<Self>,
+        max_merge_bytes: NonZeroUsize,
+    ) -> MergeAllowance {
         MergeAllowance {
-            max_bytes: self.admission.budget.max_merge_bytes(),
+            max_bytes: max_merge_bytes,
             peak_per_planned_byte: MERGE_PEAK_PER_PLANNED_BYTE,
             reservation: Arc::clone(self) as Arc<dyn MergeReservation>,
         }
@@ -480,6 +482,24 @@ mod tests {
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
     }
 
+    /// Reserves a merge's share of the budget's merge allowance and checks
+    /// `candidate` under the reservation, as a merge's commit is admitted.
+    fn admit_merge(
+        admission: &Arc<PublicationAdmission>,
+        namespace_id: &NamespaceId,
+        candidate: &PreparedCandidate,
+    ) -> Result<Arc<AdmissionPermit>, CoreError> {
+        let max_merge_bytes =
+            NonZeroUsize::new(admission.budget.max_merge_bytes()).expect("merges are on");
+        let permit = admission.reserve_merge(namespace_id, max_merge_bytes)?;
+        PublicationAdmission::validate_merge(
+            &candidate.candidate,
+            candidate.wal_record_bytes_upper_bound,
+            &permit.merge_allowance(max_merge_bytes),
+        )?;
+        Ok(permit)
+    }
+
     /// A merge under the namespace `main` whose planned WAL bytes are
     /// `planned_bytes`, so the merge allowance is charged three times those
     /// bytes.
@@ -543,8 +563,7 @@ mod tests {
 
         let mut large = merge(4096);
         large.estimated_retained_bytes = 8192;
-        let permit = admission
-            .acquire_candidate(&namespace_id, &large)
+        let permit = admit_merge(&admission, &namespace_id, &large)
             .expect("a merge above the namespace allowance and the byte total");
         let merge_only = ExecutionBudgetStats {
             admitted_requests: 1,
@@ -603,8 +622,7 @@ mod tests {
             );
         };
 
-        let error = first_runtime
-            .acquire_candidate(&namespace_id, &merge(allowance / 3 + 1))
+        let error = admit_merge(&first_runtime, &namespace_id, &merge(allowance / 3 + 1))
             .err()
             .expect("a merge above the allowance");
         assert_matches!(
@@ -618,19 +636,15 @@ mod tests {
         );
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
 
-        let first = first_runtime
-            .acquire_candidate(&namespace_id, &merge(0))
-            .expect("a first merge");
-        let second = second_runtime
-            .acquire_candidate(&namespace_id, &merge(0))
+        let first = admit_merge(&first_runtime, &namespace_id, &merge(0)).expect("a first merge");
+        let second = admit_merge(&second_runtime, &namespace_id, &merge(0))
             .expect("a second merge beside the first");
         assert_eq!(budget.stats().admitted_merges, 2);
         assert_eq!(budget.stats().admitted_merge_bytes, allowance);
         gauges(2, allowance);
         let both = budget.stats();
         for runtime in [&first_runtime, &second_runtime] {
-            let error = runtime
-                .acquire_candidate(&namespace_id, &merge(0))
+            let error = admit_merge(runtime, &namespace_id, &merge(0))
                 .err()
                 .expect("no room for a third merge");
             assert_eq!(error.code(), loonfs_types::ErrorCode::ServerBusy);
@@ -648,40 +662,20 @@ mod tests {
         drop(second);
         let one = budget.stats();
         let growing = merge(MIN_MERGE_RESERVED_BYTES / 3 + 1);
-        let error = second_runtime
-            .acquire_candidate(&namespace_id, &growing)
+        let error = admit_merge(&second_runtime, &namespace_id, &growing)
             .err()
             .expect("no room to grow beside the first merge");
         assert_eq!(error.code(), loonfs_types::ErrorCode::ServerBusy);
         assert_eq!(budget.stats(), one, "the refused merge returns its floor");
         drop(first);
-        let alone = second_runtime
-            .acquire_candidate(&namespace_id, &growing)
-            .expect("the same merge alone");
+        let alone =
+            admit_merge(&second_runtime, &namespace_id, &growing).expect("the same merge alone");
         let peak = 3 * (MIN_MERGE_RESERVED_BYTES / 3 + 1);
         assert_eq!(budget.stats().admitted_merge_bytes, peak);
         gauges(1, peak);
         drop(alone);
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
         gauges(0, 0);
-    }
-
-    /// Checks that a budget whose merge allowance is zero refuses every
-    /// merge candidate, even one that plans no bytes, with
-    /// `merge_too_large`, and charges nothing.
-    #[test]
-    fn a_zero_allowance_admits_no_merge() {
-        let namespace_id = NamespaceId::parse("main").expect("namespace");
-        let budget = ExecutionBudget::builder().max_merge_bytes(0).build();
-        let admission = runtime_admission(PublicationPolicy::default(), &budget);
-        for planned_bytes in [0, 1] {
-            let error = admission
-                .acquire_candidate(&namespace_id, &merge(planned_bytes))
-                .err()
-                .expect("merges are off");
-            assert_matches!(error, CoreError::MergeTooLarge { max_bytes: 0, .. });
-        }
-        assert_eq!(budget.stats(), ExecutionBudgetStats::default());
     }
 
     #[test]
@@ -888,14 +882,12 @@ mod tests {
 
         let allowance = 512 * 1024 * 1024;
         assert_matches!(
-            admission
-                .acquire_candidate(&namespaces[0], &merge(allowance / 3 + 1))
+            admit_merge(admission, &namespaces[0], &merge(allowance / 3 + 1))
                 .err(),
             Some(CoreError::MergeTooLarge { max_bytes, .. }) if max_bytes == allowance
         );
         drop(
-            admission
-                .acquire_candidate(&namespaces[0], &merge(allowance / 3))
+            admit_merge(admission, &namespaces[0], &merge(allowance / 3))
                 .expect("a merge within the default allowance"),
         );
 

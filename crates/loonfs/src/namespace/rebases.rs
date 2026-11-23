@@ -4,6 +4,7 @@
 
 use super::merges::{MergeOutcome, PlannedMerge};
 use crate::publisher::MergeReservation;
+use crate::runtime_core::MergesEnabled;
 use crate::trace::{self, operation_span};
 use crate::{
     ActorId, CommitId, Consistency, Error, LoonFs, MergeConflict, MergeForkOptions, Namespace,
@@ -35,7 +36,7 @@ impl LoonFs<Writable> {
         trace::in_operation(
             operation_span!(self.core, "fork_namespace_for_rebase", namespace_id),
             async {
-                self.core.ensure_merges_enabled()?;
+                self.core.merges_enabled()?;
                 let administrator = self.namespace(namespace_id).administrator().await?;
                 let administrator = &administrator;
                 let target = self
@@ -122,7 +123,7 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "replay_fork", self.namespace_id),
             async {
-                self.core.ensure_merges_enabled()?;
+                let merges = self.core.merges_enabled()?;
                 let request = MergeRequest {
                     source_namespace_id: source_namespace_id.clone(),
                     through_seq: options.through_seq,
@@ -131,10 +132,12 @@ impl Namespace<Writable> {
                     actor_id: actor.clone(),
                     message: options.message.clone(),
                 };
-                let planned = self.plan_replay(&request, None).await?;
+                let planned = self.plan_replay(&request, merges, None).await?;
                 let (commit, conflicts) = match self
                     .commit_merge(&request, planned, |request, reservation| {
-                        Box::pin(async move { self.plan_replay(&request, Some(reservation)).await })
+                        Box::pin(async move {
+                            self.plan_replay(&request, merges, Some(reservation)).await
+                        })
                     })
                     .await?
                 {
@@ -163,11 +166,12 @@ impl Namespace<Writable> {
     pub(crate) async fn plan_replay(
         &self,
         request: &MergeRequest,
+        merges: MergesEnabled,
         reservation: Option<MergeReservation>,
     ) -> Result<PlannedMerge<Vec<MergeConflict>>> {
         let source_namespace_id = &request.source_namespace_id;
         // Boxed so the replay's future stays within the compiler's layout depth.
-        self.plan_commit(request, reservation, |new_fork, allowance| {
+        self.plan_commit(request, merges, reservation, |new_fork, allowance| {
             Box::pin(async move {
                 let new_fork = &new_fork;
                 let basis = self
