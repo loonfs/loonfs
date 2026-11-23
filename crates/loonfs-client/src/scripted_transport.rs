@@ -8,9 +8,10 @@ use http::{Request, Response};
 use http_body_util::BodyExt as _;
 use loonfs_types::{ErrorCode, ErrorResponse};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use tower::Service;
+use tower::{Service, ServiceExt as _};
 
 pub(crate) enum Outcome {
     TransportFailure,
@@ -109,6 +110,32 @@ pub(crate) fn client(transport: &ScriptedTransport) -> Client {
         loonfs_types::Context::Service,
     )
     .expect("valid client config")
+}
+
+/// Returns a client for `http://127.0.0.1:1` that sends every request
+/// through the reqwest transport, and a counter of the calls that reach the
+/// transport.
+pub(crate) fn counted_reqwest_client() -> (Client, Arc<AtomicUsize>) {
+    let config = ClientConfig {
+        server_url: "http://127.0.0.1:1".to_owned(),
+        auth_token: None,
+        actor: Some(loonfs_test_support::test_actor()),
+        request_timeout_ms: None,
+        disable_transient_retry: false,
+        ca_cert_path: None,
+    };
+    let reqwest = crate::reqwest_transport::service(&config).expect("the reqwest transport");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = {
+        let calls = calls.clone();
+        tower::service_fn(move |request: Request<Body>| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            reqwest.clone().oneshot(request)
+        })
+    };
+    let client = Client::with_transport(config, counted, loonfs_types::Context::Service)
+        .expect("valid client config");
+    (client, calls)
 }
 
 pub(crate) fn script(outcomes: impl IntoIterator<Item = Outcome>) -> ScriptedTransport {

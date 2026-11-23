@@ -10,6 +10,7 @@ enum TransportErrorKind {
     Connect,
     Timeout,
     Body,
+    InvalidRequest,
 }
 
 /// A failed HTTP exchange, distinct from a served API error response.
@@ -54,6 +55,17 @@ impl TransportError {
         }
     }
 
+    /// Returns an error for a request that the transport can't send, such as
+    /// a request whose URL the transport can't parse. The client returns the
+    /// error as [`ClientError::Protocol`](crate::ClientError::Protocol) and
+    /// doesn't send the request again.
+    pub fn invalid_request(source: impl Into<Cause>) -> Self {
+        Self {
+            kind: TransportErrorKind::InvalidRequest,
+            source: source.into(),
+        }
+    }
+
     /// Reports whether establishing the connection failed.
     pub fn is_connect(&self) -> bool {
         matches!(self.kind, TransportErrorKind::Connect)
@@ -67,6 +79,11 @@ impl TransportError {
     /// Reports whether a body ended with an error.
     pub fn is_body(&self) -> bool {
         matches!(self.kind, TransportErrorKind::Body)
+    }
+
+    /// Reports whether the transport refused to send the request.
+    pub fn is_invalid_request(&self) -> bool {
+        matches!(self.kind, TransportErrorKind::InvalidRequest)
     }
 
     /// Returns `None` because transport failures have no server error code.

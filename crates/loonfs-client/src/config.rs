@@ -82,6 +82,12 @@ impl ClientConfig {
     /// they accept.
     pub fn validate(&self) -> std::result::Result<(), ConfigFieldError> {
         let server_uri = validate_absolute_http_url("server_url", &self.server_url)?;
+        if !is_sendable_url(&server_uri) {
+            return Err(ConfigFieldError::Invalid {
+                field: "server_url",
+                reason: "must be an absolute http or https URL with a host".to_owned(),
+            });
+        }
         if let Some(token) = &self.auth_token {
             if token.is_blank() {
                 return Err(ConfigFieldError::Invalid {
@@ -114,6 +120,18 @@ impl ClientConfig {
         }
         Ok(())
     }
+}
+
+/// Returns whether the client can send a request to `uri` as written, which
+/// requires an absolute http or https URL with a host.
+///
+/// The shared `validate_absolute_http_url` doesn't require a host, because
+/// the store also uses it for an S3 endpoint, where the bucket name can be
+/// prefixed to the host. The client sends to its URLs as written, so this
+/// function requires the host.
+pub(crate) fn is_sendable_url(uri: &Uri) -> bool {
+    matches!(uri.scheme_str(), Some("http" | "https"))
+        && uri.host().is_some_and(|host| !host.is_empty())
 }
 
 /// Returns the `Authorization` header value that sends `token`, or an error
@@ -201,6 +219,21 @@ mod tests {
         config("http://example.internal", None)
             .validate()
             .expect("unauthenticated plaintext deployments remain supported");
+    }
+
+    #[test]
+    fn a_server_url_without_a_host_is_refused() {
+        let error = config("http://:80", None)
+            .validate()
+            .expect_err("a URL with an empty host");
+        assert_matches!(
+            error,
+            ConfigFieldError::Invalid {
+                field: "server_url",
+                ref reason,
+            } if reason == "must be an absolute http or https URL with a host",
+            "unexpected validation error: {error}"
+        );
     }
 
     #[test]

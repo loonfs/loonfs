@@ -159,6 +159,24 @@ fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
 }
 
 #[tokio::test]
+async fn a_download_from_a_relative_url_is_refused_without_a_send() {
+    let (client, calls) = scripted_transport::counted_reqwest_client();
+    let mut sink = Vec::new();
+    let error = client
+        .download_via_presigned_url(&grant(crc32c_content_ref(b"object"), "/object"), &mut sink)
+        .await
+        .expect_err("a relative presigned URL");
+    assert_matches!(
+        &error,
+        ClientError::Protocol(message) if message.contains("`/object`"),
+        "unexpected error: {error}"
+    );
+    assert!(!error.retryable_without_operator_action());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(sink.is_empty());
+}
+
+#[tokio::test]
 async fn a_crc32c_only_grant_verifies_the_bytes_it_receives() {
     let payload = b"transferred straight to the provider".to_vec();
     let content_ref = crc32c_content_ref(&payload);

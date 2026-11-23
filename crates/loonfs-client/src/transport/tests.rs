@@ -761,6 +761,53 @@ async fn a_request_that_cant_be_built_is_refused_without_a_send() {
     assert_eq!(transport.attempts(), 0);
 }
 
+/// Returns a presigned PUT transfer to the relative URL `/object`.
+fn presigned_put_to_a_relative_url() -> ObjectTransfer {
+    ObjectTransfer::PresignedUrl {
+        method: "PUT".to_owned(),
+        url: "/object".to_owned(),
+        headers: std::collections::BTreeMap::new(),
+        expires_at_ms: 1,
+    }
+}
+
+#[tokio::test]
+async fn a_presigned_put_to_a_relative_url_is_refused_without_a_send() {
+    let (client, calls) = scripted_transport::counted_reqwest_client();
+    let error = client
+        .upload_via_presigned_url(&presigned_put_to_a_relative_url(), b"direct")
+        .await
+        .expect_err("a relative presigned URL");
+    assert_matches!(
+        &error,
+        ClientError::Protocol(message) if message.contains("`/object`"),
+        "unexpected error: {error}"
+    );
+    assert!(!error.retryable_without_operator_action());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_part_upload_to_a_relative_url_is_refused_without_a_send() {
+    let (client, calls) = scripted_transport::counted_reqwest_client();
+    let error = client
+        .upload_part_via_presigned_url(
+            1,
+            &presigned_put_to_a_relative_url(),
+            loonfs_types::Checksum::crc32c(b"part"),
+            Bytes::from_static(b"part"),
+        )
+        .await
+        .expect_err("a relative presigned URL");
+    assert_matches!(
+        &error,
+        ClientError::Protocol(message) if message.contains("`/object`"),
+        "unexpected error: {error}"
+    );
+    assert!(!error.retryable_without_operator_action());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn a_failed_read_of_the_source_is_a_local_failure() {
     let transport =

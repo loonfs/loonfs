@@ -339,13 +339,23 @@ impl Client {
         }
         // The URL and the headers that remain come from the server, such as a
         // presigned URL, or from the caller, so a request that can't be built
-        // breaks the API's contract and would fail the same way again.
-        builder.body(body).map_err(|error| {
+        // breaks the API's contract and would fail the same way again. No
+        // transport can send a request to a URL that isn't an absolute http or
+        // https URL with a host, so the client refuses that request here,
+        // whichever transport it uses.
+        let cant_be_built = |reason: &dyn std::fmt::Display| {
             ClientError::Protocol(format!(
-                "request to `{}` can't be built: {error}",
+                "request to `{}` can't be built: {reason}",
                 request.url
             ))
-        })
+        };
+        let built = builder.body(body).map_err(|error| cant_be_built(&error))?;
+        if !crate::config::is_sendable_url(built.uri()) {
+            return Err(cant_be_built(
+                &"the URL isn't an absolute http or https URL with a host",
+            ));
+        }
+        Ok(built)
     }
 
     async fn send(
@@ -448,13 +458,15 @@ impl BufferedResponse {
 }
 
 fn failed_attempt(url: &str, error: TransportError) -> FailedAttempt {
+    let message = render_send_error(url, &error, error.is_connect(), error.is_timeout());
     FailedAttempt {
-        error: ClientError::Http(render_send_error(
-            url,
-            &error,
-            error.is_connect(),
-            error.is_timeout(),
-        )),
+        // A request that the transport refuses to send fails the same way on
+        // every attempt, like a request that the client can't build.
+        error: if error.is_invalid_request() {
+            ClientError::Protocol(message)
+        } else {
+            ClientError::Http(message)
+        },
         retry_after_ms: None,
     }
 }
