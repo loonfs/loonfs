@@ -28,7 +28,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         target.ensure_file()?;
         let revision = self.view().latest_file_revision(&target).await?;
         if let Some(expected) = expected {
-            expected.ensure_revision(revision.inode_id, Some(revision.revision_no))?;
+            expected.ensure_revision(Some(revision.revision_no))?;
         }
         let appended = self.append_to(&revision, bytes).await?;
         for piece in &appended.pieces {

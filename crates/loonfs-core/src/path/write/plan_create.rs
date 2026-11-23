@@ -189,7 +189,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             .await?;
         target.ensure_file()?;
         let actual = self.view().current_revision_no(inode_id).await?;
-        expected.ensure_revision(inode_id, actual)?;
+        expected.ensure_revision(actual)?;
         let binding = self.view().source_binding(target.resolved()).await?;
         self.commit.replace_file(binding, &content_ref, None).await
     }
@@ -253,7 +253,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .await?
                     .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
                 if let Some(expected) = expected_file_state {
-                    expected.ensure_revision(existing.inode_id, Some(revision.revision_no))?;
+                    expected.ensure_revision(Some(revision.revision_no))?;
                 }
                 let binding = self.view().source_binding(&existing).await?;
                 self.commit.replace_file(binding, &content_ref, None).await

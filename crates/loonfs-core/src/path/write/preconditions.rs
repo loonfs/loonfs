@@ -421,16 +421,12 @@ impl ExpectedFileState {
         self.revision_no.is_some()
     }
 
-    /// Requires `actual`, the current revision of the file `inode_id`
-    /// (`None` when the file isn't visible), to be the revision that the
-    /// request expects, if it expects one.
-    pub(super) fn ensure_revision(
-        &self,
-        inode_id: InodeId,
-        actual: Option<RevisionNo>,
-    ) -> Result<()> {
+    /// Requires `actual`, the current revision of the file (`None` when the
+    /// file isn't visible), to be the revision that the request expects, if
+    /// it expects one.
+    pub(super) fn ensure_revision(&self, actual: Option<RevisionNo>) -> Result<()> {
         match self.revision_no {
-            Some(expected) => ensure_expected_revision(inode_id, expected, actual),
+            Some(expected) => ensure_expected_revision(self.inode_id, expected, actual),
             None => Ok(()),
         }
     }

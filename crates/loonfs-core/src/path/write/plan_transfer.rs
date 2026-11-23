@@ -245,8 +245,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .await?
                     .ok_or_else(|| CoreError::PathNotFound(path.to_owned()))?;
                 if let Some(expected) = expected_destination {
-                    expected
-                        .ensure_revision(existing.inode_id, Some(existing_revision.revision_no))?;
+                    expected.ensure_revision(Some(existing_revision.revision_no))?;
                 }
                 let binding = self.view().source_binding(existing).await?;
                 self.commit
@@ -303,6 +302,6 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             return Ok(());
         };
         let actual = self.view().current_revision_no(existing.inode_id).await?;
-        expected.ensure_revision(existing.inode_id, actual)
+        expected.ensure_revision(actual)
     }
 }
