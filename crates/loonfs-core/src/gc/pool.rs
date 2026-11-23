@@ -59,8 +59,8 @@ impl<S: ObjectStore> PoolStore<S> {
         memory: CollectionMemory,
     ) -> Result<PoolGcResponse> {
         let mut report = PoolGcResponse::empty(self.pool_id.clone());
-        let mut roots = PoolRoots::load(self, session_cache, clock, memory).await?;
-        let filters = ContentFilters::load(self, &mut roots, &mut report).await?;
+        let roots = PoolRoots::load(self, session_cache, clock, memory).await?;
+        let filters = ContentFilters::load(self, &roots, &mut report).await?;
         let sweep = PoolSweep {
             pool: self,
             clock,

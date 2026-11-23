@@ -50,17 +50,6 @@ pub(super) enum SessionNamespace {
     Retired,
 }
 
-/// A root that a pool's collection couldn't read.
-#[derive(Clone, Copy)]
-pub(super) enum UnreadRoot<'a> {
-    /// The roots of the member with this namespace ID.
-    Member(&'a NamespaceId),
-    /// The extent filter of the layout segment at this key. The key's
-    /// namespace is the segment's owner, which for a segment that a fork
-    /// inherited is the fork's source.
-    ExtentFilter(&'a str),
-}
-
 /// How the collection's read of the pool's members ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MemberReadOutcome {
@@ -72,45 +61,6 @@ pub(super) enum MemberReadOutcome {
     BudgetExceeded,
     /// The roots of one member couldn't be read.
     UnreadableMember,
-}
-
-impl MemberReadReport {
-    /// Records that the collection couldn't read `unread`, one of a member's
-    /// roots, because of `error`, and logs which root it couldn't read, so
-    /// that the collection skips the content sweep and finishes the rest.
-    /// Returns `error` instead when it is a failed charge to the collection's
-    /// memory budget, which ends the collection.
-    ///
-    /// A member's read and the load of an extent filter that a member's
-    /// rooted manifest lists both end here. Another process can collect a
-    /// member while the pool's collection reads it, so a manifest, a WAL
-    /// object, or a segment that the read needs can be gone.
-    pub(super) fn stop_at_unreadable_member(
-        &mut self,
-        pool_id: &PoolId,
-        unread: UnreadRoot<'_>,
-        error: CoreError,
-    ) -> Result<()> {
-        if let CoreError::LiveSetExceedsCollectionMemory { .. } = error {
-            return Err(error);
-        }
-        match unread {
-            UnreadRoot::Member(namespace_id) => tracing::warn!(
-                pool_id = %pool_id,
-                namespace_id = %namespace_id,
-                error = %error,
-                "a pool member's roots couldn't be read; skipping the pool's content sweep"
-            ),
-            UnreadRoot::ExtentFilter(segment_key) => tracing::warn!(
-                pool_id = %pool_id,
-                object_key = %segment_key,
-                error = %error,
-                "a layout segment's extent filter couldn't be loaded; skipping the pool's content sweep"
-            ),
-        }
-        self.outcome = MemberReadOutcome::UnreadableMember;
-        Ok(())
-    }
 }
 
 /// What the collection read of the pool's members.
@@ -293,12 +243,18 @@ impl PoolRoots {
             match result {
                 Ok(Some(status)) => self.members.insert(member_id, status)?,
                 Ok(None) => {}
+                Err(error @ CoreError::LiveSetExceedsCollectionMemory { .. }) => return Err(error),
+                // Another process can collect a member while this collection
+                // reads it, so an object that the read needs can be gone.
                 Err(error) => {
-                    return self.member_read.stop_at_unreadable_member(
-                        &pool.pool_id,
-                        UnreadRoot::Member(&member_id),
-                        error,
-                    )
+                    tracing::warn!(
+                        pool_id = %pool.pool_id,
+                        namespace_id = %member_id,
+                        error = %error,
+                        "a pool member's roots couldn't be read; skipping the pool's content sweep"
+                    );
+                    self.member_read.outcome = MemberReadOutcome::UnreadableMember;
+                    return Ok(());
                 }
             }
             self.member_read.members_read += 1;

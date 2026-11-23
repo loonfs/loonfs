@@ -1,7 +1,7 @@
 //! Content roots from the extent filters of the layout segments that the
 //! rooted manifests of a pool's members list.
 
-use super::members::{MemberReadOutcome, PoolRoots, UnreadRoot};
+use super::members::{MemberReadOutcome, PoolRoots};
 use super::sweep::{ContentReference, PoolSweep};
 use crate::error::{CoreError, Result};
 use crate::gc::charged_set::Charge;
@@ -35,18 +35,11 @@ pub(super) struct ContentFilters {
 
 impl ContentFilters {
     /// Loads the extent filters of the rooted layout segments, or returns
-    /// `None` when the collection couldn't read every member's roots, and
-    /// records why in `report`.
-    ///
-    /// A filter that can't be loaded makes the collection skip content
-    /// deletion, as an unreadable member does (see
-    /// [`MemberReadReport::stop_at_unreadable_member`](super::members::MemberReadReport::stop_at_unreadable_member)).
-    /// The segment can be gone because the member published a compaction
-    /// after the collection read its roots, and the member's own collection
-    /// deleted the replaced segment.
+    /// `None` when the collection couldn't read every member's roots or
+    /// couldn't load a filter, and records why in `report`.
     pub(super) async fn load<S: ObjectStore>(
         pool: &PoolStore<S>,
-        roots: &mut PoolRoots,
+        roots: &PoolRoots,
         report: &mut PoolGcResponse,
     ) -> Result<Option<Self>> {
         let skipped = match roots.member_read.outcome {
@@ -67,10 +60,19 @@ impl ContentFilters {
 
     /// Loads the extent filter of each rooted layout segment and charges it
     /// to the collection's budget, or returns `None` when a filter can't be
-    /// loaded, and records that in `roots`.
+    /// loaded.
+    ///
+    /// A filter that can't be loaded leaves the collection without the roots
+    /// of the content that the segment's layout rows refer to, so the
+    /// collection skips content deletion. The collection has read every
+    /// listed member before it loads the filters, so it still cleans up the
+    /// upload sessions from the members' statuses. (The segment can be gone
+    /// if a member whose manifest lists it published a compaction after the
+    /// collection read the member's roots, and the member's own collection
+    /// then deleted the replaced segment.)
     async fn load_filters<S: ObjectStore>(
         pool: &PoolStore<S>,
-        roots: &mut PoolRoots,
+        roots: &PoolRoots,
     ) -> Result<Option<Self>> {
         let mut filters_charge = Charge::new(&roots.memory);
         let store = &pool.store;
@@ -88,12 +90,15 @@ impl ContentFilters {
         while let Some((key, filter)) = loads.next().await {
             let filter = match filter {
                 Ok(filter) => filter,
+                // The logged key's namespace is the segment's owner, which for a
+                // segment that a fork inherited is the fork's source.
                 Err(error) => {
-                    roots.member_read.stop_at_unreadable_member(
-                        &pool.pool_id,
-                        UnreadRoot::ExtentFilter(key),
-                        error.into(),
-                    )?;
+                    tracing::warn!(
+                        pool_id = %pool.pool_id,
+                        object_key = %key,
+                        error = %error,
+                        "a layout segment's extent filter couldn't be loaded; skipping the pool's content sweep"
+                    );
                     return Ok(None);
                 }
             };
