@@ -30,7 +30,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     pub(crate) async fn create(
         &mut self,
         child_inode_id: InodeId,
-        name: &AvailableName,
+        name: AvailableName,
         child: NewChild,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
@@ -99,7 +99,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// revision's size. It's `None` for a put or a copy.
     pub(crate) async fn replace_file(
         &mut self,
-        binding: &ResolvedBinding,
+        binding: ResolvedBinding,
         content_ref: &ContentRef,
         append_offset: Option<u64>,
     ) -> Result<()> {
@@ -109,7 +109,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
         let revision_no = next_revision_no(inode_id, current_revision_no)?;
         let delta = revision_delta(
             &mut self.numbering,
-            binding,
+            &binding,
             revision_no,
             content_ref.clone(),
             append_offset,
@@ -122,7 +122,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// current revision.
     pub(crate) async fn restore_revision(
         &mut self,
-        binding: &ResolvedBinding,
+        binding: ResolvedBinding,
         source_revision_no: RevisionNo,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
@@ -134,7 +134,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
         let revision_no = next_revision_no(inode_id, current_revision_no)?;
         let delta = revision_delta(
             &mut self.numbering,
-            binding,
+            &binding,
             revision_no,
             source_revision.content_ref,
             None,
@@ -144,7 +144,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     }
 
     /// Deletes the file or directory subtree that `binding` binds.
-    pub(crate) async fn delete(&mut self, binding: &ResolvedBinding) -> Result<()> {
+    pub(crate) async fn delete(&mut self, binding: ResolvedBinding) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let inode_id = binding.child_inode_id();
         let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
@@ -154,7 +154,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
             },
         )?;
         let deltas = vec![
-            unbind_delta(&mut self.numbering, binding, &inode)?,
+            unbind_delta(&mut self.numbering, &binding, &inode)?,
             WalDelta::TombstoneSubtree {
                 delta_index: self.numbering.reserve_delta_index()?,
                 root_inode_id: inode.inode_id,
@@ -173,8 +173,8 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// Rebinds the inode that `source_binding` binds at `destination`.
     pub(crate) async fn rename(
         &mut self,
-        source_binding: &ResolvedBinding,
-        destination: &AvailableName,
+        source_binding: ResolvedBinding,
+        destination: AvailableName,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let new_parent_inode_id = destination.parent_inode_id();
@@ -191,7 +191,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
             .await?;
         let revision = self.resolve_revision_summary(&inode).await?;
         let deltas = vec![
-            unbind_delta(&mut self.numbering, source_binding, &inode)?,
+            unbind_delta(&mut self.numbering, &source_binding, &inode)?,
             WalDelta::BindDirentry {
                 delta_index: self.numbering.reserve_delta_index()?,
                 parent_inode_id: new_parent_inode_id,
@@ -218,7 +218,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
         &mut self,
         deletion: &SubtreeTombstoneRecord,
         deletion_seq: CommitSeq,
-        destination: &AvailableName,
+        destination: AvailableName,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let inode_id = deletion.root_inode_id;
@@ -257,7 +257,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// map after the update.
     pub(crate) async fn update_attributes(
         &mut self,
-        target: &ResolvedTarget<'_>,
+        target: ResolvedTarget<'_>,
         attributes: &Attributes,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
@@ -282,7 +282,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// Replaces the access row of `target` with `boundary` and `grants`.
     pub(crate) async fn update_access(
         &mut self,
-        target: &ResolvedTarget<'_>,
+        target: ResolvedTarget<'_>,
         boundary: bool,
         grants: &AccessGrants,
     ) -> Result<()> {

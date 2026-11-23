@@ -39,11 +39,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         self.commit.record_appended(appended);
         let binding = self.view().source_binding(target.resolved()).await?;
         self.commit
-            .replace_file(
-                &binding,
-                &content_ref,
-                Some(revision.content_ref.size_bytes),
-            )
+            .replace_file(binding, &content_ref, Some(revision.content_ref.size_bytes))
             .await
     }
 

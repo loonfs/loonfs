@@ -20,7 +20,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         target.ensure_file()?;
         let binding = self.view().source_binding(target.resolved()).await?;
         self.commit
-            .restore_revision(&binding, source_revision_no)
+            .restore_revision(binding, source_revision_no)
             .await
     }
 }

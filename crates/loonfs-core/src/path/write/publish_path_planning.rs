@@ -156,7 +156,7 @@ pub(super) struct AccessUpdateTarget<'a> {
 /// [`PlanningView::source_binding`] read it. Only that function makes one,
 /// so a write that takes one unbinds a current binding or writes a revision
 /// under it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ResolvedBinding {
     parent_inode_id: InodeId,
     name_key: NameKey,

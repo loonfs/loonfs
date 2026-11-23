@@ -28,7 +28,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 current.map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
             ensure_expected_access_revision(target.inode_id(), expected, Some(actual))?;
         }
-        self.commit.update_access(&target, boundary, grants).await
+        self.commit.update_access(target, boundary, grants).await
     }
 }
 

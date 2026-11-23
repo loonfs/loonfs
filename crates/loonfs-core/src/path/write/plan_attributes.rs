@@ -46,7 +46,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 Some(current.attributes_revision_no),
             )?;
         }
-        self.commit.update_attributes(&target, &attributes).await
+        self.commit.update_attributes(target, &attributes).await
     }
 }
 
