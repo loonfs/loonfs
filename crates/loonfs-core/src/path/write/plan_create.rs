@@ -13,7 +13,6 @@ use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, TombstoneRow
 use loonfs_types::options::RestoreDeletedDestination;
 use loonfs_types::{
     AbsolutePath, AccessRight, CommitSeq, ContentRef, DestinationBehavior, InodeId, InodeKind,
-    ROOT_INODE_ID,
 };
 
 /// A deleted item's deletion in the trash: the latest tombstone event of the
@@ -219,21 +218,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
 
         let final_name = final_component(absolute_path)?;
 
-        match walk {
-            VisiblePathWalk::Found(existing) => {
-                if behavior == DestinationBehavior::NoReplace {
-                    self.view()
-                        .authorize(
-                            existing.parent_inode_id.unwrap_or(ROOT_INODE_ID),
-                            AccessRight::Create.into(),
-                            Absence::Path(absolute_path.as_str()),
-                        )
-                        .await?;
-                    return Err(CoreError::DestinationExists {
-                        path: absolute_path.as_str().to_owned(),
-                        existing_display_name: Some(existing.display_name.clone()),
-                    });
-                }
+        let name = match walk {
+            VisiblePathWalk::Found(existing) if behavior == DestinationBehavior::Replace => {
                 self.view()
                     .authorize(
                         existing.inode_id,
@@ -262,7 +248,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     expected.ensure_revision(Some(revision.revision_no))?;
                 }
                 let binding = self.view().source_binding(&existing).await?;
-                self.commit.replace_file(binding, &content_ref, None).await
+                return self.commit.replace_file(binding, &content_ref, None).await;
+            }
+            VisiblePathWalk::Found(existing) => {
+                let destination = ResolvedDestination::found(absolute_path, existing)?;
+                self.view().ensure_vacant_destination(&destination).await?
             }
             VisiblePathWalk::Missing(missing) => {
                 self.view()
@@ -275,14 +265,13 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 if expected_file_state.is_some() {
                     return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
                 }
-                let name = self
-                    .create_missing_directories(absolute_path, missing)
-                    .await?;
-                let new_inode = self.next_inode_id()?;
-                self.commit
-                    .create(new_inode, name, NewChild::File(content_ref))
-                    .await
+                self.create_missing_directories(absolute_path, missing)
+                    .await?
             }
-        }
+        };
+        let new_inode = self.next_inode_id()?;
+        self.commit
+            .create(new_inode, name, NewChild::File(content_ref))
+            .await
     }
 }
