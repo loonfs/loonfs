@@ -3,17 +3,22 @@
 use crate::{Body, Client, ClientConfig, TransportError};
 use bytes::Bytes;
 use futures::future::BoxFuture;
+use futures::StreamExt as _;
 use http::{Request, Response};
 use http_body_util::BodyExt as _;
 use loonfs_types::{ErrorCode, ErrorResponse};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use tower::Service;
+use tower::{Service, ServiceExt as _};
 
 pub(crate) enum Outcome {
     TransportFailure,
     Success(Vec<u8>),
+    /// A 200 response whose body sends these bytes and then fails, as a
+    /// connection that drops while the body is read does.
+    BodyFailure(Vec<u8>),
     PartAccepted(String),
     /// A 206 response with this `Content-Range` header and body.
     PartialContent(String, Vec<u8>),
@@ -107,6 +112,32 @@ pub(crate) fn client(transport: &ScriptedTransport) -> Client {
     .expect("valid client config")
 }
 
+/// Returns a client for `http://127.0.0.1:1` that sends every request
+/// through the reqwest transport, and a counter of the calls that reach the
+/// transport.
+pub(crate) fn counted_reqwest_client() -> (Client, Arc<AtomicUsize>) {
+    let config = ClientConfig {
+        server_url: "http://127.0.0.1:1".to_owned(),
+        auth_token: None,
+        actor: Some(loonfs_test_support::test_actor()),
+        request_timeout_ms: None,
+        disable_transient_retry: false,
+        ca_cert_path: None,
+    };
+    let reqwest = crate::reqwest_transport::service(&config).expect("the reqwest transport");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = {
+        let calls = calls.clone();
+        tower::service_fn(move |request: Request<Body>| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            reqwest.clone().oneshot(request)
+        })
+    };
+    let client = Client::with_transport(config, counted, loonfs_types::Context::Service)
+        .expect("valid client config");
+    (client, calls)
+}
+
 pub(crate) fn script(outcomes: impl IntoIterator<Item = Outcome>) -> ScriptedTransport {
     ScriptedTransport(Arc::new(Mutex::new(State {
         outcomes: outcomes.into_iter().collect(),
@@ -167,6 +198,13 @@ impl Service<Request<Body>> for ScriptedTransport {
                     "injected transport failure",
                 ))),
                 Outcome::Success(bytes) => Ok(Response::new(Body::from(Bytes::from(bytes)))),
+                Outcome::BodyFailure(bytes) => Ok(Response::new(Body::from_stream(
+                    futures::stream::iter([
+                        Ok(Bytes::from(bytes)),
+                        Err(std::io::Error::other("connection reset")),
+                    ])
+                    .boxed(),
+                ))),
                 Outcome::PartAccepted(etag) => Ok(Response::builder()
                     .header(http::header::ETAG, etag)
                     .body(Body::empty())

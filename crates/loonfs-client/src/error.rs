@@ -6,24 +6,32 @@ use thiserror::Error;
 
 /// Error returned by the asynchronous HTTP client.
 ///
+/// Each variant means one kind of failure wherever the client returns it,
+/// and [`Self::retryable_without_operator_action`] decides from the variant
+/// alone whether sending the request again can succeed.
+///
 /// Foreign causes (I/O, JSON, and HTTP transport) are captured as message
 /// strings rather than `#[source]` chains.
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum ClientError {
-    /// The client configuration could not be read.
+    /// The client configuration file could not be read.
     #[error("failed to read config: {0}")]
     ConfigIo(String),
-    /// The client configuration could not be decoded.
+    /// The client configuration file could not be decoded.
     #[error("failed to decode config: {0}")]
     ConfigDecode(String),
-    /// A client configuration field is missing or invalid.
+    /// A client configuration field is missing or invalid, so the client
+    /// can't send the request until the configuration changes.
     #[error(transparent)]
     ConfigField(#[from] ConfigFieldError),
-    /// A path is invalid or cannot be used with the requested namespace.
+    /// A path that the caller passed is invalid or can't be used with the
+    /// requested namespace.
     #[error("invalid namespace path `{0}`")]
     InvalidNamespacePath(String),
-    /// Sending an HTTP request or reading its response failed.
+    /// Sending a request or receiving its response over the network failed,
+    /// such as a refused connection, a timeout, or a connection that dropped
+    /// while a response body was read.
     #[error("http error: {0}")]
     Http(String),
     /// A response had an error status and a body that is not the API's error
@@ -40,7 +48,8 @@ pub enum ClientError {
         /// envelope.
         detail: String,
     },
-    /// The server returned a structured API error response.
+    /// The server returned the API's error envelope, whose code says what
+    /// failed.
     #[error("server returned {status} {}: {}", response.code, response.message)]
     Api {
         /// HTTP status code returned by the server.
@@ -59,18 +68,23 @@ pub enum ClientError {
         /// Description of the upload limits the payload exceeds.
         reason: String,
     },
-    /// Reading or writing streamed data failed.
+    /// Reading or writing the caller's local data failed: a file, a payload
+    /// source, a sink, or a record that the client keeps on disk.
     #[error("i/o error: {0}")]
     Io(String),
-    /// Serializing a request or decoding a JSON response failed.
+    /// The client couldn't encode a request body as JSON, or couldn't decode
+    /// a complete response body as the JSON that the API defines.
     #[error("json error: {0}")]
     Json(String),
-    /// A decoded response violates the API contract.
+    /// A response or a call breaks the API's contract, so the same call fails
+    /// the same way until the server or the caller changes something.
     ///
-    /// [`ClientError::Json`] means the response could not be decoded. This
-    /// variant means decoding succeeded, but the decoded value is not valid
-    /// according to the API specification.
-    #[error("server response violates the API contract: {0}")]
+    /// Examples are a decoded response whose value isn't valid according to
+    /// the API specification (where [`ClientError::Json`] means the response
+    /// couldn't be decoded), a presigned URL that isn't a valid request, and
+    /// a resumed download that is read before the caller supplies the bytes
+    /// it skipped.
+    #[error("API contract violation: {0}")]
     Protocol(String),
 }
 
@@ -91,6 +105,39 @@ impl ClientError {
         match self {
             ClientError::Api { response, .. } => ErrorCode::parse(&response.code),
             _ => None,
+        }
+    }
+
+    /// Returns whether sending the same request again can succeed without a
+    /// change by the caller or an operator. The client retries an error like
+    /// that when the request is safe to send more than once.
+    ///
+    /// That is the case for a network failure ([`ClientError::Http`]), for an error code that
+    /// [`ErrorCode::retryable_without_operator_action`] accepts, and for a
+    /// response without the error envelope whose status says that the
+    /// responder stopped waiting for the rest of the request (408) or that
+    /// the responder is busy or failing for the moment (429, 500, 502, 503,
+    /// or 504), such as a storage provider's SlowDown or a load balancer's
+    /// 502. A response with any other status needs a change before the
+    /// request can succeed, such as a 501 or a 505 from a proxy that doesn't
+    /// support the request.
+    pub fn retryable_without_operator_action(&self) -> bool {
+        match self {
+            ClientError::Http(_) => true,
+            ClientError::Api { .. } => self
+                .code()
+                .is_some_and(ErrorCode::retryable_without_operator_action),
+            ClientError::HttpStatus { status, .. } => {
+                matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+            }
+            ClientError::ConfigIo(_)
+            | ClientError::ConfigDecode(_)
+            | ClientError::ConfigField(_)
+            | ClientError::InvalidNamespacePath(_)
+            | ClientError::UploadTooLarge { .. }
+            | ClientError::Io(_)
+            | ClientError::Json(_)
+            | ClientError::Protocol(_) => false,
         }
     }
 

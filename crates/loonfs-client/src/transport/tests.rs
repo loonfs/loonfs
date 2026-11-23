@@ -11,6 +11,7 @@ use loonfs_types::CommitId;
 use loonfs_types::CommitSeq;
 use loonfs_types::CompleteUploadBody;
 use loonfs_types::CreateUploadBody;
+use loonfs_types::ErrorCode;
 use loonfs_types::ObjectTransfer;
 use loonfs_types::SnapshotId;
 use loonfs_types::UploadId;
@@ -693,7 +694,7 @@ async fn response_progress_resets_inactivity_without_resetting_total_deadlines()
 }
 
 #[test]
-fn retryable_transport_failure_covers_transport_and_unavailability_only() {
+fn retries_cover_transport_failures_and_unavailability_only() {
     let api = |code: &str| ClientError::Api {
         status: 503,
         response: Box::new(ErrorResponse {
@@ -705,68 +706,132 @@ fn retryable_transport_failure_covers_transport_and_unavailability_only() {
             details: None,
         }),
     };
-    assert!(retryable_transport_failure(
-        FailureSource::Network,
-        &ClientError::Http("reset".to_owned())
-    ));
-    assert!(retryable_transport_failure(
-        FailureSource::Response,
-        &api("server_busy")
-    ));
-    assert!(retryable_transport_failure(
-        FailureSource::Response,
-        &api("commit_queue_full")
-    ));
-    assert!(retryable_transport_failure(
-        FailureSource::Response,
-        &api("shutting_down")
-    ));
-    assert!(!retryable_transport_failure(
-        FailureSource::Response,
-        &api("server_error")
-    ));
-    assert!(!retryable_transport_failure(
-        FailureSource::Response,
-        &api("store_contention")
-    ));
-    assert!(!retryable_transport_failure(
-        FailureSource::Response,
-        &api("maintenance_required")
-    ));
-    assert!(!retryable_transport_failure(
-        FailureSource::Response,
-        &api("index_lagging")
-    ));
+    assert!(ClientError::Http("reset".to_owned()).retryable_without_operator_action());
+    assert!(api("server_busy").retryable_without_operator_action());
+    assert!(api("commit_queue_full").retryable_without_operator_action());
+    assert!(api("shutting_down").retryable_without_operator_action());
+    assert!(!api("server_error").retryable_without_operator_action());
+    assert!(!api("store_contention").retryable_without_operator_action());
+    assert!(!api("maintenance_required").retryable_without_operator_action());
+    assert!(!api("index_lagging").retryable_without_operator_action());
     // An unknown outcome, including a request that the server cancelled at
     // its deadline, uses 503 but is not safe to retry automatically. The
     // caller must first determine whether a mutation completed.
-    assert!(!retryable_transport_failure(
-        FailureSource::Response,
-        &api("outcome_unknown")
-    ));
-    // A non-envelope status is retried when it says the responder is busy
-    // or failing for the moment, and not when it refuses the request.
+    assert!(!api("outcome_unknown").retryable_without_operator_action());
+    // Reading or writing local data failed, so a resend would fail the same
+    // way.
+    assert!(!ClientError::Io("disk full".to_owned()).retryable_without_operator_action());
+    // A non-envelope status is retried when it says the request didn't
+    // arrive in time or the responder is busy or failing for the moment, and
+    // not when it refuses the request.
     let non_envelope = |status: u16, provider_code: Option<&str>| ClientError::HttpStatus {
         status,
         provider_code: provider_code.map(str::to_owned),
         detail: "expected value at line 1 column 1".to_owned(),
     };
-    assert!(retryable_transport_failure(
-        FailureSource::Response,
-        &non_envelope(502, None)
-    ));
-    assert!(retryable_transport_failure(
-        FailureSource::Response,
-        &non_envelope(503, Some("SlowDown"))
-    ));
-    assert!(!retryable_transport_failure(
-        FailureSource::Response,
-        &non_envelope(400, Some("ExpiredToken"))
-    ));
-    assert!(!retryable_transport_failure(
-        FailureSource::Response,
-        &non_envelope(403, Some("AccessDenied"))
-    ));
+    assert!(non_envelope(502, None).retryable_without_operator_action());
+    assert!(non_envelope(503, Some("SlowDown")).retryable_without_operator_action());
+    assert!(non_envelope(408, None).retryable_without_operator_action());
+    assert!(!non_envelope(400, Some("ExpiredToken")).retryable_without_operator_action());
+    assert!(!non_envelope(403, Some("AccessDenied")).retryable_without_operator_action());
+    for refused in [501, 505, 507, 511] {
+        assert!(
+            !non_envelope(refused, None).retryable_without_operator_action(),
+            "{refused}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_request_that_cant_be_built_is_refused_without_a_send() {
+    let transport = scripted_transport::script([]);
+    let client = scripted_transport::client(&transport);
+    let request = WireRequest::presigned(
+        Method::PUT,
+        "http://example.invalid/an object",
+        SendPolicy::RetryWithoutDeadline,
+    )
+    .header("x-signed", "line\nbreak");
+    let error = client
+        .call(&request)
+        .await
+        .expect_err("the presigned request isn't valid");
+    assert_matches!(&error, ClientError::Protocol(message) if message.contains("can't be built"));
+    assert!(!error.retryable_without_operator_action());
+    assert_eq!(transport.attempts(), 0);
+}
+
+/// Returns a presigned PUT transfer to the relative URL `/object`.
+fn presigned_put_to_a_relative_url() -> ObjectTransfer {
+    ObjectTransfer::PresignedUrl {
+        method: "PUT".to_owned(),
+        url: "/object".to_owned(),
+        headers: std::collections::BTreeMap::new(),
+        expires_at_ms: 1,
+    }
+}
+
+#[tokio::test]
+async fn a_presigned_put_to_a_relative_url_is_refused_without_a_send() {
+    let (client, calls) = scripted_transport::counted_reqwest_client();
+    let error = client
+        .upload_via_presigned_url(&presigned_put_to_a_relative_url(), b"direct")
+        .await
+        .expect_err("a relative presigned URL");
+    assert_matches!(
+        &error,
+        ClientError::Protocol(message) if message.contains("`/object`"),
+        "unexpected error: {error}"
+    );
+    assert!(!error.retryable_without_operator_action());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_part_upload_to_a_relative_url_is_refused_without_a_send() {
+    let (client, calls) = scripted_transport::counted_reqwest_client();
+    let error = client
+        .upload_part_via_presigned_url(
+            1,
+            &presigned_put_to_a_relative_url(),
+            loonfs_types::Checksum::crc32c(b"part"),
+            Bytes::from_static(b"part"),
+        )
+        .await
+        .expect_err("a relative presigned URL");
+    assert_matches!(
+        &error,
+        ClientError::Protocol(message) if message.contains("`/object`"),
+        "unexpected error: {error}"
+    );
+    assert!(!error.retryable_without_operator_action());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_failed_read_of_the_source_is_a_local_failure() {
+    let transport =
+        scripted_transport::script([scripted_transport::Outcome::Success(b"unused".to_vec())]);
+    let client = scripted_transport::client(&transport);
+    let request = client.request(
+        Operation::retry_without_deadline(Method::PUT),
+        "http://127.0.0.1/content",
+    );
+    let source = futures::stream::iter([
+        Ok(Bytes::from_static(b"some")),
+        Err(std::io::Error::other("disk read failed")),
+    ])
+    .boxed();
+    let error = client
+        .call_streamed_once(&request, source, None)
+        .await
+        .expect_err("the source failed");
+    assert_matches!(
+        &error,
+        ClientError::Io(message) if message.contains("disk read failed"),
+        "unexpected error: {error}"
+    );
+    assert!(!error.retryable_without_operator_action());
 }
 
 #[tokio::test]

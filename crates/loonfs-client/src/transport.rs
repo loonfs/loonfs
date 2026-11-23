@@ -5,15 +5,15 @@ use crate::operations::Operation;
 use crate::transport_body::{timeout_error, wait_for_timeout, RequestActivity, TimedBody};
 use crate::{Body, Client, ClientError, PayloadStream, Result, TransportError};
 use bytes::Bytes;
-use futures::StreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
 use loonfs_types::{
-    headers, Context, ErrorCode, ErrorResponse, NamespaceId, OperationDeadline, PageRequest,
+    headers, Context, ErrorResponse, NamespaceId, OperationDeadline, PageRequest,
     TransportRetryOutcome,
 };
 pub(crate) use loonfs_types::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 pub(crate) type Transport =
@@ -143,19 +143,33 @@ impl Client {
         body: PayloadStream,
         size_bytes: Option<u64>,
     ) -> Result<Vec<u8>> {
+        // A failed read of the caller's source fails the request, and the
+        // transport reports it like a network failure. The failure is kept
+        // here so that the request returns it as the local failure it is.
+        let source_failure = Arc::new(OnceLock::new());
+        let body = body
+            .inspect_err({
+                let source_failure = source_failure.clone();
+                move |error| {
+                    let _ = source_failure.set(error.to_string());
+                }
+            })
+            .boxed();
         let mut request_body = self.build(request, Body::from_stream(body))?;
         if let Some(size_bytes) = size_bytes {
             request_body
                 .headers_mut()
                 .append(http::header::CONTENT_LENGTH, size_bytes.into());
         }
-        self.send(request_body, None)
-            .await
-            .map_err(|attempt| attempt.error)?
-            .collect(&request.url)
-            .await
-            .map(|response| response.bytes)
-            .map_err(|attempt| attempt.error)
+        let sent = match self.send(request_body, None).await {
+            Ok(response) => response.collect(&request.url).await,
+            Err(attempt) => Err(attempt),
+        };
+        sent.map(|response| response.bytes)
+            .map_err(|attempt| match source_failure.get() {
+                Some(message) => ClientError::Io(format!("reading the payload failed: {message}")),
+                None => attempt.error,
+            })
     }
 
     /// Sends a request and returns a successful response with its body
@@ -182,7 +196,6 @@ impl Client {
         let built = self
             .build(request, Body::empty())
             .map_err(|error| FailedAttempt {
-                source: FailureSource::Network,
                 error,
                 retry_after_ms: None,
             })?;
@@ -196,7 +209,6 @@ impl Client {
                 .map_err(|error| failed_attempt(&request.url, error))?
                 .to_bytes();
             return Err(FailedAttempt {
-                source: FailureSource::Response,
                 error: map_status_error(response.status.as_u16(), &bytes),
                 retry_after_ms,
             });
@@ -268,8 +280,7 @@ impl Client {
                 Ok(response) => return Ok(response),
                 Err(failed) => failed,
             };
-            let retryable = retryable_transport_failure(failed.source, &failed.error);
-            if !self.transport_retry_enabled || !retryable {
+            if !self.transport_retry_enabled || !failed.error.retryable_without_operator_action() {
                 return Err(failed.error);
             }
             // The policy waits the whole `Retry-After`, or stops when the deadline can't fit it.
@@ -302,7 +313,6 @@ impl Client {
             .map(Body::from)
             .unwrap_or_else(Body::empty);
         let built = self.build(request, body).map_err(|error| FailedAttempt {
-            source: FailureSource::Network,
             error,
             retry_after_ms: None,
         })?;
@@ -318,10 +328,8 @@ impl Client {
             .uri(&request.url);
         if request.authenticate {
             if let Some(token) = &self.auth_token {
-                let mut value = http::HeaderValue::from_str(&format!("Bearer {}", token.expose()))
-                    .map_err(|error| {
-                        failed_attempt(&request.url, TransportError::new(error)).error
-                    })?;
+                let mut value = crate::config::authorization_header(token)
+                    .expect("the client validates its token when it is built");
                 value.set_sensitive(true);
                 builder = builder.header(http::header::AUTHORIZATION, value);
             }
@@ -329,9 +337,25 @@ impl Client {
         for (name, value) in &request.headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
-        builder
-            .body(body)
-            .map_err(|error| failed_attempt(&request.url, TransportError::new(error)).error)
+        // The URL and the headers that remain come from the server, such as a
+        // presigned URL, or from the caller, so a request that can't be built
+        // breaks the API's contract and would fail the same way again. No
+        // transport can send a request to a URL that isn't an absolute http or
+        // https URL with a host, so the client refuses that request here,
+        // whichever transport it uses.
+        let cant_be_built = |reason: &dyn std::fmt::Display| {
+            ClientError::Protocol(format!(
+                "request to `{}` can't be built: {reason}",
+                request.url
+            ))
+        };
+        let built = builder.body(body).map_err(|error| cant_be_built(&error))?;
+        if !crate::config::is_sendable_url(built.uri()) {
+            return Err(cant_be_built(
+                &"the URL isn't an absolute http or https URL with a host",
+            ));
+        }
+        Ok(built)
     }
 
     async fn send(
@@ -403,7 +427,6 @@ impl WireResponse {
         } else {
             let retry_after_ms = parse_retry_after_ms(&self.headers);
             Err(FailedAttempt {
-                source: FailureSource::Response,
                 error: map_status_error(self.status.as_u16(), &bytes),
                 retry_after_ms,
             })
@@ -435,38 +458,25 @@ impl BufferedResponse {
 }
 
 fn failed_attempt(url: &str, error: TransportError) -> FailedAttempt {
+    let message = render_send_error(url, &error, error.is_connect(), error.is_timeout());
     FailedAttempt {
-        source: FailureSource::Network,
-        error: ClientError::Http(render_send_error(
-            url,
-            &error,
-            error.is_connect(),
-            error.is_timeout(),
-        )),
+        // A request that the transport refuses to send fails the same way on
+        // every attempt, like a request that the client can't build.
+        error: if error.is_invalid_request() {
+            ClientError::Protocol(message)
+        } else {
+            ClientError::Http(message)
+        },
         retry_after_ms: None,
     }
 }
 
-/// One failed attempt, with whether the network layer itself reported it.
+/// One failed attempt.
 pub(crate) struct FailedAttempt {
-    /// Whether a complete response was served. Classified here, before the
-    /// error is flattened, because the retry policy keys on it: a served
-    /// status with a non-envelope body (a load balancer's HTML 502) is not a
-    /// transport failure.
-    pub(crate) source: FailureSource,
     pub(crate) error: ClientError,
     /// The wait that the failed response's `Retry-After` header asks for, in
     /// milliseconds, when the header is in delta seconds.
     pub(crate) retry_after_ms: Option<u64>,
-}
-
-/// Where a failed request attempt's error came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FailureSource {
-    /// No complete response was served.
-    Network,
-    /// The server served a complete response with an error status.
-    Response,
 }
 
 pub(crate) fn map_status_error(status: u16, body: &[u8]) -> ClientError {
@@ -525,28 +535,6 @@ fn render_send_error(
     } else {
         format!("request to `{url}` failed: {detail}")
     }
-}
-
-/// Returns whether a failed request is eligible for an automatic retry.
-///
-/// Network failures are retryable. Server responses are retryable only when
-/// their error code identifies a temporary condition that requires no
-/// operator action. A response without the error envelope is retryable when
-/// its status says the responder is busy or failing for the moment, which a
-/// storage provider's SlowDown or InternalError and an intermediary's 502
-/// are; the policy of the request already says it is safe to send again.
-pub(crate) fn retryable_transport_failure(source: FailureSource, error: &ClientError) -> bool {
-    source == FailureSource::Network
-        || error
-            .code()
-            .is_some_and(ErrorCode::retryable_without_operator_action)
-        || matches!(
-            error,
-            ClientError::HttpStatus {
-                status: 429 | 500 | 502 | 503 | 504,
-                ..
-            }
-        )
 }
 
 #[allow(

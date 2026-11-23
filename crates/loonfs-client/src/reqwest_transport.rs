@@ -44,7 +44,11 @@ fn convert_request(
 }
 
 fn transport_error(error: reqwest::Error) -> TransportError {
-    if error.is_connect() {
+    // Reqwest returns a builder error when it refuses to send a request,
+    // for example when its URL parser rejects the URL.
+    if error.is_builder() {
+        TransportError::invalid_request(error)
+    } else if error.is_connect() {
         TransportError::connect(error)
     } else if error.is_timeout() {
         TransportError::timeout(error)
@@ -181,5 +185,80 @@ mod tests {
         assert!(streamed.body().and_then(reqwest::Body::as_bytes).is_none());
         assert!(streamed.try_clone().is_none());
         assert_eq!(polls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Sends a presigned GET to each URL through the reqwest transport and
+    /// checks which of the client, the transport, or the network refused it.
+    /// Nothing listens on port 1, so a request that is sent fails to connect.
+    #[tokio::test]
+    async fn a_url_that_cant_be_sent_to_is_a_contract_violation() {
+        use crate::transport::{SendPolicy, WireRequest};
+        use crate::Client;
+
+        #[derive(Debug)]
+        enum RefusedBy {
+            Client,
+            Transport,
+            Network,
+        }
+
+        let long_path = format!("http://127.0.0.1:1/{}", "{".repeat(30_000));
+        let cases = [
+            ("/object", RefusedBy::Client),
+            ("object", RefusedBy::Client),
+            ("ftp://127.0.0.1:1/object", RefusedBy::Client),
+            ("http://:80/object", RefusedBy::Client),
+            ("http://user@:80/object", RefusedBy::Client),
+            ("http://exa mple.com/object", RefusedBy::Client),
+            ("http://exa%zzmple.com/object", RefusedBy::Client),
+            ("http://[::1/object", RefusedBy::Client),
+            ("http://127.0.0.1:99999/object", RefusedBy::Transport),
+            ("http://127.0.0.1:8a/object", RefusedBy::Transport),
+            ("http://[zz::1]/object", RefusedBy::Transport),
+            ("http://[::1]x/object", RefusedBy::Transport),
+            ("http://300.1.1.1/object", RefusedBy::Transport),
+            ("http://xn--a/object", RefusedBy::Transport),
+            // The transport encodes each brace as three bytes, and the
+            // encoded URL is longer than an `http::Uri` can be.
+            (long_path.as_str(), RefusedBy::Transport),
+            ("http://user:secret@127.0.0.1:1/object", RefusedBy::Network),
+            ("http://[::1]:1/object", RefusedBy::Network),
+            ("http://127.0.0.1:1/object#fragment", RefusedBy::Network),
+            ("http://127.0.0.1:1/object%zz", RefusedBy::Network),
+        ];
+        let client = Client::new(
+            ClientConfig {
+                server_url: "http://127.0.0.1:1".to_owned(),
+                auth_token: None,
+                actor: None,
+                request_timeout_ms: None,
+                disable_transient_retry: true,
+                ca_cert_path: None,
+            },
+            loonfs_types::Context::Service,
+        )
+        .expect("valid client config");
+        for (url, refused) in cases {
+            let shown = &url[..url.len().min(60)];
+            let request = WireRequest::presigned(http::Method::GET, url, SendPolicy::Once);
+            let error = client
+                .call(&request)
+                .await
+                .expect_err("nothing listens on port 1");
+            let message: String = error.to_string().chars().take(300).collect();
+            let expected = match refused {
+                RefusedBy::Client => {
+                    matches!(&error, ClientError::Protocol(m) if m.contains("can't be built"))
+                }
+                RefusedBy::Transport => {
+                    matches!(&error, ClientError::Protocol(m) if !m.contains("can't be built"))
+                }
+                RefusedBy::Network => matches!(&error, ClientError::Http(_)),
+            };
+            assert!(
+                expected,
+                "`{shown}` {refused:?}: unexpected error: {message}"
+            );
+        }
     }
 }

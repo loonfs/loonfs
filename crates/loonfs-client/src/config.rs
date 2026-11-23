@@ -82,11 +82,24 @@ impl ClientConfig {
     /// they accept.
     pub fn validate(&self) -> std::result::Result<(), ConfigFieldError> {
         let server_uri = validate_absolute_http_url("server_url", &self.server_url)?;
+        if !is_sendable_url(&server_uri) {
+            return Err(ConfigFieldError::Invalid {
+                field: "server_url",
+                reason: "must be an absolute http or https URL with a host".to_owned(),
+            });
+        }
         if let Some(token) = &self.auth_token {
             if token.is_blank() {
                 return Err(ConfigFieldError::Invalid {
                     field: "auth_token",
                     reason: "must not be empty".to_owned(),
+                });
+            }
+            if authorization_header(token).is_err() {
+                return Err(ConfigFieldError::Invalid {
+                    field: "auth_token",
+                    reason: "must be usable in an HTTP header, without control characters"
+                        .to_owned(),
                 });
             }
             if server_uri.scheme_str() == Some("http") && !is_literal_loopback_host(&server_uri) {
@@ -107,6 +120,26 @@ impl ClientConfig {
         }
         Ok(())
     }
+}
+
+/// Returns whether the client can send a request to `uri` as written, which
+/// requires an absolute http or https URL with a host.
+///
+/// The shared `validate_absolute_http_url` doesn't require a host, because
+/// the store also uses it for an S3 endpoint, where the bucket name can be
+/// prefixed to the host. The client sends to its URLs as written, so this
+/// function requires the host.
+pub(crate) fn is_sendable_url(uri: &Uri) -> bool {
+    matches!(uri.scheme_str(), Some("http" | "https"))
+        && uri.host().is_some_and(|host| !host.is_empty())
+}
+
+/// Returns the `Authorization` header value that sends `token`, or an error
+/// when the token can't be sent in a header.
+pub(crate) fn authorization_header(
+    token: &SecretString,
+) -> std::result::Result<http::HeaderValue, http::header::InvalidHeaderValue> {
+    http::HeaderValue::from_str(&format!("Bearer {}", token.expose()))
 }
 
 fn is_literal_loopback_host(uri: &Uri) -> bool {
@@ -186,6 +219,21 @@ mod tests {
         config("http://example.internal", None)
             .validate()
             .expect("unauthenticated plaintext deployments remain supported");
+    }
+
+    #[test]
+    fn a_server_url_without_a_host_is_refused() {
+        let error = config("http://:80", None)
+            .validate()
+            .expect_err("a URL with an empty host");
+        assert_matches!(
+            error,
+            ConfigFieldError::Invalid {
+                field: "server_url",
+                ref reason,
+            } if reason == "must be an absolute http or https URL with a host",
+            "unexpected validation error: {error}"
+        );
     }
 
     #[test]
@@ -280,6 +328,30 @@ mod tests {
         let config: ClientConfig =
             toml::from_str("server_url = \"http://localhost:1\"\n").expect("minimal config");
         assert!(config.auth_token.is_none());
+    }
+
+    #[test]
+    fn a_token_that_cant_be_sent_in_a_header_fails_construction() {
+        let error = Client::new(
+            ClientConfig {
+                server_url: "https://example.com".to_owned(),
+                auth_token: Some("line\nbreak".into()),
+                actor: None,
+                request_timeout_ms: None,
+                disable_transient_retry: false,
+                ca_cert_path: None,
+            },
+            loonfs_types::Context::Service,
+        )
+        .expect_err("a token with a line break");
+        assert_matches!(
+            error,
+            ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {
+                field: "auth_token",
+                ..
+            }),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]
