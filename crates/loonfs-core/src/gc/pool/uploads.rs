@@ -1,9 +1,9 @@
 //! The upload sessions of a pool: listing them, and deciding what the pool's
 //! collection does with each session's records.
 
-use super::members::PoolRoots;
+use super::members::{PoolRoots, SessionNamespace};
 use crate::error::{CoreError, Result};
-use crate::gc::live_set::RetirementStatus;
+use crate::gc::deletes::AgeWindow;
 use crate::gc::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use crate::heap_bytes::HeapBytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
@@ -247,38 +247,32 @@ impl<S: ObjectStore> PoolStore<S> {
         )
     }
 
-    /// Determines what to do with a session whose records the sweep read, by
-    /// the status of the namespace that created the session.
+    /// Determines what to do with a session whose records the sweep read.
     ///
-    /// A session of a deleted namespace is kept until the namespace's
-    /// retirement deadline, and from the deadline on it follows the rules of
-    /// a retired namespace, even while a fork's snapshot keeps the namespace
-    /// from retirement. An open or aborted session follows the same rules in
-    /// an active namespace and in a retired one, and its provider cleanup runs
-    /// after the retirement, because the records and the content are under
-    /// the pool's prefix.
+    /// The collection first checks what it knows of the session's namespace,
+    /// and keeps the session when the namespace requires that (see
+    /// [`SessionNamespace::KeepsSessions`]).
+    /// An open or aborted session follows the same rules in a namespace that
+    /// is being created, an active namespace, and a retired one, and its
+    /// provider cleanup runs after the retirement, because the records and
+    /// the content are under the pool's prefix.
     pub(super) async fn sweep_upload_session(
         &self,
         roots: &PoolRoots,
         clock: &OperationClock,
         state: &UploadSessionState,
     ) -> Result<UploadSessionSweep> {
-        let Some(status) = roots.find_retirement_status(&state.session.namespace_id) else {
-            return Ok(retain_undated());
-        };
-        if let RetirementStatus::Retained {
-            retires_at_ms: Some(deadline_ms),
-        } = status
+        if let SessionNamespace::KeepsSessions { reclaimable_at_ms } =
+            roots.find_session_namespace(&state.session.namespace_id)
         {
-            return Ok(retain_until(deadline_ms));
+            return Ok(UploadSessionSweep::Retain { reclaimable_at_ms });
         }
         match &state.outcome {
             None => self.abort_expired_session(clock, &state.session).await,
             Some(UploadOutcome::Aborted { aborted_at_ms }) => {
-                if clock.request_at_ms().saturating_sub(*aborted_at_ms) < GC_GRACE_WINDOW_MS {
-                    return Ok(retain_until(
-                        aborted_at_ms.saturating_add(GC_GRACE_WINDOW_MS),
-                    ));
+                let window = AgeWindow::after(*aborted_at_ms, GC_GRACE_WINDOW_MS);
+                if !window.has_passed(clock.request_at_ms()) {
+                    return Ok(retain_until(window.ends_at_ms));
                 }
                 // Repeat provider cleanup so a later collection completes work left by a crash
                 // after the abort.
@@ -295,12 +289,11 @@ impl<S: ObjectStore> PoolStore<S> {
             // the sessions, and the sweep reads an outcome only when the
             // listing returned one. An outcome record never changes, so a
             // completed outcome here contradicts the earlier read, and the
-            // session keeps the completed-content grace of an active
-            // namespace.
+            // collection keeps the session for the completed-content grace,
+            // whatever the namespace's status.
             Some(UploadOutcome::Completed {
                 completed_at_ms, ..
-            }) => Ok(sweep_completed_session(
-                RetirementStatus::Active,
+            }) => Ok(completed_content_grace(
                 clock.request_at_ms(),
                 *completed_at_ms,
             )),
@@ -319,15 +312,12 @@ impl<S: ObjectStore> PoolStore<S> {
         clock: &OperationClock,
         session: &UploadSessionPayload,
     ) -> Result<UploadSessionSweep> {
-        let expires_at_ms = session.expires_at_ms;
-        if clock.request_at_ms().saturating_sub(expires_at_ms) < GC_GRACE_WINDOW_MS {
-            return Ok(retain_until(
-                expires_at_ms.saturating_add(GC_GRACE_WINDOW_MS),
-            ));
+        let window = AgeWindow::after(session.expires_at_ms, GC_GRACE_WINDOW_MS);
+        if !window.has_passed(clock.request_at_ms()) {
+            return Ok(retain_until(window.ends_at_ms));
         }
-        let aborted = UploadOutcome::Aborted {
-            aborted_at_ms: clock.request_at_ms(),
-        };
+        let aborted_at_ms = clock.request_at_ms();
+        let aborted = UploadOutcome::Aborted { aborted_at_ms };
         match create_upload_outcome(&self.store, &self.pool_id, session, &aborted).await {
             // Keep the newly aborted session until its post-abort grace period expires.
             Ok(OutcomeCreation::Created) => {
@@ -335,7 +325,7 @@ impl<S: ObjectStore> PoolStore<S> {
                     .release(&self.store)
                     .await;
                 Ok(retain_until(
-                    clock.request_at_ms().saturating_add(GC_GRACE_WINDOW_MS),
+                    AgeWindow::after(aborted_at_ms, GC_GRACE_WINDOW_MS).ends_at_ms,
                 ))
             }
             Ok(OutcomeCreation::Existing(_)) => {
@@ -387,31 +377,38 @@ pub(super) enum UploadSessionSweep {
 }
 
 /// Returns whether a completed session's records are kept or deleted, from
-/// the retirement `status` of the namespace that created the session and the
-/// session's completion time.
+/// what the collection knows of the session's `namespace` and the session's
+/// completion time.
 ///
-/// A deleted namespace past its retirement deadline (retained with no
-/// deadline) can't admit the session's content, so the session is deleted
-/// without the completed-content grace, as in a retired namespace.
+/// The collection keeps a completed session of a namespace that is being
+/// created for the completed-content grace, as it does for an active
+/// namespace, because a retried create or fork can make the namespace
+/// active, and a writer can then commit the session's content. The
+/// collection deletes a completed session of a namespace that it treats as
+/// retired without the grace.
 pub(super) fn sweep_completed_session(
-    status: RetirementStatus,
+    namespace: SessionNamespace,
     now_ms: u64,
     completed_at_ms: u64,
 ) -> UploadSessionSweep {
-    match status {
-        RetirementStatus::Retained {
-            retires_at_ms: Some(deadline_ms),
-        } => retain_until(deadline_ms),
-        RetirementStatus::Active
-            if now_ms.saturating_sub(completed_at_ms) < CONTENT_RECLAMATION_GRACE_WINDOW_MS =>
-        {
-            retain_until(completed_at_ms.saturating_add(CONTENT_RECLAMATION_GRACE_WINDOW_MS))
+    match namespace {
+        SessionNamespace::KeepsSessions { reclaimable_at_ms } => {
+            UploadSessionSweep::Retain { reclaimable_at_ms }
         }
-        RetirementStatus::Active
-        | RetirementStatus::Retained {
-            retires_at_ms: None,
-        }
-        | RetirementStatus::Eligible => UploadSessionSweep::Delete,
+        SessionNamespace::Live => completed_content_grace(now_ms, completed_at_ms),
+        SessionNamespace::Retired => UploadSessionSweep::Delete,
+    }
+}
+
+/// Keeps a completed session's records until the completed-content grace
+/// after `completed_at_ms` has passed at `now_ms`, and deletes them after
+/// that.
+fn completed_content_grace(now_ms: u64, completed_at_ms: u64) -> UploadSessionSweep {
+    let window = AgeWindow::after(completed_at_ms, CONTENT_RECLAMATION_GRACE_WINDOW_MS);
+    if window.has_passed(now_ms) {
+        UploadSessionSweep::Delete
+    } else {
+        retain_until(window.ends_at_ms)
     }
 }
 
@@ -423,7 +420,7 @@ fn retain_until(at_ms: u64) -> UploadSessionSweep {
 }
 
 /// A session kept for a reason no clock resolves.
-pub(super) fn retain_undated() -> UploadSessionSweep {
+fn retain_undated() -> UploadSessionSweep {
     UploadSessionSweep::Retain {
         reclaimable_at_ms: None,
     }

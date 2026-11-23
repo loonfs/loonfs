@@ -13,12 +13,13 @@ use crate::namespace::state::NamespaceReadState;
 use crate::segment::MetadataRunPolicy;
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::{
-    content_blob, pool_member, temporary_object, temporary_prefix, upload_outcome, upload_session,
+    content_blob, metadata_segment_object_key, pool_member, temporary_object, temporary_prefix,
+    upload_outcome, upload_session,
 };
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::RecordedOperation;
 use loonfs_types::format::control::UploadSessionPayload;
-use loonfs_types::format::manifest::ContentLayoutRecord;
+use loonfs_types::format::manifest::{ContentLayoutRecord, MetadataRowFamily};
 use loonfs_types::{
     ChecksumAlgorithm, CommitSeq, ContentExtent, ContentId, ContentLayout, ExtentObject,
     GcSkippedWork,
@@ -441,34 +442,56 @@ async fn a_snapshot_whose_manifest_is_missing_makes_its_member_unreadable_unless
         target_namespace_id: NamespaceId::parse(target).expect("namespace"),
     };
     let unreadable = vec![GcSkippedWork::ContentDeletionUnreadableMember];
-    // The owner, whether the member is deleted, and the skipped work.
+    // The owner of a snapshot that the test writes, or `None` for the
+    // member's own fork point snapshot, whether the member is deleted, and
+    // the skipped work. The member is a fork, so it has a fork point
+    // snapshot.
     let cases = [
-        (user, false, vec![]),
-        (fork_of("fork"), false, unreadable.clone()),
-        (fork_of("member"), false, unreadable),
-        (fork_of("member"), true, vec![]),
+        (Some(user), false, vec![]),
+        (Some(fork_of("fork")), false, unreadable.clone()),
+        (None, false, unreadable),
+        (None, true, vec![]),
     ];
     for (owner, deleted, skipped) in cases {
         let directory = tempdir().expect("directory");
         let store = LocalFsStore::new(directory.path()).expect("store");
-        let (pool_id, members) = pool(&store, &["member"]).await;
+        let (pool_id, members) = pool(&store, &["source", "member"]).await;
         let namespace = crate::test_support::namespace_store(&store, &member);
-        let snapshot = namespace
-            .create_snapshot_record(
-                owner,
-                crate::test_support::folded_manifest(&namespace)
+        let snapshot_id = match owner {
+            Some(owner) => {
+                namespace
+                    .create_snapshot_record(
+                        owner,
+                        crate::test_support::folded_manifest(&namespace)
+                            .await
+                            .expect("fold the WAL tail"),
+                        &context(1_000).clock(),
+                    )
                     .await
-                    .expect("fold the WAL tail"),
-                &context(1_000).clock(),
-            )
-            .await
-            .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
-            .expect("snapshot");
+                    .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
+                    .expect("snapshot")
+                    .snapshot_id
+            }
+            None => namespace
+                .load_current_manifest()
+                .await
+                .expect("current manifest")
+                .payload()
+                .fork_basis
+                .as_ref()
+                .expect("a fork basis")
+                .fork_point_snapshot_id
+                .clone(),
+        };
+        let snapshot = snapshot_id.clone();
         let content_id = numbered_content_id(1);
         let referenced = plant(&store, &pool_id, &content_id).await;
         publish_layout(&store, &member, &content_id).await;
         store
-            .delete(&metadata_manifest_object(&member, &snapshot.manifest_no))
+            .delete(&metadata_manifest_object(
+                &member,
+                &snapshot_id.manifest_no(),
+            ))
             .await
             .expect("delete the snapshot's manifest");
         let unreferenced = plant(&store, &pool_id, &numbered_content_id(2)).await;
@@ -482,9 +505,109 @@ async fn a_snapshot_whose_manifest_is_missing_makes_its_member_unreadable_unless
         assert_eq!(report.skipped, skipped, "deleted: {deleted}, {snapshot:?}");
         assert_eq!(exists(&store, &unreferenced).await, !skipped.is_empty());
         assert!(exists(&store, &referenced).await);
-        let record = loonfs_objectstore::keys::snapshot_record(&member, &snapshot.snapshot_id);
+        let record = loonfs_objectstore::keys::snapshot_record(&member, &snapshot_id);
         assert!(exists(&store, &record).await, "`{record}`");
     }
+}
+
+/// Checks that a layout segment whose extent filter can't be loaded makes
+/// the collection skip the content sweep, and that the collection still
+/// sweeps the temporary objects. The test deletes the segment, as the
+/// member's own collection would after the member publishes a compaction
+/// that replaces it. The collection read the member, so it still cleans up
+/// the member's sessions.
+#[tokio::test]
+async fn a_layout_segment_whose_filter_cant_be_loaded_skips_the_content_sweep() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (pool_id, members) = pool(&store, &["member"]).await;
+    let member = &members[0];
+    let content_id = numbered_content_id(1);
+    let referenced = plant(&store, &pool_id, &content_id).await;
+    publish_layout(&store, member, &content_id).await;
+    let current = crate::test_support::namespace_store(&store, member)
+        .load_current_manifest()
+        .await
+        .expect("current manifest");
+    for segment in current
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
+    {
+        store
+            .delete(&metadata_segment_object_key(segment))
+            .await
+            .expect("delete the layout segment");
+    }
+    let unreferenced = plant(&store, &pool_id, &numbered_content_id(2)).await;
+    let temporary = temporary_object(&pool_id);
+    store
+        .put_if_absent(&temporary, Bytes::from_static(b"x"))
+        .await
+        .expect("temporary object");
+    let aborted = UploadOutcome::Aborted {
+        aborted_at_ms: 1_000,
+    };
+    let session = plant_session(&store, &pool_id, member, 1_000, Some(aborted)).await;
+    let aged = aged_context(&store, &members).await;
+    let report = collect_pool(&store, &pool_id, &aged).await;
+    assert_eq!(
+        report.skipped,
+        [GcSkippedWork::ContentDeletionUnreadableMember]
+    );
+    assert_eq!(report.deleted.content_objects, 0);
+    assert!(exists(&store, &unreferenced).await);
+    assert!(exists(&store, &referenced).await);
+    assert_eq!(report.deleted.temporary_objects, 1);
+    assert!(!exists(&store, &temporary).await);
+    assert_eq!(report.deleted.upload_sessions, 1);
+    assert!(!session_exists(&store, &pool_id, &session).await);
+}
+
+/// Checks that a layout segment whose extent filter can't be loaded makes
+/// the collection skip content deletion, and that the collection still
+/// deletes the records of a retired fork's completed session. The
+/// collection read every listed member before it loaded the filters, so it
+/// treats the fork, which has no member entry, as retired.
+#[tokio::test]
+async fn a_filter_that_cant_be_loaded_still_deletes_the_sessions_of_a_retired_fork() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (pool_id, members) = pool(&store, &["source", "fork"]).await;
+    let (source, fork) = (&members[0], &members[1]);
+    let session = plant_session(&store, &pool_id, fork, 1_000, Some(completed(1_000))).await;
+    delete_namespace(&store, fork, 1_000).await;
+    publish_layout(&store, source, &numbered_content_id(1)).await;
+    let current = crate::test_support::namespace_store(&store, source)
+        .load_current_manifest()
+        .await
+        .expect("current manifest");
+    for segment in current
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
+    {
+        store
+            .delete(&metadata_segment_object_key(segment))
+            .await
+            .expect("delete the layout segment");
+    }
+    let aged = aged_context(&store, &members).await;
+    let retired = collect(&store, fork, aged.now_ms).await;
+    assert_eq!(retired.deleted_snapshots_by_owner.fork, 2);
+    let report = collect_pool_at(&store, &pool_id, aged.now_ms).await;
+    assert_eq!(
+        report.skipped,
+        [GcSkippedWork::ContentDeletionUnreadableMember]
+    );
+    assert!(!exists(&store, &pool_member(&pool_id, fork)).await);
+    assert_eq!(report.retained.upload_session_undecided, 0);
+    assert_eq!(report.deleted.upload_sessions, 1);
+    assert!(!session_exists(&store, &pool_id, &session).await);
 }
 
 #[tokio::test]
@@ -900,6 +1023,38 @@ async fn a_session_completed_in_a_fork_installed_during_the_collection_keeps_its
     assert_eq!(report.deleted.upload_sessions, 0);
     assert_eq!(report.retained.upload_session_window, 1);
     assert!(exists(store.inner(), &upload_session(&pool_id, &upload_id)).await);
+}
+
+/// Checks that a completed session of a member that is being created keeps
+/// its records for the completed-content grace, as a session of an active
+/// member does, because a retried create or fork can finish the member and
+/// commit the session's content, and that the records are deleted once the
+/// grace has passed.
+#[tokio::test]
+async fn a_completed_session_of_an_initializing_member_keeps_its_grace() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (pool_id, members) = pool(&store, &["first"]).await;
+    let initializing = NamespaceId::parse("initializing").expect("namespace");
+    crate::test_support::half_done_fork(&store, &members[0], &initializing, &context(1_000)).await;
+    crate::test_support::write_member_entry(&store, &pool_id, &initializing).await;
+    let session = plant_session(
+        &store,
+        &pool_id,
+        &initializing,
+        1_000,
+        Some(completed(1_000)),
+    )
+    .await;
+    let grace_ends_at_ms = 1_000 + CONTENT_RECLAMATION_GRACE_WINDOW_MS;
+    let report = collect_pool_at(&store, &pool_id, grace_ends_at_ms - 1).await;
+    assert_eq!(report.deleted.upload_sessions, 0);
+    assert_eq!(report.retained.upload_session_window, 1);
+    assert!(session_exists(&store, &pool_id, &session).await);
+    let report = collect_pool_at(&store, &pool_id, grace_ends_at_ms).await;
+    assert_eq!(report.deleted.upload_sessions, 1);
+    assert!(!session_exists(&store, &pool_id, &session).await);
+    assert!(exists(&store, &pool_member(&pool_id, &initializing)).await);
 }
 
 #[tokio::test]

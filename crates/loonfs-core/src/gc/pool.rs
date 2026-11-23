@@ -18,7 +18,6 @@ use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::temporary_prefix;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::PoolGcResponse;
-pub(crate) use members::MemberState;
 use members::PoolRoots;
 use std::sync::atomic::{AtomicU64, Ordering};
 use sweep::PoolSweep;
@@ -61,6 +60,7 @@ impl<S: ObjectStore> PoolStore<S> {
     ) -> Result<PoolGcResponse> {
         let mut report = PoolGcResponse::empty(self.pool_id.clone());
         let roots = PoolRoots::load(self, session_cache, clock, memory).await?;
+        let filters = ContentFilters::load(self, &roots, &mut report).await?;
         let sweep = PoolSweep {
             pool: self,
             clock,
@@ -69,7 +69,7 @@ impl<S: ObjectStore> PoolStore<S> {
             listed_bytes: AtomicU64::new(0),
             listed_objects: AtomicU64::new(0),
         };
-        match ContentFilters::load(&sweep, &mut report).await? {
+        match filters {
             Some(filters) => filters.sweep(&sweep, &mut report).await?,
             // A skipped content sweep leaves the content unlisted, but the
             // content still occupies storage.

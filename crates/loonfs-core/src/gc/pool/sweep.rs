@@ -3,8 +3,7 @@
 
 use super::members::PoolRoots;
 use super::uploads::{
-    retain_undated, sweep_completed_session, ListedUpload, ListedUploadKind, OutcomeListing,
-    UploadSessionSweep,
+    sweep_completed_session, ListedUpload, ListedUploadKind, OutcomeListing, UploadSessionSweep,
 };
 use crate::error::Result;
 use crate::gc::deletes::Decision;
@@ -98,20 +97,19 @@ impl<S: ObjectStore> PoolSweep<'_, S> {
     /// collection listed as completed.
     ///
     /// The collection listed the session as completed before the member
-    /// listing, so the status of the session's namespace decides it, including
-    /// when the listing didn't include the namespace because it has been
-    /// retired.
+    /// listing, so the collection decides the session from what it knows of
+    /// the session's namespace, including when the listing didn't include the
+    /// namespace because it has been retired.
     pub(super) fn completed_session(
         &self,
         upload_id: &UploadId,
         session: &CompletedUploadSession,
     ) -> Decision<PoolGcResponse> {
-        let sweep = self
-            .roots
-            .find_retirement_status(&session.namespace_id)
-            .map_or_else(retain_undated, |status| {
-                sweep_completed_session(status, self.clock.request_at_ms(), session.completed_at_ms)
-            });
+        let sweep = sweep_completed_session(
+            self.roots.find_session_namespace(&session.namespace_id),
+            self.clock.request_at_ms(),
+            session.completed_at_ms,
+        );
         // The sweep adds a kept session to the cache, so a later collection
         // doesn't read its record. Adding it here instead of when the
         // record is read means that this collection's inserts can't evict an

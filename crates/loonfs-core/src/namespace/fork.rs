@@ -769,7 +769,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// old, and write this snapshot on a manifest that a delete and a
     /// collection removed during the call. The namespace is deleted then, and
     /// its collection leaves the snapshot to retirement
-    /// (`LiveSet::load_snapshots`).
+    /// (`NamespaceRoots::missing_manifest` in `gc/roots.rs`).
     pub(crate) async fn write_fork_point_snapshot(
         &self,
         newest: &PublicationBasis,

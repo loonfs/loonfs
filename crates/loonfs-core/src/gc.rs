@@ -10,13 +10,13 @@ mod families;
 mod live_set;
 mod pool;
 mod retire;
+mod roots;
 mod session_cache;
-mod snapshot_manifests;
 mod snapshots;
 mod sweep;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use pool::MemberState;
+pub(crate) use roots::RetirementStatus;
 pub(crate) use session_cache::CompletedUploadSession;
 pub use session_cache::{CompletedUploadSessionCache, SharedCompletedUploadSessions};
