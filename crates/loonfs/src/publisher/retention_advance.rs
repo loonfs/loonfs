@@ -32,9 +32,7 @@ impl NamespacePublisher {
                 // may omit the floor object. The callers get the error, and
                 // the next sweep tries the advance again.
                 self.record_panic("retention_advance", panic_message(payload.as_ref()));
-                if let Some(engine) = self.lock_engine().await.engine.as_mut() {
-                    engine.invalidate_projection();
-                }
+                self.lock_engine().await.invalidate_projection();
                 Err(Error::RuntimeTask(
                     "retention advance task aborted mid-advance".to_owned(),
                 ))
@@ -55,12 +53,11 @@ impl NamespacePublisher {
         planned: &LoadedManifest,
         target: CommitSeq,
     ) -> Result<FloorObjectReport> {
-        let Some(writer) = self.context.writer.upgrade() else {
+        let Some(_writer) = self.context.writer.upgrade() else {
             return Err(CoreError::ShuttingDown.into());
         };
         let core = &self.context.runtime_core;
-        let mut slot = self.lock_engine().await;
-        let engine = self.engine_for(&mut slot, &writer.writer_id);
+        let mut engine = self.lock_engine().await;
         let clock = OperationClock::start(core.now_ms(), Arc::clone(core.timer()));
         engine
             .publish_floor_object(planned, target, &clock)

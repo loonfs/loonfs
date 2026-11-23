@@ -112,11 +112,10 @@ impl NamespacePublisher {
         }
         let namespace_id = &self.namespace_id;
         {
-            let slot = self.lock_engine().await;
-            if slot
-                .engine
-                .as_ref()
-                .is_some_and(|engine| engine.retains_commit_receipt(candidate.commit_id()))
+            if self
+                .lock_engine()
+                .await
+                .retains_commit_receipt(candidate.commit_id())
             {
                 return Ok(());
             }

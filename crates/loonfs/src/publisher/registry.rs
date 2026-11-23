@@ -283,7 +283,7 @@ impl PublisherRegistry {
     /// publisher's own commit engine and writer session.
     pub(crate) fn new(
         runtime_core: RuntimeCore,
-        writer: Weak<WriterState>,
+        writer: &Arc<WriterState>,
         runtime: Handle,
     ) -> Self {
         let admission = Arc::new(PublicationAdmission::new(
@@ -294,7 +294,8 @@ impl PublisherRegistry {
             shared: Arc::new(RegistryShared {
                 context: Arc::new(PublisherContext {
                     runtime_core,
-                    writer,
+                    writer: Arc::downgrade(writer),
+                    writer_id: writer.writer_id.clone(),
                     runtime,
                     admission,
                 }),

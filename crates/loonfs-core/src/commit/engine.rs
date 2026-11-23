@@ -20,7 +20,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::options::DeleteNamespaceOptions;
 use loonfs_types::{Commit, CommitId, CommitSeq, DeleteNamespaceResponse, NamespaceId, WriterId};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 mod candidate;
 
@@ -60,10 +60,10 @@ pub enum TailSource {
 /// Tracks writer state for one namespace session: unacquired, acquired,
 /// permanently fenced, or without a namespace that the store still has.
 ///
-/// Object storage cannot reconstruct whether the current session was fenced.
-/// Runtimes should therefore share one instance across engines for the same
-/// namespace and keep it outside rebuildable caches. An engine without shared
-/// state treats each one-shot commit as a separate session.
+/// Object storage can't reconstruct whether the current session was fenced,
+/// so a runtime keeps the session's engine for as long as the session
+/// stays open. Each engine creates its own status, and a runtime reads the
+/// status through a [`WriterSessionStatusView`].
 #[derive(Debug, Default)]
 pub enum WriterSessionStatus {
     /// No epoch yet: the session's first publish acquires one.
@@ -85,11 +85,9 @@ pub enum WriterSessionStatus {
     ///
     /// The record that the session owes a fence is one record for the
     /// session, which relies on the rule that a session publishes one WAL
-    /// object at a time. The runtime publishes through one engine per
-    /// session. If two engines that share a session had puts in flight at
-    /// the same time, a known outcome of one put would clear the record that
-    /// the other put left, so this record doesn't
-    /// protect a host that overlaps puts from two engines of one session.
+    /// object at a time. The session's engine publishes one unit at a time,
+    /// so a known outcome of one put can't clear a record that another put
+    /// of the session set.
     HoldsEpochOwesFence(AcquiredWriter),
     /// Permanent fencing record for this session. Later publishes return
     /// `writer_fenced` without accessing the store. Acquiring a new writer epoch
@@ -103,8 +101,42 @@ pub enum WriterSessionStatus {
     NamespaceGone,
 }
 
-/// Shared handle to one namespace's [`WriterSessionStatus`].
-pub type SharedWriterSessionStatus = Arc<Mutex<WriterSessionStatus>>;
+/// A read-only view of one engine's [`WriterSessionStatus`], from
+/// [`NamespaceCommitEngine::session_status`].
+///
+/// A runtime reads the status through this view while the engine is busy
+/// with a unit, such as to refuse new work for a fenced session. The view
+/// can't change the status or attach it to another engine, so the status
+/// changes only through its engine.
+#[derive(Debug, Clone)]
+pub struct WriterSessionStatusView(Arc<Mutex<WriterSessionStatus>>);
+
+impl WriterSessionStatusView {
+    /// Locks the status for reading. The engine can't change the status
+    /// until the caller drops the guard.
+    pub fn lock(&self) -> WriterSessionStatusGuard<'_> {
+        // The runtime catches a panic in a unit of work and keeps running,
+        // so a poisoned lock still returns the status.
+        WriterSessionStatusGuard(
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
+/// A locked [`WriterSessionStatusView`], which derefs to the status for
+/// reading.
+#[derive(Debug)]
+pub struct WriterSessionStatusGuard<'a>(MutexGuard<'a, WriterSessionStatus>);
+
+impl std::ops::Deref for WriterSessionStatusGuard<'_> {
+    type Target = WriterSessionStatus;
+
+    fn deref(&self) -> &WriterSessionStatus {
+        &self.0
+    }
+}
 
 /// A writer session for one namespace: it publishes batches of candidates
 /// through numbered WAL puts, and keeps the position each batch leaves.
@@ -126,13 +158,16 @@ struct PositionState {
     current: Option<WriterPosition>,
     acquired_anchor: Option<WriterAnchor>,
     /// This session's epoch and fencing for the namespace; see
-    /// [`WriterSessionStatus`].
-    session: SharedWriterSessionStatus,
+    /// [`WriterSessionStatus`]. The engine creates the status, and no other
+    /// engine can reach it.
+    session: Arc<Mutex<WriterSessionStatus>>,
 }
 
 impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// Returns a commit engine over `namespace` that commits as `writer_id`,
-    /// with a writer session that no other engine shares.
+    /// with a new writer session. Building the engine sends no request to
+    /// the store, and the session acquires its writer epoch on its first
+    /// publish.
     pub fn new(namespace: NamespaceStore<S>, writer_id: WriterId) -> Self {
         Self {
             namespace,
@@ -140,16 +175,28 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             position: PositionState {
                 current: None,
                 acquired_anchor: None,
-                session: SharedWriterSessionStatus::default(),
+                session: Arc::default(),
             },
         }
     }
 
-    /// Uses runtime-managed session state so the writer epoch and fenced status
-    /// persist across engine instances.
-    pub fn writer_session(mut self, session: SharedWriterSessionStatus) -> Self {
-        self.position.session = session;
-        self
+    /// Returns a commit engine whose session already holds `acquired`, for a
+    /// test that acquires the writer epoch through the store before the
+    /// engine's first publish.
+    #[cfg(test)]
+    pub(crate) fn with_acquired_session(
+        namespace: NamespaceStore<S>,
+        writer_id: WriterId,
+        acquired: AcquiredWriter,
+    ) -> Self {
+        let engine = Self::new(namespace, writer_id);
+        *engine.position.lock_session() = WriterSessionStatus::Acquired(acquired);
+        engine
+    }
+
+    /// Returns a read-only view of this engine's writer session status.
+    pub fn session_status(&self) -> WriterSessionStatusView {
+        WriterSessionStatusView(Arc::clone(&self.position.session))
     }
 
     /// Drops the position and its tail, so the next unit reads the tail from
@@ -491,13 +538,7 @@ impl PositionState {
             }
         };
         self.acquired_anchor = Some(anchor);
-        let mut session = self.lock_session();
-        if let WriterSessionStatus::Fenced(fence) = &*session {
-            // Another engine fenced the shared session while this engine was acquiring
-            // the epoch. Preserve the fenced state.
-            return Err(CoreError::WriterFenced(fence.clone()));
-        }
-        *session = WriterSessionStatus::Acquired(acquired_writer.clone());
+        *self.lock_session() = WriterSessionStatus::Acquired(acquired_writer.clone());
         Ok(acquired_writer)
     }
 

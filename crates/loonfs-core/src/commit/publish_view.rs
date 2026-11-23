@@ -11,7 +11,6 @@ use crate::namespace::held::{Checked, Held, HeldManifestForm};
 use crate::namespace::read_anchor::WriterAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
-use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::segment::VerifiedMetadataSegments;
 use crate::storage::tail_content::ContentWrites;
@@ -305,18 +304,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     .await?,
             )),
         };
-        // A writer anchor's load checked the writer epoch of the anchor's
-        // manifest and the namespace's status (see `WriterAnchor`). This
-        // check compares the session's own position with the session, which
-        // is a different comparison. An engine that shares its session with
-        // another engine can keep a position of another epoch, so another
-        // epoch here returns `writer_fenced`, not `namespace_corrupt`. The
-        // position is active, because it was built from a writer anchor and
-        // moves only onto active manifests.
-        if let ViewSource::Cached(cached, _) = &source {
-            let head = &cached.read_basis().head;
-            ensure_writer_not_fenced(head.writer_epoch, head.writer.as_ref(), &acquired_writer)?;
-        }
         let tail_discovered = matches!(source, ViewSource::Cold(_));
         let (position, manifest_segments) = match source {
             ViewSource::Cached(cached, segments) => (*cached, segments),

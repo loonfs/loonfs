@@ -38,10 +38,12 @@ use admission::PublicationAdmission;
 use folds::NamespaceTurns;
 pub(crate) use folds::{FoldWhen, NamespaceFold};
 use loonfs_core::control::{Held, LoadedManifest};
-use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionStatus, WriterSessionStatus};
+use loonfs_core::publish::{
+    NamespaceCommitEngine, WriterSessionStatus, WriterSessionStatusGuard, WriterSessionStatusView,
+};
 use loonfs_core::time::Observation;
 use loonfs_core::MetadataCompactionCancellation;
-use loonfs_types::{CommitId, CommitSeq, NamespaceId};
+use loonfs_types::{CommitId, CommitSeq, NamespaceId, WriterId};
 use queue::{InFlightRequest, WorkItem};
 use registry::RegistryShared;
 pub use registry::{CloseNamespaceReport, NamespaceSessionStatus};
@@ -56,8 +58,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use worker::elapsed_ms_from;
 
 /// What every namespace publisher of one runtime shares: the runtime core,
-/// the writer, the Tokio runtime that runs the publisher tasks, and the
-/// publication admission.
+/// the writer and its ID, the Tokio runtime that runs the publisher tasks,
+/// and the publication admission.
 struct PublisherContext {
     /// Strong: the runtime core owns neither the registry nor the writer, so
     /// keeping it here cannot cycle. Publications read through its caches,
@@ -69,6 +71,8 @@ struct PublisherContext {
     /// `shutting_down` once the writer is gone, so dropping the writer stops
     /// new work without ever leaving the caches or store dangling.
     writer: Weak<WriterState>,
+    /// The writer ID that each publisher's engine commits as.
+    writer_id: WriterId,
     runtime: Handle,
     admission: Arc<PublicationAdmission>,
 }
@@ -83,15 +87,19 @@ struct NamespacePublisher {
     /// Admission keeps this lock locked until it reserves bytes against the observed
     /// tail, so a publication cannot change that tail before the reservation.
     /// Lock it through [`Self::lock_engine`].
-    engine: Arc<AsyncMutex<EngineSlot>>,
+    ///
+    /// The publisher builds the engine when the publisher is created and
+    /// keeps it for its whole life, because the engine's writer session
+    /// status (the acquired epoch and terminal fencing state) describes this
+    /// process and can't be reconstructed from object storage. Invalidation
+    /// drops only the engine's position and the position's WAL tail.
+    engine: Arc<AsyncMutex<NamespaceCommitEngine<SharedObjectStore>>>,
     /// The engine's position as of the last release of the engine, which
     /// reads in this runtime start from.
     read_position: Arc<ReadPositionSlot>,
-    /// The writer session, which stores the acquired epoch and terminal
-    /// fencing state. Those values describe this process and can't be
-    /// reconstructed from object storage, so the publisher keeps them for its
-    /// whole life.
-    session: SharedWriterSessionStatus,
+    /// A read-only view of the engine's writer session status, which
+    /// admission reads while another task has the engine locked.
+    session: WriterSessionStatusView,
     /// Weak: the session table owns its publishers, and a strong reference
     /// back would cycle the whole structure into a leak. A publisher whose
     /// registry is gone keeps serving, with an unowned worker.
@@ -110,31 +118,6 @@ struct NamespacePublisher {
     turns: Arc<NamespaceTurns>,
 }
 
-/// Commit engine retained by one namespace publisher.
-///
-/// The engine keeps its WAL tail with its position until the position is
-/// dropped.
-struct EngineSlot {
-    /// Built on the first unit of work and kept for the publisher's life.
-    /// Invalidation drops only its position and the position's WAL tail.
-    engine: Option<NamespaceCommitEngine<SharedObjectStore>>,
-}
-
-impl EngineSlot {
-    fn wal_tail_inline_bytes(&self) -> Option<usize> {
-        self.engine
-            .as_ref()
-            .and_then(NamespaceCommitEngine::wal_tail_inline_bytes)
-    }
-
-    #[cfg(test)]
-    fn wal_tail_bytes(&self) -> Option<usize> {
-        self.engine
-            .as_ref()
-            .and_then(NamespaceCommitEngine::wal_tail_bytes)
-    }
-}
-
 /// The engine of one publisher, locked through
 /// [`NamespacePublisher::lock_engine`].
 ///
@@ -145,27 +128,31 @@ impl EngineSlot {
 struct LockedEngine<'a> {
     publisher: &'a NamespacePublisher,
     /// `None` only while `drop` runs.
-    slot: Option<tokio::sync::MutexGuard<'a, EngineSlot>>,
+    guard: Option<tokio::sync::MutexGuard<'a, NamespaceCommitEngine<SharedObjectStore>>>,
 }
 
 impl std::ops::Deref for LockedEngine<'_> {
-    type Target = EngineSlot;
+    type Target = NamespaceCommitEngine<SharedObjectStore>;
 
-    fn deref(&self) -> &EngineSlot {
-        self.slot.as_ref().expect("a locked engine keeps its guard")
+    fn deref(&self) -> &NamespaceCommitEngine<SharedObjectStore> {
+        self.guard
+            .as_ref()
+            .expect("a locked engine keeps its guard")
     }
 }
 
 impl std::ops::DerefMut for LockedEngine<'_> {
-    fn deref_mut(&mut self) -> &mut EngineSlot {
-        self.slot.as_mut().expect("a locked engine keeps its guard")
+    fn deref_mut(&mut self) -> &mut NamespaceCommitEngine<SharedObjectStore> {
+        self.guard
+            .as_mut()
+            .expect("a locked engine keeps its guard")
     }
 }
 
 impl Drop for LockedEngine<'_> {
     fn drop(&mut self) {
-        if let Some(slot) = self.slot.take() {
-            self.publisher.release_engine(slot);
+        if let Some(guard) = self.guard.take() {
+            self.publisher.release_engine(guard);
         }
     }
 }
@@ -249,6 +236,11 @@ impl NamespacePublisher {
         let read_position = Arc::new(ReadPositionSlot::new(
             shared.context.runtime_core.head_and_wal_tail_cache(),
         ));
+        let engine = NamespaceCommitEngine::new(
+            shared.context.runtime_core.namespace_store(&namespace_id),
+            shared.context.writer_id.clone(),
+        );
+        let session = engine.session_status();
         Self {
             context: Arc::clone(&shared.context),
             namespace_id,
@@ -264,9 +256,9 @@ impl NamespacePublisher {
                 last_published: None,
                 counted_candidates: 0,
             })),
-            engine: Arc::new(AsyncMutex::new(EngineSlot { engine: None })),
+            engine: Arc::new(AsyncMutex::new(engine)),
             read_position,
-            session: SharedWriterSessionStatus::default(),
+            session,
             shared: Arc::downgrade(shared),
             compaction_cancellation: MetadataCompactionCancellation::default(),
             fold_published: watch::Sender::new(()),
@@ -317,7 +309,7 @@ impl NamespacePublisher {
         if !matches!(self.lock_state().admission, PublisherAdmissionStatus::Open) {
             return NamespaceSessionStatus::Closed;
         }
-        match *lock_state(&self.session) {
+        match *self.session.lock() {
             WriterSessionStatus::Fenced(_) => NamespaceSessionStatus::Fenced,
             WriterSessionStatus::NamespaceGone => NamespaceSessionStatus::Closed,
             WriterSessionStatus::Unacquired
@@ -365,7 +357,7 @@ impl NamespacePublisher {
     pub(super) fn admitted_session(
         &self,
         state: &NamespacePublisherState,
-    ) -> std::result::Result<std::sync::MutexGuard<'_, WriterSessionStatus>, CoreError> {
+    ) -> std::result::Result<WriterSessionStatusGuard<'_>, CoreError> {
         match state.admission {
             PublisherAdmissionStatus::Open => self.unfenced_session(),
             PublisherAdmissionStatus::Closed => Err(CoreError::ShuttingDown),
@@ -380,8 +372,8 @@ impl NamespacePublisher {
     /// caller drops the guard.
     pub(super) fn unfenced_session(
         &self,
-    ) -> std::result::Result<std::sync::MutexGuard<'_, WriterSessionStatus>, CoreError> {
-        let session = lock_state(&self.session);
+    ) -> std::result::Result<WriterSessionStatusGuard<'_>, CoreError> {
+        let session = self.session.lock();
         if let WriterSessionStatus::Fenced(fence) = &*session {
             return Err(CoreError::WriterFenced(fence.clone()));
         }
@@ -389,7 +381,7 @@ impl NamespacePublisher {
     }
 
     pub(super) fn session_is_fenced(&self) -> bool {
-        matches!(*lock_state(&self.session), WriterSessionStatus::Fenced(_))
+        matches!(*self.session.lock(), WriterSessionStatus::Fenced(_))
     }
 
     /// Drops the engine's position once no other task has the engine
@@ -400,10 +392,7 @@ impl NamespacePublisher {
     /// because garbage collection keeps that manifest's objects for at least
     /// one grace.
     pub(super) async fn drop_position(&self) {
-        let mut slot = self.lock_engine().await;
-        if let Some(engine) = slot.engine.as_mut() {
-            engine.invalidate_projection();
-        }
+        self.lock_engine().await.invalidate_projection();
     }
 
     /// Moves the engine's position onto `published`, a manifest above it
@@ -411,32 +400,30 @@ impl NamespacePublisher {
     /// move there, once no other task has the engine locked (see
     /// [`Self::drop_position`]).
     pub(super) async fn move_position(&self, published: Held<LoadedManifest>) {
-        let mut slot = self.lock_engine().await;
-        if let Some(engine) = slot.engine.as_mut() {
-            engine.record_manifest_published(published);
-        }
+        self.lock_engine()
+            .await
+            .record_manifest_published(published);
     }
 
     pub(super) async fn lock_engine(&self) -> LockedEngine<'_> {
         LockedEngine {
             publisher: self,
-            slot: Some(self.engine.lock().await),
+            guard: Some(self.engine.lock().await),
         }
     }
 
     /// Stores the engine's position for reads, and releases the engine.
-    pub(super) fn release_engine(&self, slot: tokio::sync::MutexGuard<'_, EngineSlot>) {
+    pub(super) fn release_engine(
+        &self,
+        engine: tokio::sync::MutexGuard<'_, NamespaceCommitEngine<SharedObjectStore>>,
+    ) {
         if std::thread::panicking() {
             // The engine may be partway through a unit of work. Reads start
             // from the namespace's cached head until the next release.
             self.read_position.clear();
             return;
         }
-        let position = slot
-            .engine
-            .as_ref()
-            .and_then(NamespaceCommitEngine::read_position);
-        match self.read_position.prepare(position) {
+        match self.read_position.prepare(engine.read_position()) {
             Some(position) => self.read_position.store(position),
             None => {
                 if self.read_position.clear() {
@@ -450,7 +437,7 @@ impl NamespacePublisher {
                 }
             }
         }
-        drop(slot);
+        drop(engine);
     }
 
     /// Returns when this session last published, on the runtime's monotonic

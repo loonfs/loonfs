@@ -189,9 +189,7 @@ async fn engine_wal_tail_objects(publisher: &NamespacePublisher) -> u64 {
         .engine
         .lock()
         .await
-        .engine
-        .as_ref()
-        .and_then(NamespaceCommitEngine::wal_tail_objects)
+        .wal_tail_objects()
         .unwrap_or(0)
 }
 
@@ -709,12 +707,5 @@ async fn a_commit_at_the_byte_write_stop_waits_for_the_fold_and_commits() {
 }
 
 async fn engine_wal_tail_bytes(publisher: &NamespacePublisher) -> usize {
-    publisher
-        .engine
-        .lock()
-        .await
-        .engine
-        .as_ref()
-        .and_then(NamespaceCommitEngine::wal_tail_bytes)
-        .unwrap_or(0)
+    publisher.engine.lock().await.wal_tail_bytes().unwrap_or(0)
 }

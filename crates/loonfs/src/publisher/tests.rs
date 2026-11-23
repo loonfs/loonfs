@@ -545,7 +545,7 @@ async fn settle_delete(
 fn standalone_publisher(namespace_id: &NamespaceId, runtime: &TestRuntime) -> NamespacePublisher {
     let registry = PublisherRegistry::new(
         runtime.core.clone(),
-        Arc::downgrade(&runtime.writer),
+        &runtime.writer,
         tokio::runtime::Handle::current(),
     );
     let turns = registry.namespace_turns(namespace_id);
@@ -2610,9 +2610,6 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         .engine
         .lock()
         .await
-        .engine
-        .as_ref()
-        .expect("engine")
         .writer_position()
         .expect("reanchored projection");
     assert_eq!(input.wal_tail_objects(), 0);
@@ -2690,15 +2687,7 @@ async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
         .publisher
         .live_publisher(&namespace_id)
         .expect("live session");
-    let tail_objects = || async {
-        publisher
-            .engine
-            .lock()
-            .await
-            .engine
-            .as_ref()
-            .and_then(NamespaceCommitEngine::wal_tail_objects)
-    };
+    let tail_objects = || async { publisher.engine.lock().await.wal_tail_objects() };
 
     assert_eq!(failing.attempts(), 1);
     assert!(
@@ -3715,10 +3704,15 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
     wait_for_queued_candidates(&publisher, 1).await;
     let budget = writer.execution_budget().clone();
     assert_eq!(budget.stats().publications_running, 1);
+    let engine = publisher
+        .engine
+        .try_lock()
+        .expect("waiting for a slot must not lock the other namespace's engine");
     assert!(
-        publisher.engine.lock().await.engine.is_none(),
-        "waiting for a slot must not load the other namespace's engine"
+        engine.writer_position().is_none(),
+        "waiting for a slot must not read the other namespace's state"
     );
+    drop(engine);
     first.abort();
     let _ = first.await;
     assert_eq!(

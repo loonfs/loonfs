@@ -210,9 +210,7 @@ async fn a_fold_at_the_write_stop_puts_on_its_basis_with_no_request_first() {
             .engine
             .lock()
             .await
-            .engine
-            .as_ref()
-            .and_then(NamespaceCommitEngine::wal_tail_objects)
+            .wal_tail_objects()
             .unwrap_or(0)
     };
     // No fold starts while the test has every fold permit, so the session

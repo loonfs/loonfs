@@ -274,7 +274,7 @@ impl LoonFsBuilder<Writable> {
             writer_id,
             compactor_epochs: Default::default(),
         });
-        let publisher = PublisherRegistry::new(core.clone(), Arc::downgrade(&writer), runtime);
+        let publisher = PublisherRegistry::new(core.clone(), &writer, runtime);
         core.set_head_positions(publisher.head_positions());
         // The publisher keeps the core without a subject, and only the
         // handles act in the builder's context.

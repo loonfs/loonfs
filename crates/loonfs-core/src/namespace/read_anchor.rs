@@ -1,7 +1,7 @@
 //! Loads a manifest and rechecks its successor around WAL tip discovery.
 
 use crate::control_object::ControlObjectLoadError;
-use crate::error::{CoreError, Result as CoreResult};
+use crate::error::{CoreError, Result as CoreResult, WriterFence};
 use crate::limits::MAX_POSITION_MOVES;
 use crate::manifest::metadata_basis_from_manifest;
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
@@ -9,7 +9,7 @@ use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::held::{Checked, Held};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
-use crate::namespace::writer_epoch::{ensure_writer_not_fenced, AcquiredWriter};
+use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::segment::MetadataSegmentCache;
 use crate::time::Observation;
 use crate::wal::{discover_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail};
@@ -17,6 +17,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{CommitSeq, ManifestNo};
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -327,25 +328,23 @@ fn writer_anchor(anchor: NamespaceReadAnchor) -> CoreResult<WriterAnchor> {
 /// A lower epoch means a corrupt store, because the session's epoch is in
 /// a claim manifest that the session published, and no manifest after a
 /// claim has a lower epoch than the claim (format spec, "Writer ownership").
-/// This rule compares a stored manifest with the session. The publish view
-/// compares the session's own position with the session separately (see
-/// [`ensure_writer_not_fenced`]).
 fn ensure_stored_writer_epoch(
     manifest: &NamespaceManifestPayload,
     acquired_writer: &AcquiredWriter,
 ) -> CoreResult<()> {
-    if manifest.writer_epoch < acquired_writer.writer_epoch {
-        return Err(CoreError::NamespaceCorrupt(format!(
+    match manifest.writer_epoch.cmp(&acquired_writer.writer_epoch) {
+        Ordering::Equal => Ok(()),
+        Ordering::Greater => Err(CoreError::WriterFenced(WriterFence {
+            fenced_epoch: acquired_writer.writer_epoch,
+            active_epoch: manifest.writer_epoch,
+            active_writer: manifest.writer.clone(),
+        })),
+        Ordering::Less => Err(CoreError::NamespaceCorrupt(format!(
             "manifest {} records writer epoch {}, below the writer epoch {} that this \
              session acquired",
             manifest.manifest_no, manifest.writer_epoch, acquired_writer.writer_epoch
-        )));
+        ))),
     }
-    ensure_writer_not_fenced(
-        manifest.writer_epoch,
-        manifest.writer.as_ref(),
-        acquired_writer,
-    )
 }
 
 pub fn project_anchor_tail<S: ObjectStore + ?Sized>(

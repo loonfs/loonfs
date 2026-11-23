@@ -97,13 +97,12 @@ impl NamespacePublisher {
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
         self.wait_for_fold().await?;
-        let Some(writer) = self.context.writer.upgrade() else {
+        let Some(_writer) = self.context.writer.upgrade() else {
             return Err(CoreError::ShuttingDown.into());
         };
         let _turn = self.turns.fold.write().await;
         let _permit = self.context.runtime_core.fold_permit().await;
-        let mut slot = self.lock_engine().await;
-        let engine = self.engine_for(&mut slot, &writer.writer_id);
+        let mut engine = self.lock_engine().await;
         let result = engine
             .delete_namespace(administrator, options)
             .await
