@@ -197,7 +197,7 @@ pub(super) fn pool_gc_summary(report: &PoolGcResponse) -> String {
                 "skipped the content sweep: the collection couldn't read every pool member's roots within its budget"
             }
             GcSkippedWork::ContentDeletionUnreadableMember => {
-                "skipped the content sweep: the collection couldn't read one pool member's roots"
+                "skipped the content sweep: the collection couldn't read one pool member's roots or load one layout segment's extent filter"
             }
             GcSkippedWork::Unknown => "skipped work for a reason unknown to this CLI",
         }
