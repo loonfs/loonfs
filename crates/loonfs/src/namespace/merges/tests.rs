@@ -3,6 +3,7 @@
 //! and merges on a runtime that has merges turned off.
 
 use super::{MergeOutcome, PlannedCommit, PlannedMerge};
+use crate::engine::{ExtensionEntry, ExtensionName, ExtensionPublication};
 use crate::publish::{CommitIntent, FilesystemOperation};
 use crate::publisher::MergeReservation;
 use crate::runtime_core::MergesEnabled;
@@ -13,10 +14,13 @@ use crate::{
 use futures::future::BoxFuture;
 use loonfs_core::limits::MAX_TAIL_COMMIT_AGE_MS;
 use loonfs_core::MergeRequest;
+use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_test_support::stores::{request_lines, KeyPredicate, RecordingStore};
+use loonfs_test_support::stores::{
+    request_lines, BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
+};
 use loonfs_types::{
     AbsolutePath, CommitSeq, ContentId, ContentLayout, DeleteDirectoryBehavior, ExtentObject,
     ManifestNo, MergeConflictKind, FEATURE_MERGES,
@@ -1430,6 +1434,59 @@ async fn a_merge_folds_a_fork_whose_tail_has_a_commit_older_than_the_max_age() {
     let after = family.manifest_nos().await;
     assert!(after[1] > before[1], "the merge folds the fork: {after:?}");
     assert_eq!(family.fresh_read(&family.main, "/c.txt").await, b"c");
+}
+
+/// Checks that a merge that folds its fork takes the fork's snapshot when
+/// another process replaced the fold's manifest at the same head before the
+/// snapshot was verified.
+///
+/// The fork's tail has a commit older than [`MAX_TAIL_COMMIT_AGE_MS`], so the
+/// merge folds the fork from the position of the fork's writer session, and
+/// the fold moves the position onto the manifest it published. The store
+/// blocks the snapshot record's write until a second runtime on the same
+/// store has published an extension's entry on the fork, as a grep worker in
+/// another process does. The verification then finds the newer manifest,
+/// and the fork's tail is empty, so the next attempt's fold finds the
+/// newer manifest only if it doesn't start from the position.
+#[tokio::test]
+async fn a_merge_snapshots_its_fork_after_another_process_replaced_the_folds_manifest() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let fork_id = namespace_id("main-fork");
+    let blocking = Arc::new(BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(snapshot_prefix(&fork_id)),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    let store: crate::SharedObjectStore = blocking.clone();
+    let clock = Arc::new(ManualClock::at_system_time());
+    let family = family_on(directory, store.clone(), Some(clock.clone())).await;
+    let other = LoonFs::builder_with_store(store, crate::Context::Service)
+        .writer_id(writer_id("other-process"))
+        .build()
+        .await
+        .expect("the other process's runtime");
+    let maintenance = other.maintenance(writer_id("other-process"));
+    let replace = async {
+        blocking.wait_until_blocked().await;
+        let basis = maintenance
+            .load_extension_basis(&fork_id)
+            .await
+            .expect("load the extension basis");
+        let name = ExtensionName::parse("grep").expect("extension name");
+        let entry = ExtensionEntry::new(1, Vec::new(), serde_json::Map::new());
+        let published = maintenance
+            .publish_extension(&basis, &name, entry)
+            .await
+            .expect("publish the extension's entry");
+        assert_matches!(published, ExtensionPublication::Published(_));
+        blocking.release();
+    };
+    clock.advance_ms(MAX_TAIL_COMMIT_AGE_MS + 1);
+    blocking.block_next();
+    let merger = actor();
+    let (merged, ()) = tokio::join!(family.main.merge_fork(&fork_id, &merger), replace);
+    merged.expect("the merge");
+    assert_eq!(family.fresh_read(&family.main, "/b.txt").await, b"b");
 }
 
 /// Checks that `main`'s fold keeps a file within the extent cap across fork,

@@ -1,12 +1,15 @@
 //! Store requests of snapshot calls on a writer's runtime after a fold:
 //! creating a snapshot, reading at it, and deleting it.
 
+use loonfs::engine::{ExtensionEntry, ExtensionName, ExtensionPublication};
 use loonfs::{
     CreateSnapshotOptions, FoldWalOutcome, LoonFs, Namespace, SharedObjectStore, Writable,
 };
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_test_support::stores::{KeyPredicate, MemoryStore, RecordedOperation, RecordingStore};
+use loonfs_test_support::stores::{
+    request_lines, KeyPredicate, MemoryStore, RecordedOperation, RecordingStore,
+};
 use loonfs_types::{ChecksumAlgorithm, NamespaceId};
 use std::assert_matches;
 use std::num::NonZeroU64;
@@ -187,6 +190,73 @@ async fn snapshot_lookups_on_the_writers_runtime_read_snapshot_records_and_no_ma
             RecordedOperation::GetWithMetadata { key, .. } if key.starts_with(&snapshot_prefix)
         );
     }
+}
+
+/// Checks that a snapshot succeeds when another process replaced the
+/// manifest of the writer session's position at the same head.
+///
+/// The session folds after every commit, so its position is on the newest
+/// manifest and its WAL tail is empty. A second runtime on the same store
+/// publishes an extension's entry, as a grep worker in another process
+/// does, which replaces that manifest without moving the head. The
+/// snapshot's fold starts from the position, and the snapshot's
+/// verification finds the newer manifest, so the first attempt fails, and
+/// the second attempt's fold loads the newest manifest from the store.
+///
+/// The failed attempt costs 14 requests: the record's write, the
+/// verification's probe for the newest manifest (9 HEADs and a read of the
+/// newest manifest), the verification's read of the manifest boundary, and
+/// the read and the swap that mark the record deleted. The second attempt costs 9:
+/// the fold's load of the head (a listing of the manifests, three reads of
+/// the manifest boundary, a read for the next WAL object, and a HEAD
+/// for a successor) and the 3 requests of a snapshot after a fold.
+#[tokio::test]
+async fn a_snapshot_succeeds_after_another_process_replaced_the_positions_manifest() {
+    let fixture = fixture(Fold::Session).await;
+    let store: SharedObjectStore = fixture.recording.clone();
+    let other = LoonFs::builder_with_store(store, loonfs::Context::Service)
+        .writer_id(writer_id("other-process"))
+        .build()
+        .await
+        .expect("the other process's runtime");
+    let maintenance = other.maintenance(writer_id("other-process"));
+    let basis = maintenance
+        .load_extension_basis(&fixture.namespace_id)
+        .await
+        .expect("load the extension basis");
+    let replaced = basis.manifest().manifest_no;
+    let name = ExtensionName::parse("grep").expect("extension name");
+    let entry = ExtensionEntry::new(1, Vec::new(), serde_json::Map::new());
+    let published = maintenance
+        .publish_extension(&basis, &name, entry)
+        .await
+        .expect("publish the extension's entry");
+    assert_matches!(published, ExtensionPublication::Published(_));
+
+    fixture.recording.reset();
+    let created = fixture.namespace.create_snapshot().await;
+    let operations = fixture.recording.take();
+    if let Err(error) = created {
+        panic!(
+            "a snapshot after another process replaced manifest {replaced} failed \
+             with {:?} after {} store requests: {error}",
+            error.code(),
+            operations.len()
+        );
+    }
+    // The failed attempt ends when it marks its own record deleted.
+    let failed_record = operations[0].key().to_owned();
+    let failed = 1 + operations
+        .iter()
+        .rposition(|operation| operation.key() == failed_record)
+        .expect("the failed attempt's record");
+    let (failed, retried) = operations.split_at(failed);
+    assert_eq!(
+        (failed.len(), retried.len()),
+        (14, 9),
+        "{:#?}",
+        request_lines(&operations)
+    );
 }
 
 /// Checks that creating a snapshot of a namespace with 32 fork snapshots costs
