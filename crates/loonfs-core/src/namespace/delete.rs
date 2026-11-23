@@ -7,7 +7,7 @@ use crate::manifest::PublicationReport;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
-use crate::namespace::writer_epoch::{ensure_writer_not_fenced, AcquiredWriter};
+use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
@@ -50,20 +50,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     .clone()
                     .filter(|held| held.read_basis().basis.manifest() == &current.manifest());
                 let head = match &held {
-                    // The session's own position is compared with the
-                    // session, as the publish view compares its position (see
-                    // `ensure_writer_not_fenced`). The position is active,
-                    // because it was built from a writer anchor and moves
-                    // only onto active manifests.
-                    Some(held) => {
-                        let head = held.read_basis().head.clone();
-                        ensure_writer_not_fenced(
-                            head.writer_epoch,
-                            head.writer.as_ref(),
-                            acquired_writer,
-                        )?;
-                        head
-                    }
+                    Some(held) => held.read_basis().head.clone(),
                     // The writer anchor's load returns `writer_fenced` for
                     // another writer's epoch, `namespace_corrupt` for a lower
                     // one, and then `namespace_deleted` for a tombstone (see

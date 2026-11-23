@@ -538,13 +538,7 @@ impl PositionState {
             }
         };
         self.acquired_anchor = Some(anchor);
-        let mut session = self.lock_session();
-        if let WriterSessionStatus::Fenced(fence) = &*session {
-            // Another engine fenced the shared session while this engine was acquiring
-            // the epoch. Preserve the fenced state.
-            return Err(CoreError::WriterFenced(fence.clone()));
-        }
-        *session = WriterSessionStatus::Acquired(acquired_writer.clone());
+        *self.lock_session() = WriterSessionStatus::Acquired(acquired_writer.clone());
         Ok(acquired_writer)
     }
 

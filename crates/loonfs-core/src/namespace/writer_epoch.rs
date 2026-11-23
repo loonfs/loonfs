@@ -1,7 +1,7 @@
 //! Writer acquisition through a manifest epoch and a numbered fence WAL object.
 
 use crate::engine::{NamespaceEngine, Writable};
-use crate::error::{CoreError, Result, WriterFence};
+use crate::error::{CoreError, Result};
 use crate::manifest::publish::ManifestChange;
 use crate::manifest::PublicationReport;
 use crate::namespace::control::LoadedManifest;
@@ -217,32 +217,4 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .await?;
         Ok(segments.map(|segments| head.basis().decoded(segments.loaded_manifest())))
     }
-}
-
-/// Fails with `writer_fenced` when `active_epoch` isn't the epoch of
-/// `acquired_writer`. `active_writer` is the writer block that records
-/// `active_epoch`.
-///
-/// The publish view, and a deletion that starts from the session's
-/// position, call this function to compare the session's own position with
-/// the session. A position is kept in this process's memory, and the
-/// position can be older than the session without the store being corrupt,
-/// so any other epoch there means that the position isn't the session's.
-/// The check of a manifest that a writer anchor's load read from the store
-/// is a different rule, in which a lower epoch is a corrupt store (see
-/// `ensure_stored_writer_epoch` in `read_anchor.rs`).
-/// `ensure_stored_writer_epoch` calls this function for a higher epoch.
-pub(crate) fn ensure_writer_not_fenced(
-    active_epoch: WriterEpoch,
-    active_writer: Option<&WriterBlock>,
-    acquired_writer: &AcquiredWriter,
-) -> Result<()> {
-    if active_epoch == acquired_writer.writer_epoch {
-        return Ok(());
-    }
-    Err(CoreError::WriterFenced(WriterFence {
-        fenced_epoch: acquired_writer.writer_epoch,
-        active_epoch,
-        active_writer: active_writer.cloned(),
-    }))
 }
