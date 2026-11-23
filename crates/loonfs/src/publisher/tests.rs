@@ -2250,6 +2250,80 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
     );
 }
 
+/// Checks that a publish that panics while it has the engine locked drops the
+/// runtime's view of the namespace, as an unknown outcome does, so the next
+/// read loads the namespace by discovery instead of starting from the
+/// position that the publish had when it panicked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_contained_panic_drops_the_view_and_the_next_read_loads_the_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(PanicWalPutStore::new(temp_dir.path(), &namespace_id));
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer = test_writer_with_cache(
+        store.clone() as SharedStore,
+        MetadataCache::default(),
+        recorder.clone(),
+    )
+    .await;
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("bootstrap");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "first", "first",
+        )))
+        .await
+        .expect("a commit before the panic");
+    assert!(writer.core.writer_position(&namespace_id).is_some());
+
+    store.arm_blocking_panic();
+    let doomed = {
+        let namespace = namespace.clone();
+        tokio::spawn(async move {
+            namespace
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "doomed", "doomed",
+                )))
+                .await
+        })
+    };
+    store.wait_until_blocked().await;
+    store.release_into_panic();
+    let doomed_error = doomed
+        .await
+        .expect("doomed submit task")
+        .expect_err("the doomed commit panicked");
+    assert_eq!(doomed_error.code(), ErrorCode::OutcomeUnknown);
+    assert!(writer.core.writer_position(&namespace_id).is_none());
+    assert!(
+        writer
+            .core
+            .head_and_wal_tail_cache()
+            .get_head(&namespace_id)
+            .is_none(),
+        "the position that the panic left doesn't stay as the cached head"
+    );
+
+    let loaded = || {
+        crate::test_support::counter(
+            &recorder.snapshot(),
+            "loonfs.read_head.source",
+            &[("source", "loaded")],
+        )
+    };
+    let before = loaded();
+    namespace
+        .stat("/first")
+        .await
+        .expect("a read after the panic");
+    assert_eq!(loaded(), before + 1, "the read loads the namespace");
+}
+
 /// Checks that `loonfs.publisher.queue_depth` reports the candidates queued
 /// at every namespace's publisher together, and falls to zero once both
 /// queues are taken.

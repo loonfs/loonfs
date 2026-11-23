@@ -417,20 +417,22 @@ impl NamespacePublisher {
         &self,
         engine: tokio::sync::MutexGuard<'_, NamespaceCommitEngine<SharedObjectStore>>,
     ) {
-        if std::thread::panicking() {
-            // The engine may be partway through a unit of work. Reads start
-            // from the namespace's cached head until the next release.
-            self.read_position.clear();
-            return;
-        }
-        match self.read_position.prepare(engine.read_position()) {
+        // A panic can stop the engine partway through a unit of work, after a
+        // put whose outcome the engine hasn't recorded, so the release then
+        // drops the position, as it does when the engine has none.
+        let position = if std::thread::panicking() {
+            None
+        } else {
+            self.read_position.prepare(engine.read_position())
+        };
+        match position {
             Some(position) => self.read_position.store(position),
             None => {
                 if self.read_position.clear() {
                     // The engine dropped its position because it found a
                     // change it can't follow, such as another writer's claim,
-                    // so the position that just became the cached head may
-                    // be out of date.
+                    // or a panic stopped its unit of work, so the position
+                    // that just became the cached head may be out of date.
                     self.context
                         .runtime_core
                         .invalidate_namespace_read_cache(&self.namespace_id);
