@@ -1566,7 +1566,7 @@ async fn a_snapshot_without_a_ttl_is_kept_until_it_is_deleted() {
 }
 
 #[tokio::test]
-async fn snapshot_creation_deletes_its_record_when_the_floor_passed_its_manifest() {
+async fn snapshot_creation_deletes_its_snapshot_when_the_floor_passed_its_manifest() {
     let directory = tempdir().expect("tempdir");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1616,13 +1616,23 @@ async fn snapshot_creation_deletes_its_record_when_the_floor_passed_its_manifest
         .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect_err("floor passed snapshot");
     assert_eq!(error.code(), ErrorCode::StaleHead);
-    assert!(store
-        .list_prefix(&snapshot_prefix(&namespace_id))
-        .await
-        .expect("snapshots")
-        .is_empty());
-    assert_eq!(store.counts().create_if_absent_puts, 1);
-    assert_eq!(store.counts().deletes, 1);
+    let counts = store.counts();
+    assert_eq!(
+        (
+            counts.create_if_absent_puts,
+            counts.gets_with_metadata,
+            counts.compare_and_swaps,
+            counts.deletes,
+        ),
+        (1, 1, 1, 0),
+        "the record's put, then the cleanup's load and its delete time"
+    );
+    assert_eq!(
+        crate::test_support::deleted_snapshot_records(&store, &namespace_id)
+            .await
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1678,7 +1688,7 @@ async fn snapshot_verification_rejects_a_deleted_namespace() {
 }
 
 #[tokio::test]
-async fn snapshot_basis_verification_store_failure_deletes_the_record() {
+async fn snapshot_basis_verification_store_failure_deletes_the_snapshot() {
     let directory = tempdir().expect("tempdir");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1713,11 +1723,12 @@ async fn snapshot_basis_verification_store_failure_deletes_the_record() {
         .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect_err("verification failed");
     assert_eq!(error.code(), ErrorCode::ServerError);
-    assert!(store
-        .list_prefix(&snapshot_prefix(&namespace_id))
-        .await
-        .expect("snapshots")
-        .is_empty());
+    assert_eq!(
+        crate::test_support::deleted_snapshot_records(&store, &namespace_id)
+            .await
+            .len(),
+        1
+    );
 }
 
 async fn wal_object_count<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> usize {

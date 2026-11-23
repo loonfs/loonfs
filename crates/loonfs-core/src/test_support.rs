@@ -453,6 +453,38 @@ pub(crate) async fn write_fork_snapshot<S: ObjectStore>(
     .expect("write the fork snapshot");
 }
 
+/// Returns the snapshot records of `namespace_id` in ID order, after checking
+/// that each one is a deleted user snapshot, as a failed snapshot creation
+/// leaves its record.
+#[cfg(test)]
+pub(crate) async fn deleted_snapshot_records<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Vec<loonfs_types::format::control::SnapshotPayload> {
+    use loonfs_objectstore::ObjectStoreExtension;
+    let keys = store
+        .list_prefix(&loonfs_objectstore::keys::snapshot_prefix(namespace_id))
+        .await
+        .expect("list the snapshot records");
+    let mut records = Vec::with_capacity(keys.len());
+    for key in keys {
+        let record = crate::snapshot::record::load_snapshot_record_at_key(store, &key)
+            .await
+            .expect("load a listed snapshot record")
+            .state;
+        std::assert_matches!(
+            record.owner,
+            loonfs_types::format::control::SnapshotOwner::User {
+                deleted_at_ms: Some(_),
+                ..
+            },
+            "a failed creation leaves a deleted user snapshot at `{key}`"
+        );
+        records.push(record);
+    }
+    records
+}
+
 /// Returns the pool that the current manifest of `namespace_id` records, for a
 /// test that builds the key of a content object or an upload record.
 pub async fn load_pool_id<S: ObjectStore>(store: S, namespace_id: &NamespaceId) -> PoolId {

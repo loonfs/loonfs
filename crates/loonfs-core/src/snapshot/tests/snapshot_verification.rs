@@ -11,7 +11,7 @@ use std::assert_matches;
 /// Checks that a snapshot of a manifest that compaction, or a fold of a newer
 /// head, replaces before the snapshot's verification returns
 /// `stale_head` and deletes the snapshot, so the caller folds and takes a
-/// snapshot again.
+/// snapshot again. The deleted record stays at the snapshot's key.
 #[tokio::test]
 async fn a_snapshot_of_a_manifest_replaced_before_verification_is_refused_and_deleted() {
     for advance_head in [false, true] {
@@ -66,11 +66,12 @@ async fn a_snapshot_of_a_manifest_replaced_before_verification_is_refused_and_de
         });
         let error = created.expect_err("the selected manifest is no longer current");
         assert_eq!(error.code(), ErrorCode::StaleHead);
-        assert!(store
-            .list_prefix(&snapshot_prefix(&namespace_id))
-            .await
-            .expect("snapshots")
-            .is_empty());
+        assert_eq!(
+            crate::test_support::deleted_snapshot_records(&store, &namespace_id)
+                .await
+                .len(),
+            1
+        );
     }
 }
 
@@ -97,15 +98,10 @@ async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replace
         .await
         .expect("write");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let owner = SnapshotOwner::User {
-        name: None,
-        expires_at_ms: None,
-        deleted_at_ms: None,
-    };
     let clock = context.clock();
     let basis = namespace.load_current_basis().await.expect("discovery");
     let (created, verified) = namespace
-        .create_verified_snapshot_record(owner.clone(), basis.clone(), &clock)
+        .create_verified_snapshot_record(None, None, basis.clone(), &clock)
         .await
         .expect("snapshot of the current manifest");
     assert_eq!(verified.manifest.manifest(), basis.manifest.manifest());
@@ -127,7 +123,7 @@ async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replace
 
     store.block_next();
     let (outcome, ()) = tokio::join!(
-        namespace.create_verified_snapshot_record(owner, basis, &clock),
+        namespace.create_verified_snapshot_record(None, None, basis, &clock),
         async {
             store.wait_until_blocked().await;
             crate::test_support::namespace_store(&store, &namespace_id)
@@ -142,7 +138,18 @@ async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replace
         .list_prefix(&snapshot_prefix(&namespace_id))
         .await
         .expect("snapshots");
-    assert_eq!(snapshots.len(), 1, "only the verified snapshot stays");
+    assert_eq!(snapshots.len(), 2);
+    for key in snapshots {
+        let record = record::load_snapshot_record_at_key(&store, &key)
+            .await
+            .expect("snapshot record")
+            .state;
+        assert_eq!(
+            record.owner.deleted_at_ms().is_none(),
+            record.snapshot_id == created.record.snapshot_id,
+            "only the verified snapshot isn't deleted"
+        );
+    }
 }
 
 pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
@@ -264,11 +271,12 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
         }
     );
     assert_matches!(result, Err(CoreError::HeadMoved(_)));
-    assert!(store
-        .list_prefix(&snapshot_prefix(&namespace_id))
-        .await
-        .expect("snapshots")
-        .is_empty());
+    assert_eq!(
+        crate::test_support::deleted_snapshot_records(&store, &namespace_id)
+            .await
+            .len(),
+        1
+    );
 }
 
 /// Checks that a snapshot's verification reads no manifest. It checks the
@@ -376,32 +384,55 @@ async fn snapshot_verification_sends_a_successor_head_and_a_boundary_read_and_re
     );
 }
 
+/// Checks that a creation whose put of the snapshot record was applied and
+/// whose read-back failed marks the creation's own record deleted, so a later
+/// put of the creation can't leave an active snapshot, with or without an
+/// expiry.
 #[tokio::test]
-async fn a_snapshot_write_that_is_stored_and_fails_its_read_back_leaves_no_snapshot() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let store = FailStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
-        OperationSelector::Any,
-        InjectedError::Transport("lost snapshot acknowledgement".to_owned()),
-    )
-    .apply_then_fail();
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    store.fail_next(2);
-    let error = create_snapshot(&store, &namespace_id, &context)
-        .await
-        .expect_err("an unconfirmed snapshot write fails creation");
-    assert_matches!(error, CoreError::Store { .. });
-    assert_eq!(store.attempts(), 3, "put, read-back, and cleanup delete");
-    assert!(store
-        .list_prefix(&snapshot_prefix(&namespace_id))
-        .await
-        .expect("snapshots")
-        .is_empty());
+async fn a_snapshot_write_that_is_stored_and_fails_its_read_back_leaves_a_deleted_snapshot() {
+    for expires_at_ms in [None, Some(10 * crate::limits::GC_GRACE_WINDOW_MS)] {
+        let directory = tempdir().expect("directory");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace");
+        let store = FailStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
+            OperationSelector::Any,
+            InjectedError::Transport("lost snapshot acknowledgement".to_owned()),
+        )
+        .apply_then_fail();
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let basis = crate::test_support::folded_manifest(&namespace)
+            .await
+            .expect("fold the WAL tail");
+        let owner = SnapshotOwner::User {
+            name: Some("unconfirmed".to_owned()),
+            expires_at_ms,
+            deleted_at_ms: None,
+        };
+        let clock = context.clock();
+        store.fail_next(2);
+        let error = namespace
+            .create_snapshot_record(owner.clone(), basis.clone(), &clock)
+            .await
+            .expect_err("an unconfirmed snapshot write fails creation");
+        assert_eq!(
+            store.attempts(),
+            4,
+            "the put, its read-back, the cleanup's read, and its compare-and-swap"
+        );
+        let put = super::snapshot_cleanup::record_of_failed_creation(
+            &error,
+            &basis,
+            owner,
+            clock.request_at_ms(),
+        );
+        super::snapshot_cleanup::assert_a_late_put_is_refused_by_a_deleted_snapshot(&store, &put)
+            .await;
+    }
 }
 
 /// Checks that a snapshot read accepts a user snapshot with or without an
