@@ -151,29 +151,29 @@ impl RuntimeCore {
                 .instrument(phase_span!(self, Phase::PinRead, namespace_id))
                 .await?;
         }
-        for _ in 1..MAX_CONTENTION_ATTEMPTS {
-            let context = pinned.context.clone();
-            let result =
-                classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await;
-            if !matches!(result, Err(Error::Core(CoreError::ManifestReplaced { .. }))) {
-                return result;
+        // The first run reads at the head pinned above, and each later run
+        // pins the head again.
+        let mut first = Some(pinned);
+        let read = &read;
+        // Boxed, because without the box, a crate that awaits a read fails to
+        // compile with "queries overflow the depth limit!" while the compiler
+        // computes the layout of the caller's future.
+        Box::pin(self.read_at_reloaded_head(namespace_id, || {
+            let first = first.take();
+            async move {
+                let pinned = match first {
+                    Some(pinned) => pinned,
+                    None => {
+                        self.pinned_read(namespace_id, confirmation)
+                            .instrument(phase_span!(self, Phase::PinRead, namespace_id))
+                            .await?
+                    }
+                };
+                let context = pinned.context.clone();
+                classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await
             }
-            self.reload_replaced_head(namespace_id).await?;
-            pinned = self
-                .pinned_read(namespace_id, confirmation)
-                .instrument(phase_span!(self, Phase::PinRead, namespace_id))
-                .await?;
-        }
-        let context = pinned.context.clone();
-        let result =
-            classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await;
-        match result {
-            Err(Error::Core(CoreError::ManifestReplaced {
-                current_manifest_no,
-                ..
-            })) => Err(replaced_on_every_run(namespace_id, current_manifest_no)),
-            result => result,
-        }
+        }))
+        .await
     }
 
     /// Runs `attempt`, and runs it again from a reloaded head each time it
@@ -183,8 +183,8 @@ impl RuntimeCore {
     ///
     /// `attempt` reads at the namespace's head as the head is when the run
     /// starts, so a run after a reload reads a newer manifest than the run
-    /// before it read. [`Self::read_at_least`] runs an ordinary read the same
-    /// way at a head that it pins for each run.
+    /// before it read. [`Self::read_at_least`] runs an ordinary read through
+    /// this method, with a head that it pins for each run.
     pub(crate) async fn read_at_reloaded_head<T, F, Fut>(
         &self,
         namespace_id: &NamespaceId,
