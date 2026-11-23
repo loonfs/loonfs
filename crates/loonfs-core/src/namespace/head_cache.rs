@@ -139,21 +139,31 @@ impl CachedHead {
         )
     }
 
+    /// Merges `other`, a head at the same place in the durable order, into
+    /// this head, and returns whether this head changed. This head takes the
+    /// younger check time and the higher boundary (see [`Held::merge`]) and
+    /// the later head confirmation. Two observations in the same millisecond
+    /// keep this head's confirmation, so a tie never moves a confirmation.
+    fn merge(&mut self, other: &CachedHead) -> bool {
+        let checked = self.basis.merge(&other.basis);
+        let confirmed = self.head_confirmed.age_at(&other.head_confirmed) > 0;
+        if confirmed {
+            self.head_confirmed = other.head_confirmed.clone();
+        }
+        checked || confirmed
+    }
+
     /// Returns whether this head replaces `cached`: whether it's newer in the
-    /// durable order, or the same head with a later confirmation and no
-    /// earlier one.
+    /// durable order, or, at the same place in that order, whether merging
+    /// `cached` into this head changes nothing and merging this head into
+    /// `cached` changes something. So this head's check time, head
+    /// confirmation and boundary are each at least `cached`'s, and one of
+    /// the three is later or higher.
     fn supersedes(&self, cached: &CachedHead) -> bool {
         match self.order().cmp(&cached.order()) {
             std::cmp::Ordering::Greater => true,
             std::cmp::Ordering::Less => false,
-            std::cmp::Ordering::Equal => {
-                let checks = [
-                    (cached.basis.checked(), self.basis.checked()),
-                    (&cached.head_confirmed, &self.head_confirmed),
-                ];
-                checks.iter().all(|(cached, own)| own.age_at(cached) == 0)
-                    && checks.iter().any(|(cached, own)| cached.age_at(own) > 0)
-            }
+            std::cmp::Ordering::Equal => !self.clone().merge(cached) && cached.clone().merge(self),
         }
     }
 
@@ -165,22 +175,15 @@ impl CachedHead {
 }
 
 /// Returns the head that replaces `cached` when `candidate` is installed, or
-/// `None` when `cached` stays: a candidate equal to `cached` in the durable
-/// order takes the later of each confirmation (see [`Held::merge`]), and any
-/// other candidate is compared whole by [`CachedHead::supersedes`].
+/// `None` when `cached` stays: a candidate at the same place in the durable
+/// order as `cached` is merged into `cached` (see [`CachedHead::merge`]), and
+/// any other candidate is compared whole by [`CachedHead::supersedes`].
 fn next_head(cached: &CachedHead, candidate: CachedHead) -> Option<CachedHead> {
     if cached.order() != candidate.order() {
         return Some(candidate);
     }
     let mut next = CachedHead::clone(cached);
-    let checked = next.basis.merge(&candidate.basis);
-    // Two observations in the same millisecond keep the cached one, so a tie
-    // never moves a confirmation.
-    let confirmed = cached.head_confirmed.age_at(&candidate.head_confirmed) > 0;
-    if confirmed {
-        next.head_confirmed = candidate.head_confirmed;
-    }
-    (checked || confirmed).then_some(next)
+    next.merge(&candidate).then_some(next)
 }
 
 impl DecodedBlock for Arc<CachedHead> {
@@ -330,9 +333,10 @@ impl HeadAndWalTailCache {
     ///
     /// - A candidate below the cached head changes nothing, and the read
     ///   starts from the cached head.
-    /// - A candidate equal to the cached head takes the later of each
-    ///   confirmation, because confirmations only move forward. A new
-    ///   snapshot is cached only when a confirmation moved.
+    /// - A candidate equal to the cached head is merged into it, so the head
+    ///   takes the later of each confirmation and the higher boundary,
+    ///   because neither moves backward. A new snapshot is cached only when
+    ///   the merge changed the head.
     /// - A newer candidate becomes the cached head.
     ///
     /// The cache compares the heads and inserts under one lock, so a head
@@ -600,19 +604,25 @@ mod tests {
         )
     }
 
-    /// Creates a head like [`head_at`] that keeps a manifest boundary whose
-    /// etag is `etag_bytes` bytes long.
-    fn large_head(seq: u64, etag_bytes: usize, checked: &Observation) -> CachedHead {
-        let boundary = KeptBoundary::read(Some(LoadedBoundary {
+    /// Returns the boundary object of namespace `demo` at manifest
+    /// `manifest_no`, read with the ETag `etag`.
+    fn boundary_at(manifest_no: u64, etag: String) -> KeptBoundary {
+        KeptBoundary::read(Some(LoadedBoundary {
             object_key: "namespaces/demo/boundary.json".to_owned(),
-            etag: "e".repeat(etag_bytes),
+            etag,
             state: loonfs_types::format::control::BoundaryPayload {
                 namespace_id: namespace("demo"),
                 boundary: loonfs_types::format::control::ManifestBoundary::Manifest {
-                    manifest_no: ManifestNo(1),
+                    manifest_no: ManifestNo(manifest_no),
                 },
             },
-        }));
+        }))
+    }
+
+    /// Creates a head like [`head_at`] that keeps a manifest boundary whose
+    /// etag is `etag_bytes` bytes long.
+    fn large_head(seq: u64, etag_bytes: usize, checked: &Observation) -> CachedHead {
+        let boundary = boundary_at(1, "e".repeat(etag_bytes));
         rechecked(head_at(seq, 1, checked), checked, boundary)
     }
 
@@ -739,6 +749,50 @@ mod tests {
             Arc::ptr_eq(&same_millisecond, &replaced),
             "a confirmation in the same millisecond doesn't move"
         );
+    }
+
+    /// Checks that a candidate equal to the cached head whose check read the
+    /// boundary object in the same millisecond as the cached head's check,
+    /// which kept no boundary, replaces the cached head, so the cache keeps
+    /// the boundary.
+    #[test]
+    fn a_boundary_read_in_the_same_millisecond_replaces_the_cached_head() {
+        let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000));
+        let now = Observation::now(clock);
+        let cache = HeadAndWalTailCache::unshared(1 << 20);
+        cache.replace_head(head_at(5, 1, &now));
+        let boundary = boundary_at(1, "\"boundary-etag\"".to_owned());
+        let read = rechecked(head_at(5, 1, &now), &now, boundary.clone());
+        let replaced = cache.replace_head(read);
+        assert_eq!(replaced.basis().boundary(), &boundary);
+        let cached = cache.get_head(&namespace("demo")).expect("a cached head");
+        assert_eq!(cached.basis().boundary(), &boundary);
+    }
+
+    /// Checks that a candidate at the cached head's place in the durable
+    /// order with later checks and a lower boundary doesn't replace a cached
+    /// head with a higher boundary, and that the merge of the two does.
+    #[test]
+    fn a_head_with_a_lower_boundary_does_not_replace_the_cached_head() {
+        let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000));
+        let early = Observation::now(clock.clone());
+        clock.advance_ms(10);
+        let late = Observation::now(clock.clone());
+        let higher = boundary_at(2, "\"higher\"".to_owned());
+        let cached = rechecked(head_at(5, 1, &early), &early, higher.clone());
+        let lower = rechecked(
+            CachedHead {
+                head_confirmed: late.clone(),
+                ..head_at(5, 1, &late)
+            },
+            &late,
+            boundary_at(1, "\"lower\"".to_owned()),
+        );
+        assert!(!lower.supersedes(&cached));
+        let merged = next_head(&cached, lower).expect("the later checks change the head");
+        assert!(merged.supersedes(&cached));
+        assert_eq!(merged.basis().boundary(), &higher);
+        assert_eq!(merged.basis().checked(), &late);
     }
 
     /// Checks that a check during which the head is invalidated, or during
@@ -948,6 +1002,30 @@ mod tests {
         assert_eq!(order(&cached), (6, 2));
         assert_eq!(cached.basis().checked(), &late);
         assert_eq!(cached.head_confirmed(), &early);
+    }
+
+    /// Checks that a publication that found the cached head's manifest
+    /// current, with a check in the same millisecond as the cached head's
+    /// and a boundary object that the cached head doesn't keep, raises the
+    /// cached head's boundary to that object.
+    #[test]
+    fn a_publication_that_finds_the_cached_manifest_current_raises_its_boundary() {
+        let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000));
+        let now = Observation::now(clock);
+        let demo = namespace("demo");
+        let cache = HeadAndWalTailCache::unshared(1 << 20);
+        cache.replace_head(head_at(6, 2, &now));
+        let boundary = boundary_at(1, "\"boundary-etag\"".to_owned());
+        let published = published_at(2, &now);
+        let published = Held::new(
+            published.manifest().clone(),
+            published.checked().clone(),
+            boundary.clone(),
+        );
+        cache.move_head(&demo, &published);
+        let cached = cache.get_head(&demo).expect("the head stays");
+        assert_eq!(order(&cached), (6, 2));
+        assert_eq!(cached.basis().boundary(), &boundary);
     }
 
     /// Checks that the reads of one head that arrive while a check runs
