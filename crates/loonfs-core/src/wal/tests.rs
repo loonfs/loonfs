@@ -814,14 +814,13 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         )
         .await
         .expect("same-epoch WAL object");
-    let mut warm = crate::RuntimeReadContext {
-        read_basis: crate::control::ReadBasis {
+    let mut warm = crate::RuntimeReadContext::new(
+        crate::control::ReadBasis {
             basis: loaded.basis(),
             head: loaded.read_state,
         },
-        tail: None,
-        visible_seq: None,
-    };
+        None,
+    );
     let error = super::probe_namespace_wal(
         &store,
         &crate::cache::HeadAndWalTailCache::unshared(usize::MAX),
@@ -861,14 +860,13 @@ async fn warm_context_behind(
             .expect("commit");
     }
     store.reset();
-    crate::RuntimeReadContext {
-        read_basis: crate::control::ReadBasis {
+    crate::RuntimeReadContext::new(
+        crate::control::ReadBasis {
             basis: loaded.basis(),
             head: loaded.read_state,
         },
-        tail: None,
-        visible_seq: None,
-    }
+        None,
+    )
 }
 
 /// Checks that a warm probe reads the WAL in discovery's widening windows, and

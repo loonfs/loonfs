@@ -10,7 +10,7 @@ use super::record::{encode_snapshot_record, LoadedSnapshotRecord};
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
-use crate::namespace::basis::ReadBasis;
+use crate::namespace::basis::SnapshotReadBasis;
 use crate::namespace::control::ensure_namespace_live;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -32,7 +32,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         live_head: &NamespaceReadState,
         snapshot_id: &SnapshotId,
-    ) -> Result<ReadBasis> {
+    ) -> Result<SnapshotReadBasis> {
         let now_ms = self.wall_clock.now_ms();
         let Some(loaded) = self.load_snapshot_record(snapshot_id).await? else {
             return Err(CoreError::SnapshotNotFound {
@@ -50,9 +50,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         live_head: &NamespaceReadState,
         record: SnapshotPayload,
-    ) -> Result<ReadBasis> {
+    ) -> Result<SnapshotReadBasis> {
         load_snapshot_read_basis_from_record(&self.store, &self.segment_cache, live_head, record)
             .await
+            .map(SnapshotReadBasis)
     }
 
     /// Deletes the user snapshot `record`, whose creation failed with

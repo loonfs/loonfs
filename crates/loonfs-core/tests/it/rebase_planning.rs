@@ -140,12 +140,12 @@ impl Family {
             .clone()
             .expect("the new fork's basis")
             .fork_point_snapshot_id;
-        RuntimeReadContext::new(
+        RuntimeReadContext::at_snapshot(
             namespace_store(&self.store, &self.rebase)
                 .load_snapshot_read_basis(&live.read_basis().head, &snapshot_id)
                 .await
                 .expect("the new fork through its fork point snapshot"),
-            None,
+            live,
         )
     }
 

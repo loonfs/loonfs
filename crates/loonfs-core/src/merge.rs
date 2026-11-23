@@ -410,7 +410,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         CommitIntent {
             commit_id: request.commit_id.clone(),
             actor_id: request.actor_id.clone(),
-            subject: self.subject.clone(),
+            subject: self.subject().cloned(),
             message: request.message.clone(),
             operations,
             preconditions,

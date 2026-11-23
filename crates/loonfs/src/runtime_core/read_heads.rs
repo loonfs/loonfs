@@ -16,7 +16,7 @@ use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
     project_anchor_tail, ActiveNamespaceCatalogEntry, NamespaceReadAnchor, PublicationBasis,
-    ReadBasis, VerifiedNamespaceCatalogEntry,
+    ReadBasis, SnapshotReadBasis, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::time::Observation;
@@ -418,14 +418,12 @@ impl RuntimeCore {
     fn pinned_read_at_basis(
         &self,
         namespace_id: &NamespaceId,
-        basis: ReadBasis,
+        basis: SnapshotReadBasis,
         live: RuntimeReadContext,
     ) -> PinnedRead {
         PinnedRead {
-            engine: self
-                .reader_engine(namespace_id)
-                .with_authorization_head(live),
-            context: self.read_context(basis, None),
+            engine: self.reader_engine(namespace_id),
+            context: RuntimeReadContext::at_snapshot(basis, live),
         }
     }
 

@@ -20,7 +20,7 @@ pub(crate) mod status;
 pub(crate) mod store;
 pub(crate) mod writer_epoch;
 
-pub use basis::{MetadataBasis, PublicationBasis, ReadBasis};
+pub use basis::{MetadataBasis, PublicationBasis, ReadBasis, SnapshotReadBasis};
 
 #[cfg(test)]
 mod tests;

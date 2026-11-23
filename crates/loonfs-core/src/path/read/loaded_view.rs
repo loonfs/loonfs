@@ -119,14 +119,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let loaded = self
             .load_read_anchor(crate::test_support::observed_now())
             .await?;
-        let context = RuntimeReadContext {
-            read_basis: ReadBasis {
+        let context = RuntimeReadContext::new(
+            ReadBasis {
                 basis: loaded.basis(),
                 head: loaded.read_state,
             },
-            tail: None,
-            visible_seq: None,
-        };
+            None,
+        );
         self.load_metadata_view(&context).await
     }
 }
@@ -406,14 +405,13 @@ mod tests {
             .load_read_anchor(crate::test_support::observed_now())
             .await
             .expect("read anchor");
-        let context = RuntimeReadContext {
-            read_basis: ReadBasis {
+        let context = RuntimeReadContext::new(
+            ReadBasis {
                 basis: anchor.basis(),
                 head: anchor.read_state,
             },
-            tail: None,
-            visible_seq: None,
-        };
+            None,
+        );
         // Once the first load caches the manifest, a load reads nothing from
         // the store before the WAL objects of the tail.
         let segment_cache = Arc::new(crate::cache::MetadataSegmentCache::unshared(1 << 20));

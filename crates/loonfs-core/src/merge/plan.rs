@@ -109,7 +109,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             ),
             before: StateReader::new(fork_view.metadata_view_at(source_after_seq), &memory),
             fork_tail: &fork_view.wal_tail,
-            fork_authorizer: Authorizer::for_request(fork.subject.as_ref()),
+            fork_authorizer: Authorizer::for_request(fork.subject()),
             record: &record,
             fork_point_seq,
             memory: Arc::clone(&memory),
