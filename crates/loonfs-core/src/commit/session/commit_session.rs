@@ -2,7 +2,7 @@
 //! change, over the loaded metadata and the rows that the commit's earlier
 //! writes would persist.
 
-use super::checks::CommitNumbering;
+use super::numbering::{CommitNumbering, OperationIndex};
 use crate::commit::engine::CommitCandidate;
 use crate::commit::AppendedContent;
 use crate::metadata::{MetadataState, MetadataView};
@@ -87,13 +87,12 @@ impl<'a, S: ObjectStore + ?Sized> CommitSession<'a, S> {
         std::mem::take(&mut self.appended)
     }
 
-    /// Records the deltas of the operation that `op_index` identifies. It
-    /// sets the layout of each revision that the deltas write, applies the
-    /// deltas to the overlay so that later reads see them, and records them
-    /// with the index. Each write reserves its index before it checks
-    /// anything, so an index overflow is reported before the write's own
-    /// errors.
-    pub(super) fn record_operation(&mut self, op_index: u32, mut deltas: Vec<WalDelta>) {
+    /// Records the deltas of the operation that `op_index` identifies, which
+    /// the write reserved. It sets the layout of each revision that the
+    /// deltas write, applies the deltas to the overlay so that later reads
+    /// see them, and records them with the index.
+    pub(super) fn record_operation(&mut self, op_index: OperationIndex, mut deltas: Vec<WalDelta>) {
+        let op_index = op_index.into_u32();
         for delta in &mut deltas {
             if let WalDelta::AppendFileRevision {
                 content_ref,

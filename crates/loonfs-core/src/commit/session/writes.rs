@@ -1,9 +1,10 @@
 //! The writes of one commit: each write reserves its operation index,
 //! checks the rules about its own rows, and records the WAL deltas that it
-//! builds.
+//! builds. A write reserves its index before it checks anything, so an index
+//! overflow is reported before the write's own errors.
 
-use super::checks::CommitNumbering;
 use super::commit_session::CommitSession;
+use super::numbering::CommitNumbering;
 use crate::commit::{CommitOperand, CommitValidationError};
 use crate::error::Result;
 use crate::metadata::{InodeRecord, SubtreeTombstoneRecord};

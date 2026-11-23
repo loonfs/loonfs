@@ -1,5 +1,4 @@
-//! The rules that the writes of a commit check against the commit's state,
-//! and the numbering of the commit's operations and deltas.
+//! The rules that the writes of a commit check against the commit's state.
 
 use super::commit_session::CommitSession;
 use crate::commit::CommitValidationError;
@@ -9,34 +8,6 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
 
 use loonfs_types::{CommitSeq, InodeId, InodeKind, RevisionNo};
-
-#[derive(Debug, Default)]
-pub(super) struct CommitNumbering {
-    next_op_index: u32,
-    next_delta_index: u32,
-}
-
-impl CommitNumbering {
-    pub(super) fn reserve_op_index(&mut self) -> std::result::Result<u32, CommitValidationError> {
-        let op_index = self.next_op_index;
-        self.next_op_index = self
-            .next_op_index
-            .checked_add(1)
-            .ok_or(CommitValidationError::OperationIndexOverflow)?;
-        Ok(op_index)
-    }
-
-    pub(super) fn reserve_delta_index(
-        &mut self,
-    ) -> std::result::Result<u32, CommitValidationError> {
-        let delta_index = self.next_delta_index;
-        self.next_delta_index = self
-            .next_delta_index
-            .checked_add(1)
-            .ok_or(CommitValidationError::DeltaIndexOverflow)?;
-        Ok(delta_index)
-    }
-}
 
 impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// Ensures that `deletion`, the root's deletion in the trash, is the
