@@ -4,7 +4,7 @@ use super::publish_path_planning::{is_missing_visible_path, PlanningView};
 use crate::authorize::Absence;
 use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
-use crate::metadata::access::access_revision_no;
+use crate::metadata::access_revision_no;
 use crate::metadata::{ResolvedVisiblePath, VisiblePathError};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{

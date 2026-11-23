@@ -5,16 +5,8 @@
 use super::visibility::{AncestorWalk, MetadataVisibilityReads};
 use crate::error::{CoreError, Result};
 use loonfs_types::format::manifest::{AccessRevisionRecord, TombstoneRowAction};
-use loonfs_types::{
-    AccessRevisionNo, AccessRight, AccessRights, InodeId, PrincipalSet, ROOT_INODE_ID,
-};
+use loonfs_types::{AccessRight, AccessRights, InodeId, PrincipalSet, ROOT_INODE_ID};
 use std::collections::HashMap;
-
-/// Returns the access revision of an inode whose latest access row is `row`.
-/// An inode with no access row is at access revision 0.
-pub(crate) fn access_revision_no(row: Option<&AccessRevisionRecord>) -> AccessRevisionNo {
-    row.map_or(AccessRevisionNo(0), |row| row.access_revision_no)
-}
 
 /// The inodes an inheritance walk reached, nearest first, each with its own
 /// access row, and the known ancestor the walk stopped before, if any.

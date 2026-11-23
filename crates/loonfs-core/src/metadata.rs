@@ -40,6 +40,7 @@ pub(crate) use self::rows::{
 };
 pub(crate) use self::tail_rows::RowOrders;
 pub(crate) use self::view::MetadataView;
+pub(crate) use self::view_revisions::{access_revision_no, attributes_revision_no};
 pub(crate) use self::view_session::{
     preload_inode_groups, LeafRevisionPreload, MetadataViewSession,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,

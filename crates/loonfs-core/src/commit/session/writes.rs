@@ -7,7 +7,7 @@ use super::commit_session::CommitSession;
 use super::numbering::CommitNumbering;
 use crate::commit::{CommitOperand, CommitValidationError};
 use crate::error::Result;
-use crate::metadata::access::access_revision_no;
+use crate::metadata::access_revision_no;
 use crate::path::write::{
     AvailableName, DeletionInTrash, NewInodeId, ResolvedBinding, ResolvedTarget,
 };
