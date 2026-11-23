@@ -447,7 +447,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         deadline.ensure_before(clock)?;
         target.write_fork_point_snapshot(&newest, clock).await?;
         deadline.ensure_before(clock)?;
-        target.write_member_entry(&payload.pool_id).await?;
+        target.write_member_entry(&payload.pool_id, clock).await?;
         // The check after the fork snapshot's put checks `deadline` last, so it
         // is also the check before the active manifest.
         if let Err(error) = self

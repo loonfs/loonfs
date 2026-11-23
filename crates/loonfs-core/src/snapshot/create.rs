@@ -192,9 +192,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 return Ok((CreatedSnapshot { record, etag }, basis))
             }
             Ok((_, SnapshotBasisVerification::Invalid)) => manifest_replaced(),
-            // Only the record's write returns this error, and only from its
-            // check before the first put, so a call that returns it sent no
-            // put and has no record to delete.
+            // Only the record's write returns this error, and only when the
+            // budget was spent before its first put, so a call that returns
+            // it sent no put and has no record to delete. A write that sent a
+            // put and then ran out of budget returns that put's store error,
+            // and the cleanup below runs.
             Err(error @ CoreError::MetadataPublicationBudgetExceeded { .. }) => return Err(error),
             Err(error) => error,
         };

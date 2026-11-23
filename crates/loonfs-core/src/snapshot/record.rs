@@ -25,30 +25,32 @@ pub(crate) fn encode_snapshot_record(record: &SnapshotPayload) -> Bytes {
 }
 
 /// Writes a record under its freshly generated [`SnapshotId`], and returns
-/// the version of the record that the write stored.
-///
-/// The write checks `clock`'s publication budget once, before its first put,
-/// so a call that stalled past its budget writes nothing (format spec,
-/// "Clock and operation assumptions"). The retries of the put don't check
-/// the budget again.
+/// the version of the record that the write stored. Every put starts inside
+/// `clock`'s publication budget (see
+/// [`create_control_object_under_generated_id`]).
 pub(crate) async fn write_snapshot_record<S: ObjectStore + ?Sized>(
     store: &S,
     record: &SnapshotPayload,
     clock: &OperationClock,
 ) -> Result<ObjectMetadata> {
-    clock.ensure_metadata_publication_budget(&record.namespace_id)?;
     let encoded = encode_snapshot_record(record);
     let object_key = snapshot_record(&record.namespace_id, &record.snapshot_id);
-    create_control_object_under_generated_id(store, &object_key, encoded)
-        .await
-        .inspect_err(|error| {
-            tracing::error!(
-                namespace_id = %record.namespace_id,
-                object_key = %object_key,
-                error = %error,
-                "snapshot record write failed"
-            );
-        })
+    create_control_object_under_generated_id(
+        store,
+        &object_key,
+        encoded,
+        &record.namespace_id,
+        clock,
+    )
+    .await
+    .inspect_err(|error| {
+        tracing::error!(
+            namespace_id = %record.namespace_id,
+            object_key = %object_key,
+            error = %error,
+            "snapshot record write failed"
+        );
+    })
 }
 
 pub(crate) type LoadedSnapshotRecord = LoadedControl<SnapshotPayload>;

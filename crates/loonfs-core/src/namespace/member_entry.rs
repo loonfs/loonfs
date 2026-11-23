@@ -4,6 +4,7 @@
 use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
+use crate::time::OperationClock;
 use bytes::Bytes;
 use loonfs_objectstore::keys::pool_member;
 use loonfs_objectstore::ObjectStore;
@@ -15,7 +16,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// put-if-absent. An entry that's already stored counts as written,
     /// because every call that finishes the namespace writes the same bytes
     /// at the same key.
-    pub(crate) async fn write_member_entry(&self, pool_id: &PoolId) -> Result<()> {
+    pub(crate) async fn write_member_entry(
+        &self,
+        pool_id: &PoolId,
+        clock: &OperationClock,
+    ) -> Result<()> {
         let object_key = pool_member(pool_id, &self.namespace_id);
         let entry = PoolMemberPayload {
             pool_id: pool_id.clone(),
@@ -23,8 +28,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
         };
         let bytes = encode_control_state(ControlObjectKind::PoolMember, &entry)
             .expect("a member entry should encode");
-        create_control_object_under_generated_id(&self.store, &object_key, Bytes::from(bytes))
-            .await?;
+        create_control_object_under_generated_id(
+            &self.store,
+            &object_key,
+            Bytes::from(bytes),
+            &self.namespace_id,
+            clock,
+        )
+        .await?;
         Ok(())
     }
 

@@ -100,7 +100,14 @@ pub(crate) async fn create_upload_session_record<S: ObjectStore + ?Sized>(
     let object_key = upload_session(catalog.pool_id(), &upload_id);
     let encoded = encode_control_state(ControlObjectKind::UploadSession, &record)
         .expect("an upload session record should encode");
-    create_control_object_under_generated_id(store, &object_key, Bytes::from(encoded)).await?;
+    create_control_object_under_generated_id(
+        store,
+        &object_key,
+        Bytes::from(encoded),
+        catalog.namespace_id(),
+        clock,
+    )
+    .await?;
     Ok(record)
 }
 

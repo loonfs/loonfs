@@ -372,8 +372,9 @@ pub async fn write_member_entry<S: ObjectStore>(
     pool_id: &PoolId,
     namespace_id: &NamespaceId,
 ) {
-    namespace_store(store, namespace_id)
-        .write_member_entry(pool_id)
+    let namespace = namespace_store(store, namespace_id);
+    namespace
+        .write_member_entry(pool_id, &namespace.start_clock())
         .await
         .expect("write the member entry");
 }

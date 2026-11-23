@@ -1724,3 +1724,30 @@ async fn a_fork_past_its_budget_writes_no_fork_point_snapshot() {
     );
     assert_fork_stopped_after_manifests(&store, &source, &target, 1).await;
 }
+
+/// Checks that a call whose publication budget passed before it wrote a
+/// namespace's member entry returns the budget error and writes nothing, so a
+/// stalled call that finishes a fork can't write an entry again after the
+/// fork's retirement deleted it.
+#[tokio::test]
+async fn a_member_entry_past_its_publication_budget_writes_nothing() {
+    let directory = tempdir().expect("directory");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let (source, target) = source_and_target();
+    NamespaceFixture::new(&inner, &source, &context())
+        .create()
+        .await
+        .expect("create the source");
+    let pool_id = crate::test_support::load_pool_id(&inner, &source).await;
+    let entry = loonfs_objectstore::keys::pool_member(&pool_id, &target);
+    let store = RecordingStore::new(inner, KeyPredicate::exact(&entry));
+    let timer = Arc::new(ManualClock::new(0));
+    let clock = crate::time::OperationClock::start(context().now_ms, timer.clone());
+    timer.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
+    let error = crate::test_support::namespace_store(&store, &target)
+        .write_member_entry(&pool_id, &clock)
+        .await
+        .expect_err("a call past its budget is refused");
+    assert_matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. });
+    assert_eq!(store.take(), [], "no request for the member entry");
+}

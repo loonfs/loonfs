@@ -2,9 +2,11 @@
 
 use crate::error::CoreError;
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
+use crate::time::OperationClock;
 use bytes::Bytes;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
+use loonfs_types::NamespaceId;
 use std::future::Future;
 
 /// An attempt whose write may have taken effect reads it back before it returns.
@@ -42,26 +44,41 @@ where
 /// precondition failure is read back like
 /// a transport failure: an earlier attempt's put can take effect after its own
 /// read-back found nothing.
+///
+/// Every put starts inside `clock`'s publication budget, as a manifest put
+/// does (format spec, "Clock and operation assumptions"). A read-back isn't
+/// checked, so a put that was applied is confirmed after the budget too.
+/// When the budget is spent before the first put, the call returns the budget
+/// error and has sent nothing. When it's spent before a later put, the call
+/// stops and returns the error of the last put it sent, as it does when it
+/// runs out of attempts. So the budget error means that no put was sent, and
+/// any other error means that one may have been.
 pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     encoded: Bytes,
+    namespace_id: &NamespaceId,
+    clock: &OperationClock,
 ) -> crate::error::Result<ObjectMetadata> {
-    retry_while_contended(|| async {
+    let mut last_error = None;
+    for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
+        if let Err(spent) = clock.ensure_metadata_publication_budget(namespace_id) {
+            return Err(last_error.unwrap_or(spent));
+        }
         match store.put_if_absent(object_key, encoded.clone()).await {
-            Ok(metadata) => Ok(CasOutcome::Settled(metadata)),
+            Ok(metadata) => return Ok(metadata),
             Err(
                 error @ (ObjectStoreError::PreconditionFailed { .. }
                 | ObjectStoreError::Transport { .. }),
             ) => match store.get_with_metadata(object_key).await {
-                Ok(Some(stored)) => Ok(CasOutcome::Settled(stored.metadata)),
-                Ok(None) => Ok(CasOutcome::Contended(CoreError::store(object_key, &error))),
-                Err(error) => Err(CoreError::store(object_key, &error)),
+                Ok(Some(stored)) => return Ok(stored.metadata),
+                Ok(None) => last_error = Some(CoreError::store(object_key, &error)),
+                Err(error) => return Err(CoreError::store(object_key, &error)),
             },
-            Err(error) => Err(CoreError::store(object_key, &error)),
+            Err(error) => return Err(CoreError::store(object_key, &error)),
         }
-    })
-    .await?
+    }
+    Err(last_error.expect("the positive attempt limit should leave the error of a put"))
 }
 
 #[cfg(test)]
@@ -72,6 +89,14 @@ mod tests {
         BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
     };
     use tempfile::tempdir;
+
+    fn demo() -> NamespaceId {
+        NamespaceId::parse("demo").expect("namespace id")
+    }
+
+    fn fresh_clock() -> OperationClock {
+        OperationClock::start(1_000, crate::test_support::std_timer())
+    }
 
     #[tokio::test]
     async fn generated_id_create_recovers_when_the_first_write_has_an_ambiguous_outcome() {
@@ -88,10 +113,15 @@ mod tests {
         .apply_then_fail();
         store.fail_next(1);
 
-        let metadata =
-            create_control_object_under_generated_id(&store, object_key, payload.clone())
-                .await
-                .expect("exact read-back reconciles the write that succeeded");
+        let metadata = create_control_object_under_generated_id(
+            &store,
+            object_key,
+            payload.clone(),
+            &demo(),
+            &fresh_clock(),
+        )
+        .await
+        .expect("exact read-back reconciles the write that succeeded");
 
         assert_eq!(store.attempts(), 1);
         assert!(metadata.etag.is_some());
@@ -119,9 +149,16 @@ mod tests {
         store.fail_next(1);
         let gate = store.inner();
         gate.block_next();
+        let (namespace_id, clock) = (demo(), fresh_clock());
 
         let (created, ()) = tokio::join!(
-            create_control_object_under_generated_id(&store, object_key, payload.clone()),
+            create_control_object_under_generated_id(
+                &store,
+                object_key,
+                payload.clone(),
+                &namespace_id,
+                &clock,
+            ),
             async {
                 gate.wait_until_blocked().await;
                 gate.inner()
@@ -134,6 +171,56 @@ mod tests {
 
         let metadata = created.expect("the create adopts its own late put");
         assert_eq!(store.attempts(), 2);
+        let stored = store
+            .get_with_metadata(object_key)
+            .await
+            .expect("read record")
+            .expect("record exists");
+        assert_eq!(stored.bytes, payload);
+        assert_eq!(metadata, stored.metadata);
+    }
+
+    /// Checks that a put that was applied and lost its answer is confirmed by
+    /// its read-back even when the budget passed during the read-back.
+    #[tokio::test]
+    async fn generated_id_create_confirms_a_written_put_after_its_budget() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_key = "namespaces/demo/snapshots/snp_0000000000000g000000000001.json";
+        let payload = Bytes::from_static(b"generated control record");
+        let store = BlockingStore::new(
+            FailStore::new(
+                LocalFsStore::new(temp_dir.path()).expect("store"),
+                KeyPredicate::exact(object_key),
+                OperationSelector::PutCreateIfAbsent,
+                InjectedError::Transport("lost write acknowledgement".to_owned()),
+            )
+            .apply_then_fail(),
+            KeyPredicate::exact(object_key),
+            OperationSelector::GetWithMetadata,
+        );
+        store.inner().fail_next(1);
+        store.block_next();
+        let timer = std::sync::Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+        let clock = OperationClock::start(1_000, timer.clone());
+        let namespace_id = demo();
+
+        let (created, ()) = tokio::join!(
+            create_control_object_under_generated_id(
+                &store,
+                object_key,
+                payload.clone(),
+                &namespace_id,
+                &clock,
+            ),
+            async {
+                store.wait_until_blocked().await;
+                timer.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
+                store.release();
+            },
+        );
+
+        let metadata = created.expect("the read-back confirms the written put");
+        assert_eq!(store.inner().attempts(), 1);
         let stored = store
             .get_with_metadata(object_key)
             .await
@@ -160,6 +247,8 @@ mod tests {
             &store,
             object_key,
             Bytes::from_static(b"the record as written"),
+            &demo(),
+            &fresh_clock(),
         )
         .await
         .expect("the record under the generated id is this creation's own");
