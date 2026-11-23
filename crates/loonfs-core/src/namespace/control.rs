@@ -123,6 +123,18 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
     }
 
+    /// Loads the namespace's current manifest as [`Self::load_current_basis`]
+    /// does, and returns `namespace_deleted` when that manifest is a tombstone
+    /// and `namespace_not_found` when it's initializing.
+    pub async fn load_live_basis(
+        &self,
+        observed: Observation,
+    ) -> crate::error::Result<Held<LoadedManifest>> {
+        let current = self.load_current_basis(observed).await?;
+        ensure_namespace_live(&self.namespace_id, current.manifest().payload().status)?;
+        Ok(current)
+    }
+
     /// Returns the error for a namespace that has no manifest above its
     /// manifest boundary and no boundary object.
     pub(crate) fn namespace_not_found(&self) -> CoreError {

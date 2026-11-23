@@ -5,7 +5,7 @@
 use crate::error::Result;
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
 use crate::namespace::boundary::KeptBoundary;
-use crate::namespace::control::LoadedManifest;
+use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::time::Observation;
@@ -235,6 +235,29 @@ impl<S: ObjectStore> NamespaceStore<S> {
             held.checked = observed;
         }
         Ok(Checked::Newest)
+    }
+
+    /// Returns `basis` when a check finds its manifest the newest (see
+    /// [`Self::check_newest`]), and otherwise the namespace's current
+    /// manifest from the manifest boundary (see [`Self::load_live_basis`]).
+    ///
+    /// Either way, the call returns `namespace_deleted` when the manifest
+    /// that it would return is a tombstone, and `namespace_not_found` when
+    /// that manifest is initializing, so every manifest it returns is active.
+    /// `observed` is an observation that the caller read before the call.
+    /// When the check finds `basis` the newest, `observed` becomes the check
+    /// time of `basis`, and a manifest loaded from the boundary is checked at
+    /// `observed` too.
+    pub async fn refresh_live(
+        &self,
+        mut basis: Held<LoadedManifest>,
+        observed: Observation,
+    ) -> Result<Held<LoadedManifest>> {
+        if self.check_newest(&mut basis, observed.clone()).await? != Checked::Newest {
+            return self.load_live_basis(observed).await;
+        }
+        ensure_namespace_live(&self.namespace_id, basis.manifest().payload().status)?;
+        Ok(basis)
     }
 }
 
