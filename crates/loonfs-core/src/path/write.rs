@@ -1,6 +1,6 @@
 //! Path-oriented writes: the mutation request language, the planner that
-//! compiles it into one commit's operations, and the publish planning
-//! session.
+//! checks each operation and writes its rows into one commit, and the
+//! publish planning session.
 
 mod intent;
 mod plan_access;
@@ -18,5 +18,7 @@ mod publish_path_planning;
 mod session;
 
 pub use intent::{CommitIntent, FilesystemOperation};
-pub(crate) use planner::{commit_fingerprint, merge_fingerprint};
+pub(crate) use plan_create::DeletionInTrash;
+pub(crate) use planner::{commit_fingerprint, merge_fingerprint, NewInodeId};
+pub(crate) use publish_path_planning::{AvailableName, ResolvedBinding, ResolvedTarget};
 pub(crate) use session::PublishPlanningSession;

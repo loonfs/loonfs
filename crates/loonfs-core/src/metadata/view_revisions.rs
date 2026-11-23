@@ -14,9 +14,26 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::{
-    AccessRevisionNo, Attributes, AttributesProjection, AttributesRevisionNo, CommitSeq, InodeId,
-    InodeKind, NamespaceId, RevisionNo,
+    AccessRevisionNo, AttributesProjection, AttributesRevisionNo, CommitSeq, InodeId, InodeKind,
+    NamespaceId, RevisionNo,
 };
+
+/// Returns the attributes revision of an inode whose latest attributes row
+/// is `row`.
+///
+/// An inode with no attributes row is at attributes revision 0.
+pub(crate) fn attributes_revision_no(
+    row: Option<&AttributesRevisionRecord>,
+) -> AttributesRevisionNo {
+    row.map_or(AttributesRevisionNo(0), |row| row.attributes_revision_no)
+}
+
+/// Returns the access revision of an inode whose latest access row is `row`.
+///
+/// An inode with no access row is at access revision 0.
+pub(crate) fn access_revision_no(row: Option<&AccessRevisionRecord>) -> AccessRevisionNo {
+    row.map_or(AccessRevisionNo(0), |row| row.access_revision_no)
+}
 
 /// A chain's head in one view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,19 +257,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// no actor or time. That state is concrete, not a missing result, so
     /// nothing writes a durable row to represent it.
     pub(crate) async fn attributes(&self, inode_id: InodeId) -> Result<AttributesProjection> {
-        Ok(match self.latest_attributes_revision(inode_id).await? {
-            Some(record) => AttributesProjection {
-                attributes_revision_no: record.attributes_revision_no,
-                attributes_updated_by: Some(record.committed_by),
-                attributes_updated_at_ms: Some(record.committed_at_ms),
-                attributes: record.attributes,
-            },
-            None => AttributesProjection {
-                attributes_revision_no: AttributesRevisionNo(0),
-                attributes_updated_by: None,
-                attributes_updated_at_ms: None,
-                attributes: Attributes::default(),
-            },
+        let record = self.latest_attributes_revision(inode_id).await?;
+        Ok(AttributesProjection {
+            attributes_revision_no: attributes_revision_no(record.as_ref()),
+            attributes_updated_by: record.as_ref().map(|record| record.committed_by.clone()),
+            attributes_updated_at_ms: record.as_ref().map(|record| record.committed_at_ms),
+            attributes: record.map(|record| record.attributes).unwrap_or_default(),
         })
     }
 

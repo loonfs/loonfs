@@ -40,6 +40,7 @@ pub(crate) use self::rows::{
 };
 pub(crate) use self::tail_rows::RowOrders;
 pub(crate) use self::view::MetadataView;
+pub(crate) use self::view_revisions::{access_revision_no, attributes_revision_no};
 pub(crate) use self::view_session::{
     preload_inode_groups, LeafRevisionPreload, MetadataViewSession,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,
@@ -50,5 +51,6 @@ pub(crate) use loonfs_types::format::manifest::TrashRecord;
 pub(crate) use self::rows::MetadataStateBuilder;
 
 pub(crate) use visibility::{
-    ancestry_allows_read, visible_child, AncestorWalk, Ancestry, MetadataVisibilityReads,
+    ancestry_allows_read, visible_child, AncestorWalk, MetadataVisibilityReads, MissingPath,
+    VisiblePathWalk,
 };

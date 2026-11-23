@@ -584,29 +584,12 @@ impl ListedChild {
     /// Resolves a scanned child of `directory` to its path.
     pub(super) fn new(directory: &ResolvedVisiblePath, scanned: ScannedChild) -> Self {
         Self {
-            resolved: resolve_visible_child(directory, &scanned.child.binding),
+            resolved: ResolvedVisiblePath::child_of(
+                &directory.absolute_path,
+                &scanned.child.binding,
+            ),
             binding: scanned.child.binding,
             readable: scanned.readable,
         }
-    }
-}
-
-/// Resolves the path of `binding`'s child, a visible child of `directory`.
-pub(super) fn resolve_visible_child(
-    directory: &ResolvedVisiblePath,
-    binding: &DirentryBindingRecord,
-) -> ResolvedVisiblePath {
-    let display_name = binding
-        .display_name()
-        .expect("visible binding should be bound");
-    ResolvedVisiblePath {
-        absolute_path: directory.absolute_path.join(display_name),
-        inode_id: binding.child_inode_id,
-        inode_kind: binding.child_kind,
-        created_by: binding.child_created_by.clone(),
-        created_at_ms: binding.child_created_at_ms,
-        parent_inode_id: Some(binding.parent_inode_id),
-        display_name: display_name.to_string(),
-        binding_version: Some(binding.bind_position),
     }
 }

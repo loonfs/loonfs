@@ -1,60 +1,55 @@
 //! Publish plans that add bytes to the end of a file.
 
 use super::planner::OperationPlanningSession;
-use super::publish_path_planning::{CompiledFilesystemOperation, Target};
-use crate::commit::{AppendedContent, CommitOperation, CommitValidationError};
+use super::preconditions::ExpectedFileState;
+use super::publish_path_planning::Target;
+use crate::commit::AppendedContent;
 use crate::error::{CoreError, Result};
 use crate::metadata::RevisionRecord;
 use crate::storage::tail_content::materialize_content_layout;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalInlineContent;
-use loonfs_types::{AccessRight, Checksum, ContentId, ContentRef, ContentRefKind, RevisionNo};
+use loonfs_types::{AccessRight, Checksum, ContentId, ContentRef, ContentRefKind};
 
-impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
+impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     /// Plans the next revision of a file as its current bytes followed by
     /// `bytes`. The guard is checked first so that a stale caller hears about
     /// the revision, not about the content it would have extended.
     pub(super) async fn plan_append(
-        &self,
+        &mut self,
         target: Target<'_>,
-        expected_revision_no: Option<RevisionNo>,
+        expected: Option<ExpectedFileState>,
         bytes: &[u8],
-    ) -> Result<CompiledFilesystemOperation> {
+    ) -> Result<()> {
         let target = self
-            .view
+            .view()
             .resolve_authorized_target(target, AccessRight::Write.into())
             .await?;
         target.ensure_file()?;
-        let revision = self.view.latest_file_revision(&target).await?;
-        if let Some(expected) =
-            expected_revision_no.filter(|expected| *expected != revision.revision_no)
-        {
-            return Err(CommitValidationError::BaseRevisionMismatch {
-                inode_id: revision.inode_id,
-                expected,
-                actual: Some(revision.revision_no),
-            }
-            .into());
+        let revision = self.view().latest_file_revision(&target).await?;
+        if let Some(expected) = expected {
+            expected.ensure_revision(Some(revision.revision_no))?;
         }
         let appended = self.append_to(&revision, bytes).await?;
-        Ok(CompiledFilesystemOperation {
-            ops: vec![CommitOperation::ReplaceFile {
-                inode_id: revision.inode_id,
-                base_revision_no: revision.revision_no,
-                content_ref: appended.content_ref.clone(),
-                append_offset: Some(revision.content_ref.size_bytes),
-            }],
-            appended: Some(appended),
-        })
+        for piece in &appended.pieces {
+            self.pieces
+                .insert_piece(&appended.content_ref, piece, self.committed_seq);
+        }
+        let content_ref = appended.content_ref.clone();
+        self.commit.record_appended(appended);
+        let binding = self.view().source_binding(target.resolved()).await?;
+        self.commit
+            .replace_file(binding, &content_ref, Some(revision.content_ref.size_bytes))
+            .await
     }
 
     /// Plans `bytes` after `base_row`'s content, as the same chain when this
     /// namespace created the chain and the base is the chain's head, and as a
     /// new chain that shares the base's extents otherwise.
     async fn append_to(&self, base_row: &RevisionRecord, bytes: &[u8]) -> Result<AppendedContent> {
-        let namespace_id = self.view.namespace_id;
+        let namespace_id = self.namespace_id;
         let base = &base_row.content_ref;
-        let head = self.view.metadata.content_head(&base.content_id).await?;
+        let head = self.view().metadata.content_head(&base.content_id).await?;
         let head_size = head
             .as_ref()
             .map_or(base.size_bytes, |head| head.size_bytes);
@@ -99,7 +94,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             let content = self.pieces.content(base);
             let mut layout = materialize_content_layout(
                 self.content_writes,
-                &self.view.metadata,
+                &self.view().metadata,
                 content.as_ref(),
                 base,
             )

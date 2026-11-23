@@ -4,10 +4,10 @@
 use super::state::{Edge, InodeState};
 use crate::error::{CoreError, Result};
 use crate::metadata::RevisionRecord;
+use crate::metadata::{access_revision_no, attributes_revision_no};
 use loonfs_types::{
-    AttributesRevisionNo, BindingVersion, CommitPrecondition, CommitSeq, ContentRef,
-    DeleteDirectoryBehavior, DisplayName, FilesystemOperation, InodeId, InodeKind, NamespaceId,
-    RevisionNo,
+    BindingVersion, CommitPrecondition, CommitSeq, ContentRef, DeleteDirectoryBehavior,
+    DisplayName, FilesystemOperation, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 
 /// What a merge's commit does to one inode.
@@ -293,12 +293,8 @@ pub(super) fn attributes_update(
             .filter(|(key, _)| ours_attributes.get(key).is_none())
             .map(|(key, _)| key.clone())
             .collect(),
-        expected_attributes_revision_no: theirs.map(|theirs| {
-            theirs
-                .attributes
-                .as_ref()
-                .map_or(AttributesRevisionNo(0), |row| row.attributes_revision_no)
-        }),
+        expected_attributes_revision_no: theirs
+            .map(|theirs| attributes_revision_no(theirs.attributes.as_ref())),
     }
 }
 
@@ -315,14 +311,8 @@ pub(super) fn access_update(
         inode_id,
         boundary,
         grants,
-        expected_access_revision_no: theirs.map(|theirs| {
-            theirs
-                .access
-                .as_ref()
-                .map_or(loonfs_types::AccessRevisionNo(0), |row| {
-                    row.access_revision_no
-                })
-        }),
+        expected_access_revision_no: theirs
+            .map(|theirs| access_revision_no(theirs.access.as_ref())),
     }
 }
 

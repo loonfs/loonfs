@@ -2,11 +2,11 @@
 //! order, each seeing the rows earlier candidates would persist.
 
 use super::planned_pieces::{CommitPieces, PlannedPieces};
-use super::planner::{CreatedInodeIds, OperationPlanningSession};
+use super::planner::{CreatedInodeIds, NewInodeId, OperationPlanningSession};
 use super::publish_path_planning::PlanningView;
 use crate::authorize::Authorizer;
 use crate::commit::engine::{CommitCandidate, MergeIntent};
-use crate::commit::{AppendedContent, CommitFingerprint, CommitPlan, CommitValidationSession};
+use crate::commit::{CommitFingerprint, CommitPlan, CommitSession};
 use crate::error::{CoreError, Result};
 use crate::merge::merge_start;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
@@ -15,7 +15,7 @@ use crate::storage::tail_content::{cut_layout, materialize_content_layout, Conte
 use crate::wal::{inline_content_refs, ProjectedContent, ProjectedWalTail};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{next_public_ordinal, CommitSeq, ContentRef, InodeId, NamespaceId};
+use loonfs_types::{next_public_ordinal, CommitSeq, ContentRef, NamespaceId};
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
@@ -77,9 +77,9 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         &self.durable_cache
     }
 
-    /// Checks a candidate's preconditions and plans and validates its
-    /// operations in one pass, against the batch's state before the
-    /// candidate.
+    /// Checks a candidate's preconditions against the batch's state before
+    /// the candidate, and then plans each of its operations. Planning an
+    /// operation writes the operation's rows into the commit.
     pub(crate) async fn prepare_commit(
         &self,
         candidate: &CommitCandidate,
@@ -105,11 +105,11 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
     }
 
     /// Folds an accepted commit into the session so later candidates in the
-    /// same batch plan and validate against it.
+    /// same batch are planned against it.
     pub(crate) fn apply_accepted_commit(&mut self, preview: &WalCommitPayload, plan: &CommitPlan) {
         // A plan belongs to the head it was planned against, and accepting it
         // at another head would apply its deltas to a state they weren't
-        // validated against.
+        // planned against.
         assert_eq!(
             plan.apply_after_seq, self.head.seq,
             "a commit plan should be accepted at the head it was planned against"
@@ -139,10 +139,10 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         }
     }
 
-    /// Plans each operation against the view, validates its compiled
-    /// operations at once, and applies the accepted effects, so later
-    /// operations observe earlier ones. The first failure aborts the request
-    /// and attaches the failing operation's index.
+    /// Plans each operation in order. Each write applies its rows to the
+    /// commit's state at once, so a later operation reads the rows that
+    /// earlier operations wrote. The first operation that fails ends the
+    /// request, and the error includes that operation's index.
     ///
     /// The head is the validated source of the namespace and writer epoch:
     /// `load_publish_metadata_view` fences on epoch equality, and the batch
@@ -166,20 +166,17 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                     head.seq
                 ))
             })?;
-        let mut validation = CommitValidationSession::new(
+        let mut commit = CommitSession::new(
             base_view,
             &self.accepted_rows,
+            &head.namespace_id,
+            candidate,
             committed_seq,
-            &request.commit_id,
-            &request.actor_id,
             self.committed_at_ms,
         );
-        let mut deltas = Vec::new();
         let mut operation_indexes = Vec::new();
-        let mut appended: Vec<AppendedContent> = Vec::new();
         let mut pieces = CommitPieces::new(self);
         let mut next_create_no = NonZeroU32::MIN;
-        let proofs = candidate.proofs_by_reference();
         for value in candidate.inline_content() {
             pieces.insert_piece(
                 value.content_ref(),
@@ -197,12 +194,14 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 .and_then(|merge| merge.temporary_moves.get(&index).copied());
             let created_inode_ids = match candidate.merge() {
                 Some(merge) => {
-                    let assigned = merge.created_inode_ids.get(&index).copied();
-                    if let Some(inode_id) = assigned {
-                        ensure_merged_inode_is_new(&validation.view(), inode_id)
-                            .await
-                            .map_err(|error| error.at_operation(index))?;
-                    }
+                    let assigned = match merge.created_inode_ids.get(&index) {
+                        Some(&inode_id) => Some(
+                            NewInodeId::merged(&commit.view(), inode_id)
+                                .await
+                                .map_err(|error| error.at_operation(index))?,
+                        ),
+                        None => None,
+                    };
                     CreatedInodeIds::Merge(assigned)
                 }
                 None => CreatedInodeIds::Generated {
@@ -210,49 +209,31 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 },
             };
             let mut operation_session = OperationPlanningSession {
-                view: self.planning_view(authorizer, validation.view()),
-                pieces: &pieces,
+                namespace_id: &head.namespace_id,
+                authorizer,
+                commit: &mut commit,
+                pieces: &mut pieces,
                 content_writes: self.content_writes,
                 committed_seq,
                 created_inode_ids,
                 temporary_move,
             };
-            let compiled = operation_session
+            operation_session
                 .plan(operation)
                 .await
                 .map_err(|error| error.at_operation(index))?;
-            if let CreatedInodeIds::Merge(Some(inode_id)) = operation_session.created_inode_ids {
+            if let CreatedInodeIds::Merge(Some(assigned)) = operation_session.created_inode_ids {
                 // Only a bug in the merge's planner assigns an ID to an
                 // operation that creates no inode. A panic would return
                 // `outcome_unknown` and panic again on every retry, so
                 // the merge fails with an error that the caller doesn't retry.
                 return Err(CoreError::InvalidCommitRequest(format!(
-                    "a merge assigned inode `{inode_id}` to an operation that creates no inode"
+                    "a merge assigned inode `{}` to an operation that creates no inode",
+                    assigned.inode_id()
                 ))
                 .at_operation(index));
             }
-            if let Some(value) = &compiled.appended {
-                for piece in &value.pieces {
-                    pieces.insert_piece(&value.content_ref, piece, committed_seq);
-                }
-            }
-            appended.extend(compiled.appended);
-            let operation_deltas = validation
-                .validate(&compiled.ops, |content_ref| {
-                    if let Some(value) = appended
-                        .iter()
-                        .find(|value| value.content_ref == *content_ref)
-                    {
-                        return value.layout.clone();
-                    }
-                    proofs
-                        .get(content_ref)
-                        .and_then(|proof| proof.revision_layout(&head.namespace_id))
-                })
-                .await
-                .map_err(|error| error.at_operation(index))?;
-            operation_indexes.extend(std::iter::repeat_n(index, operation_deltas.len()));
-            deltas.extend(operation_deltas);
+            operation_indexes.resize(commit.deltas().len(), index);
         }
 
         let mut plan = CommitPlan {
@@ -266,15 +247,16 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             apply_after_seq: head.seq,
             assigned_seq: committed_seq,
             committed_at_ms: self.committed_at_ms,
-            deltas,
-            appended: appended
+            deltas: commit.take_deltas(),
+            appended: commit
+                .take_appended()
                 .into_iter()
                 .flat_map(|value| value.pieces)
                 .collect(),
             inline_content: candidate.inline_content().to_vec(),
         };
         self.carry_revision_layouts(
-            &validation.view(),
+            &commit.view(),
             pre_state,
             &pieces,
             candidate,
@@ -381,27 +363,6 @@ async fn ensure_merge_is_admissible<S: ObjectStore + ?Sized>(
             expected_after_seq,
             actual_after_seq: merge.record.source_after_seq,
         });
-    }
-    Ok(())
-}
-
-/// Requires an inode that a merge creates under the fork's ID to be absent
-/// from `view`, which includes the merge's earlier operations, so an ID
-/// assigned to two creates fails at the second.
-///
-/// An inode row is immutable and unique, so a second row for the same ID
-/// would corrupt the namespace. The ID is present only if the merge's planner
-/// has a bug: it mistook an inode that this namespace already has (for
-/// example, one that an earlier merge created) for a new one, or it assigned
-/// one ID to two creates.
-async fn ensure_merged_inode_is_new<S: ObjectStore + ?Sized>(
-    view: &MetadataView<'_, '_, S>,
-    inode_id: InodeId,
-) -> Result<()> {
-    if view.inode_at_seq(inode_id).await?.is_some() {
-        return Err(CoreError::InvalidCommitRequest(format!(
-            "a merge creates inode `{inode_id}`, which already exists"
-        )));
     }
     Ok(())
 }

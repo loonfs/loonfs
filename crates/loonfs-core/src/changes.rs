@@ -352,14 +352,14 @@ fn committed_change_with_events(
 /// Maps one commit's ordered WAL deltas to semantic filesystem events, one
 /// per internal operation.
 ///
-/// One request operation can compile into several internal operations (such as
+/// One request operation can consist of several internal operations (such as
 /// creating missing parent directories, replacing a file by moving over it, or
 /// copying attributes onto a new inode), and each of those gets its own
 /// event. The deltas include the request-operation index they came from, so the
 /// events stay in request order whatever their count.
 ///
-/// Validation emits one fixed delta pattern per internal operation, so a
-/// stored commit with an unmatched pattern returns `namespace_corrupt`.
+/// Each internal operation writes one fixed pattern of deltas, so a stored
+/// commit with an unmatched pattern returns `namespace_corrupt`.
 ///
 /// `committed_seq` is also the bind sequence for bindings created by this
 /// commit.

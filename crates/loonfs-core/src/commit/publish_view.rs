@@ -146,8 +146,8 @@ pub struct WriterPosition {
 }
 
 impl WriterPosition {
-    /// Returns the position's retention floor, which restore validation and
-    /// the merge floor rule read: the basis manifest's floor, raised by the
+    /// Returns the position's retention floor, which the checks of a restore
+    /// and the merge floor rule read: the basis manifest's floor, raised by the
     /// floor objects in the position's WAL tail.
     pub fn retention_floor_seq(&self) -> CommitSeq {
         self.read_basis.head.retention_floor_seq

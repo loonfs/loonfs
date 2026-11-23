@@ -9,7 +9,9 @@ use super::{
     AccessRevisionRecord, DirentryBindingRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
 };
 use futures::FutureExt;
-use loonfs_types::{AbsolutePath, CommitSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
+use loonfs_types::{
+    AbsolutePath, CommitSeq, DisplayName, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
+};
 use std::collections::BTreeSet;
 use std::future::Future;
 
@@ -412,8 +414,8 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
 
 /// For a page or walk that already checked its parent is a visible directory, the
 /// newest slot binding at the read sequence is equivalent to [`visible_child`]
-/// without an inode lookup: commit validation creates the child's inode row
-/// in the same commit as its first binding, and retention removes an inode row
+/// without an inode lookup: a create writes the child's inode row in the
+/// same commit as its first binding, and retention removes an inode row
 /// only when an expired deletion hides the inode, which no visible directory
 /// binds. A bound binding under a visible directory therefore implies the
 /// child inode exists at that sequence, leaving the child's ancestry as the
@@ -441,13 +443,66 @@ pub(crate) async fn visible_page_child<R: MetadataVisibilityReads>(
     Ok(Some(direntry))
 }
 
-/// Resolves `absolute_path` component by component through visible
-/// directories and visible child bindings, starting at the canonical root
-/// inode. Each component folds into its name key.
-pub(crate) async fn resolve_visible_path<R>(
+/// How far [`walk_visible_path`] got down a path.
+pub(crate) enum VisiblePathWalk {
+    /// Every component of the path is visible.
+    Found(ResolvedVisiblePath),
+    /// A component of the path has no visible child under the directory above
+    /// it.
+    Missing(MissingPath),
+}
+
+/// The components of a path that [`walk_visible_path`] found missing, below
+/// the deepest directory on the path that is visible.
+///
+/// Only the walk makes one, so the first missing component had no visible
+/// child under that directory in the state that the walk read.
+pub(crate) struct MissingPath {
+    /// The deepest directory on the path that is visible, which is the
+    /// directory above the first missing component.
+    deepest_existing: InodeId,
+    /// The path of that directory, as the namespace stores it.
+    deepest_path: AbsolutePath,
+    /// The path's components from the first missing one to the last one, as
+    /// the path spells them.
+    missing: Vec<DisplayName>,
+}
+
+impl MissingPath {
+    /// Returns the deepest directory on the path that is visible.
+    pub(crate) fn deepest_existing(&self) -> InodeId {
+        self.deepest_existing
+    }
+
+    /// Returns the path's components from the first missing one to the last
+    /// one, as the path spells them.
+    pub(crate) fn into_missing(self) -> Vec<DisplayName> {
+        self.missing
+    }
+}
+
+impl VisiblePathWalk {
+    /// Returns the path's inode, or [`VisiblePathError::PathNotFound`] for
+    /// the first component that has no visible child.
+    pub(crate) fn into_resolved(self) -> Result<ResolvedVisiblePath, VisiblePathError> {
+        match self {
+            Self::Found(resolved) => Ok(resolved),
+            Self::Missing(missing) => Err(VisiblePathError::PathNotFound {
+                absolute_path: missing.deepest_path.join(&missing.missing[0]).to_string(),
+            }),
+        }
+    }
+}
+
+/// Walks `absolute_path` component by component through visible directories
+/// and visible child bindings, starting at the canonical root inode, until
+/// it reaches the path's inode or a component that has no visible child.
+///
+/// Each component folds into its name key.
+pub(crate) async fn walk_visible_path<R>(
     reads: &mut R,
     absolute_path: &AbsolutePath,
-) -> Result<ResolvedVisiblePath, R::Error>
+) -> Result<VisiblePathWalk, R::Error>
 where
     R: MetadataVisibilityReads,
     R::Error: From<VisiblePathError>,
@@ -458,7 +513,7 @@ where
             .visible_inode(root_inode_id)
             .await?
             .ok_or(VisiblePathError::RootMissing)?;
-        return Ok(ResolvedVisiblePath {
+        return Ok(VisiblePathWalk::Found(ResolvedVisiblePath {
             absolute_path: AbsolutePath::root(),
             inode_id: root_inode_id,
             inode_kind: root.inode_kind,
@@ -467,63 +522,52 @@ where
             parent_inode_id: None,
             display_name: String::new(),
             binding_version: None,
-        });
+        }));
     }
 
-    let mut last: Option<DirentryBindingRecord> = None;
-    let mut current_absolute_path = AbsolutePath::root();
+    let root_path = AbsolutePath::root();
+    let mut last: Option<ResolvedVisiblePath> = None;
 
-    for component in absolute_path.components() {
-        let (parent_inode_id, parent_kind) = match &last {
-            None => (root_inode_id, InodeKind::Directory),
-            Some(binding) => (binding.child_inode_id, binding.child_kind),
+    let components = absolute_path.components();
+    for (depth, component) in components.iter().enumerate() {
+        let (parent_path, parent_inode_id, parent_kind) = match &last {
+            None => (&root_path, root_inode_id, InodeKind::Directory),
+            Some(parent) => (&parent.absolute_path, parent.inode_id, parent.inode_kind),
         };
         if parent_kind != InodeKind::Directory {
             return Err(VisiblePathError::PathComponentNotDirectory {
-                absolute_path: current_absolute_path.to_string(),
+                absolute_path: parent_path.to_string(),
                 inode_id: parent_inode_id,
                 inode_kind: parent_kind,
             }
             .into());
         }
 
-        let display_name = component.to_display_name();
-        let not_found = || VisiblePathError::PathNotFound {
-            absolute_path: current_absolute_path.join(&display_name).to_string(),
-        };
-        let name_key = NameKey::for_display_name(&display_name);
-        let direntry = reads
+        let name_key = NameKey::for_display_name(&component.to_display_name());
+        let direntry = match reads
             .active_child_binding(parent_inode_id, &name_key)
             .await?
-            .ok_or_else(not_found)?;
-        let direntry = visible_page_child(reads, direntry)
-            .await?
-            .ok_or_else(not_found)?;
+        {
+            Some(direntry) => visible_page_child(reads, direntry).await?,
+            None => None,
+        };
+        let Some(direntry) = direntry else {
+            return Ok(VisiblePathWalk::Missing(MissingPath {
+                deepest_existing: parent_inode_id,
+                deepest_path: parent_path.clone(),
+                missing: components[depth..]
+                    .iter()
+                    .map(|component| component.to_display_name())
+                    .collect(),
+            }));
+        };
 
-        current_absolute_path = current_absolute_path.join(
-            direntry
-                .display_name()
-                .expect("visible binding should be bound"),
-        );
-        last = Some(direntry);
+        last = Some(ResolvedVisiblePath::child_of(parent_path, &direntry));
     }
 
-    let last = last.expect("a non-root path should have a component");
-    let display_name = last
-        .display_name()
-        .expect("visible binding should be bound")
-        .to_string();
-    let binding_version = Some(last.bind_position);
-    Ok(ResolvedVisiblePath {
-        absolute_path: current_absolute_path,
-        inode_id: last.child_inode_id,
-        inode_kind: last.child_kind,
-        created_by: last.child_created_by,
-        created_at_ms: last.child_created_at_ms,
-        parent_inode_id: Some(last.parent_inode_id),
-        display_name,
-        binding_version,
-    })
+    Ok(VisiblePathWalk::Found(
+        last.expect("a non-root path should have a component"),
+    ))
 }
 
 /// Drives a visibility future built over in-memory reads to completion
@@ -531,8 +575,7 @@ where
 ///
 /// Every [`MetadataVisibilityReads`] method on the in-memory implementors
 /// returns without awaiting, so the composed future finishes on its first
-/// poll; `now_or_never` performs exactly that single poll (the same pattern
-/// commit validation uses to stay synchronous over its in-memory preview).
+/// poll, and `now_or_never` performs exactly that single poll.
 pub(crate) fn resolve_in_memory_read<T>(future: impl Future<Output = T>) -> T {
     future
         .now_or_never()

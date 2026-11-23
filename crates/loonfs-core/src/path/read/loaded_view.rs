@@ -255,7 +255,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 mod tests {
     use super::*;
     use crate::commit::engine::CommitCandidate;
-    use crate::path::read::listing::resolve_visible_child;
+    use crate::metadata::ResolvedVisiblePath;
     use crate::path::write::{CommitIntent, FilesystemOperation};
     use crate::test_support::WriterAt;
     use bytes::Bytes;
@@ -542,7 +542,7 @@ mod tests {
                 let entry = view
                     .build_authoritative_path_entry_with_session(
                         &mut session,
-                        &resolve_visible_child(&resolved, &child.binding),
+                        &ResolvedVisiblePath::child_of(&resolved.absolute_path, &child.binding),
                         projection,
                     )
                     .await

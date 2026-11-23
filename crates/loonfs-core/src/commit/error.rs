@@ -1,82 +1,15 @@
-//! [`CommitValidationError`]: every way a commit request can fail
-//! validation.
+//! [`CommitValidationError`]: errors that the checks of a commit's operations
+//! return, which a client sees after the prefix `commit validation failed:`.
 
 use loonfs_types::{
-    AccessRevisionNo, AttributesRevisionNo, CommitSeq, ErrorCode, ErrorDetails, InodeId, InodeKind,
-    NameKey, RevisionNo,
+    AccessRevisionNo, AttributesRevisionNo, CommitSeq, ErrorCode, ErrorDetails, InodeId, RevisionNo,
 };
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CommitOperand {
-    CreateParent,
-    RenameSource,
-    RenameTargetParent,
-    ReplaceTarget,
-    RestoreTarget,
-    DeleteTarget,
-    SubtreeRoot,
-    AttributeTarget,
-    AccessTarget,
-    RestoreDeletedTarget,
-    EmptyDirectoryTarget,
-}
-
-impl fmt::Display for CommitOperand {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::CreateParent => "create parent",
-            Self::RenameSource => "rename source",
-            Self::RenameTargetParent => "rename target parent",
-            Self::ReplaceTarget => "replace target",
-            Self::RestoreTarget => "restore target",
-            Self::DeleteTarget => "delete target",
-            Self::SubtreeRoot => "delete subtree root",
-            Self::AttributeTarget => "attribute update target",
-            Self::AccessTarget => "access update target",
-            Self::RestoreDeletedTarget => "restore target",
-            Self::EmptyDirectoryTarget => "empty directory target",
-        })
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum CommitValidationError {
-    #[error("{operand} inode `{inode_id}` is missing")]
-    InodeMissing {
-        operand: CommitOperand,
-        inode_id: InodeId,
-    },
-    #[error(
-        "{operand} inode `{inode_id}` has the wrong kind: expected `{expected}`, found `{actual}`"
-    )]
-    InodeWrongKind {
-        operand: CommitOperand,
-        inode_id: InodeId,
-        expected: InodeKind,
-        actual: InodeKind,
-    },
-    #[error(
-        "{operand} name `{name_key}` under parent inode `{parent_inode_id}` is taken by inode `{child_inode_id}`"
-    )]
-    NameTaken {
-        operand: CommitOperand,
-        parent_inode_id: InodeId,
-        name_key: NameKey,
-        child_inode_id: InodeId,
-    },
-    #[error(
-        "{operand} inode `{inode_id}` conflicts with subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
-    )]
-    TargetUnderSubtreeTombstone {
-        operand: CommitOperand,
-        inode_id: InodeId,
-        root_inode_id: InodeId,
-        tombstone_seq: CommitSeq,
-    },
     #[error(
         "base revision mismatch for inode `{inode_id}`: {}",
         revision_mismatch(.expected, .actual)
@@ -85,13 +18,6 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         expected: RevisionNo,
         actual: Option<RevisionNo>,
-    },
-    #[error(
-        "binding precondition failed: name `{name_key}` is not bound under parent inode `{parent_inode_id}`"
-    )]
-    BindingPreconditionMissing {
-        parent_inode_id: InodeId,
-        name_key: NameKey,
     },
     #[error(
         "binding precondition failed: {target} {}", binding_mismatch(.expected_inode_id, .actual_inode_id)
@@ -177,17 +103,12 @@ impl CommitValidationError {
         match self {
             Self::BaseRevisionMismatch { .. } => ErrorCode::StaleRevision,
             Self::RestoreRevisionSourceRevisionMissing { .. } => ErrorCode::RevisionNotFound,
-            Self::TargetUnderSubtreeTombstone { .. } => ErrorCode::NamespaceCorrupt,
             Self::UpdateAttributesBaseRevisionMismatch { .. } => ErrorCode::StaleAttributes,
             Self::UpdateAttributesRevisionOverflow { .. } => ErrorCode::ServerError,
             Self::UpdateAccessBaseRevisionMismatch { .. } => ErrorCode::StaleAccess,
             Self::UpdateAccessRevisionOverflow { .. } => ErrorCode::ServerError,
-            Self::NameTaken { .. }
-            | Self::BindingPreconditionMissing { .. }
-            | Self::BindingPreconditionMismatch { .. } => ErrorCode::PathConflict,
-            Self::InodeWrongKind { .. } => ErrorCode::WrongKind,
+            Self::BindingPreconditionMismatch { .. } => ErrorCode::PathConflict,
             Self::DirectoryNotEmpty { .. } => ErrorCode::DirectoryNotEmpty,
-            Self::InodeMissing { .. } => ErrorCode::PathNotFound,
             Self::RestoreDeletedTargetNotDeleted { .. }
             | Self::RestoreDeletedTargetsCurrentCommit { .. }
             | Self::RestoreDeletedSequenceMismatch { .. } => ErrorCode::NotDeleted,
@@ -219,11 +140,7 @@ impl CommitValidationError {
                 actual_revision_no: *actual,
                 ..ErrorDetails::default()
             }),
-            Self::InodeMissing {
-                operand: CommitOperand::RestoreDeletedTarget,
-                inode_id,
-            }
-            | Self::RestoreDeletedTargetNotDeleted { inode_id }
+            Self::RestoreDeletedTargetNotDeleted { inode_id }
             | Self::RestoreDeletedTargetsCurrentCommit { inode_id } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
                 ..ErrorDetails::default()
@@ -256,13 +173,6 @@ impl CommitValidationError {
                 inode_id: Some(*inode_id),
                 expected_access_revision_no: Some(*expected),
                 actual_access_revision_no: *actual,
-                ..ErrorDetails::default()
-            }),
-            Self::InodeMissing {
-                operand: CommitOperand::AttributeTarget | CommitOperand::AccessTarget,
-                inode_id,
-            } => Some(ErrorDetails {
-                inode_id: Some(*inode_id),
                 ..ErrorDetails::default()
             }),
             _ => None,

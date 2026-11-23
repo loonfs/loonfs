@@ -1154,26 +1154,29 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
         .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect("snapshot");
 
-    // Without a cache, every publish view re-fetches the segment blocks
-    // its validation walks need.
+    // Without a cache, every publish view fetches again the segment blocks
+    // that resolving `/docs` reads.
     let mut uncached = NamespaceCommitEngine::new(
         crate::test_support::namespace_store(&store, &namespace_id),
         writer.writer_id.clone(),
     );
     store.reset();
     uncached
-        .publish_batch(vec![create_dir("uncached-a", "alpha")], &writer.clock())
+        .publish_batch(
+            vec![create_dir("uncached-a", "docs/alpha")],
+            &writer.clock(),
+        )
         .await
         .results
         .remove(0)
         .expect("uncached publish a");
     assert!(
         store.count(OperationSelector::Read) > 0,
-        "publish validation should read segment blocks"
+        "planning a create under `/docs` should read segment blocks"
     );
     store.reset();
     uncached
-        .publish_batch(vec![create_dir("uncached-b", "beta")], &writer.clock())
+        .publish_batch(vec![create_dir("uncached-b", "docs/beta")], &writer.clock())
         .await
         .results
         .remove(0)
@@ -1193,7 +1196,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
     );
     store.reset();
     cached
-        .publish_batch(vec![create_dir("cached-a", "gamma")], &writer.clock())
+        .publish_batch(vec![create_dir("cached-a", "docs/gamma")], &writer.clock())
         .await
         .results
         .remove(0)
@@ -1204,7 +1207,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
     );
     store.reset();
     cached
-        .publish_batch(vec![create_dir("cached-b", "delta")], &writer.clock())
+        .publish_batch(vec![create_dir("cached-b", "docs/delta")], &writer.clock())
         .await
         .results
         .remove(0)

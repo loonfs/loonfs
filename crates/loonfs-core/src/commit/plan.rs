@@ -1,15 +1,11 @@
-//! The plan of one commit: its validated deltas and what its WAL record
+//! The plan of one commit: its deltas and what its WAL record
 //! needs for publication.
 
 use super::CommitFingerprint;
 use crate::storage::inline_content::InlineContent;
 
-use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::format::wal::{MergeRecord, WalCommitDelta, WalInlineContent};
-use loonfs_types::{
-    ActorId, CommitId, CommitSeq, ContentRef, DisplayName, InodeId, NameKey, NamespaceId,
-    WriterEpoch,
-};
+use loonfs_types::{ActorId, CommitId, CommitSeq, ContentRef, NamespaceId, WriterEpoch};
 
 /// The bytes one append adds, the reference its revision names, and what
 /// the commit records about that reference's bytes.
@@ -20,9 +16,9 @@ pub(crate) struct AppendedContent {
     pub(crate) pieces: Vec<WalInlineContent>,
 }
 
-/// One planned and validated commit, ready for its WAL record.
+/// One planned commit, ready for its WAL record.
 ///
-/// The request's identity moves in here when validation succeeds, so there
+/// The request's identity moves in here when planning succeeds, so there
 /// is no second copy that would need an equality check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommitPlan {
@@ -39,14 +35,4 @@ pub(crate) struct CommitPlan {
     pub(crate) deltas: Vec<WalCommitDelta>,
     pub(crate) appended: Vec<WalInlineContent>,
     pub(crate) inline_content: Vec<InlineContent>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedBinding {
-    pub parent_inode_id: InodeId,
-    pub name_key: NameKey,
-    pub display_name: DisplayName,
-    pub child_inode_id: InodeId,
-    /// Position of the bind event that established the binding.
-    pub bind_position: DeltaPosition,
 }

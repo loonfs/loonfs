@@ -1,17 +1,18 @@
-//! Commit fingerprinting and the planning of one filesystem operation into
-//! the commit operations it needs.
+//! Commit fingerprinting and the planning of one filesystem operation, which
+//! calls the commit's writes for its rows.
 
 use super::intent::{CommitIntent, FilesystemOperation};
 use super::planned_pieces::CommitPieces;
 use super::preconditions::{
-    validate_expected_file_state, validate_revision_precondition, PreconditionFields,
+    validate_expected_file_state, validate_revision_precondition, ExpectedFileState,
+    PreconditionFields,
 };
-use super::publish_path_planning::{
-    CompiledFilesystemOperation, Destination, PlanningView, Target,
-};
+use super::publish_path_planning::{Destination, PlanningView, Target};
+use crate::authorize::Authorizer;
 use crate::commit::engine::TemporaryMove;
-use crate::commit::{CommitFingerprint, NewChild};
+use crate::commit::{CommitFingerprint, CommitSession, NewChild};
 use crate::error::{CoreError, Result};
+use crate::metadata::MetadataView;
 use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
@@ -58,12 +59,15 @@ pub(crate) fn merge_fingerprint(
     .fingerprint()
 }
 
-/// The planning of one operation: the planning view, the commit's pieces,
-/// where content writes go, the commit's sequence, and where the IDs of the
-/// inodes it creates come from.
-pub(super) struct OperationPlanningSession<'p, S: ObjectStore + ?Sized> {
-    pub(super) view: PlanningView<'p, S>,
-    pub(super) pieces: &'p CommitPieces<'p, S>,
+/// The planning of one operation: the namespace, the request's authorizer,
+/// the commit's state, which the operation's writes change, the commit's
+/// pieces, where content writes go, the commit's sequence, and where the IDs
+/// of the inodes it creates come from.
+pub(super) struct OperationPlanningSession<'p, 'c, S: ObjectStore + ?Sized> {
+    pub(super) namespace_id: &'p NamespaceId,
+    pub(super) authorizer: Authorizer<'p>,
+    pub(super) commit: &'p mut CommitSession<'c, S>,
+    pub(super) pieces: &'p mut CommitPieces<'c, S>,
     pub(super) content_writes: ContentWrites<'p, S>,
     /// The sequence that the commit is assigned.
     pub(super) committed_seq: CommitSeq,
@@ -71,6 +75,44 @@ pub(super) struct OperationPlanningSession<'p, S: ObjectStore + ?Sized> {
     /// The leg of a merge's move through a temporary name that the operation
     /// is, if it's one.
     pub(super) temporary_move: Option<TemporaryMove>,
+}
+
+/// The ID of an inode that a create writes.
+///
+/// Only [`OperationPlanningSession::next_inode_id`] and [`NewInodeId::merged`]
+/// make one, so the ID is new to the namespace. A generated ID includes the
+/// low 32 bits of the commit's sequence, the create's number within the
+/// commit and 64 random bits, so it differs from every existing inode's ID,
+/// and [`NewInodeId::merged`] checks that no inode has a merge's assigned ID.
+pub(crate) struct NewInodeId(InodeId);
+
+impl NewInodeId {
+    /// Returns `inode_id`, the ID that a merge assigns to an inode that it
+    /// creates, after checking that no inode in `view` has it.
+    ///
+    /// `view` includes the merge's earlier operations, so an ID assigned to
+    /// two creates fails at the second.
+    ///
+    /// An inode row is immutable and unique, so a second row for the same ID
+    /// would corrupt the namespace. The ID is present only if the merge's
+    /// planner has a bug: it mistook an inode that this namespace already has
+    /// (for example, one that an earlier merge created) for a new one, or it
+    /// assigned one ID to two creates.
+    pub(super) async fn merged<S: ObjectStore + ?Sized>(
+        view: &MetadataView<'_, '_, S>,
+        inode_id: InodeId,
+    ) -> Result<Self> {
+        if view.inode_at_seq(inode_id).await?.is_some() {
+            return Err(CoreError::InvalidCommitRequest(format!(
+                "a merge creates inode `{inode_id}`, which already exists"
+            )));
+        }
+        Ok(Self(inode_id))
+    }
+
+    pub(crate) fn inode_id(&self) -> InodeId {
+        self.0
+    }
 }
 
 /// Where the IDs of the inodes that one operation creates come from.
@@ -81,10 +123,20 @@ pub(super) enum CreatedInodeIds<'p> {
     /// The ID that the inode has in the fork, for a merge's operation, which
     /// creates at most one inode. The operation takes the ID when it creates
     /// the inode.
-    Merge(Option<InodeId>),
+    Merge(Option<NewInodeId>),
 }
 
-impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
+impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
+    /// Returns what the operation reads and authorizes against: the
+    /// metadata as the commit's writes so far have left it.
+    pub(super) fn view(&self) -> PlanningView<'_, S> {
+        PlanningView {
+            namespace_id: self.namespace_id,
+            authorizer: self.authorizer,
+            metadata: self.commit.view(),
+        }
+    }
+
     /// Returns the ID of the next inode that the commit creates.
     ///
     /// A merge whose operation creates an inode without an assigned ID, or
@@ -92,14 +144,14 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
     /// the merge's planner causes that. A panic would return
     /// `outcome_unknown` and panic again on every retry, so the merge
     /// fails with an error that the caller doesn't retry.
-    pub(super) fn next_inode_id(&mut self) -> Result<InodeId> {
+    pub(super) fn next_inode_id(&mut self) -> Result<NewInodeId> {
         match &mut self.created_inode_ids {
             CreatedInodeIds::Generated { next_create_no } => {
                 let create_no = **next_create_no;
                 **next_create_no = create_no.checked_add(1).expect(
                     "a commit should create fewer inodes than its 32-bit delta positions allow",
                 );
-                Ok(InodeId::generate(self.committed_seq, create_no))
+                Ok(NewInodeId(InodeId::generate(self.committed_seq, create_no)))
             }
             CreatedInodeIds::Merge(assigned) => assigned.take().ok_or_else(|| {
                 CoreError::InvalidCommitRequest(
@@ -110,11 +162,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
     }
 
     /// Plans `operation`, mapping its path or inode address onto the one
-    /// planner for its kind.
-    pub(super) async fn plan(
-        &mut self,
-        operation: &FilesystemOperation,
-    ) -> Result<CompiledFilesystemOperation> {
+    /// planner for its kind, which calls the commit's writes for its rows.
+    pub(super) async fn plan(&mut self, operation: &FilesystemOperation) -> Result<()> {
         use FilesystemOperation as Op;
         match operation {
             Op::CreateDirectory { path, parents } => {
@@ -159,7 +208,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 expected_revision_no,
             } => {
                 let content_ref = prepared_reference(content)?.clone();
-                self.plan_put_file_revision_by_inode(*inode_id, content_ref, *expected_revision_no)
+                let expected = ExpectedFileState::new(*inode_id, Some(*expected_revision_no));
+                self.plan_put_file_revision_by_inode(*inode_id, content_ref, expected)
                     .await
             }
             Op::AppendFile {
@@ -175,9 +225,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                     PreconditionFields::Put,
                 )?;
                 let target = Target::path(path, expected.map(|expected| expected.inode_id));
-                let expected_revision_no = expected.and_then(|expected| expected.revision_no);
-                self.plan_append(target, expected_revision_no, inline_content)
-                    .await
+                self.plan_append(target, expected, inline_content).await
             }
             Op::AppendFileByInode {
                 inode_id,
@@ -185,7 +233,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 expected_revision_no,
             } => {
                 let target = Target::Inode(*inode_id);
-                self.plan_append(target, *expected_revision_no, inline_content)
+                let expected = ExpectedFileState::new(*inode_id, *expected_revision_no);
+                self.plan_append(target, Some(expected), inline_content)
                     .await
             }
             Op::DeletePath {
@@ -346,7 +395,8 @@ fn prepared_reference(content: &FileContent) -> Result<&loonfs_types::ContentRef
 mod tests {
     use super::*;
     use crate::commit::engine::CommitCandidate;
-    use crate::commit::CommitPlan;
+    use crate::commit::{CommitPlan, CommitValidationError};
+    use crate::error::ErrorCode;
     use crate::path::write::PublishPlanningSession;
     use crate::test_support::WriterAt;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -354,8 +404,9 @@ mod tests {
     use loonfs_types::FilesystemEvent;
     use loonfs_types::{
         AbsolutePath, AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue,
-        CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
-        DestinationPrecondition, PrincipalId, RevisionNo, ROOT_INODE_ID,
+        AttributesRevisionNo, CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
+        DestinationPrecondition, DisplayName, InodeKind, NameKey, PrincipalId, RevisionNo,
+        ROOT_INODE_ID,
     };
     use std::assert_matches;
 
@@ -464,6 +515,33 @@ mod tests {
                 loonfs_test_support::ids::commit_fingerprint("test"),
             )
             .await
+    }
+
+    /// Returns the error of the operation that `error` reports as failed.
+    fn failed_operation_error(error: CoreError) -> CoreError {
+        match error {
+            CoreError::FailedOperation {
+                operation_index: 0,
+                error,
+            } => *error,
+            other => panic!("expected the first operation to fail, got {other:?}"),
+        }
+    }
+
+    fn set_owner_by_inode(
+        inode_id: InodeId,
+        owner: &str,
+        expected: Option<AttributesRevisionNo>,
+    ) -> FilesystemOperation {
+        FilesystemOperation::UpdateAttributesByInode {
+            inode_id,
+            set: BTreeMap::from([(
+                AttributeKey::parse("owner").expect("attribute key"),
+                AttributeValue::parse(owner).expect("attribute value"),
+            )]),
+            remove: Vec::new(),
+            expected_attributes_revision_no: expected,
+        }
     }
 
     async fn plan_against_current_state(
@@ -927,5 +1005,484 @@ mod tests {
                 .collect();
             assert_eq!(kinds, expected, "{label}");
         }
+    }
+
+    #[tokio::test]
+    async fn stale_revision_precondition_is_rejected() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+        for body in ["content-1", "content-2"] {
+            fixture
+                .put_file(
+                    "/docs/readme.txt",
+                    body.as_bytes(),
+                    DestinationBehavior::Replace,
+                    None,
+                )
+                .await
+                .expect("seed a revision");
+        }
+        let file =
+            crate::test_support::visible_inode_id(&store, &namespace_id, "/docs/readme.txt").await;
+        let replacement = crate::test_support::namespace_store(&store, &namespace_id)
+            .store_bytes_as_content(b"content-3")
+            .await
+            .expect("stage")
+            .into_content_ref();
+
+        let error = try_plan_against_current_state(
+            &store,
+            &namespace_id,
+            &request(FilesystemOperation::PutFileRevisionByInode {
+                inode_id: file,
+                content: loonfs_types::FileContent::Ref(replacement),
+                expected_revision_no: RevisionNo(1),
+            }),
+        )
+        .await
+        .expect_err("the expected revision is stale");
+        assert_eq!(error.code(), ErrorCode::StaleRevision);
+        assert_matches!(
+            failed_operation_error(error),
+            CoreError::CommitValidation(CommitValidationError::BaseRevisionMismatch {
+                inode_id,
+                expected: RevisionNo(1),
+                actual: Some(RevisionNo(2)),
+            }) if inode_id == file
+        );
+    }
+
+    /// A revision restore copies the revision it identifies, which an earlier
+    /// operation of the same commit may have written, and fails when the file
+    /// has no such revision.
+    #[tokio::test]
+    async fn a_revision_restore_copies_a_revision_that_the_same_commit_wrote() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                "/docs/readme.txt",
+                b"content-1",
+                DestinationBehavior::Replace,
+                None,
+            )
+            .await
+            .expect("seed a revision");
+        let file =
+            crate::test_support::visible_inode_id(&store, &namespace_id, "/docs/readme.txt").await;
+        let replacement = crate::test_support::namespace_store(&store, &namespace_id)
+            .store_bytes_as_content(b"content-2")
+            .await
+            .expect("stage")
+            .into_content_ref();
+        let restore = |source_revision_no| FilesystemOperation::RestoreRevisionByInode {
+            inode_id: file,
+            source_revision_no: RevisionNo(source_revision_no),
+        };
+
+        // The put writes revision 2, the first restore copies it as revision
+        // 3, and the second restore copies revision 3 as revision 4.
+        let planned = plan_against_current_state(
+            &store,
+            &namespace_id,
+            &CommitIntent {
+                preconditions: Vec::new(),
+                commit_id: CommitId::parse("restore-request").expect("valid commit id"),
+                actor_id: loonfs_test_support::test_actor(),
+                subject: None,
+                message: None,
+                operations: vec![
+                    FilesystemOperation::PutFileRevisionByInode {
+                        inode_id: file,
+                        content: loonfs_types::FileContent::Ref(replacement.clone()),
+                        expected_revision_no: RevisionNo(1),
+                    },
+                    restore(2),
+                    restore(3),
+                ],
+            },
+        )
+        .await;
+        let copied: Vec<_> = planned
+            .deltas
+            .iter()
+            .map(|delta| match &delta.delta {
+                WalDelta::AppendFileRevision {
+                    revision_no,
+                    content_ref,
+                    ..
+                } => (*revision_no, content_ref),
+                other => panic!("expected a revision delta, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            copied,
+            [2, 3, 4].map(|revision_no| (RevisionNo(revision_no), &replacement))
+        );
+
+        let error = try_plan_against_current_state(&store, &namespace_id, &request(restore(99)))
+            .await
+            .expect_err("the file has no revision 99");
+        assert_eq!(error.code(), ErrorCode::RevisionNotFound);
+        assert_matches!(
+            failed_operation_error(error),
+            CoreError::CommitValidation(
+                CommitValidationError::RestoreRevisionSourceRevisionMissing {
+                    inode_id,
+                    source_revision_no: RevisionNo(99),
+                }
+            ) if inode_id == file
+        );
+    }
+
+    /// A revision restore of a file whose current revision is the largest
+    /// public integer has no next revision to write.
+    #[tokio::test]
+    async fn a_revision_restore_past_the_largest_revision_number_is_rejected() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                "/file.txt",
+                b"content-1",
+                DestinationBehavior::Replace,
+                None,
+            )
+            .await
+            .expect("seed a revision");
+        let file = crate::test_support::visible_inode_id(&store, &namespace_id, "/file.txt").await;
+        let maximum = RevisionNo(loonfs_types::MAX_PUBLIC_INTEGER);
+        let content_id = loonfs_types::ContentId::generate();
+        let checksum = loonfs_types::Checksum::crc64nvme(b"content-max");
+        let layout = loonfs_types::ContentLayout {
+            creator_namespace_id: namespace_id.clone(),
+            extents: vec![loonfs_types::ContentExtent {
+                content_id: content_id.clone(),
+                object: loonfs_types::ExtentObject::Whole,
+                object_checksum: checksum.clone(),
+                offset: 0,
+                length: 11,
+            }],
+        };
+        let content_ref = ContentRef {
+            kind: loonfs_types::ContentRefKind::BlobV1,
+            content_id,
+            size_bytes: 11,
+            checksum,
+        };
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .append_wal_commit(
+                vec![crate::test_support::file_revision_delta(
+                    0,
+                    file,
+                    maximum,
+                    content_ref,
+                    Some(layout),
+                )],
+                Vec::new(),
+            )
+            .await
+            .expect("write a revision at the largest revision number");
+
+        let error = try_plan_against_current_state(
+            &store,
+            &namespace_id,
+            &request(FilesystemOperation::RestoreRevisionByInode {
+                inode_id: file,
+                source_revision_no: maximum,
+            }),
+        )
+        .await
+        .expect_err("revision numbers stop at the largest public integer");
+        assert_eq!(error.code(), ErrorCode::ServerError);
+        assert_matches!(
+            failed_operation_error(error),
+            CoreError::CommitValidation(CommitValidationError::RevisionOverflow {
+                inode_id,
+                base_revision_no,
+            }) if inode_id == file && base_revision_no == maximum
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_expected_attributes_revision_is_rejected() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+        fixture
+            .put_file("/docs/a.txt", b"a", DestinationBehavior::NoReplace, None)
+            .await
+            .expect("seed a file");
+        let docs = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs").await;
+        for owner in ["ada", "grace"] {
+            fixture
+                .submit_operation(
+                    CommitId::parse(format!("seed-owner-{owner}")).expect("valid commit id"),
+                    set_owner_by_inode(docs, owner, None),
+                    Vec::new(),
+                )
+                .await
+                .expect("seed an attributes revision");
+        }
+
+        let error = try_plan_against_current_state(
+            &store,
+            &namespace_id,
+            &request(set_owner_by_inode(
+                docs,
+                "hopper",
+                Some(AttributesRevisionNo(1)),
+            )),
+        )
+        .await
+        .expect_err("the expected attributes revision is stale");
+        assert_eq!(
+            error.code(),
+            ErrorCode::StaleAttributes,
+            "the precondition reports the attribute-conflict code"
+        );
+        assert_matches!(
+            failed_operation_error(error),
+            CoreError::CommitValidation(
+                CommitValidationError::UpdateAttributesBaseRevisionMismatch {
+                    inode_id,
+                    expected: AttributesRevisionNo(1),
+                    actual: Some(AttributesRevisionNo(2)),
+                }
+            ) if inode_id == docs
+        );
+    }
+
+    #[tokio::test]
+    async fn a_first_attribute_write_states_revision_zero() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file("/docs/a.txt", b"a", DestinationBehavior::NoReplace, None)
+            .await
+            .expect("seed a file");
+        let docs = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs").await;
+        let update = |expected: u64| {
+            request(set_owner_by_inode(
+                docs,
+                "ada",
+                Some(AttributesRevisionNo(expected)),
+            ))
+        };
+
+        try_plan_against_current_state(&store, &namespace_id, &update(0))
+            .await
+            .expect("a first write states revision zero");
+        let error = try_plan_against_current_state(&store, &namespace_id, &update(1))
+            .await
+            .expect_err("nothing has written revision 1 yet");
+        assert_eq!(error.code(), ErrorCode::StaleAttributes);
+        assert_matches!(
+            failed_operation_error(error),
+            CoreError::CommitValidation(
+                CommitValidationError::UpdateAttributesBaseRevisionMismatch {
+                    expected: AttributesRevisionNo(1),
+                    actual: Some(AttributesRevisionNo(0)),
+                    ..
+                }
+            )
+        );
+    }
+
+    /// A namespace whose directory `/docs` was deleted, with the inode ID of
+    /// `/docs` and the sequence of each of its deletions.
+    struct DeletedDocs {
+        _temp_dir: tempfile::TempDir,
+        store: LocalFsStore,
+        namespace_id: NamespaceId,
+        docs: InodeId,
+        deletion_seqs: Vec<CommitSeq>,
+    }
+
+    fn restore_docs(docs: InodeId, deletion_seq: CommitSeq) -> FilesystemOperation {
+        FilesystemOperation::RestoreDeleted {
+            inode_id: docs,
+            deletion_seq,
+            destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
+        }
+    }
+
+    /// Deletes `/docs` once, then restores and deletes it again `redeletes`
+    /// times, and with `restore_last`, restores its last deletion.
+    async fn deleted_docs(redeletes: usize, restore_last: bool) -> DeletedDocs {
+        let (temp_dir, store, namespace_id, context) = setup_namespace().await;
+        let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+        fixture
+            .submit_operation(
+                CommitId::parse("create-docs").expect("valid commit id"),
+                create_dir("/docs"),
+                Vec::new(),
+            )
+            .await
+            .expect("create /docs");
+        let docs = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs").await;
+        let mut deletion_seqs = Vec::new();
+        for redelete in 0..=redeletes {
+            if let Some(&deletion_seq) = deletion_seqs.last() {
+                fixture
+                    .submit_operation(
+                        CommitId::parse(format!("restore-docs-{redelete}"))
+                            .expect("valid commit id"),
+                        restore_docs(docs, deletion_seq),
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("restore /docs");
+            }
+            let deletion = fixture.delete_path("/docs", None).await.expect("delete");
+            deletion_seqs.push(deletion.committed_seq);
+        }
+        if let Some(&deletion_seq) = deletion_seqs.last().filter(|_| restore_last) {
+            fixture
+                .submit_operation(
+                    CommitId::parse("restore-docs-last").expect("valid commit id"),
+                    restore_docs(docs, deletion_seq),
+                    Vec::new(),
+                )
+                .await
+                .expect("restore /docs");
+        }
+        DeletedDocs {
+            _temp_dir: temp_dir,
+            store,
+            namespace_id,
+            docs,
+            deletion_seqs,
+        }
+    }
+
+    /// A bind requires an inode with no current binding. If a corrupt
+    /// namespace still binds a deleted directory somewhere, a restore of that
+    /// directory passes the planner's checks and then fails with
+    /// `namespace_corrupt`.
+    #[tokio::test]
+    async fn a_restore_of_an_inode_that_is_still_bound_reports_corruption() {
+        let deleted = deleted_docs(0, false).await;
+        let other = DisplayName::parse("other").expect("display name");
+        crate::test_support::namespace_store(&deleted.store, &deleted.namespace_id)
+            .append_wal_commit(
+                vec![WalDelta::BindDirentry {
+                    delta_index: 0,
+                    parent_inode_id: ROOT_INODE_ID,
+                    name_key: NameKey::for_display_name(&other),
+                    display_name: other,
+                    child_inode_id: deleted.docs,
+                    child_kind: InodeKind::Directory,
+                    child_created_by: loonfs_test_support::test_actor(),
+                    child_created_at_ms: 0,
+                    revision: None,
+                }],
+                Vec::new(),
+            )
+            .await
+            .expect("bind /docs again without revoking its deletion");
+
+        let error = try_plan_against_current_state(
+            &deleted.store,
+            &deleted.namespace_id,
+            &request(FilesystemOperation::RestoreDeleted {
+                inode_id: deleted.docs,
+                deletion_seq: deleted.deletion_seqs[0],
+                destination: loonfs_types::options::RestoreDeletedDestination::Name {
+                    parent_inode_id: ROOT_INODE_ID,
+                    display_name: DisplayName::parse("restored").expect("display name"),
+                },
+            }),
+        )
+        .await
+        .expect_err("inode /docs already has a parent");
+        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+        let error = failed_operation_error(error);
+        assert_matches!(error, CoreError::NamespaceCorrupt(_));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "namespace corrupt: a commit binds inode `{}`, which is already bound as \
+                 `other` under parent inode `{ROOT_INODE_ID}`",
+                deleted.docs
+            )
+        );
+    }
+
+    /// A restore of a deleted item succeeds only while the deletion that the
+    /// request identifies is the latest tombstone event of the item's root,
+    /// so a stale request can't cancel a later deletion.
+    #[tokio::test]
+    async fn a_restore_of_a_deleted_item_applies_only_while_its_deletion_is_the_roots_latest_event()
+    {
+        let not_deleted =
+            |deleted: &DeletedDocs| CommitValidationError::RestoreDeletedTargetNotDeleted {
+                inode_id: deleted.docs,
+            };
+        let mismatch =
+            |deleted: &DeletedDocs| CommitValidationError::RestoreDeletedSequenceMismatch {
+                inode_id: deleted.docs,
+                requested_seq: deleted.deletion_seqs[0],
+                actual_deletion_seq: deleted.deletion_seqs[1],
+            };
+        // Each case: its name, how often `/docs` was restored and deleted
+        // again since the first deletion, whether its last deletion was
+        // restored, the number of restores of the first deletion in the
+        // request, and the error.
+        type Expected<'a> = &'a dyn Fn(&DeletedDocs) -> CommitValidationError;
+        let cases: [(&str, usize, bool, usize, Expected); 3] = [
+            ("restored twice in one commit", 0, false, 2, &not_deleted),
+            ("already restored", 0, true, 1, &not_deleted),
+            ("deleted again since", 1, false, 1, &mismatch),
+        ];
+        for (name, redeletes, restore_last, restores, expected) in cases {
+            let deleted = deleted_docs(redeletes, restore_last).await;
+            let error = try_plan_against_current_state(
+                &deleted.store,
+                &deleted.namespace_id,
+                &CommitIntent {
+                    preconditions: Vec::new(),
+                    commit_id: CommitId::parse("restore-request").expect("valid commit id"),
+                    actor_id: loonfs_test_support::test_actor(),
+                    subject: None,
+                    message: None,
+                    operations: vec![
+                        restore_docs(deleted.docs, deleted.deletion_seqs[0]);
+                        restores
+                    ],
+                },
+            )
+            .await
+            .expect_err(name);
+            assert_eq!(error.code(), ErrorCode::NotDeleted, "{name}");
+            let operation_index = u32::try_from(restores - 1).expect("operation index");
+            assert_matches!(
+                error,
+                CoreError::FailedOperation { operation_index: index, error }
+                    if index == operation_index
+                        && matches!(
+                            &*error,
+                            CoreError::CommitValidation(actual) if *actual == expected(&deleted)
+                        ),
+                "{name}"
+            );
+        }
+
+        let deleted = deleted_docs(0, false).await;
+        let planned = plan_against_current_state(
+            &deleted.store,
+            &deleted.namespace_id,
+            &request(restore_docs(deleted.docs, deleted.deletion_seqs[0])),
+        )
+        .await;
+        assert_matches!(
+            planned.deltas.as_slice(),
+            [
+                WalCommitDelta {
+                    delta: WalDelta::RevokeSubtreeTombstone { target, .. },
+                    ..
+                },
+                WalCommitDelta {
+                    delta: WalDelta::BindDirentry { .. },
+                    ..
+                },
+            ] if target.seq == deleted.deletion_seqs[0]
+        );
     }
 }

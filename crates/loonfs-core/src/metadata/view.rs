@@ -6,7 +6,7 @@ use super::manifest_index;
 use super::manifest_tail_combiner::{ManifestPage, ManifestTailCombiner, TieOrder};
 use super::tail_rows::{TailFamily, TailRows};
 use super::view_session::{LeafRevisionPreload, MetadataViewSession};
-use super::visibility::{self, MetadataVisibilityReads};
+use super::visibility::{self, MetadataVisibilityReads, VisiblePathWalk};
 use crate::error::{CoreError, Result};
 use crate::heap_bytes::HeapBytes;
 use crate::metadata::{
@@ -371,6 +371,17 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ) -> Result<ResolvedVisiblePath> {
         self.session()
             .resolve_visible_path(absolute_path, LeafRevisionPreload::Skip)
+            .await
+    }
+
+    /// Walks `absolute_path` from the root to its inode, or to the first
+    /// component that has no visible child.
+    pub(crate) async fn walk_visible_path(
+        &self,
+        absolute_path: &AbsolutePath,
+    ) -> Result<VisiblePathWalk> {
+        self.session()
+            .walk_visible_path(absolute_path, LeafRevisionPreload::Skip)
             .await
     }
 
