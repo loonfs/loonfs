@@ -151,3 +151,43 @@ async fn a_lost_state_after_the_new_forks_were_deleted_recovers_as_merged() {
     assert_eq!(state.status, MergeSessionStatus::Merged);
     assert!(merges(&mechanics.sent()).is_empty());
 }
+
+/// Checks that a lost state whose new fork never merged recovers as
+/// `merged`, without another rebase, when the next-range query says that
+/// the namespace has the original fork's commits through its head, as it
+/// does after another merge covered them, and that the session lists the
+/// new fork and deletes it.
+#[tokio::test]
+async fn a_lost_state_recovers_as_merged_when_another_merge_covered_the_rebased_fork() {
+    let rebased = namespace_id("rebase-1");
+    let mechanics = ScriptedMechanics::new([
+        Answer::ForkSnapshots(vec![rebased.clone()]),
+        Answer::Namespace {
+            rebased_from: Some(sandbox()),
+        },
+        // The new fork never merged.
+        Answer::range(10, 12),
+        Answer::Range {
+            next_after_seq: 20,
+            source_head_seq: 20,
+            merged: true,
+        },
+        Answer::Deleted,
+    ]);
+
+    let session = recover(&mechanics, DefaultResolver).await;
+
+    assert_eq!(session.state().status, MergeSessionStatus::Merged);
+    assert_eq!(session.state().new_fork_ids, std::slice::from_ref(&rebased));
+    let (_, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+    mechanics.assert_script_used();
+    assert_eq!(state.status, MergeSessionStatus::Merged);
+    assert!(state.new_fork_ids.is_empty());
+    assert!(merges(&mechanics.sent()).is_empty());
+    assert_eq!(
+        mechanics.sent().last(),
+        Some(&Sent::Delete {
+            namespace_id: rebased
+        })
+    );
+}

@@ -30,8 +30,9 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     /// with. When that fork was rebased into new forks that never merged and
     /// weren't rebased, the session doesn't have the commit IDs of their
     /// replay commits, which the lost state recorded, so it can't read their
-    /// conflict reports. It rebases the fork again into another new fork,
-    /// which repeats the classification. The session deletes every new fork
+    /// conflict reports. When the fork has commits left to merge, it rebases
+    /// the fork again into another new fork, which repeats the
+    /// classification. The session deletes every new fork
     /// that it found once it's `merged` or `abandoned`.
     ///
     /// The session merges the original fork through `options.through_seq`,
@@ -108,7 +109,10 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
                 _ => range.source_head_seq,
             };
             let status = status_after_range(&fork_id, through_seq, &range.outcome, &[]);
-            if !was_rebased || matches!(status, MergeSessionStatus::Failed { .. }) {
+            // The session is `merged` when nothing of the fork is left to
+            // merge, even if the fork was rebased, and only a fork with
+            // commits left to merge is rebased again.
+            if !was_rebased || !matches!(status, MergeSessionStatus::Merging { .. }) {
                 break status;
             }
             let Some(new_fork_id) = new_fork_id(&new_fork_ids) else {
