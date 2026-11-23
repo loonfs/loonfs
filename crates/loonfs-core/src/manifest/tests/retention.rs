@@ -2116,6 +2116,80 @@ async fn snapshots_append_past_the_threshold_and_compaction_drains() {
     ));
 }
 
+/// Checks that a compaction unit is abandoned when it finds an input segment
+/// of its basis missing and a newer manifest replaced the basis, and that
+/// the same missing segment of the current manifest returns
+/// `namespace_corrupt`.
+///
+/// To replace the basis, another process compacts the same runs, and a
+/// collection then deletes the segments that only the replaced basis lists.
+#[tokio::test]
+async fn a_unit_whose_replaced_basis_lost_an_input_segment_is_abandoned() {
+    for replaced in [true, false] {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        bootstrap_namespace(&store, &namespace_id, &test_context())
+            .await
+            .expect("bootstrap");
+        let mut writer = NamespaceCommitEngine::new(
+            crate::test_support::namespace_store(&store, &namespace_id),
+            test_context().writer_id,
+        );
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        for prefix in ["a", "b", "c"] {
+            publish_directories(&mut writer, prefix, 2).await;
+            namespace.fold_wal().await.expect("fold");
+        }
+        let basis = namespace
+            .load_current_basis(crate::test_support::observed_now())
+            .await
+            .expect("the unit's basis");
+        let basis_segments = run_segment_object_keys(basis.manifest().envelope());
+        let lost = if replaced {
+            // Another process compacts the same runs, and a collection deletes
+            // the segments that only the replaced basis lists.
+            let (_, published) =
+                crate::test_support::compact_every_group(&store, &namespace_id).await;
+            assert!(published > 0, "the other process compacts the runs");
+            let current = namespace
+                .load_current_manifest()
+                .await
+                .expect("the current manifest");
+            let kept = run_segment_object_keys(current.envelope());
+            basis_segments
+                .into_iter()
+                .filter(|key| !kept.contains(key))
+                .collect::<Vec<_>>()
+        } else {
+            basis_segments
+        };
+        assert!(!lost.is_empty(), "replaced={replaced}");
+        for key in &lost {
+            store.delete(key).await.expect("delete a segment");
+        }
+        let unit = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::writer_at("test-writer", 0),
+        )
+        .with_run_policy(crate::test_support::one_delta_run_policy())
+        .engine()
+        .compact_metadata_unit(
+            Some(basis),
+            loonfs_types::CompactorEpoch(0),
+            &crate::compaction::MetadataCompactionCancellation::default(),
+        )
+        .await;
+        if replaced {
+            assert_matches!(unit, Ok(CompactionUnitOutcome::Abandoned));
+        } else {
+            let error = unit.expect_err("a missing segment of the current manifest");
+            assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error:?}");
+        }
+    }
+}
+
 /// Checks that a unit compacts at most its run budget, and that it reads only
 /// the selected runs' segments.
 #[tokio::test]

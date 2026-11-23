@@ -1095,3 +1095,145 @@ async fn a_wave_of_reads_shares_at_most_two_checks() {
         "the check confirmed the position"
     );
 }
+
+/// Returns a fixture whose writer session keeps a position on a manifest
+/// that a collection deleted, with the segments that only that manifest
+/// lists, and whose runtime caches no segment's rows, so every read of a
+/// segment goes to the store. With `cached`, the
+/// runtime's segment cache still has the deleted manifest, which the
+/// writer's own fold put there.
+///
+/// The writer folds, so its position is on the fold's manifest. A peer then
+/// folds the writer's next commits eight times and compacts while a unit is
+/// due, which rewrites the position's runs. A collection one grace window
+/// later raises the boundary over the position's manifest and deletes the
+/// manifest and the segments that only it lists. The position isn't checked
+/// in between, because nothing in the writer's runtime reads.
+async fn position_on_a_collected_manifest(name: &str, cached: bool) -> (Fixture, ManifestNo) {
+    use loonfs_objectstore::ObjectStore;
+    let cache = MetadataCache::builder().max_segment_bytes(0);
+    let cache = if cached {
+        cache
+    } else {
+        cache.max_manifest_bytes(0)
+    };
+    let fixture = fixture_with_cache(name, Parked::WalPuts, cache.build()).await;
+    let store: SharedObjectStore = fixture.recording.clone();
+    let namespace_id = fixture.namespace_id.clone();
+    fixture
+        .writer
+        .maintenance(writer_id(name))
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the writer's tail");
+    fixture.writer.drain().await.expect("drain");
+    let position = loonfs_core::test_support::namespace_store(store.clone(), &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("the position's manifest");
+    let peer_id = format!("{name}-peer");
+    let peer = peer(&fixture, &peer_id).await;
+    let maintenance = peer.maintenance(writer_id(&peer_id));
+    for index in 0..8 {
+        fixture.put(&format!("/{index}.txt")).await.expect("put");
+        maintenance.fold_wal(&namespace_id).await.expect("fold");
+    }
+    maintenance
+        .maintain_metadata_while_due(&namespace_id, &loonfs::MaintenanceCancellation::default())
+        .await
+        .expect("compact");
+    loonfs::test_support::maintenance_past_the_grace_window(store.clone())
+        .await
+        .gc(&namespace_id)
+        .await
+        .expect("collect");
+    let key = metadata_manifest_object(&namespace_id, &position.manifest().manifest_no);
+    assert!(
+        store.head(&key).await.expect("HEAD").is_none(),
+        "the collection deletes the position's manifest"
+    );
+    let mut lost = 0;
+    for segment in position
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| run.segments.iter())
+    {
+        let key = loonfs_objectstore::keys::metadata_segment_object_key(segment);
+        lost += usize::from(store.head(&key).await.expect("HEAD").is_none());
+    }
+    assert!(lost > 0, "the collection deletes a segment of the position");
+    (fixture, position.manifest().manifest_no)
+}
+
+/// Checks that a retention advance from a writer position whose manifest a
+/// collection deleted plans from the newest manifest, whether or not the
+/// runtime's segment cache still has the deleted manifest. Every commit is
+/// younger than the grace window, so the floor stays at 0.
+///
+/// Without the manifest in the cache, the check of the manifest boundary
+/// before the manifest's load finds the manifest collected, so the advance
+/// drops the position and plans from the newest manifest. With the manifest
+/// in the cache, the plan reads a segment that the collection deleted, the
+/// advance finds a newer current manifest, drops the position and the
+/// cached head, loads the head again, and plans from the newest manifest.
+#[tokio::test]
+async fn a_retention_advance_from_a_position_on_a_collected_manifest_succeeds() {
+    for cached in [false, true] {
+        let name = format!("collected-advance-{}", if cached { "hit" } else { "miss" });
+        let (fixture, _) = position_on_a_collected_manifest(&name, cached).await;
+        fixture.recording.reset();
+        let advanced = fixture
+            .writer
+            .maintenance(writer_id(&name))
+            .advance_retention_floor(&fixture.namespace_id)
+            .await;
+        assert_eq!(
+            advanced
+                .unwrap_or_else(|error| panic!("cached={cached}: {error:?}"))
+                .retention_floor_seq,
+            loonfs::CommitSeq(0),
+            "cached={cached}"
+        );
+        let namespace = fixture.namespace_id.to_string();
+        let line = |request: &str| request.replace("{ns}", &namespace);
+        let discovery = |newest_get: bool| {
+            let mut lines = vec![
+                line("get {ns} Boundary"),
+                line("list namespaces/{ns}/manifests/"),
+            ];
+            if newest_get {
+                lines.push(line("get {ns} MetadataManifest 00000000000000000018"));
+            }
+            lines.push(line("get {ns} Boundary"));
+            lines
+        };
+        let segments = vec![line("get {ns} MetadataSegment"); 4];
+        let expected = if cached {
+            [
+                // The plan's read of a segment that the collection deleted.
+                vec![line("get {ns} MetadataSegment")],
+                // The check that a newer manifest replaced the planned one.
+                discovery(true),
+                // The load of the head after the drop.
+                discovery(false),
+                vec![
+                    line("get {ns} WalObject 00000000000000000011"),
+                    line("head {ns} MetadataManifest 00000000000000000019"),
+                    line("get {ns} Boundary"),
+                ],
+                // The second plan, from the newest manifest.
+                discovery(false),
+                segments,
+            ]
+            .concat()
+        } else {
+            [vec![line("get {ns} Boundary")], discovery(true), segments].concat()
+        };
+        assert_eq!(
+            loonfs_test_support::stores::request_lines(&fixture.recording.take()),
+            expected,
+            "cached={cached}"
+        );
+    }
+}

@@ -556,6 +556,15 @@ impl Maintenance {
     /// Its next put collides with the floor object, and it plans again
     /// against the new floor.
     ///
+    /// A writer position's manifest may have been replaced, and its segments
+    /// collected, while the position went unchecked. When the advance finds a
+    /// segment of the manifest it planned from missing and that manifest
+    /// isn't the current one, the call drops the position and the cached head
+    /// and plans again from the newest manifest, up to
+    /// `MAX_CONTENTION_ATTEMPTS` plans, after which it returns
+    /// `store_contention`. A missing segment of the current manifest returns
+    /// `namespace_corrupt`.
+    ///
     /// When no manifest records the floor of the view after the advance,
     /// including after an earlier advance whose fold failed, the call then
     /// folds the namespace, so the fold's manifest records the floor. The
@@ -570,33 +579,12 @@ impl Maintenance {
         trace::in_operation(
             operation_span!(self.core, "advance_retention_floor", namespace_id),
             async {
-                let store = self.core.namespace_store(namespace_id);
-                let (planned, retention_floor_seq) = self.load_retention_view(namespace_id).await?;
-                let plan = store
-                    .plan_retention_floor(&planned, retention_floor_seq, options.target)
+                let report = self
+                    .core
+                    .read_at_reloaded_head(namespace_id, || {
+                        self.publish_retention_floor(namespace_id, options)
+                    })
                     .await?;
-                let report = match plan {
-                    RetentionPlan::Stays(retention_floor_seq) => FloorObjectReport {
-                        retention_floor_seq,
-                        manifest_retention_floor_seq: planned.retention_floor_seq(),
-                    },
-                    RetentionPlan::Moves(target) => match self
-                        .publisher
-                        .submit_retention_advance(namespace_id, planned.clone(), target)
-                        .await
-                    {
-                        Some(report) => report?,
-                        None => {
-                            let report = store.publish_floor_object(&planned, target).await?;
-                            // A session that opened in this runtime after the
-                            // check above keeps a position that may end below
-                            // the floor object, and a fold from that position
-                            // would miss the floor object.
-                            self.publisher.drop_session_position(namespace_id).await;
-                            report
-                        }
-                    },
-                };
                 if report.retention_floor_seq > report.manifest_retention_floor_seq {
                     self.publisher
                         .fold_namespace(namespace_id, FoldWhen::Always)
@@ -609,6 +597,65 @@ impl Maintenance {
             },
         )
         .await
+    }
+
+    /// Plans the retention floor of [`Self::advance_retention_floor_with_options`],
+    /// writes a floor object when the floor moves, and returns the floors
+    /// after the advance.
+    ///
+    /// The plan and the floor object's check of the planned manifest's
+    /// segments read the manifest that the advance plans from. That manifest
+    /// can be a writer position's, which a newer manifest may have replaced,
+    /// and a collection may then have deleted its segments. So a missing
+    /// segment returns `manifest_replaced` when the planned manifest isn't the
+    /// current one (see
+    /// [`NamespaceStore::ensure_manifest_current`](loonfs_core::NamespaceStore::ensure_manifest_current)),
+    /// and the caller plans again from the newest manifest. A missing segment
+    /// of the current manifest stays `namespace_corrupt`.
+    async fn publish_retention_floor(
+        &self,
+        namespace_id: &NamespaceId,
+        options: &AdvanceRetentionFloorOptions,
+    ) -> Result<FloorObjectReport> {
+        let store = self.core.namespace_store(namespace_id);
+        let (planned, retention_floor_seq) = self.load_retention_view(namespace_id).await?;
+        let published = async {
+            let plan = store
+                .plan_retention_floor(&planned, retention_floor_seq, options.target)
+                .await?;
+            Ok(match plan {
+                RetentionPlan::Stays(retention_floor_seq) => FloorObjectReport {
+                    retention_floor_seq,
+                    manifest_retention_floor_seq: planned.retention_floor_seq(),
+                },
+                RetentionPlan::Moves(target) => match self
+                    .publisher
+                    .submit_retention_advance(namespace_id, planned.clone(), target)
+                    .await
+                {
+                    Some(report) => report?,
+                    None => {
+                        let report = store.publish_floor_object(&planned, target).await?;
+                        // A session that opened in this runtime after the
+                        // check above keeps a position that may end below
+                        // the floor object, and a fold from that position
+                        // would miss the floor object.
+                        self.publisher.drop_session_position(namespace_id).await;
+                        report
+                    }
+                },
+            })
+        }
+        .await;
+        match published {
+            Err(Error::Core(error)) if error.is_missing_segment() => {
+                store
+                    .ensure_manifest_current(planned.payload().manifest_no)
+                    .await?;
+                Err(error.into())
+            }
+            published => published,
+        }
     }
 
     /// Returns the manifest and the retention floor that a retention advance

@@ -448,6 +448,28 @@ pub fn classify_store_failure(kind: ObjectStoreErrorKind) -> ErrorCode {
 }
 
 impl CoreError {
+    /// Returns whether this error reports a metadata segment that a read of
+    /// a manifest's rows found missing, in a batch itself or in one of its
+    /// operations.
+    ///
+    /// A collection can delete the segments of a manifest that a newer
+    /// manifest replaced, so a caller that read from a manifest it kept in
+    /// memory asks whether that manifest is still current (see
+    /// [`NamespaceStore::ensure_manifest_current`](crate::NamespaceStore::ensure_manifest_current))
+    /// before it reports the store as corrupt.
+    pub fn is_missing_segment(&self) -> bool {
+        let error = match self {
+            Self::FailedOperation { error, .. } => error.as_ref(),
+            error => error,
+        };
+        matches!(
+            error,
+            Self::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
+                crate::manifest::ManifestLoadError::MissingSegment { .. }
+            ))
+        )
+    }
+
     /// Builds the core error for a failed object-store operation on
     /// `object_key`.
     ///

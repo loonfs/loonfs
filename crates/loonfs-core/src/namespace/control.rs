@@ -104,6 +104,32 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Ok(self.load_current_basis(observed).await?.into_manifest())
     }
 
+    /// Returns `manifest_replaced` when the namespace's current manifest,
+    /// which the call finds from the manifest boundary, is above manifest
+    /// `manifest_no`, and `Ok` when it isn't.
+    ///
+    /// A caller that read rows from a manifest kept in memory, numbered
+    /// `manifest_no`, calls this function when it finds a segment missing. A
+    /// collection keeps the segments of the current manifest and of the
+    /// manifests that snapshots pin, and it can delete the segments of a
+    /// manifest that a newer manifest replaced. So the missing segment means
+    /// a corrupt store only when manifest `manifest_no` is still the current
+    /// manifest, and otherwise the caller reads again from the current
+    /// manifest.
+    pub async fn ensure_manifest_current(
+        &self,
+        manifest_no: ManifestNo,
+    ) -> crate::error::Result<()> {
+        let current_manifest_no = self.load_current_manifest().await?.payload().manifest_no;
+        if current_manifest_no > manifest_no {
+            return Err(CoreError::ManifestReplaced {
+                replaced_manifest_no: manifest_no,
+                current_manifest_no,
+            });
+        }
+        Ok(())
+    }
+
     /// Loads the namespace's current manifest from the manifest boundary,
     /// with the boundary of the last read, as a manifest checked at
     /// `observed`, an observation that the caller read before the call.
