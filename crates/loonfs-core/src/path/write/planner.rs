@@ -81,8 +81,9 @@ pub(super) struct OperationPlanningSession<'p, 'c, S: ObjectStore + ?Sized> {
 ///
 /// Only [`OperationPlanningSession::next_inode_id`] and [`NewInodeId::merged`]
 /// make one, so the ID is new to the namespace. A generated ID includes the
-/// commit's own sequence, which no earlier commit used, and
-/// [`NewInodeId::merged`] checks that no inode has a merge's assigned ID.
+/// low 32 bits of the commit's sequence, the create's number within the
+/// commit and 64 random bits, so it differs from every existing inode's ID,
+/// and [`NewInodeId::merged`] checks that no inode has a merge's assigned ID.
 pub(crate) struct NewInodeId(InodeId);
 
 impl NewInodeId {

@@ -10,8 +10,8 @@ pub(super) struct CommitNumbering {
 }
 
 /// The index of one write in its commit, which the WAL stores as the delta's
-/// semantic operation index. A copy to a vacant name makes two writes, so it
-/// reserves two indexes.
+/// semantic operation index. A copy to a vacant name of a file that has
+/// attributes makes two writes, so it reserves two indexes.
 ///
 /// Only [`CommitNumbering::reserve_op_index`] makes one, and recording deltas
 /// consumes it, so a write records its deltas only under an index that it

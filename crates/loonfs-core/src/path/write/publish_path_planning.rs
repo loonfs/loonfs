@@ -1,8 +1,8 @@
 //! [`PlanningView`]: the read-only part of planning one operation, with
 //! the target and destination resolution that the planners share. The
 //! directories that a put or `mkdir -p` creates above its path are created
-//! here too, because only this module makes a [`ResolvedDestination`]. The
-//! authorization checks are in [`super::planning_authorization`].
+//! here too, because only this module can build a destination without a
+//! lookup. The authorization checks are in [`super::planning_authorization`].
 
 use super::planner::OperationPlanningSession;
 use super::planning_authorization::AccessStateRef;
@@ -325,7 +325,9 @@ impl<'a> ResolvedDestination<'a> {
 }
 
 /// A name under a visible directory that a bind can take. Only
-/// [`ResolvedDestination::available_name`] makes one, so the directory was
+/// [`ResolvedDestination::available_name`] makes one, and only this module
+/// makes a [`ResolvedDestination`], either from a lookup of the name's
+/// occupant or for a name that a walk found missing. So the directory was
 /// visible, and no other visible inode occupied the name, in the commit's
 /// state when the value was made.
 pub(crate) struct AvailableName {
