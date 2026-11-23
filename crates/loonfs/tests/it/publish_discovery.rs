@@ -5,6 +5,7 @@ use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_objectstore::keys::{
     boundary, metadata_manifest_object, metadata_manifest_prefix, wal_prefix,
 };
+use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
@@ -204,6 +205,92 @@ async fn the_first_read_after_a_create_sends_no_request() {
         "{requests:?}"
     );
     writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a create that finds the namespace already active, because
+/// another runtime finished the create and then claimed the namespace and
+/// committed, installs no cached head. The first read in the create's
+/// runtime loads the namespace by discovery and sees the other runtime's
+/// commit, with no wait for the read's maximum staleness.
+#[tokio::test]
+async fn a_create_that_finds_the_namespace_claimed_leaves_the_first_read_to_discovery() {
+    let directory = tempfile::tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("created").expect("namespace");
+    let store = Arc::new(RecordingStore::new(
+        BlockingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::family(DurableObjectFamily::PoolMember),
+            OperationSelector::PutCreateIfAbsent,
+        ),
+        KeyPredicate::any(),
+    ));
+    let creator = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("creator"))
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .build()
+        .await
+        .expect("creator");
+    let other = LoonFs::builder_with_store(
+        Arc::new(LocalFsStore::new(directory.path()).expect("store")),
+        loonfs::Context::Service,
+    )
+    .writer_id(loonfs_test_support::ids::writer_id("other"))
+    .build()
+    .await
+    .expect("other runtime");
+    let actor = test_actor();
+    store.inner().block_next();
+    let (created, ()) = tokio::join!(creator.create_namespace(&namespace_id, &actor), async {
+        // The create published manifest 1 and waits on its member entry.
+        store.inner().wait_until_blocked().await;
+        other
+            .create_namespace(&namespace_id, &test_actor())
+            .await
+            .expect("the other runtime finishes the create");
+        other
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .create_directory("/acknowledged", &test_actor())
+            .await
+            .expect("the other runtime's claim and commit");
+        other.drain().await.expect("drain");
+        store.inner().release();
+    });
+    created.expect("the create finds the namespace active");
+    let namespace = creator
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    store.reset();
+    namespace
+        .stat("/acknowledged")
+        .await
+        .expect("the first read sees the other runtime's commit");
+    // The discovery reads the boundary, lists the manifests, and reads the
+    // boundary again. It then reads the WAL objects above the other
+    // runtime's claim, manifest 3, in a concurrent window whose reads can
+    // finish in any order: the claim's fence, the commit, and the first
+    // missing number. Last come the successor check and the boundary read
+    // after it.
+    let requests = store.take();
+    let mut sent = requests.iter().map(kind_and_key).collect::<Vec<_>>();
+    sent.sort();
+    let mut expected = vec![
+        ("get", boundary(&namespace_id)),
+        ("list", metadata_manifest_prefix(&namespace_id)),
+        ("get", boundary(&namespace_id)),
+        ("get", "wal 1".to_owned()),
+        ("get", "wal 2".to_owned()),
+        ("get", "wal 3".to_owned()),
+        (
+            "head",
+            metadata_manifest_object(&namespace_id, &ManifestNo(4)),
+        ),
+        ("get", boundary(&namespace_id)),
+    ];
+    expected.sort();
+    assert_eq!(sent, expected, "{requests:?}");
+    other.shutdown().await.expect("shutdown other");
+    creator.shutdown().await.expect("shutdown creator");
 }
 
 /// Checks that the first commit on a fork's new namespace in the runtime

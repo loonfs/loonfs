@@ -17,9 +17,18 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// `active`, and returns the active manifest
     /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/namespace-creation.md#finishing-a-namespace-thats-initializing)).
     ///
-    /// A namespace that another call made active returns that call's manifest,
-    /// and a tombstone returns `namespace_deleted`. The active manifest becomes
-    /// the namespace's cached head (see [`Self::install_active_head`]).
+    /// When another call made the namespace active, the function returns the
+    /// newest manifest that this call found, and a tombstone returns
+    /// `namespace_deleted`.
+    ///
+    /// An active manifest that this call published becomes the namespace's
+    /// cached head, so this process's first read and first writer claim start
+    /// from it without a request. The head's manifest check and its head
+    /// confirmation are both timed at the start of the call's clock, because
+    /// the call put the manifest after that start, so at that start no
+    /// manifest followed it and no commit above it had been acknowledged. A call that found the namespace already active leaves
+    /// the cached head as it is, and the first read loads the namespace by
+    /// discovery.
     pub(crate) async fn publish_active_manifest(
         &self,
         manifest_1: Held<LoadedManifest>,
@@ -38,24 +47,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 async move { changed }
             })
             .await?;
-        self.install_active_head(&update.current);
+        if update.published {
+            let active = &update.current;
+            let head = NamespaceReadState::from(active.manifest().payload());
+            self.head_and_wal_tail_cache.replace_head(CachedHead::new(
+                active.with_head(head),
+                active.checked().clone(),
+            ));
+        }
         Ok(update.current)
-    }
-
-    /// Installs `active`, the active manifest that a create or a fork
-    /// published or found, as the namespace's cached head, so this process's
-    /// first read and first writer claim start from it. A read replays the
-    /// empty WAL tail above `active` without a request.
-    ///
-    /// Both of the head's times, its manifest check and its head
-    /// confirmation, are `active`'s check time. When this call published
-    /// `active`, no writer had claimed the namespace before that check, so no
-    /// commit followed it.
-    pub(crate) fn install_active_head(&self, active: &Held<LoadedManifest>) {
-        let head = NamespaceReadState::from(active.manifest().payload());
-        self.head_and_wal_tail_cache.replace_head(CachedHead::new(
-            active.with_head(head),
-            active.checked().clone(),
-        ));
     }
 }

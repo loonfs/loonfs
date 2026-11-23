@@ -431,8 +431,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// a manifest of this namespace that the call read, from which the checks
     /// after the fork snapshot start. Each write first checks `deadline`.
     ///
-    /// A fork that another call already made active returns that call's
-    /// manifest.
+    /// When another call already made the fork active, the function returns
+    /// the state of the newest manifest that this call found, and installs no
+    /// cached head (see
+    /// [`NamespaceStore::publish_active_manifest`]).
     async fn finish_fork(
         &self,
         target: &NamespaceStore<&S>,
@@ -443,7 +445,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<NamespaceMetadata> {
         let payload = newest.manifest().payload();
         if payload.status.is_active() {
-            target.install_active_head(&newest);
             return Ok(crate::namespace::status::created_namespace(payload));
         }
         deadline.ensure_before(clock)?;
@@ -462,7 +463,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 Ok(NewestManifest::Manifest(current))
                     if current.manifest().payload().status.is_active() =>
                 {
-                    target.install_active_head(&current);
                     Ok(crate::namespace::status::created_namespace(
                         current.manifest().payload(),
                     ))

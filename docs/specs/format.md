@@ -463,7 +463,7 @@ A warm read refreshes a cached view in strict order (serialized one refresh per 
 
 An `eventual` warm read ([Read consistency](api.md#read-consistency)) skips probes while the tip confirmation (timestamped before the confirming request was sent) is younger than `max_staleness_ms` and the view's last manifest check is younger than `READ_REVALIDATION_BOUND_MS` (the last manifest check is the start of the last successor probe in the same runtime that found no manifest after the view's manifest or after an earlier manifest, or of the last publication in that runtime that published the view's manifest or found it current with a request) (ensuring referenced content survives until any issued download URL expires, [Content roots](#119-content-roots)). Cached views only advance monotonically. On namespace deletion, unknown mutation outcome, or fencing, the runtime drops the cached view and ignores in-flight loads started before the drop.
 
-A create installs manifest 2 as its initial view, and a fork installs its active manifest (and only updates the source's view if it had to fold an aged source tail).
+A create or a fork that publishes the active manifest installs that manifest as its initial view (and a fork only updates the source's view if it had to fold an aged source tail). A create or a fork that finds the namespace already active installs no view, so the runtime's first read of the namespace loads it by discovery.
 
 #### Warm reads from a local writer position
 
