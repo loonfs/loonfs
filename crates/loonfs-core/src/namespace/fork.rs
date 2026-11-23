@@ -582,15 +582,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         mut held: Option<WriterPosition>,
         clock: &OperationClock,
     ) -> Result<Option<(SnapshotPayload, PublicationBasis, ManifestProjection<'_, S>)>> {
-        let owner = SnapshotOwner::User {
-            name: None,
-            expires_at_ms: Some(
-                clock
-                    .request_at_ms()
-                    .saturating_add(OPERATION_SNAPSHOT_TTL_MS),
-            ),
-            deleted_at_ms: None,
-        };
+        let expires_at_ms = clock
+            .request_at_ms()
+            .saturating_add(OPERATION_SNAPSHOT_TTL_MS);
         for _ in 0..MAX_CONTENTION_ATTEMPTS {
             let head = self
                 .namespace
@@ -604,7 +598,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             }
             match self
                 .namespace
-                .create_verified_snapshot_record(owner.clone(), head.publication_basis(), clock)
+                .create_verified_snapshot_record(
+                    None,
+                    Some(expires_at_ms),
+                    head.publication_basis(),
+                    clock,
+                )
                 .await
             {
                 Ok((created, basis)) => return Ok(Some((created.record, basis, head))),

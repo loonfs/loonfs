@@ -152,24 +152,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .map_err(|error| CoreError::store(&object_key, &error))
     }
 
-    /// Deletes a snapshot whose creation failed with `error`. A failed delete is
-    /// only logged, and collection removes the snapshot later.
-    pub(crate) async fn delete_failed_snapshot_record(
-        &self,
-        snapshot_id: &SnapshotId,
-        error: &CoreError,
-    ) {
-        if let Err(cleanup_error) = self.delete_snapshot_record(snapshot_id).await {
-            tracing::warn!(
-                namespace_id = %self.namespace_id,
-                snapshot_id = %snapshot_id,
-                original_error = %error,
-                cleanup_error = %cleanup_error,
-                "failed to delete a snapshot record after its creation failed"
-            );
-        }
-    }
-
     /// Checks that `basis`, the manifest of a snapshot that the call wrote,
     /// is still the newest manifest of an active namespace.
     ///

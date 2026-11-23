@@ -1159,7 +1159,13 @@ async fn an_initializing_namespace_is_not_found_except_by_create_fork_and_delete
         &manifest_1
     );
     assert_eq!(manifest_payloads(&store, &target).await, [manifest_1]);
-    assert!(snapshot_records(&store, &target).await.is_empty());
+    assert_eq!(
+        crate::test_support::deleted_snapshot_records(&store, &target)
+            .await
+            .len(),
+        1,
+        "the refused snapshot's record is deleted"
+    );
 }
 
 /// Checks that a delete of an initializing namespace publishes its tombstone

@@ -140,9 +140,7 @@ pub(super) enum SnapshotManifest {
 /// The reason comes from the snapshot's record, which the listing reads after
 /// it finds the manifest missing.
 pub(super) enum MissingManifest {
-    /// The record is gone, because another collection, a retirement, or the
-    /// creator of a candidate that failed verification deleted the snapshot
-    /// after the listing.
+    /// Another collection or a retirement removed the record after the listing.
     RecordGone,
     /// A user snapshot that was never verified, with its record.
     UnverifiedUser(SnapshotPayload),
@@ -270,9 +268,8 @@ impl<'a, S: ObjectStore> NamespaceRoots<'a, S> {
             None => Ok(MissingManifest::RecordGone),
             // A verified user snapshot protects its manifest from the moment
             // it's acknowledged, so a user snapshot whose manifest is missing
-            // is a candidate that failed verification and outlived its
-            // creator's delete, or whose put succeeded after the creator gave
-            // up (format spec, "Snapshot cleanup").
+            // is a candidate whose creation failed. Its creator marked it
+            // deleted, or cleanup failed or never ran (format spec, "Snapshot cleanup").
             Some(record) if matches!(record.owner, SnapshotOwner::User { .. }) => {
                 Ok(MissingManifest::UnverifiedUser(record))
             }

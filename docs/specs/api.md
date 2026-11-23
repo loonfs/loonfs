@@ -910,6 +910,8 @@ Recording deletion in `deleted_at_ms` instead of overwriting `expires_at_ms` avo
 
 Even after expiry or deletion, the snapshot record stays in storage until GC removes it after the grace window (`deleted_at_ms + grace` or `expires_at_ms + grace`, whichever comes first). Keeping the record through the grace window leaves operations that validated the snapshot right before deletion with the same completion margin as before expiry, and keeps the [snapshot inventory](#snapshot-inventory) accurate about what still pins old manifests.
 
+A create that returns an error after it started writing the snapshot record leaves that record deleted in the same way, so the snapshot inventory can list a deleted record whose ID no create returned ([Creating and verifying a snapshot](format.md#82-creating-and-verifying-a-snapshot)).
+
 Deleting a missing or already-deleted user snapshot returns the same success response without writing, making retries safe. Deleting a fork snapshot returns `snapshot_not_found` because only garbage collection deletes fork snapshots. In the service context, snapshot deletion stays available after the namespace itself is deleted ([`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns)).
 
 Creating, retrieving, listing, extending, and deleting snapshots require an administrator or the service context. Reading through a snapshot requires `read` and `history` on the historical inode, evaluated at the current head.

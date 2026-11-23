@@ -1,10 +1,147 @@
 //! Collection recovery after failed or concurrent snapshot cleanup.
 
 use super::*;
+use crate::limits::{GC_GRACE_WINDOW_MS, MAX_CONTENTION_ATTEMPTS};
+use crate::namespace::basis::PublicationBasis;
 use loonfs_objectstore::keys::{self, snapshot_prefix};
 use loonfs_objectstore::ObjectStoreExtension;
+use loonfs_test_support::ids::page_limit;
 use loonfs_test_support::stores::{replace_object, MetadataMapStore};
-use loonfs_types::format::control::SnapshotOwner;
+use loonfs_types::format::control::{SnapshotOwner, SnapshotPayload};
+use loonfs_types::PageRequest;
+use std::assert_matches;
+
+/// Returns the snapshot record that a failed creation wrote for `owner` on
+/// `basis`'s manifest at `created_at_ms`. The record's key comes from
+/// `error`, the store error that the creation's put returned.
+pub(super) fn record_of_failed_creation(
+    error: &CoreError,
+    basis: &PublicationBasis,
+    owner: SnapshotOwner,
+    created_at_ms: u64,
+) -> SnapshotPayload {
+    let CoreError::Store { object_key, .. } = error else {
+        panic!("expected the store error of the record's put, got {error:?}");
+    };
+    let (namespace_id, snapshot_id) =
+        record::snapshot_record_key_ids(object_key).expect("a snapshot record key");
+    let manifest = basis.manifest.manifest();
+    SnapshotPayload {
+        snapshot_id,
+        namespace_id,
+        head_seq: manifest.head_seq,
+        payload_checksum: manifest.payload_checksum,
+        created_at_ms,
+        owner,
+    }
+}
+
+/// Puts `put`, the record of a failed snapshot creation, as a put of that
+/// creation that the store applies after the call returned. Checks that the
+/// store refuses the put, that the record at the key is `put` with a delete
+/// time, that a read by ID and the snapshot listing don't return the
+/// snapshot, and that collection deletes the record once the grace window has
+/// passed after its delete time.
+pub(super) async fn assert_a_late_put_is_refused_by_a_deleted_snapshot<S: ObjectStore>(
+    store: &S,
+    put: &SnapshotPayload,
+) {
+    let namespace_id = &put.namespace_id;
+    let key = keys::snapshot_record(namespace_id, &put.snapshot_id);
+    assert_matches!(
+        store
+            .put_if_absent(&key, record::encode_snapshot_record(put))
+            .await,
+        Err(ObjectStoreError::PreconditionFailed { .. }),
+        "a put of the creation that the store applies late is refused"
+    );
+    let records = crate::test_support::deleted_snapshot_records(store, namespace_id).await;
+    let [stored] = &records[..] else {
+        panic!("expected one snapshot record, got {records:?}");
+    };
+    let deleted_at_ms = stored
+        .owner
+        .deleted_at_ms()
+        .expect("the record has a delete time");
+    let mut undeleted = stored.clone();
+    if let SnapshotOwner::User { deleted_at_ms, .. } = &mut undeleted.owner {
+        *deleted_at_ms = None;
+    }
+    assert_eq!(&undeleted, put, "the record is the creation's own");
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    let head = namespace.load_read_state().await.expect("head");
+    let reader = crate::NamespaceEngine::reader(namespace);
+    assert_eq!(
+        reader
+            .get_snapshot(&head, &put.snapshot_id)
+            .await
+            .expect_err("a deleted snapshot can't be read")
+            .code(),
+        ErrorCode::SnapshotNotFound
+    );
+    let listed = reader
+        .list_snapshots_page(
+            &head,
+            PageRequest {
+                limit: page_limit(10),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("list snapshots");
+    assert!(listed.items.is_empty(), "listed {:?}", listed.items);
+    for (now_ms, deleted) in [
+        (deleted_at_ms + GC_GRACE_WINDOW_MS - 1, 0),
+        (deleted_at_ms + GC_GRACE_WINDOW_MS, 1),
+    ] {
+        let collected = crate::test_support::namespace_store(store, namespace_id)
+            .gc(&writer_at("collector", now_ms).clock())
+            .await
+            .expect("collect");
+        assert_eq!(collected.deleted_snapshots_by_owner.user, deleted);
+    }
+    assert!(store.head(&key).await.expect("snapshot record").is_none());
+}
+
+/// Checks that a creation whose every put of the snapshot record had an
+/// unknown outcome writes a deleted record at the snapshot's key, so a put
+/// of the creation that the store applies after the call returned can't
+/// leave an active snapshot, with or without an expiry.
+#[tokio::test]
+async fn a_creation_whose_puts_were_lost_leaves_a_deleted_snapshot_that_refuses_a_late_put() {
+    for expires_at_ms in [None, Some(10 * GC_GRACE_WINDOW_MS)] {
+        let directory = tempdir().expect("directory");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace");
+        let store = FailStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
+            OperationSelector::PutCreateIfAbsent,
+            InjectedError::Transport("lost snapshot write request".to_owned()),
+        );
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let basis = crate::test_support::folded_manifest(&namespace)
+            .await
+            .expect("fold the WAL tail");
+        let owner = SnapshotOwner::User {
+            name: Some("lost".to_owned()),
+            expires_at_ms,
+            deleted_at_ms: None,
+        };
+        let clock = context.clock();
+        store.fail_next(MAX_CONTENTION_ATTEMPTS);
+        let error = namespace
+            .create_snapshot_record(owner.clone(), basis.clone(), &clock)
+            .await
+            .expect_err("every put of the record had an unknown outcome");
+        assert_eq!(store.remaining(), 0, "every attempt's put was lost");
+        let put = record_of_failed_creation(&error, &basis, owner, clock.request_at_ms());
+        assert_a_late_put_is_refused_by_a_deleted_snapshot(&store, &put).await;
+    }
+}
 
 /// Checks the sequence of events where a quiet namespace's current manifest is
 /// replaced and collected between a snapshot's fold and its record put, and
@@ -36,7 +173,7 @@ async fn an_unverified_snapshot_left_without_its_manifest_is_deleted_at_the_grac
                 },
             ),
             KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
-            OperationSelector::Delete,
+            OperationSelector::CompareAndSwap,
             InjectedError::Transport("cleanup unavailable".to_owned()),
         ),
         KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
@@ -60,7 +197,7 @@ async fn an_unverified_snapshot_left_without_its_manifest_is_deleted_at_the_grac
         .load_current_manifest()
         .await
         .expect("selected manifest");
-    store.inner().fail_next(1);
+    store.inner().fail_next(MAX_CONTENTION_ATTEMPTS);
     store.block_next();
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let clock = setup.clock();
@@ -94,7 +231,7 @@ async fn an_unverified_snapshot_left_without_its_manifest_is_deleted_at_the_grac
         ErrorCode::StaleHead,
         "a failed cleanup keeps the verification error"
     );
-    assert_eq!(store.inner().attempts(), 1);
+    assert_eq!(store.inner().attempts(), MAX_CONTENTION_ATTEMPTS);
     store.inner().clear();
     let snapshots = store
         .list_prefix(&snapshot_prefix(&namespace_id))
@@ -106,7 +243,7 @@ async fn an_unverified_snapshot_left_without_its_manifest_is_deleted_at_the_grac
         "failed cleanup left its unverified snapshot"
     );
 
-    let grace_window_ms = crate::limits::GC_GRACE_WINDOW_MS;
+    let grace_window_ms = GC_GRACE_WINDOW_MS;
     for now_ms in [1_000, 1_000 + grace_window_ms - 1] {
         let young = crate::test_support::namespace_store(&store, &namespace_id)
             .gc(&writer_at("collector", now_ms).clock())

@@ -49,11 +49,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<(CreatedSnapshot, PublicationBasis)> {
         self.namespace
             .create_verified_snapshot_record(
-                SnapshotOwner::User {
-                    name,
-                    expires_at_ms,
-                    deleted_at_ms: None,
-                },
+                name,
+                expires_at_ms,
                 basis,
                 &self.namespace.start_clock(),
             )
@@ -86,11 +83,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         };
         self.namespace
             .create_verified_snapshot_record(
-                SnapshotOwner::User {
-                    name: None,
-                    expires_at_ms,
-                    deleted_at_ms: None,
-                },
+                None,
+                expires_at_ms,
                 basis,
                 &self.namespace.start_clock(),
             )
@@ -111,9 +105,11 @@ pub struct CreatedSnapshot {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Creates a verified snapshot of `basis`'s manifest for `owner`, and returns the
+    /// Creates a snapshot of `basis`'s manifest for `owner`, and returns the
     /// snapshot record with the newest manifest and the manifest boundary that
     /// the verification read (see [`Self::create_verified_snapshot_record`]).
+    /// A fork snapshot is written without verification, as a fork writes
+    /// its fork snapshot, and the call returns `basis`.
     #[cfg(test)]
     pub(crate) async fn create_snapshot_record(
         &self,
@@ -121,12 +117,24 @@ impl<S: ObjectStore> NamespaceStore<S> {
         basis: PublicationBasis,
         clock: &OperationClock,
     ) -> Result<(SnapshotPayload, PublicationBasis)> {
-        self.create_verified_snapshot_record(owner, basis, clock)
+        let SnapshotOwner::User {
+            name,
+            expires_at_ms,
+            deleted_at_ms,
+        } = owner
+        else {
+            let record = self.new_snapshot_record(owner, &basis, clock);
+            write_snapshot_record(&self.store, &record).await?;
+            return Ok((record, basis));
+        };
+        assert_eq!(deleted_at_ms, None, "a created snapshot isn't deleted");
+        self.create_verified_snapshot_record(name, expires_at_ms, basis, clock)
             .await
             .map(|(created, basis)| (created.record, basis))
     }
 
-    /// Creates a verified snapshot of `basis`'s manifest for `owner`.
+    /// Creates a verified user snapshot of `basis`'s manifest, with the label
+    /// `name` and the expiry `expires_at_ms`.
     ///
     /// `basis` contains a manifest and the manifest boundary that the caller
     /// read: the manifest that the caller's fold published or found current,
@@ -137,24 +145,26 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// verification, so the caller can read a fresh basis and take a snapshot
     /// again. Returns the snapshot record with the version that its write
     /// stored, and the newest manifest with the manifest boundary that the
-    /// verification read.
+    /// verification read. A call that fails after it starts writing the
+    /// record leaves the record deleted at its key (see
+    /// `delete_failed_snapshot`).
     pub(crate) async fn create_verified_snapshot_record(
         &self,
-        owner: SnapshotOwner,
+        name: Option<String>,
+        expires_at_ms: Option<u64>,
         basis: PublicationBasis,
         clock: &OperationClock,
     ) -> Result<(CreatedSnapshot, PublicationBasis)> {
-        validate_snapshot_owner(&owner)?;
-        let manifest = basis.manifest.manifest();
-        let snapshot_id = SnapshotId::generate(manifest.manifest_no);
-        let record = SnapshotPayload {
-            snapshot_id: snapshot_id.clone(),
-            namespace_id: self.namespace_id.clone(),
-            head_seq: manifest.head_seq,
-            payload_checksum: manifest.payload_checksum,
-            created_at_ms: clock.request_at_ms(),
-            owner,
-        };
+        validate_snapshot_request(name.as_deref(), expires_at_ms)?;
+        let record = self.new_snapshot_record(
+            SnapshotOwner::User {
+                name,
+                expires_at_ms,
+                deleted_at_ms: None,
+            },
+            &basis,
+            clock,
+        );
         let verification = async {
             let written = write_snapshot_record(&self.store, &record).await?;
             Ok::<_, CoreError>((written.etag, self.verify_snapshot_basis(basis).await?))
@@ -167,9 +177,27 @@ impl<S: ObjectStore> NamespaceStore<S> {
             Ok((_, SnapshotBasisVerification::Invalid)) => manifest_replaced(),
             Err(error) => error,
         };
-        self.delete_failed_snapshot_record(&snapshot_id, &error)
-            .await;
+        self.delete_failed_snapshot(&record, clock, &error).await;
         Err(error)
+    }
+
+    /// Returns a record for `owner` of `basis`'s manifest, under a freshly
+    /// generated [`SnapshotId`].
+    fn new_snapshot_record(
+        &self,
+        owner: SnapshotOwner,
+        basis: &PublicationBasis,
+        clock: &OperationClock,
+    ) -> SnapshotPayload {
+        let manifest = basis.manifest.manifest();
+        SnapshotPayload {
+            snapshot_id: SnapshotId::generate(manifest.manifest_no),
+            namespace_id: self.namespace_id.clone(),
+            head_seq: manifest.head_seq,
+            payload_checksum: manifest.payload_checksum,
+            created_at_ms: clock.request_at_ms(),
+            owner,
+        }
     }
 }
 
@@ -180,25 +208,16 @@ fn manifest_replaced() -> CoreError {
     )
 }
 
-fn validate_snapshot_owner(owner: &SnapshotOwner) -> Result<()> {
-    match owner {
-        SnapshotOwner::User {
-            name,
-            expires_at_ms,
-            ..
-        } => {
-            if let Some(name) = name {
-                validate_snapshot_name(name)?;
-            }
-            if *expires_at_ms == Some(0) {
-                return Err(CoreError::InvalidSnapshotRequest(
-                    "snapshot expiry must not be zero".to_owned(),
-                ));
-            }
-            Ok(())
-        }
-        SnapshotOwner::Fork { .. } => Ok(()),
+fn validate_snapshot_request(name: Option<&str>, expires_at_ms: Option<u64>) -> Result<()> {
+    if let Some(name) = name {
+        validate_snapshot_name(name)?;
     }
+    if expires_at_ms == Some(0) {
+        return Err(CoreError::InvalidSnapshotRequest(
+            "snapshot expiry must not be zero".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_snapshot_name(name: &str) -> Result<()> {
