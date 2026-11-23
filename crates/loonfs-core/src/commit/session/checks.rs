@@ -3,7 +3,8 @@
 use super::commit_session::CommitSession;
 use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
-use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
+use crate::metadata::{InodeRecord, RevisionRecord};
+use crate::path::write::DeletionInTrash;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
 
@@ -24,23 +25,24 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// deletion at or below the floor is accepted after the floor moves.
     pub(super) fn ensure_restorable_deletion(
         &self,
-        deletion: &SubtreeTombstoneRecord,
+        deletion: &DeletionInTrash,
         deletion_seq: CommitSeq,
     ) -> Result<()> {
-        let inode_id = deletion.root_inode_id;
+        let inode_id = deletion.root_inode_id();
+        let deletion_committed_seq = deletion.position().seq;
         if deletion_seq <= self.view().retention_floor_seq() {
             return Err(CommitValidationError::RestoreDeletedTargetNotDeleted { inode_id }.into());
         }
-        if deletion.committed_seq >= self.committed_seq {
+        if deletion_committed_seq >= self.committed_seq {
             return Err(
                 CommitValidationError::RestoreDeletedTargetsCurrentCommit { inode_id }.into(),
             );
         }
-        if deletion.committed_seq != deletion_seq {
+        if deletion_committed_seq != deletion_seq {
             return Err(CommitValidationError::RestoreDeletedSequenceMismatch {
                 inode_id,
                 requested_seq: deletion_seq,
-                actual_deletion_seq: deletion.committed_seq,
+                actual_deletion_seq: deletion_committed_seq,
             }
             .into());
         }

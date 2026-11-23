@@ -7,8 +7,10 @@ use super::commit_session::CommitSession;
 use super::numbering::CommitNumbering;
 use crate::commit::{CommitOperand, CommitValidationError};
 use crate::error::Result;
-use crate::metadata::{InodeRecord, SubtreeTombstoneRecord};
-use crate::path::write::{AvailableName, NewInodeId, ResolvedBinding, ResolvedTarget};
+use crate::metadata::InodeRecord;
+use crate::path::write::{
+    AvailableName, DeletionInTrash, NewInodeId, ResolvedBinding, ResolvedTarget,
+};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, RevisionSummary};
 use loonfs_types::format::wal::WalDelta;
@@ -218,19 +220,19 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// deletion of the same inode.
     pub(crate) async fn restore_deleted(
         &mut self,
-        deletion: &SubtreeTombstoneRecord,
+        deletion: DeletionInTrash,
         deletion_seq: CommitSeq,
         destination: AvailableName,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
-        let inode_id = deletion.root_inode_id;
+        let inode_id = deletion.root_inode_id();
         let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
             CommitValidationError::InodeMissing {
                 operand: CommitOperand::RestoreDeletedTarget,
                 inode_id,
             },
         )?;
-        self.ensure_restorable_deletion(deletion, deletion_seq)?;
+        self.ensure_restorable_deletion(&deletion, deletion_seq)?;
         self.ensure_child_unbound(inode_id, None).await?;
         let revision = self.resolve_revision_summary(&inode).await?;
         let deltas = vec![

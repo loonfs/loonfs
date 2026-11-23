@@ -6,10 +6,10 @@ use super::publish_path_planning::{is_missing_visible_path, AvailableName, Desti
 use crate::authorize::{check_rights, Absence};
 use crate::commit::{CommitValidationError, NewChild};
 use crate::error::{CoreError, Result};
-use crate::metadata::{SubtreeTombstoneRecord, VisiblePathError};
+use crate::metadata::VisiblePathError;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::TombstoneRowAction;
+use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, TombstoneRowAction};
 use loonfs_types::options::RestoreDeletedDestination;
 use loonfs_types::{
     AbsolutePath, AccessRight, CommitSeq, ContentRef, DestinationBehavior, DisplayName, InodeId,
@@ -23,6 +23,27 @@ pub(super) struct ParentDirectories {
     /// directory created below it.
     deepest_existing: InodeId,
     missing: Vec<DisplayName>,
+}
+
+/// A deleted item's deletion in the trash: the latest tombstone event of the
+/// item's root, which is a `set` above the retention floor. Only
+/// [`OperationPlanningSession::resolve_deletion_in_trash`] makes one, so a
+/// restore that takes one revokes a deletion that is in the trash.
+pub(crate) struct DeletionInTrash {
+    root_inode_id: InodeId,
+    position: DeltaPosition,
+    deleted_binding: DeletedBinding,
+}
+
+impl DeletionInTrash {
+    pub(crate) fn root_inode_id(&self) -> InodeId {
+        self.root_inode_id
+    }
+
+    /// The position of the deletion's `set` event, which a revoke refers to.
+    pub(crate) fn position(&self) -> DeltaPosition {
+        self.position
+    }
 }
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
@@ -74,37 +95,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         deletion_seq: CommitSeq,
         destination: RestoreDeletedDestination,
     ) -> Result<()> {
-        let deletion = self.view().metadata.tombstone_in_trash(inode_id).await?;
-        let (deletion, deleted_binding) = match &deletion {
-            Some(
-                deletion @ SubtreeTombstoneRecord {
-                    action:
-                        TombstoneRowAction::Set {
-                            deleted_binding, ..
-                        },
-                    ..
-                },
-            ) => (deletion, deleted_binding),
-            _ => {
-                let authorization_target = self
-                    .view()
-                    .metadata
-                    .current_parent_binding_for_child(inode_id)
-                    .await?
-                    .map_or(inode_id, |binding| binding.parent_inode_id);
-                self.view()
-                    .authorize(
-                        authorization_target,
-                        AccessRight::Remove.into(),
-                        Absence::Inode,
-                    )
-                    .await?;
-                return Err(
-                    CommitValidationError::RestoreDeletedTargetNotDeleted { inode_id }.into(),
-                );
-            }
-        };
-        let saved_parent = deleted_binding.parent_inode_id;
+        let deletion = self.resolve_deletion_in_trash(inode_id).await?;
+        let saved_parent = deletion.deleted_binding.parent_inode_id;
         self.view()
             .authorize(saved_parent, AccessRight::Remove.into(), Absence::Inode)
             .await?;
@@ -115,7 +107,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 display_name,
             } => Destination::name(*parent_inode_id, display_name),
             RestoreDeletedDestination::Recorded => {
-                Destination::name(saved_parent, &deleted_binding.display_name)
+                Destination::name(saved_parent, &deletion.deleted_binding.display_name)
             }
         };
         let name = self
@@ -124,6 +116,42 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         self.commit
             .restore_deleted(deletion, deletion_seq, name)
             .await
+    }
+
+    /// Returns the deletion of `inode_id` that is in the trash.
+    ///
+    /// When the inode's latest tombstone event isn't a `set` in the trash,
+    /// the restore fails with `RestoreDeletedTargetNotDeleted`, after the
+    /// `remove` right is authorized on the inode's current parent, or on the
+    /// inode when it has no parent.
+    async fn resolve_deletion_in_trash(&self, inode_id: InodeId) -> Result<DeletionInTrash> {
+        if let Some(deletion) = self.view().metadata.tombstone_in_trash(inode_id).await? {
+            let position = deletion.position();
+            if let TombstoneRowAction::Set {
+                deleted_binding, ..
+            } = deletion.action
+            {
+                return Ok(DeletionInTrash {
+                    root_inode_id: deletion.root_inode_id,
+                    position,
+                    deleted_binding,
+                });
+            }
+        }
+        let authorization_target = self
+            .view()
+            .metadata
+            .current_parent_binding_for_child(inode_id)
+            .await?
+            .map_or(inode_id, |binding| binding.parent_inode_id);
+        self.view()
+            .authorize(
+                authorization_target,
+                AccessRight::Remove.into(),
+                Absence::Inode,
+            )
+            .await?;
+        Err(CommitValidationError::RestoreDeletedTargetNotDeleted { inode_id }.into())
     }
 
     /// Resolves the destination of a restore, which has to be vacant, and
