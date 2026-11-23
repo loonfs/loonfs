@@ -31,8 +31,8 @@ use loonfs_types::format::manifest::{
     TrashRowAction, METADATA_SEGMENT_ENCODING,
 };
 use loonfs_types::format::wal::{
-    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, MergeRecord, WalCodecError,
-    WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
+    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, ForkRange, MergeRecord,
+    WalCodecError, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
     MAX_FENCE_OR_FLOOR_OBJECT_BYTES,
 };
 use loonfs_types::ROOT_INODE_ID;
@@ -532,8 +532,26 @@ fn sample_merge() -> MergeRecord {
         source_namespace_id: NamespaceId::parse("demo-fork").expect("valid namespace id"),
         source_after_seq: CommitSeq(12),
         source_through_seq: CommitSeq(30),
+        covered_ranges: Vec::new(),
         conflicts: Vec::new(),
     }
+}
+
+/// A WAL object whose commit is a merge of a rebase's new fork, whose record
+/// also covers the range of the original fork that the new fork's replay
+/// commits replayed. An empty `covered_ranges` writes no bytes, so the
+/// other merge sample doesn't pin its encoding.
+fn sample_wal_merge_covered_ranges_payload() -> WalObjectPayload {
+    let mut payload = sample_wal_payload();
+    payload.records[0].merge = Some(MergeRecord {
+        covered_ranges: vec![ForkRange {
+            source_namespace_id: NamespaceId::parse("demo-original").expect("valid namespace id"),
+            source_after_seq: CommitSeq(4),
+            source_through_seq: CommitSeq(17),
+        }],
+        ..sample_merge()
+    });
+    payload
 }
 
 /// A WAL object whose commit is a merge. An absent merge record writes no bytes,
@@ -834,6 +852,14 @@ fn wal_object_inline_content_matches_golden_bytes() {
 #[test]
 fn wal_object_merge_matches_golden_bytes() {
     assert_wal_matches_golden("wal_object_merge.v1.cbor", sample_wal_merge_payload());
+}
+
+#[test]
+fn wal_object_merge_covered_ranges_matches_golden_bytes() {
+    assert_wal_matches_golden(
+        "wal_object_merge_covered_ranges.v1.cbor",
+        sample_wal_merge_covered_ranges_payload(),
+    );
 }
 
 #[test]

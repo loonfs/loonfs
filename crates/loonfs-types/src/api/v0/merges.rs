@@ -111,7 +111,9 @@ pub struct NextMergeRangeResponse {
 pub enum NextMergeRangeOutcome {
     /// The floors allow the next merge.
     Open {
-        /// The fork's newest merge into the namespace, which the next merge continues. It's
+        /// The fork's newest range in the namespace's merge index, which the next merge
+        /// continues. After a merge of a rebase's new fork, it's the range of this fork that the
+        /// new fork's replay commits applied, so its source is this fork, not the new fork. It's
         /// absent before the fork's first merge. In a rebase's new fork, it's the fork's newest
         /// replay commit, never a merge that the new fork inherited.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,8 +128,8 @@ pub enum NextMergeRangeOutcome {
     /// `below_retention_floor`, because the fork no longer keeps the history that the merge's net
     /// change needs.
     RangeStartBelowFloor {
-        /// The fork's newest merge into the namespace, as for `open`. It's absent before the
-        /// fork's first merge.
+        /// The fork's newest range in the namespace's merge index, as for `open`. It's absent
+        /// before the fork's first merge.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         merge: Option<Merge>,

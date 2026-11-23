@@ -730,7 +730,9 @@ impl CommitFingerprintInput<'_> {
 ///
 /// The server plans a merge's operations from the merge's inputs, so the merge
 /// record identifies the merge, and the preimage includes no operations and no
-/// preconditions
+/// preconditions. It includes the record's own range only, because the
+/// record's covered ranges and conflict report follow from the fork's commits
+/// in that range
 /// ([Merge commits](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#b5-merge-commits)).
 #[derive(Debug, Clone, Copy)]
 pub struct MergeFingerprintInput<'a> {

@@ -434,32 +434,36 @@ pub struct CommitReceiptRecord {
     pub committed_seq: CommitSeq,
 }
 
-/// Indexes one merge by the fork whose commits it applied.
+/// Indexes one range of a fork's commits that a merge covered, by the fork.
 ///
 /// See [metadata rows and row keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeIndexRecord {
-    /// The fork whose commits the merge applied.
+    /// The fork whose commits the merge covered.
     pub source_namespace_id: NamespaceId,
     /// Namespace sequence assigned to the merge.
     pub committed_seq: CommitSeq,
-    /// The fork's commits above this sequence were applied.
+    /// The fork's commits above this sequence were covered.
     pub source_after_seq: CommitSeq,
-    /// The fork's commits at or below this sequence were applied.
+    /// The fork's commits at or below this sequence were covered.
     pub source_through_seq: CommitSeq,
 }
 
 impl MergeIndexRecord {
-    /// Derives the merge index row of `commit`, or `None` when the commit
-    /// isn't a merge.
-    pub fn from_commit(commit: &WalCommitPayload) -> Option<Self> {
-        commit.merge.as_ref().map(|merge| Self {
-            source_namespace_id: merge.source_namespace_id.clone(),
-            committed_seq: commit.committed_seq,
-            source_after_seq: merge.source_after_seq,
-            source_through_seq: merge.source_through_seq,
-        })
+    /// Derives the merge index rows of `commit`, one for each range that its
+    /// merge record covers, and none when the commit isn't a merge.
+    pub fn from_commit(commit: &WalCommitPayload) -> impl Iterator<Item = Self> + '_ {
+        commit
+            .merge
+            .iter()
+            .flat_map(|merge| merge.ranges())
+            .map(|range| Self {
+                source_namespace_id: range.source_namespace_id,
+                committed_seq: commit.committed_seq,
+                source_after_seq: range.source_after_seq,
+                source_through_seq: range.source_through_seq,
+            })
     }
 }
 

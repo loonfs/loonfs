@@ -438,25 +438,55 @@ fn revision_layouts_equal_the_reference_size_or_first_piece_offset() {
     }
 }
 
-/// Checks that encoding and decoding refuse a merge record whose range
-/// contains no sequence, or whose source is the committing namespace.
+/// Checks that encoding and decoding refuse a merge record when one of the
+/// ranges that it covers contains no sequence, is of the committing
+/// namespace, or is of a fork that another of its ranges covers, and that
+/// the error names that range's fork.
 #[test]
 fn a_merge_record_covers_at_least_one_commit_of_another_namespace() {
-    let merge = |source: &str, after: u64, through: u64| MergeRecord {
+    let range = |source: &str, after: u64, through: u64| ForkRange {
         source_namespace_id: NamespaceId::parse(source).expect("namespace"),
         source_after_seq: CommitSeq(after),
         source_through_seq: CommitSeq(through),
+    };
+    let merge = |own: ForkRange, covered: &[ForkRange]| MergeRecord {
+        source_namespace_id: own.source_namespace_id,
+        source_after_seq: own.source_after_seq,
+        source_through_seq: own.source_through_seq,
+        covered_ranges: covered.to_vec(),
         conflicts: Vec::new(),
     };
-    let inverted = Some("`source_after_seq` must be below `source_through_seq`");
+    let inverted = "`source_after_seq` must be below `source_through_seq`";
+    let committing = "the source is the committing namespace";
+    let twice = "the record covers the source twice";
     for (record, rejected) in [
-        (merge("fork", 4, 9), None),
-        (merge("fork", 4, 5), None),
-        (merge("fork", 9, 4), inverted),
-        (merge("fork", 4, 4), inverted),
+        (merge(range("fork", 4, 9), &[]), None),
+        (merge(range("fork", 4, 5), &[]), None),
+        (merge(range("fork", 4, 9), &[range("original", 2, 6)]), None),
+        (merge(range("fork", 9, 4), &[]), Some(("fork", inverted))),
+        (merge(range("fork", 4, 4), &[]), Some(("fork", inverted))),
         (
-            merge("bounded", 4, 9),
-            Some("the source is the committing namespace"),
+            merge(range("bounded", 4, 9), &[]),
+            Some(("bounded", committing)),
+        ),
+        (
+            merge(range("fork", 4, 9), &[range("original", 6, 6)]),
+            Some(("original", inverted)),
+        ),
+        (
+            merge(range("fork", 4, 9), &[range("bounded", 2, 6)]),
+            Some(("bounded", committing)),
+        ),
+        (
+            merge(range("fork", 4, 9), &[range("fork", 2, 4)]),
+            Some(("fork", twice)),
+        ),
+        (
+            merge(
+                range("fork", 4, 9),
+                &[range("original", 2, 6), range("original", 6, 8)],
+            ),
+            Some(("original", twice)),
         ),
     ] {
         let mut payload = inline_wal_object(&[0]);
@@ -468,7 +498,7 @@ fn a_merge_record_covers_at_least_one_commit_of_another_namespace() {
                 assert!(decoded.is_ok(), "{record:?}: {decoded:?}");
                 assert!(encoded.is_ok(), "{record:?}");
             }
-            Some(expected) => {
+            Some((source, expected)) => {
                 for error in [decoded.err(), encoded.err()] {
                     assert_matches!(
                         error,
@@ -476,8 +506,8 @@ fn a_merge_record_covers_at_least_one_commit_of_another_namespace() {
                             seq: CommitSeq(1),
                             source_namespace_id,
                             reason,
-                        }) if reason == expected
-                            && source_namespace_id == record.source_namespace_id
+                        }) if reason == expected && source_namespace_id.as_str() == source,
+                        "{record:?}"
                     );
                 }
             }
@@ -495,6 +525,7 @@ fn a_merge_record_round_trips_its_conflict_report() {
         source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
         source_after_seq: CommitSeq(4),
         source_through_seq: CommitSeq(9),
+        covered_ranges: Vec::new(),
         conflicts: Vec::new(),
     };
     let version = |path: &str| crate::MergeConflictVersion {

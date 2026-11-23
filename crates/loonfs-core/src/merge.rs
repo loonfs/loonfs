@@ -28,7 +28,9 @@ use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, RebasedFrom};
 use loonfs_types::format::manifest::MergeIndexRecord;
-use loonfs_types::format::wal::{MergeRecord, MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
+use loonfs_types::format::wal::{
+    ForkRange, MergeRecord, MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES,
+};
 use loonfs_types::{
     ActorId, Commit, CommitId, CommitPrecondition, CommitSeq, FilesystemOperation, MergeConflict,
     NamespaceId,
@@ -235,6 +237,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 .through_seq
                 .or(committed.as_ref().map(|merge| merge.source_through_seq))
                 .unwrap_or(CommitSeq(0)),
+            covered_ranges: Vec::new(),
             conflicts: Vec::new(),
         };
         let namespace_id = &self.namespace.namespace_id;
@@ -257,7 +260,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// The plan checks the fork point against this namespace's retention
     /// floor, takes the range's start from this namespace's merge index and
     /// checks it against the fork's own floor, computes the fork's net change
-    /// over the range, and classifies it against this namespace's head. It
+    /// over the range, and classifies it against this namespace's head. When
+    /// `fork` is a rebase's new fork, the merge also covers the ranges that
+    /// the replay commits in its range cover, and the plan fails with
+    /// `merge_range_conflict` when one of them doesn't continue this
+    /// namespace's merge index (see [`ensure_ranges_continue`]). It
     /// fails with `merge_too_large` when the commit wouldn't fit one WAL
     /// object or `allowance`, or with `server_busy` when other merges'
     /// reservations of `allowance` leave no room for the commit, before it
@@ -492,6 +499,43 @@ pub(crate) async fn merge_start<S: ObjectStore + ?Sized>(
             .map_or(first_after_seq, |previous| previous.source_through_seq),
         previous,
     }))
+}
+
+/// Refuses a merge into the namespace that `head` and `view` describe with
+/// `merge_range_conflict` unless each of `ranges` starts where
+/// [`merge_start`] says that the next merge of the range's fork starts, so
+/// that a fork's commits are covered once and in order
+/// ([format section 6.2](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#merges)).
+///
+/// `merged_source` is the merge's own source, a fork made at
+/// `fork_point_seq`, and every range is checked against its floor. A range
+/// of another fork that the namespace's merge index has no row for isn't
+/// checked, because the namespace knows that fork's fork point only from
+/// the fork itself. No merge in the index covers such a fork, so no row can
+/// contradict the range, and the merge that commits first writes the row
+/// that every later range of the fork is checked against.
+pub(crate) async fn ensure_ranges_continue<S: ObjectStore + ?Sized>(
+    view: &MetadataView<'_, '_, S>,
+    head: &NamespaceReadState,
+    ranges: impl IntoIterator<Item = ForkRange>,
+    merged_source: &NamespaceId,
+    fork_point_seq: CommitSeq,
+) -> Result<()> {
+    for range in ranges {
+        let source_namespace_id = range.source_namespace_id;
+        let start = merge_start(view, head, &source_namespace_id, fork_point_seq).await??;
+        if start.previous.is_none() && source_namespace_id != *merged_source {
+            continue;
+        }
+        if range.source_after_seq != start.after_seq {
+            return Err(CoreError::MergeRangeConflict {
+                source_namespace_id,
+                expected_after_seq: start.after_seq,
+                actual_after_seq: range.source_after_seq,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Returns the fork basis of the namespace whose head is `head`, with the

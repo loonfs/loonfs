@@ -270,6 +270,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                         .expect("namespace"),
                     source_after_seq: CommitSeq(MAX_PUBLIC_INTEGER - 1),
                     source_through_seq: CommitSeq(MAX_PUBLIC_INTEGER),
+                    covered_ranges: Vec::new(),
                     conflicts: Vec::new(),
                 },
                 CommitSeq(MAX_PUBLIC_INTEGER - 1),
@@ -392,6 +393,7 @@ fn a_merges_bound_includes_the_layouts_of_its_proofs() {
                 source_namespace_id: fork.clone(),
                 source_after_seq: CommitSeq(3),
                 source_through_seq: CommitSeq(7),
+                covered_ranges: Vec::new(),
                 conflicts: Vec::new(),
             },
             CommitSeq(3),
@@ -424,6 +426,7 @@ fn a_merge_records_bound_counts_its_conflict_report() {
         source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
         source_after_seq: CommitSeq(3),
         source_through_seq: CommitSeq(7),
+        covered_ranges: Vec::new(),
         conflicts: Vec::new(),
     };
     let version = loonfs_types::MergeConflictVersion {

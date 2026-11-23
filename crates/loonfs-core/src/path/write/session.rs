@@ -8,7 +8,7 @@ use crate::authorize::Authorizer;
 use crate::commit::engine::{CommitCandidate, MergeIntent};
 use crate::commit::{CommitFingerprint, CommitPlan, CommitSession};
 use crate::error::{CoreError, Result};
-use crate::merge::merge_start;
+use crate::merge::ensure_ranges_continue;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::tail_content::{cut_layout, materialize_content_layout, ContentWrites};
@@ -337,8 +337,9 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
 }
 
 /// Requires a merge into the namespace at `head` and `view` to pass the floor
-/// rule and to start where [`merge_start`] says, so that a fork's commits
-/// are applied once and in order.
+/// rule, and each range that its record covers to start where the
+/// namespace's merge index says (see [`ensure_ranges_continue`]), so that a
+/// fork's commits are covered once and in order.
 ///
 /// The floor check runs first because the range check depends on it. A base
 /// compaction removes the merge index rows below the floor, so if the fork
@@ -349,18 +350,14 @@ async fn ensure_merge_is_admissible<S: ObjectStore + ?Sized>(
     head: &NamespaceReadState,
     merge: &MergeIntent,
 ) -> Result<()> {
-    let source_namespace_id = &merge.record.source_namespace_id;
-    let expected_after_seq = merge_start(view, head, source_namespace_id, merge.fork_point_seq)
-        .await??
-        .after_seq;
-    if merge.record.source_after_seq != expected_after_seq {
-        return Err(CoreError::MergeRangeConflict {
-            source_namespace_id: source_namespace_id.clone(),
-            expected_after_seq,
-            actual_after_seq: merge.record.source_after_seq,
-        });
-    }
-    Ok(())
+    ensure_ranges_continue(
+        view,
+        head,
+        merge.record.ranges(),
+        &merge.record.source_namespace_id,
+        merge.fork_point_seq,
+    )
+    .await
 }
 
 #[cfg(test)]

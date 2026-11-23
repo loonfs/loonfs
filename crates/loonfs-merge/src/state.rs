@@ -11,15 +11,15 @@ use serde::{Deserialize, Serialize};
 /// it after every step, and [`MergeSession::resume`](crate::MergeSession::resume)
 /// continues from it.
 ///
-/// Warning: keep the state until the session has deleted all of its new
-/// forks. [`MergeSession::recover`](crate::MergeSession::recover) finds a new
-/// fork through the fork that it was rebased from, so if the state is lost
-/// after a `merged` session deleted some of its new forks, recovery can't
-/// connect the remaining new forks to the original fork, and the session
-/// merges the original fork again. A change that a new fork already merged
-/// is then left out where the namespace has the same version, and conflicts
-/// where it doesn't, so the namespace keeps what the new forks merged, but
-/// the session can end `failed`, with new forks of its own to abandon.
+/// Keep the state until the session has deleted all of its new forks.
+/// [`MergeSession::recover`](crate::MergeSession::recover) finds a new fork
+/// through the fork that it was rebased from, so if the state is lost after
+/// a `merged` session deleted some of its new forks, recovery can't connect
+/// the remaining new forks to the original fork, and nothing deletes them.
+/// The recovered session still merges each of the original fork's commits
+/// once, because the merge of the last new fork covered the original fork's
+/// replayed commits, so the next-range query of the original fork starts
+/// after them, and the session is `merged` when nothing comes after them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeSessionState {

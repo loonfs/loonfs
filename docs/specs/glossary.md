@@ -299,7 +299,7 @@ A single commit applying a contiguous range of a fork's commits (`(source_after_
 
 ### Merge index
 
-The derived `merges` row family storing one row per committed merge, keyed by source fork and merge sequence newest first. Before committing a merge, LoonFS checks the latest row to ensure the fork's commits apply once and contiguously. See [Merges](format.md#merges).
+The derived `merges` row family storing one row for each range of a fork's commits that a committed merge covers, keyed by that fork and merge sequence newest first. A merge covers its own source's range, and a merge of a rebase's new fork also covers the range of the fork that the new fork's replay commits replayed. Before committing a merge, LoonFS checks the latest row of each fork that the merge covers, to ensure the fork's commits apply once and contiguously. See [Merges](format.md#merges).
 
 ### Rebase
 

@@ -5,7 +5,7 @@
 use super::expired_deletion_rows::{compact_group, family_rows};
 use super::*;
 use loonfs_types::format::manifest::MergeIndexRecord;
-use loonfs_types::format::wal::MergeRecord;
+use loonfs_types::format::wal::{ForkRange, MergeRecord};
 use loonfs_types::Commit;
 
 fn fork(name: &str) -> NamespaceId {
@@ -26,19 +26,28 @@ async fn publish<S: ObjectStore>(
 }
 
 /// Publishes a merge of `fork_name`'s commits above `after_seq`, through
-/// `through_seq`, from a fork made at `fork_point_seq`.
+/// `through_seq`, from a fork made at `fork_point_seq`, whose record also
+/// covers `covered`, each a fork's name and its range.
 async fn publish_merge<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
     fork_name: &str,
     fork_point_seq: u64,
-    after_seq: u64,
-    through_seq: u64,
+    (after_seq, through_seq): (u64, u64),
+    covered: &[(&str, u64, u64)],
 ) -> Commit {
     let merge = MergeRecord {
         source_namespace_id: fork(fork_name),
         source_after_seq: CommitSeq(after_seq),
         source_through_seq: CommitSeq(through_seq),
+        covered_ranges: covered
+            .iter()
+            .map(|&(name, after_seq, through_seq)| ForkRange {
+                source_namespace_id: fork(name),
+                source_after_seq: CommitSeq(after_seq),
+                source_through_seq: CommitSeq(through_seq),
+            })
+            .collect(),
         conflicts: Vec::new(),
     };
     let name = format!("merge-{fork_name}-{through_seq}");
@@ -79,8 +88,9 @@ async fn newest_merge<S: ObjectStore + ?Sized>(
 }
 
 /// Checks that the projected tail and a fold both produce a merge index row
-/// for each merge, and that a scan of one fork's prefix returns that fork's
-/// merges newest first, and no other fork's.
+/// for each range that a merge covers, under the range's fork, and that a
+/// scan of one fork's prefix returns that fork's rows newest first, and no
+/// other fork's.
 #[tokio::test]
 async fn merges_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork() {
     let temp_dir = tempdir().expect("tempdir");
@@ -89,10 +99,30 @@ async fn merges_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork(
     bootstrap_namespace(&store, &namespace_id, &test_context())
         .await
         .expect("bootstrap");
-    let first = publish_merge(&store, &namespace_id, "fork-a", 3, 3, 7).await;
-    let other = publish_merge(&store, &namespace_id, "fork-b", 0, 0, 4).await;
-    let repeat = publish_merge(&store, &namespace_id, "fork-a", 3, 7, 9).await;
-    let expected = [indexed(&repeat), indexed(&first), indexed(&other)].map(MetadataRow::Merge);
+    let first = publish_merge(&store, &namespace_id, "fork-a", 3, (3, 7), &[]).await;
+    let other = publish_merge(
+        &store,
+        &namespace_id,
+        "fork-b",
+        0,
+        (0, 4),
+        &[("fork-c", 2, 6)],
+    )
+    .await;
+    let repeat = publish_merge(&store, &namespace_id, "fork-a", 3, (7, 9), &[]).await;
+    let covered = MergeIndexRecord {
+        source_namespace_id: fork("fork-c"),
+        committed_seq: other.committed_seq,
+        source_after_seq: CommitSeq(2),
+        source_through_seq: CommitSeq(6),
+    };
+    let expected = [
+        indexed(&repeat),
+        indexed(&first),
+        indexed(&other),
+        covered.clone(),
+    ]
+    .map(MetadataRow::Merge);
 
     let tail_rows = crate::test_support::namespace_store(&store, &namespace_id)
         .load_manifest_projection(crate::test_support::observed_now())
@@ -140,6 +170,7 @@ async fn merges_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork(
     for (fork_name, newest) in [
         ("fork-a", Some(indexed(&repeat))),
         ("fork-b", Some(indexed(&other))),
+        ("fork-c", Some(covered.clone())),
         ("fork", None),
     ] {
         assert_eq!(
@@ -162,7 +193,7 @@ async fn merge_rows_compact_with_the_commits_group_and_leave_no_row_below_the_fl
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let first = publish_merge(&store, &namespace_id, "fork-a", 3, 3, 7).await;
+    let first = publish_merge(&store, &namespace_id, "fork-a", 3, (3, 7), &[]).await;
     let floor = publish(
         &store,
         &namespace_id,
@@ -172,7 +203,7 @@ async fn merge_rows_compact_with_the_commits_group_and_leave_no_row_below_the_fl
     )
     .await
     .committed_seq;
-    let repeat = publish_merge(&store, &namespace_id, "fork-a", 3, 7, 9).await;
+    let repeat = publish_merge(&store, &namespace_id, "fork-a", 3, (7, 9), &[]).await;
     assert!(first.committed_seq < floor && floor < repeat.committed_seq);
     advance_floor_through(&store, &namespace_id, floor, &context).await;
     compact_group(&store, &namespace_id, MetadataFamilyGroup::Commits).await;

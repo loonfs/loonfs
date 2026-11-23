@@ -421,9 +421,12 @@ pub struct WalInlineContent {
     pub bytes: Vec<u8>,
 }
 
-/// Identifies the fork and the range of the fork's commits that a merge
-/// applied to the committing namespace, and for a rebase's replay commit,
-/// the changes that the replay commit left out.
+/// Identifies the ranges of fork commits that a merge applied or covered.
+///
+/// The record identifies the fork and the range of its commits that the merge
+/// applied to the committing namespace, the ranges of other forks that the
+/// merge also covers, and for a rebase's replay commit, the changes that the
+/// replay commit left out.
 ///
 /// The range follows the change feed's convention: the fork's commits above
 /// `source_after_seq`, through `source_through_seq`. See
@@ -438,10 +441,42 @@ pub struct MergeRecord {
     pub source_after_seq: CommitSeq,
     /// The fork's commits at or below this sequence were applied.
     pub source_through_seq: CommitSeq,
+    /// The ranges of other forks' commits that the merge also covers, one
+    /// for each fork: the forks whose commits the replay commits in the
+    /// merge's range applied to the source. Empty unless the source is a
+    /// rebase's new fork and the range has a replay commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covered_ranges: Vec<ForkRange>,
     /// The changes that a replay commit left out, as its conflict report. A
     /// merge's record has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<crate::MergeConflict>,
+}
+
+impl MergeRecord {
+    /// Returns every range of fork commits that the merge covers: its own
+    /// source's range, and then each of `covered_ranges`.
+    pub fn ranges(&self) -> impl Iterator<Item = ForkRange> + '_ {
+        std::iter::once(ForkRange {
+            source_namespace_id: self.source_namespace_id.clone(),
+            source_after_seq: self.source_after_seq,
+            source_through_seq: self.source_through_seq,
+        })
+        .chain(self.covered_ranges.iter().cloned())
+    }
+}
+
+/// A range of one fork's commits, above `source_after_seq` through
+/// `source_through_seq`, that a merge covers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkRange {
+    /// The fork whose commits the range contains.
+    pub source_namespace_id: NamespaceId,
+    /// The fork's commits above this sequence are in the range.
+    pub source_after_seq: CommitSeq,
+    /// The fork's commits at or below this sequence are in the range.
+    pub source_through_seq: CommitSeq,
 }
 
 /// Contains one accepted logical commit inside a WAL object.
@@ -826,25 +861,34 @@ fn validate_wal_bind_revisions(payload: &WalObjectPayload) -> Result<(), WalCode
     Ok(())
 }
 
-/// Requires every merge record's range to contain at least one sequence, and
-/// its source to be another namespace.
+/// Requires each range that a merge record covers to contain at least one
+/// sequence, and to be of a namespace other than the committing namespace
+/// and the record's other ranges.
 fn validate_wal_merges(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
     for record in &payload.records {
         let Some(merge) = &record.merge else {
             continue;
         };
-        let reason = if merge.source_after_seq >= merge.source_through_seq {
-            "`source_after_seq` must be below `source_through_seq`"
-        } else if merge.source_namespace_id == payload.namespace_id {
-            "the source is the committing namespace"
-        } else {
-            continue;
-        };
-        return Err(WalCodecError::InvalidWalMerge {
-            seq: record.committed_seq,
-            source_namespace_id: merge.source_namespace_id.clone(),
-            reason,
-        });
+        for (index, range) in merge.ranges().enumerate() {
+            let reason = if range.source_after_seq >= range.source_through_seq {
+                "`source_after_seq` must be below `source_through_seq`"
+            } else if range.source_namespace_id == payload.namespace_id {
+                "the source is the committing namespace"
+            } else if merge
+                .ranges()
+                .take(index)
+                .any(|earlier| earlier.source_namespace_id == range.source_namespace_id)
+            {
+                "the record covers the source twice"
+            } else {
+                continue;
+            };
+            return Err(WalCodecError::InvalidWalMerge {
+                seq: record.committed_seq,
+                source_namespace_id: range.source_namespace_id,
+                reason,
+            });
+        }
     }
     Ok(())
 }

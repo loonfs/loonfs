@@ -2,6 +2,8 @@
 //! retries of a replay commit that committed, which return its conflict
 //! report, and a rebase that the fork's own retention floor refuses.
 
+mod merges_after_rebase;
+
 use super::super::merges::{PlannedCommit, PlannedMerge};
 use crate::test_support::maintenance_past_the_grace_window;
 use crate::{

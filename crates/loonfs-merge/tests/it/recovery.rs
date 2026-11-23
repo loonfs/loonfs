@@ -126,3 +126,28 @@ async fn a_lost_state_fails_when_a_new_forks_next_range_is_unknown() {
     );
     assert_eq!(session.state().new_fork_ids, [rebased]);
 }
+
+/// Checks that a lost state after a `merged` session deleted its new forks
+/// recovers as `merged` when the next-range query says that the namespace
+/// has the original fork's commits through its head, which a merge of the
+/// last new fork records, and sends no merge.
+#[tokio::test]
+async fn a_lost_state_after_the_new_forks_were_deleted_recovers_as_merged() {
+    let mechanics = ScriptedMechanics::new([
+        Answer::ForkSnapshots(Vec::new()),
+        Answer::Range {
+            next_after_seq: 20,
+            source_head_seq: 20,
+            merged: true,
+        },
+    ]);
+
+    let session = recover(&mechanics, DefaultResolver).await;
+
+    mechanics.assert_script_used();
+    assert_eq!(session.state().status, MergeSessionStatus::Merged);
+    assert!(session.state().new_fork_ids.is_empty());
+    let (_, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+    assert_eq!(state.status, MergeSessionStatus::Merged);
+    assert!(merges(&mechanics.sent()).is_empty());
+}
