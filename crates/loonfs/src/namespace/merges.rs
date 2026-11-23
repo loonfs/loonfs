@@ -456,25 +456,23 @@ impl Namespace<Writable> {
         fork_id: &NamespaceId,
         expires_at_ms: Option<u64>,
     ) -> Result<(PinnedRead, CreatedSnapshot)> {
-        let (created, verified, checked) = self
+        let (created, verified) = self
             .mode
             .publisher
             .snapshot_after_fold(fork_id, |manifest| {
                 let engine = self
                     .core
                     .writer_engine(&self.mode.writer.writer_id, fork_id);
-                let checked = self.core.observation();
                 async move {
                     engine
                         .create_verified_snapshot(None, expires_at_ms, manifest)
                         .await
-                        .map(|(created, verified)| (created, verified, checked))
                 }
             })
             .await?;
         let fork = self
             .core
-            .pinned_read_at_created_snapshot(fork_id, &created, verified, checked)
+            .pinned_read_at_created_snapshot(fork_id, &created, &verified)
             .await?;
         Ok((fork, created))
     }

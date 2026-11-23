@@ -530,7 +530,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
     let reloaded = engine.writer_position().expect("reloaded projection");
     assert_eq!(reloaded.tail, advanced.tail);
     assert_no_writes(&store);
-    let folded_wal_no = advanced.read_basis.head.wal_no;
+    let folded_wal_no = advanced.read_basis().head.wal_no;
     for (index, input) in [Some(advanced), Some(reloaded), None]
         .into_iter()
         .enumerate()

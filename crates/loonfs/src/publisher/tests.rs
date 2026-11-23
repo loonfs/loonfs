@@ -24,7 +24,8 @@ use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode}
 use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate,
-    NamespaceOverlapStore, OperationContext, OperationKind, OperationSelector, RecordingStore,
+    NamespaceOverlapStore, OperationContext, OperationKind, OperationSelector, RecordedOperation,
+    RecordingStore,
 };
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
@@ -2513,7 +2514,7 @@ async fn a_fold_with_no_read_cache_moves_the_position_to_its_manifest() {
         .writer_position(&namespace_id)
         .expect("the fold moved the position");
     assert_eq!(
-        Some(position.read_basis.basis.manifest_no()),
+        Some(position.read_basis().basis.manifest_no()),
         status.current_manifest_no
     );
     writer.shutdown().await.expect("shut down writer");
@@ -2616,7 +2617,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         .expect("reanchored projection");
     assert_eq!(input.wal_tail_objects(), 0);
     assert_eq!(
-        input.tail.decoded_bytes(),
+        input.tail().decoded_bytes(),
         loonfs_core::cache::ProjectedWalTail::default().decoded_bytes()
     );
     store.reset();

@@ -125,14 +125,13 @@ async fn a_deleted_namespaces_fork_point_snapshot_on_a_missing_manifest_is_left_
     let (source, target) = source_and_target();
     let (_, manifest_1) = half_done_fork(&store, &source, &target, &context(1_000)).await;
     let namespace = crate::test_support::namespace_store(&store, &target);
-    let crate::namespace::control::NewestManifest::Manifest(found, boundary) = namespace
-        .find_newest_manifest()
+    let crate::namespace::control::NewestManifest::Manifest(found) = namespace
+        .find_newest_manifest(crate::test_support::observed_now())
         .await
         .expect("find manifest 1")
     else {
         panic!("manifest 1 is the newest manifest");
     };
-    let found = crate::namespace::Held::new(found, crate::test_support::observed_now(), boundary);
     let deleted_at_ms = 1_000 + GC_GRACE_WINDOW_MS;
     namespace
         .tombstone_initializing_namespace(found.clone(), &context(deleted_at_ms).clock())

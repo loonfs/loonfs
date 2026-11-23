@@ -308,13 +308,16 @@ async fn a_deletion_whose_tombstone_put_loses_its_response_reads_back_whose_tomb
             assert_eq!(deleted.expect("the deletion").namespace_id, namespace_id);
         }
         let current = crate::test_support::namespace_store(&base, &namespace_id)
-            .find_newest_manifest()
+            .find_newest_manifest(crate::test_support::observed_now())
             .await
             .expect("newest manifest");
-        let crate::namespace::control::NewestManifest::Manifest(current, _) = current else {
+        let crate::namespace::control::NewestManifest::Manifest(current) = current else {
             panic!("the tombstone is the newest manifest");
         };
-        assert_eq!(current.payload().manifest_no, loonfs_types::ManifestNo(5));
-        assert!(current.payload().status.is_deleted());
+        assert_eq!(
+            current.manifest().payload().manifest_no,
+            loonfs_types::ManifestNo(5)
+        );
+        assert!(current.manifest().payload().status.is_deleted());
     }
 }

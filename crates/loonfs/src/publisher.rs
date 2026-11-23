@@ -37,9 +37,10 @@ use crate::{CoreError, SharedObjectStore, WriterState};
 use admission::PublicationAdmission;
 use folds::NamespaceTurns;
 pub(crate) use folds::{FoldWhen, NamespaceFold};
+use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionStatus, WriterSessionStatus};
 use loonfs_core::time::Observation;
-use loonfs_core::{MetadataCompactionCancellation, PublishedManifest};
+use loonfs_core::MetadataCompactionCancellation;
 use loonfs_types::{CommitId, CommitSeq, NamespaceId};
 use queue::{InFlightRequest, WorkItem};
 use registry::RegistryShared;
@@ -409,7 +410,7 @@ impl NamespacePublisher {
     /// under the session's writer epoch, or drops the position when it can't
     /// move there, once no other task has the engine locked (see
     /// [`Self::drop_position`]).
-    pub(super) async fn move_position(&self, published: PublishedManifest) {
+    pub(super) async fn move_position(&self, published: Held<LoadedManifest>) {
         let mut slot = self.lock_engine().await;
         if let Some(engine) = slot.engine.as_mut() {
             engine.record_manifest_published(published);

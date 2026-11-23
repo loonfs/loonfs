@@ -442,6 +442,58 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
     fixture.shutdown().await;
 }
 
+/// Checks that a fold in a runtime without the namespace's writer session
+/// that finds the tail already folded confirms the manifest of the runtime's
+/// cached head, so a strong read past the manifest check interval sends only
+/// its WAL probe.
+#[tokio::test]
+async fn a_fold_that_finds_its_manifest_current_confirms_the_cached_head() {
+    let fixture = fixture("found-current").await;
+    fixture
+        .writer
+        .maintenance(loonfs_test_support::ids::writer_id("found-current"))
+        .fold_wal(&fixture.namespace_id)
+        .await
+        .expect("the writer folds the tail");
+    let store: SharedObjectStore = fixture.recording.clone();
+    let maintainer = LoonFs::builder_with_store(store, loonfs::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("maintainer"))
+        .monotonic_timer(fixture.clock.clone())
+        .config(loonfs::RuntimeConfig {
+            manifest_revalidation_interval_ms: INTERVAL_MS,
+            ..loonfs::RuntimeConfig::default()
+        })
+        .build()
+        .await
+        .expect("maintainer");
+    let reader = maintainer.read_only().namespace(&fixture.namespace_id);
+    reader
+        .stat_with_options("/file.txt", &strong())
+        .await
+        .expect("a strong stat loads the cached head");
+
+    fixture.clock.advance_ms(INTERVAL_MS);
+    let folded = maintainer
+        .maintenance(loonfs_test_support::ids::writer_id("maintainer"))
+        .fold_wal(&fixture.namespace_id)
+        .await
+        .expect("the maintainer's fold");
+    assert_eq!(folded.outcome, loonfs::FoldWalOutcome::AlreadyCurrent);
+    fixture.recording.reset();
+    reader
+        .stat_with_options("/file.txt", &strong())
+        .await
+        .expect("strong stat");
+    assert_matches!(
+        fixture.recording.take().as_slice(),
+        [RecordedOperation::Get { key, .. }]
+            if key.starts_with(&wal_prefix(&fixture.namespace_id)),
+        "the fold's check confirmed the manifest, so the read probes the WAL only"
+    );
+    maintainer.shutdown().await.expect("maintainer shutdown");
+    fixture.shutdown().await;
+}
+
 /// Checks that a runtime whose default consistency is `strong` confirms the
 /// head on a read that sets none, such as a revision listing without
 /// options, and that a read that sets `eventual` there sends no request

@@ -39,7 +39,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         options: &CreateNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         let clock = self.namespace.start_clock();
-        let existing = match self.namespace.find_existing_namespace().await? {
+        let existing = match self
+            .namespace
+            .find_existing_namespace(clock.origin())
+            .await?
+        {
             Some(existing) => existing,
             None => {
                 let manifest_1 = NamespaceManifestPayload {
@@ -58,7 +62,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 {
                     Ok(manifest_1) => return self.finish_create(manifest_1, &clock).await,
                     Err(CoreError::NamespaceExists { .. }) => {
-                        self.namespace.find_existing_namespace().await?.ok_or_else(|| {
+                        self.namespace.find_existing_namespace(clock.origin()).await?.ok_or_else(|| {
                             CoreError::NamespaceCorrupt(format!(
                                 "the manifest 1 put of namespace `{}` lost to a manifest that isn't there",
                                 self.namespace.namespace_id
@@ -70,9 +74,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             }
         };
         let manifest_1 = match existing {
-            ExistingNamespace::Initializing(manifest_1, boundary) => {
-                Held::new(manifest_1, clock.origin(), boundary)
-            }
+            ExistingNamespace::Initializing(manifest_1) => manifest_1,
             ExistingNamespace::Active if options.allow_existing => {
                 return self.namespace.load_metadata().await
             }

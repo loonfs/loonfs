@@ -2038,7 +2038,7 @@ async fn snapshots_append_past_the_threshold_and_compaction_drains() {
         .expect("compaction step");
         match report {
             super::CompactionUnitOutcome::Published { manifest, .. } => {
-                let manifest_no = manifest.manifest.manifest_no;
+                let manifest_no = manifest.manifest().manifest().manifest_no;
                 units += 1;
                 if let Some(previous) = last_manifest_no {
                     assert!(manifest_no > previous, "units must advance the manifest");

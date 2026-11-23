@@ -3,11 +3,11 @@
 use crate::error::Result;
 use crate::limits::{MAX_UNFOLDED_WAL_BYTES, MAX_UNFOLDED_WAL_OBJECTS};
 use crate::manifest::move_read_basis;
-use crate::manifest::{metadata_basis_from_manifest, LoadedMetadataBasis, PublishedManifest};
+use crate::manifest::{metadata_basis_from_manifest, LoadedMetadataBasis};
 use crate::metadata::{CommitReceiptRecord, MetadataView};
-use crate::namespace::basis::{MetadataBasis, ReadBasis};
-use crate::namespace::boundary::KeptBoundary;
-use crate::namespace::control::ensure_namespace_live;
+use crate::namespace::basis::ReadBasis;
+use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
+use crate::namespace::held::{Held, HeldManifestForm};
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -79,7 +79,7 @@ impl WriteStop {
 
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     pub(super) fn head(&self) -> &NamespaceReadState {
-        &self.position.read_basis.head
+        self.position.basis.head()
     }
 
     /// Returns the store the view reads from, which a publication writes to.
@@ -134,29 +134,50 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
 /// session's tail folds the position's tail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriterPosition {
-    pub read_basis: ReadBasis,
+    /// The head and the manifest it was read above, with the last check of
+    /// that manifest: the discovery that loaded it, a HEAD request that found
+    /// no successor, or a publication of this runtime.
+    pub(crate) basis: Held<ReadBasis>,
     /// The projected WAL tail above the basis at the head. Reads from the
     /// position start from this tail without replaying the WAL.
-    pub tail: Arc<ProjectedWalTail>,
-    /// When a store observation last confirmed the basis current: the
-    /// discovery that loaded the basis, or a HEAD that found no successor.
-    pub basis_checked: Observation,
-    /// The manifest boundary as the last check of the basis read it.
-    pub boundary: KeptBoundary,
+    pub(crate) tail: Arc<ProjectedWalTail>,
 }
 
 impl WriterPosition {
+    /// Returns the head and the manifest it was read above, with the last
+    /// check of that manifest.
+    pub fn basis(&self) -> &Held<ReadBasis> {
+        &self.basis
+    }
+
+    /// Returns the head and the manifest it was read above.
+    pub fn read_basis(&self) -> &ReadBasis {
+        self.basis.read_basis()
+    }
+
+    /// Returns the projected WAL tail above the basis at the head.
+    pub fn tail(&self) -> &Arc<ProjectedWalTail> {
+        &self.tail
+    }
+
+    /// Merges `check`, a holder of a manifest of the same namespace, into the
+    /// position's basis (see [`Held::merge`]), and returns whether the
+    /// position changed.
+    pub fn merge_check<M: HeldManifestForm>(&mut self, check: &Held<M>) -> bool {
+        self.basis.merge(check)
+    }
+
     /// Returns the position's retention floor, which the checks of a restore
     /// and the merge floor rule read: the basis manifest's floor, raised by the
     /// floor objects in the position's WAL tail.
     pub fn retention_floor_seq(&self) -> CommitSeq {
-        self.read_basis.head.retention_floor_seq
+        self.read_basis().head.retention_floor_seq
     }
 
     /// Returns the number of unfolded WAL objects at the position's head,
     /// including fences.
     pub fn wal_tail_objects(&self) -> u64 {
-        self.read_basis.head.unfolded_wal_objects()
+        self.read_basis().head.unfolded_wal_objects()
     }
 
     /// Returns the inline content bytes in the position's WAL tail.
@@ -177,12 +198,10 @@ impl WriterPosition {
     /// A manifest at or below the basis's number leaves the position where
     /// it is. A later manifest moves the position by the rule of
     /// [`move_read_basis`], which drops the position at a manifest that
-    /// folds past the position's tip.
-    pub(crate) fn move_to(&mut self, manifest: &PublishedManifest) -> bool {
-        if manifest.manifest.manifest_no <= self.read_basis.basis.manifest_no() {
-            return true;
-        }
-        move_read_basis(&mut self.read_basis, &mut self.tail, manifest)
+    /// folds past the position's tip. Either way the position merges
+    /// `manifest`'s check (see [`Held::merge`]).
+    pub(crate) fn move_to(&mut self, manifest: &Held<LoadedManifest>) -> bool {
+        move_read_basis(&mut self.basis, &mut self.tail, manifest)
     }
 }
 
@@ -196,16 +215,22 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// `acquired_anchor` when the caller passes one, and otherwise from
     /// `cached_position`, unless the position's manifest is at or below the
     /// manifest boundary (see `load_held_manifest`). Without either, the
-    /// view starts from the namespace's current state in the store.
+    /// view starts from the namespace's current state in the store, found by
+    /// a discovery that began after `attempt`, an observation that the
+    /// caller read before the call.
     pub(crate) async fn load_publish_metadata_view(
         &self,
         acquired_writer: AcquiredWriter,
         cached_position: Option<WriterPosition>,
         acquired_anchor: Option<NamespaceReadAnchor>,
+        attempt: Observation,
     ) -> Result<PublishMetadataView<'_, S>> {
         let cached = match cached_position.filter(|_| acquired_anchor.is_none()) {
             Some(cached) => self
-                .load_held_manifest(cached.read_basis.basis.manifest(), cached.boundary.clone())
+                .load_held_manifest(
+                    cached.read_basis().basis.manifest(),
+                    cached.basis.boundary().clone(),
+                )
                 .await?
                 .map(|segments| ViewSource::Cached(Box::new(cached), segments)),
             None => None,
@@ -213,19 +238,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let source = match (cached, acquired_anchor) {
             (Some(cached), _) => cached,
             (None, Some(anchor)) => ViewSource::Cold(Box::new(anchor)),
-            (None, None) => {
-                let observed = crate::time::Observation::now(Arc::clone(&self.timer));
-                ViewSource::Cold(Box::new(
-                    self.load_writer_read_anchor(&acquired_writer, observed)
-                        .await?,
-                ))
-            }
+            (None, None) => ViewSource::Cold(Box::new(
+                self.load_writer_read_anchor(&acquired_writer, attempt)
+                    .await?,
+            )),
         };
         // An anchor's loader checked the writer epoch of the anchor's manifest
         // before the load read the tail, and replay doesn't change the epoch.
         let head = match &source {
             ViewSource::Cached(cached, _) => {
-                let head = &cached.read_basis.head;
+                let head = &cached.read_basis().head;
                 ensure_writer_not_fenced(
                     head.writer_epoch,
                     head.writer.as_ref(),
@@ -245,7 +267,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     Some(&self.segment_cache),
                     anchor.current_manifest(),
                 );
-                let position = load_writer_position(&anchor, anchor.basis(), &loaded_basis)?;
+                let position = load_writer_position(&anchor, &loaded_basis)?;
                 (position, loaded_basis.segments)
             }
         };
@@ -261,22 +283,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 }
 
-/// Returns the position at `anchor`'s head above `basis`, the anchor's
-/// manifest, which the anchor checked when it loaded the manifest.
+/// Returns the position at `anchor`'s head above the anchor's manifest,
+/// with the check that confirmed the manifest when the anchor loaded it.
 fn load_writer_position<S: ObjectStore + ?Sized>(
     anchor: &NamespaceReadAnchor,
-    basis: MetadataBasis,
     loaded_basis: &LoadedMetadataBasis<'_, S>,
 ) -> Result<WriterPosition> {
-    let tail = loaded_basis.project_tail(anchor)?;
     Ok(WriterPosition {
-        read_basis: ReadBasis {
-            head: anchor.read_state.clone(),
-            basis,
-        },
-        tail,
-        basis_checked: anchor.held.checked().clone(),
-        boundary: anchor.held.boundary().clone(),
+        basis: anchor.held_basis(),
+        tail: loaded_basis.project_tail(anchor)?,
     })
 }
 

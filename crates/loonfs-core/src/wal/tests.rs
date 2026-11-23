@@ -723,7 +723,7 @@ async fn a_put_after_a_collection_collides_with_the_kept_floor_object() {
     let tip = engine
         .writer_position()
         .expect("a position")
-        .read_basis
+        .read_basis()
         .head
         .wal_no;
     let floor_object = tip.successor().expect("next WAL number");
@@ -763,7 +763,7 @@ async fn a_put_after_a_collection_collides_with_the_kept_floor_object() {
         engine
             .writer_position()
             .expect("a position")
-            .read_basis
+            .read_basis()
             .head
             .wal_no,
         floor_object
@@ -1151,7 +1151,7 @@ async fn acquire_over_an_emptied_number(
             older
                 .writer_position()
                 .expect("a position")
-                .read_basis
+                .read_basis()
                 .head
                 .wal_no,
             WalNo(2)

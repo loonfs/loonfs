@@ -10,13 +10,19 @@ use crate::block_cache::{
     CheckStart, DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
     DecodedBlockKey,
 };
+use crate::control_object::ControlObjectLoadError;
+use crate::engine::RuntimeReadContext;
 use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
-use crate::manifest::{move_read_basis, PublishedManifest};
+use crate::manifest::move_read_basis;
 use crate::namespace::basis::ReadBasis;
-use crate::namespace::boundary::KeptBoundary;
+use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::{Checked, Held};
+use crate::namespace::store::NamespaceStore;
 use crate::time::Observation;
+use crate::wal::probe_namespace_wal;
 use crate::wal::ProjectedWalTail;
+use loonfs_objectstore::ObjectStore;
 use loonfs_types::{CommitSeq, ManifestNo, NamespaceId, WalNo};
 use std::sync::Arc;
 
@@ -54,27 +60,82 @@ impl DecodedBlockKey for NamespaceId {
 /// the head refreshes.
 #[derive(Debug, Clone)]
 pub struct CachedHead {
-    pub read_basis: ReadBasis,
-    /// The successor check that last confirmed `basis`.
-    pub basis_checked: Observation,
-    /// The manifest boundary as the last check of `basis` read it.
-    pub boundary: KeptBoundary,
-    /// When the WAL probe last confirmed `head`, or when the head was loaded.
-    /// The observation is taken before the probe or the load is sent, so
-    /// `head` includes every commit acknowledged before it. An eventual read
-    /// within its maximum staleness reads at `head` without a request.
-    pub head_confirmed: Observation,
+    /// The head and the manifest it was read above, with the last check of
+    /// that manifest.
+    basis: Held<ReadBasis>,
+    /// When the WAL probe last confirmed the head, or when the head was
+    /// loaded. The observation is taken before the probe or the load is sent,
+    /// so the head includes every commit acknowledged before it. An eventual
+    /// read within its maximum staleness reads at the head without a request.
+    head_confirmed: Observation,
 }
 
 impl CachedHead {
+    /// Returns the cached head of `basis`, a head that a load or a WAL probe
+    /// confirmed at `head_confirmed`.
+    pub fn new(basis: Held<ReadBasis>, head_confirmed: Observation) -> Self {
+        Self {
+            basis,
+            head_confirmed,
+        }
+    }
+
+    /// Returns the head and the manifest it was read above, with the last
+    /// check of that manifest.
+    pub fn basis(&self) -> &Held<ReadBasis> {
+        &self.basis
+    }
+
+    /// Returns when the WAL probe last confirmed the head, or when the head
+    /// was loaded.
+    pub fn head_confirmed(&self) -> &Observation {
+        &self.head_confirmed
+    }
+
+    /// Returns the head and the manifest it was read above.
+    pub fn read_basis(&self) -> &ReadBasis {
+        self.basis.read_basis()
+    }
+
+    /// Checks whether the head's manifest is still the newest, as
+    /// [`NamespaceStore::check_newest`] does, and keeps what the check
+    /// learned.
+    pub async fn check_manifest<S: ObjectStore>(
+        &mut self,
+        namespace: &NamespaceStore<S>,
+        observed: Observation,
+    ) -> Result<Checked, CoreError> {
+        namespace.check_newest(&mut self.basis, observed).await
+    }
+
+    /// Advances the head over the WAL objects after it, as
+    /// [`probe_namespace_wal`] reads them, and returns `false` when the head
+    /// needs a discovery instead. When the probe returns `true`, the head is
+    /// confirmed at `observed`, an observation that the caller read before
+    /// the probe.
+    pub async fn probe_wal<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        head_and_wal_tail_cache: &HeadAndWalTailCache,
+        observed: Observation,
+    ) -> std::result::Result<bool, ControlObjectLoadError> {
+        let mut context = RuntimeReadContext::new(self.read_basis().clone(), None);
+        if !probe_namespace_wal(store, head_and_wal_tail_cache, &mut context).await? {
+            return Ok(false);
+        }
+        self.basis.read_basis_mut().head = context.into_read_basis().head;
+        self.head_confirmed = observed;
+        Ok(true)
+    }
+
     /// The durable order that [`HeadAndWalTailCache::replace_head`] compares
     /// heads in: head sequence, then manifest number, then WAL number. A
     /// floor object moves the WAL number alone.
     fn order(&self) -> (CommitSeq, ManifestNo, WalNo) {
         (
-            self.read_basis.head.seq,
-            self.read_basis.basis.manifest_no(),
-            self.read_basis.head.wal_no,
+            self.read_basis().head.seq,
+            self.read_basis().basis.manifest_no(),
+            self.read_basis().head.wal_no,
         )
     }
 
@@ -87,7 +148,7 @@ impl CachedHead {
             std::cmp::Ordering::Less => false,
             std::cmp::Ordering::Equal => {
                 let checks = [
-                    (&cached.basis_checked, &self.basis_checked),
+                    (cached.basis.checked(), self.basis.checked()),
                     (&cached.head_confirmed, &self.head_confirmed),
                 ];
                 checks.iter().all(|(cached, own)| own.age_at(cached) == 0)
@@ -97,10 +158,29 @@ impl CachedHead {
     }
 
     fn heap_bytes(&self) -> usize {
-        self.read_basis.head.heap_bytes()
-            + self.read_basis.basis.manifest().heap_bytes()
-            + self.boundary.heap_bytes()
+        self.read_basis().head.heap_bytes()
+            + self.read_basis().basis.manifest().heap_bytes()
+            + self.basis.boundary().heap_bytes()
     }
+}
+
+/// Returns the head that replaces `cached` when `candidate` is installed, or
+/// `None` when `cached` stays: a candidate equal to `cached` in the durable
+/// order takes the later of each confirmation (see [`Held::merge`]), and any
+/// other candidate is compared whole by [`CachedHead::supersedes`].
+fn next_head(cached: &CachedHead, candidate: CachedHead) -> Option<CachedHead> {
+    if cached.order() != candidate.order() {
+        return Some(candidate);
+    }
+    let mut next = CachedHead::clone(cached);
+    let checked = next.basis.merge(&candidate.basis);
+    // Two observations in the same millisecond keep the cached one, so a tie
+    // never moves a confirmation.
+    let confirmed = cached.head_confirmed.age_at(&candidate.head_confirmed) > 0;
+    if confirmed {
+        next.head_confirmed = candidate.head_confirmed;
+    }
+    (checked || confirmed).then_some(next)
 }
 
 impl DecodedBlock for Arc<CachedHead> {
@@ -113,13 +193,6 @@ impl DecodedBlock for Arc<ProjectedWalTail> {
     fn weight(&self) -> usize {
         ProjectedWalTail::decoded_bytes(self)
     }
-}
-
-/// Returns `candidate` if it was taken in a later millisecond than `cached`.
-/// Two observations in the same millisecond keep `cached`, so a tie never
-/// moves a confirmation.
-fn later(cached: &Observation, candidate: Observation) -> Option<Observation> {
-    (cached.age_at(&candidate) > 0).then_some(candidate)
 }
 
 /// Namespace heads and WAL-tail projections for every scope, each kind
@@ -276,22 +349,13 @@ impl HeadAndWalTailCache {
     /// invalidation or an eviction of the head passed `start`, the start of
     /// the check that loaded `candidate`.
     fn install_head(&self, start: Option<CheckStart>, candidate: CachedHead) -> Arc<CachedHead> {
-        let key = self.head_key(&candidate.read_basis.head.namespace_id);
+        let key = self.head_key(&candidate.read_basis().head.namespace_id);
         let next = match self.shared.heads.peek(&key) {
-            Some(cached) if cached.order() == candidate.order() => {
-                let basis_checked = later(&cached.basis_checked, candidate.basis_checked);
-                let head_confirmed = later(&cached.head_confirmed, candidate.head_confirmed);
-                if basis_checked.is_none() && head_confirmed.is_none() {
-                    return cached;
-                }
-                CachedHead {
-                    basis_checked: basis_checked.unwrap_or_else(|| cached.basis_checked.clone()),
-                    head_confirmed: head_confirmed.unwrap_or_else(|| cached.head_confirmed.clone()),
-                    boundary: cached.boundary.clone().higher(candidate.boundary),
-                    ..CachedHead::clone(&cached)
-                }
-            }
-            _ => candidate,
+            Some(cached) => match next_head(&cached, candidate) {
+                Some(next) => next,
+                None => return cached,
+            },
+            None => candidate,
         };
         let next = Arc::new(next);
         self.shared
@@ -302,70 +366,91 @@ impl HeadAndWalTailCache {
             .unwrap_or(next)
     }
 
+    /// Installs the head that `candidate` returns for the cached head, by the
+    /// rule of [`Self::replace_head`], and returns the head that the cache
+    /// keeps, or `None` when the namespace has no cached head.
+    ///
+    /// The cache reads the cached head and installs the candidate under one
+    /// lock, so a head that an invalidation dropped stays dropped: the
+    /// candidate is never installed in place of a head that isn't there.
+    fn replace_present_head(
+        &self,
+        namespace_id: &NamespaceId,
+        candidate: impl FnOnce(&CachedHead) -> CachedHead,
+    ) -> Option<Arc<CachedHead>> {
+        self.shared
+            .heads
+            .replace_present(&self.head_key(namespace_id), |cached| {
+                let next = next_head(cached, candidate(cached))?;
+                next.supersedes(cached).then(|| Arc::new(next))
+            })
+    }
+
     /// Moves the namespace's cached head onto `manifest`, a manifest that
     /// this runtime published or found current, by the rule a writer
     /// position moves by (see
     /// [`NamespaceCommitEngine::record_manifest_published`](crate::publish::NamespaceCommitEngine::record_manifest_published)),
     /// and caches the WAL tail above the manifest under the moved head's key.
     ///
-    /// A manifest at or below the cached head's basis changes nothing. Any
-    /// other call makes the checks of the head in flight install nothing,
-    /// and then installs the moved head through [`Self::replace_head`], or,
-    /// when no head is cached, the head can't move, or its tail isn't cached,
-    /// drops the head as [`Self::invalidate_head`] does. A head that a check
-    /// installed against an older manifest before the checks were marked is
-    /// dropped too.
+    /// A manifest at or below the cached head's basis leaves the head where
+    /// it is, and the head takes the manifest's check. Any other call makes
+    /// the checks of the head in flight install nothing, and then installs
+    /// the moved head, or, when no head is cached, the head can't move, or
+    /// its tail isn't cached, drops the head as [`Self::invalidate_head`]
+    /// does. A head that a check installed against an older manifest before
+    /// the checks were marked is dropped too. Either install happens only
+    /// while the namespace still has a cached head (see
+    /// [`Self::replace_present_head`]), so a head that an invalidation
+    /// dropped meanwhile stays dropped.
     ///
-    /// The moved head's head confirmation stays, and its manifest check is
-    /// the younger of the cached head's check and the start of the call that
-    /// published `manifest`, because neither check found a manifest after
-    /// `manifest`. The moved head keeps the higher of the cached head's
-    /// manifest boundary and the one that `manifest` carries.
-    pub fn move_head(&self, namespace_id: &NamespaceId, manifest: &PublishedManifest) {
-        if let Some(moved) = self.moved_head(namespace_id, manifest) {
+    /// The head keeps its head confirmation, and merges `manifest`'s check
+    /// (see [`Held::merge`]).
+    pub fn move_head(&self, namespace_id: &NamespaceId, manifest: &Held<LoadedManifest>) {
+        let Some(cached) = self.get_head(namespace_id) else {
+            self.invalidate_head(namespace_id);
+            return;
+        };
+        if manifest.manifest_no() <= cached.basis.manifest_no() {
+            self.replace_present_head(namespace_id, |cached| {
+                let mut checked = CachedHead::clone(cached);
+                checked.basis.merge(manifest);
+                checked
+            });
+            return;
+        }
+        if let Some(moved) = self.moved_head(namespace_id, &cached, manifest) {
             self.install_moved_head(namespace_id, manifest, moved);
         }
     }
 
-    /// Returns the cached head moved onto `manifest`, and caches its WAL
-    /// tail, or returns `None` when [`Self::move_head`] installs nothing.
+    /// Returns `cached` moved onto `manifest`, a later manifest, and caches
+    /// its WAL tail, or returns `None` when [`Self::move_head`] installs
+    /// nothing.
     fn moved_head(
         &self,
         namespace_id: &NamespaceId,
-        manifest: &PublishedManifest,
+        cached: &CachedHead,
+        manifest: &Held<LoadedManifest>,
     ) -> Option<CachedHead> {
-        let Some(cached) = self.get_head(namespace_id) else {
-            self.invalidate_head(namespace_id);
-            return None;
-        };
-        if manifest.manifest.manifest_no <= cached.read_basis.basis.manifest_no() {
-            return None;
-        }
         let tail_key = |read_basis: &ReadBasis| WalTailCacheKey {
             namespace_id: namespace_id.clone(),
             manifest_no: read_basis.basis.manifest_no(),
             head_seq: read_basis.head.seq,
             wal_no: read_basis.head.wal_no,
         };
-        let mut read_basis = cached.read_basis.clone();
-        let Some(mut tail) = self.get_tail(&tail_key(&read_basis)) else {
+        let mut basis = cached.basis.clone();
+        let Some(mut tail) = self.get_tail(&tail_key(basis.read_basis())) else {
             self.invalidate_head(namespace_id);
             return None;
         };
-        if !move_read_basis(&mut read_basis, &mut tail, manifest) {
+        if !move_read_basis(&mut basis, &mut tail, manifest) {
             self.invalidate_head(namespace_id);
             return None;
         }
-        self.insert_tail(tail_key(&read_basis), tail);
-        let basis_checked = match &manifest.started {
-            Some(started) if started.age_ms() < cached.basis_checked.age_ms() => started.clone(),
-            _ => cached.basis_checked.clone(),
-        };
+        self.insert_tail(tail_key(basis.read_basis()), tail);
         Some(CachedHead {
-            read_basis,
-            basis_checked,
+            basis,
             head_confirmed: cached.head_confirmed.clone(),
-            boundary: cached.boundary.clone().higher(manifest.boundary.clone()),
         })
     }
 
@@ -375,12 +460,12 @@ impl HeadAndWalTailCache {
     fn install_moved_head(
         &self,
         namespace_id: &NamespaceId,
-        manifest: &PublishedManifest,
+        manifest: &Held<LoadedManifest>,
         moved: CachedHead,
     ) {
         self.invalidate_head_in_flight(namespace_id);
-        let kept = self.replace_head(moved);
-        if kept.read_basis.basis.manifest_no() < manifest.manifest.manifest_no {
+        let kept = self.replace_present_head(namespace_id, |_| moved);
+        if kept.is_some_and(|kept| kept.basis.manifest_no() < manifest.manifest_no()) {
             self.invalidate_head(namespace_id);
         }
     }
@@ -444,7 +529,7 @@ mod tests {
     use crate::block_cache::charged_bytes;
     use crate::metadata::{InodeRecord, MetadataState};
     use crate::namespace::basis::MetadataBasis;
-    use crate::namespace::boundary::LoadedBoundary;
+    use crate::namespace::boundary::{KeptBoundary, LoadedBoundary};
     use crate::namespace::state::NamespaceReadState;
 
     use crate::wal::ProjectedWalTail;
@@ -471,77 +556,82 @@ mod tests {
     /// Creates a head like [`head_at`] for namespace `name`.
     fn head_of(name: &str, seq: u64, manifest_no: u64, checked: &Observation) -> CachedHead {
         let namespace_id = namespace(name);
-        CachedHead {
-            read_basis: ReadBasis {
-                head: NamespaceReadState {
-                    namespace_id: namespace_id.clone(),
-                    created_at_ms: 1_000,
-                    created_by: loonfs_test_support::test_actor(),
-                    fork_basis: None,
-                    pool_id: loonfs_test_support::ids::numbered_pool_id(1),
-                    status: NamespaceStatus::Active {},
-                    writer_epoch: WriterEpoch(1),
-                    writer: None,
-                    seq: CommitSeq(seq),
-                    wal_no: WalNo(seq),
-                    folded_wal_no: WalNo(0),
-                    retention_floor_seq: CommitSeq(0),
-                },
-                basis: MetadataBasis::new(ManifestRef {
-                    owner_namespace_id: namespace_id,
-                    manifest_no: ManifestNo(manifest_no),
-                    head_seq: CommitSeq(0),
-                    payload_checksum: loonfs_types::sha256_digest(b"checksum"),
-                }),
+        let read_basis = ReadBasis {
+            head: NamespaceReadState {
+                namespace_id: namespace_id.clone(),
+                created_at_ms: 1_000,
+                created_by: loonfs_test_support::test_actor(),
+                fork_basis: None,
+                pool_id: loonfs_test_support::ids::numbered_pool_id(1),
+                status: NamespaceStatus::Active {},
+                writer_epoch: WriterEpoch(1),
+                writer: None,
+                seq: CommitSeq(seq),
+                wal_no: WalNo(seq),
+                folded_wal_no: WalNo(0),
+                retention_floor_seq: CommitSeq(0),
             },
-            basis_checked: checked.clone(),
-            head_confirmed: checked.clone(),
-            boundary: Default::default(),
+            basis: MetadataBasis::new(ManifestRef {
+                owner_namespace_id: namespace_id,
+                manifest_no: ManifestNo(manifest_no),
+                head_seq: CommitSeq(0),
+                payload_checksum: loonfs_types::sha256_digest(b"checksum"),
+            }),
+        };
+        CachedHead::new(
+            Held::new(read_basis, checked.clone(), KeptBoundary::default()),
+            checked.clone(),
+        )
+    }
+
+    /// Returns `head` with its manifest checked at `checked` and its boundary
+    /// `boundary`.
+    fn rechecked(head: CachedHead, checked: &Observation, boundary: KeptBoundary) -> CachedHead {
+        CachedHead {
+            basis: Held::new(head.read_basis().clone(), checked.clone(), boundary),
+            ..head
         }
     }
 
     fn order(head: &CachedHead) -> (u64, u64) {
         (
-            head.read_basis.head.seq.0,
-            head.read_basis.basis.manifest_no().0,
+            head.read_basis().head.seq.0,
+            head.read_basis().basis.manifest_no().0,
         )
     }
 
     /// Creates a head like [`head_at`] that keeps a manifest boundary whose
     /// etag is `etag_bytes` bytes long.
     fn large_head(seq: u64, etag_bytes: usize, checked: &Observation) -> CachedHead {
-        CachedHead {
-            boundary: Some(LoadedBoundary {
-                object_key: "namespaces/demo/boundary.json".to_owned(),
-                etag: "e".repeat(etag_bytes),
-                state: loonfs_types::format::control::BoundaryPayload {
-                    namespace_id: namespace("demo"),
-                    boundary: loonfs_types::format::control::ManifestBoundary::Manifest {
-                        manifest_no: ManifestNo(1),
-                    },
+        let boundary = KeptBoundary::read(Some(LoadedBoundary {
+            object_key: "namespaces/demo/boundary.json".to_owned(),
+            etag: "e".repeat(etag_bytes),
+            state: loonfs_types::format::control::BoundaryPayload {
+                namespace_id: namespace("demo"),
+                boundary: loonfs_types::format::control::ManifestBoundary::Manifest {
+                    manifest_no: ManifestNo(1),
                 },
-            })
-            .into(),
-            ..head_at(seq, 1, checked)
-        }
+            },
+        }));
+        rechecked(head_at(seq, 1, checked), checked, boundary)
     }
 
     /// Creates a publication of manifest `manifest_no` in namespace `demo`
     /// at the head of a basis made by [`head_at`], so a head made by
     /// [`head_at`] moves onto it and keeps its tail.
-    fn published_at(manifest_no: u64, started: &Observation) -> PublishedManifest {
-        PublishedManifest {
-            manifest: ManifestRef {
-                manifest_no: ManifestNo(manifest_no),
-                ..head_at(0, 0, started).read_basis.basis.manifest().clone()
-            },
+    fn published_at(manifest_no: u64, started: &Observation) -> Held<LoadedManifest> {
+        let payload = loonfs_types::format::manifest::NamespaceManifestPayload {
+            manifest_no: ManifestNo(manifest_no),
             writer_epoch: WriterEpoch(1),
-            status: NamespaceStatus::Active {},
-            folded_wal_no: WalNo(0),
-            retention_floor_seq: CommitSeq(0),
-            started: Some(started.clone()),
-            boundary: Default::default(),
-        }
+            ..loonfs_types::format::manifest::NamespaceManifestPayload::initial(
+                namespace("demo"),
+                loonfs_test_support::ids::numbered_pool_id(1),
+                1_000,
+                loonfs_test_support::test_actor(),
+            )
+            .activated()
+        };
+        crate::test_support::held_manifest(payload, started.clone())
     }
 
     /// Creates a check of a head that waits until `released` is true, and
@@ -603,13 +693,20 @@ mod tests {
         let cache = HeadAndWalTailCache::unshared(1 << 20);
         cache.replace_head(head_at(5, 1, &now));
         let mut after_floor_object = head_at(5, 1, &now);
-        after_floor_object.read_basis.head.wal_no = WalNo(6);
-        after_floor_object.read_basis.head.retention_floor_seq = CommitSeq(3);
+        after_floor_object.basis.read_basis_mut().head.wal_no = WalNo(6);
+        after_floor_object
+            .basis
+            .read_basis_mut()
+            .head
+            .retention_floor_seq = CommitSeq(3);
         let installed = cache.replace_head(after_floor_object);
-        assert_eq!(installed.read_basis.head.retention_floor_seq, CommitSeq(3));
+        assert_eq!(
+            installed.read_basis().head.retention_floor_seq,
+            CommitSeq(3)
+        );
         let kept = cache.replace_head(head_at(5, 1, &now));
-        assert_eq!(kept.read_basis.head.wal_no, WalNo(6));
-        assert_eq!(kept.read_basis.head.retention_floor_seq, CommitSeq(3));
+        assert_eq!(kept.read_basis().head.wal_no, WalNo(6));
+        assert_eq!(kept.read_basis().head.retention_floor_seq, CommitSeq(3));
     }
 
     /// Checks that a candidate equal to the cached head takes the newer of
@@ -626,12 +723,13 @@ mod tests {
             head_confirmed: late.clone(),
             ..head_at(5, 1, &early)
         });
-        let replaced = cache.replace_head(CachedHead {
-            basis_checked: late.clone(),
-            ..head_at(5, 1, &early)
-        });
-        assert_eq!(replaced.basis_checked.age_ms(), 0);
-        assert_eq!(replaced.head_confirmed.age_ms(), 0);
+        let replaced = cache.replace_head(rechecked(
+            head_at(5, 1, &early),
+            &late,
+            KeptBoundary::default(),
+        ));
+        assert_eq!(replaced.basis().checked().age_ms(), 0);
+        assert_eq!(replaced.head_confirmed().age_ms(), 0);
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
         assert!(Arc::ptr_eq(&cached, &replaced));
         let unchanged = cache.replace_head(head_at(5, 1, &early));
@@ -789,7 +887,10 @@ mod tests {
         };
         cache.insert_tail(tail_key, Arc::new(ProjectedWalTail::default()));
         let published = published_at(2, &now);
-        let moved = cache.moved_head(&demo, &published).expect("the head moves");
+        let cached = cache.get_head(&demo).expect("a cached head");
+        let moved = cache
+            .moved_head(&demo, &cached, &published)
+            .expect("the head moves");
         assert_eq!(order(&moved), (6, 2));
         cache.replace_head(head_at(7, 1, &now));
         cache.install_moved_head(&demo, &published, moved);
@@ -797,6 +898,56 @@ mod tests {
             cache.get_head(&demo).is_none(),
             "the head against the older manifest is dropped"
         );
+    }
+
+    /// Checks that a head that a publication moved stays dropped when an
+    /// invalidation drops the cached head after the publication read it and
+    /// before it installs the moved head.
+    #[test]
+    fn a_moved_head_does_not_bring_back_a_head_that_an_invalidation_dropped() {
+        let now = crate::test_support::observed_now();
+        let demo = namespace("demo");
+        let cache = HeadAndWalTailCache::unshared(1 << 20);
+        cache.replace_head(head_at(6, 1, &now));
+        cache.insert_tail(
+            WalTailCacheKey {
+                namespace_id: demo.clone(),
+                manifest_no: ManifestNo(1),
+                head_seq: CommitSeq(6),
+                wal_no: WalNo(6),
+            },
+            Arc::new(ProjectedWalTail::default()),
+        );
+        let published = published_at(2, &now);
+        let cached = cache.get_head(&demo).expect("a cached head");
+        let moved = cache
+            .moved_head(&demo, &cached, &published)
+            .expect("the head moves");
+        cache.invalidate_head(&demo);
+        cache.install_moved_head(&demo, &published, moved);
+        assert!(
+            cache.get_head(&demo).is_none(),
+            "the dropped head stays dropped"
+        );
+    }
+
+    /// Checks that a publication that found the cached head's manifest
+    /// current gives the cached head that publication's check when it's
+    /// younger, and leaves the head where it is.
+    #[test]
+    fn a_publication_that_finds_the_cached_manifest_current_confirms_it() {
+        let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000));
+        let early = Observation::now(clock.clone());
+        clock.advance_ms(10);
+        let late = Observation::now(clock.clone());
+        let demo = namespace("demo");
+        let cache = HeadAndWalTailCache::unshared(1 << 20);
+        cache.replace_head(head_at(6, 2, &early));
+        cache.move_head(&demo, &published_at(2, &late));
+        let cached = cache.get_head(&demo).expect("the head stays");
+        assert_eq!(order(&cached), (6, 2));
+        assert_eq!(cached.basis().checked(), &late);
+        assert_eq!(cached.head_confirmed(), &early);
     }
 
     /// Checks that the reads of one head that arrive while a check runs
@@ -981,10 +1132,12 @@ mod tests {
         let kept = boundary.object_key.capacity()
             + boundary.etag.capacity()
             + HeapBytes::heap_bytes(&boundary.state.namespace_id);
-        let with = CachedHead {
-            boundary: Some(boundary).into(),
-            ..without.clone()
-        };
+        let checked = without.basis().checked().clone();
+        let with = rechecked(
+            without.clone(),
+            &checked,
+            KeptBoundary::read(Some(boundary)),
+        );
         assert_eq!(Arc::new(with).weight(), Arc::new(without).weight() + kept);
     }
 

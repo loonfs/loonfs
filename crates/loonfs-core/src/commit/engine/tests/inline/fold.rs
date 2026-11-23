@@ -49,12 +49,15 @@ async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
         )
         .await
         .expect("fold");
-    engine.record_manifest_published(folded.manifest.clone());
+    engine.record_manifest_published(folded.current.clone());
     let moved = engine.writer_position().expect("the position moved");
-    assert_eq!(moved.read_basis.basis.manifest(), &folded.manifest.manifest);
     assert_eq!(
-        moved.read_basis.head.folded_wal_no,
-        input.read_basis.head.wal_no
+        moved.read_basis().basis.manifest(),
+        &folded.current.manifest().manifest()
+    );
+    assert_eq!(
+        moved.read_basis().head.folded_wal_no,
+        input.read_basis().head.wal_no
     );
     assert_eq!(moved.wal_tail_objects(), 1);
     store.reset();
@@ -116,7 +119,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             .await
             .expect("fold");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-        engine.record_manifest_published(folded.manifest);
+        engine.record_manifest_published(folded.current);
         timer.advance_ms(100);
         store.reset();
 
@@ -146,10 +149,17 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
                 loonfs_objectstore::layout::wal_no_of(operation.key()).expect("WAL number")
             })
             .collect::<Vec<_>>();
-        assert!(wal_gets.contains(&input.read_basis.head.wal_no.successor().expect("next WAL")));
+        assert!(wal_gets.contains(
+            &input
+                .read_basis()
+                .head
+                .wal_no
+                .successor()
+                .expect("next WAL")
+        ));
         assert!(wal_gets
             .iter()
-            .all(|number| *number > input.read_basis.head.wal_no));
+            .all(|number| *number > input.read_basis().head.wal_no));
         let gets = |wanted: DurableObjectFamily| {
             operations
                 .iter()
@@ -191,7 +201,8 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
                 .current
                 .as_ref()
                 .expect("basis")
-                .basis_checked
+                .basis()
+                .checked()
                 .age_ms(),
             0
         );
@@ -215,7 +226,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
         .await
         .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-    engine.record_manifest_published(folded.manifest);
+    engine.record_manifest_published(folded.current);
     crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
         .acquire_writer(
             &WriterAt {
@@ -301,7 +312,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             .await
             .expect("manifest")
             .manifest(),
-        *input.read_basis.basis.manifest()
+        *input.read_basis().basis.manifest()
     );
     for value in &values {
         let key = folded_key(&store, value.content_ref()).await;
@@ -335,7 +346,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             .await
             .expect("manifest")
             .manifest(),
-        *input.read_basis.basis.manifest()
+        *input.read_basis().basis.manifest()
     );
     store.reset();
     let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
@@ -400,7 +411,7 @@ async fn competing_engines_write_their_own_objects_and_publish_one_manifest() {
     let first_input = first.writer_position().expect("first tail");
     let second_input = second.writer_position().expect("second tail");
     assert_eq!(first_input.tail, second_input.tail);
-    let basis = second_input.read_basis.basis.manifest_no();
+    let basis = second_input.read_basis().basis.manifest_no();
     let blocked = BlockingStore::new(
         store.clone(),
         KeyPredicate::content_blob(),
@@ -512,7 +523,7 @@ async fn an_occupied_span_key_is_corruption_and_stops_manifest_publication() {
             .await
             .expect("manifest")
             .manifest(),
-        *input.read_basis.basis.manifest()
+        *input.read_basis().basis.manifest()
     );
     assert_eq!(
         store
@@ -566,7 +577,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
             .await
             .expect("manifest")
             .manifest(),
-        *input.read_basis.basis.manifest()
+        *input.read_basis().basis.manifest()
     );
 }
 
@@ -628,16 +639,16 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     .await
     .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-    engine.record_manifest_published(folded.manifest.clone());
+    engine.record_manifest_published(folded.current.clone());
     let position = engine.position.current.as_ref().expect("retained position");
     assert_eq!(
-        position.read_basis.basis.manifest(),
-        &folded.manifest.manifest
+        position.read_basis().basis.manifest(),
+        &folded.current.manifest().manifest()
     );
     assert_eq!(position.wal_tail_objects(), 2);
     assert_eq!(
-        position.read_basis.head.folded_wal_no,
-        input.read_basis.head.wal_no
+        position.read_basis().head.folded_wal_no,
+        input.read_basis().head.wal_no
     );
     let reanchored = engine
         .writer_position()
@@ -695,7 +706,10 @@ async fn a_published_fold_moves_the_position_with_its_tail() {
 
     engine.record_manifest_published(published.clone());
     let moved = engine.read_position().expect("the position moved");
-    assert_eq!(moved.read_basis.basis.manifest(), &published.manifest);
+    assert_eq!(
+        moved.read_basis().basis.manifest(),
+        &published.manifest().manifest()
+    );
     assert_eq!(moved.tail.chunks().len(), 1);
     assert_eq!(engine.wal_tail_objects(), Some(1));
     assert_eq!(engine.wal_tail_inline_bytes(), Some(kept.bytes().len()));

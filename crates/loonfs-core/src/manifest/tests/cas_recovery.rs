@@ -866,3 +866,101 @@ async fn a_successor_that_copies_its_predecessor_gets_its_own_publication_id() {
         predecessor.payload().publication_id
     );
 }
+
+/// Checks that a fold whose manifest put loses its response, and that then
+/// finds another process's fold at its number, ends on that fold's manifest
+/// with the check of the position it folded from, not with the start of its
+/// own clock.
+///
+/// A third manifest was published before the fold's clock started, so no
+/// check at that start could have found the other fold the newest. A writer
+/// position that took the start of the clock would let an eventual read
+/// skip the check that finds the third manifest.
+#[tokio::test]
+async fn a_fold_that_finds_another_fold_after_a_lost_put_keeps_its_position_check() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let context = test_context();
+    let local = LocalFsStore::new(directory.path()).expect("store");
+    bootstrap_namespace(&local, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    crate::test_support::NamespaceFixture::new(&local, &namespace_id, &context)
+        .append_wal_objects(2)
+        .await
+        .expect("WAL tail");
+    let basis_no = crate::test_support::namespace_store(&local, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("current")
+        .payload()
+        .manifest_no;
+    let head = crate::test_support::namespace_store(&local, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("head");
+    let position_checked = crate::test_support::observed_now();
+    let position = crate::test_support::namespace_store(&local, &namespace_id)
+        .load_publish_metadata_view(
+            crate::namespace::writer_epoch::AcquiredWriter {
+                writer_id: context.writer_id.clone(),
+                writer_epoch: head.writer_epoch,
+            },
+            None,
+            None,
+            position_checked.clone(),
+        )
+        .await
+        .expect("position")
+        .into_position();
+    // Another process folds the tail, and then publishes a manifest above
+    // that fold, before this fold's clock starts.
+    crate::test_support::namespace_store(&local, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("another process's fold");
+    crate::test_support::NamespaceFixture::new(&local, &namespace_id, &context)
+        .engine()
+        .claim_compactor(None)
+        .await
+        .expect("a manifest above the other fold");
+    let other_fold = basis_no.successor().expect("next number");
+    assert_eq!(
+        crate::test_support::namespace_store(&local, &namespace_id)
+            .load_current_manifest()
+            .await
+            .expect("current")
+            .payload()
+            .manifest_no,
+        other_fold.successor().expect("next number")
+    );
+
+    let store = FailStore::new(
+        local,
+        KeyPredicate::exact(metadata_manifest_object(&namespace_id, &other_fold)),
+        OperationSelector::PutCreateIfAbsent,
+        InjectedError::Transport("lost request".to_owned()),
+    );
+    store.fail_next(1);
+    let folded = crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal_tail(
+            Some(position),
+            &crate::time::OperationClock::start(
+                0,
+                Arc::new(crate::time::StdMonotonicTimer::default()),
+            ),
+        )
+        .await
+        .expect("fold");
+    assert_eq!(store.remaining(), 0, "the fold's put lost its response");
+    assert_eq!(
+        folded.response.outcome,
+        crate::FoldWalOutcome::AlreadyCurrent
+    );
+    assert_eq!(folded.current.manifest_no(), other_fold);
+    assert_eq!(
+        folded.current.checked(),
+        &position_checked,
+        "the found fold keeps the check of the position's manifest"
+    );
+}

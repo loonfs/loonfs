@@ -1,6 +1,5 @@
 //! A fold that loses its manifest number to another publication.
 
-use super::super::PublishedManifest;
 use super::fold::{FoldWalResponse, FoldedWalTail};
 use super::*;
 use crate::error::Result;
@@ -178,7 +177,7 @@ impl Writer {
     /// log is cleared after each rival.
     async fn fold_against(&mut self, rivals: &[Rival]) -> Result<FoldedWalTail> {
         let input = self.engine.writer_position().expect("tail");
-        let basis = input.read_basis.basis.manifest_no();
+        let basis = input.read_basis().basis.manifest_no();
         let other = self.other_process();
         let mut store: Arc<dyn ObjectStore> = self.store.clone();
         let mut gates = Vec::new();
@@ -207,7 +206,7 @@ impl Writer {
         });
         if let Ok(folded) = &folded {
             self.engine
-                .record_manifest_published(folded.manifest.clone());
+                .record_manifest_published(folded.current.clone());
         }
         folded
     }
@@ -348,8 +347,9 @@ async fn a_fold_that_loses_to_a_fold_still_takes_the_cold_path() {
         .engine
         .writer_position()
         .expect("tail")
-        .read_basis
-        .head;
+        .read_basis()
+        .head
+        .clone();
 
     let folded = writer
         .fold_against(&[Rival::Fold(Box::new(older.clone()))])
@@ -362,11 +362,11 @@ async fn a_fold_that_loses_to_a_fold_still_takes_the_cold_path() {
     );
     assert!(!writer
         .wal_reads(&after_park)
-        .contains(&older.read_basis.head.wal_no.0));
+        .contains(&older.read_basis().head.wal_no.0));
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     assert_eq!(
         folded.response.manifest_no,
-        ManifestNo(older.read_basis.basis.manifest_no().0 + 2)
+        ManifestNo(older.read_basis().basis.manifest_no().0 + 2)
     );
     assert_eq!(folded.response.manifest_head_seq, head.seq);
 }
@@ -378,7 +378,7 @@ async fn a_fold_that_loses_to_a_fold_of_its_tail_finishes() {
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let same = writer.engine.writer_position().expect("tail");
-    let basis = same.read_basis.basis.manifest_no();
+    let basis = same.read_basis().basis.manifest_no();
     let folded = writer
         .fold_against(&[Rival::Fold(Box::new(same))])
         .await
@@ -421,7 +421,7 @@ async fn a_fold_whose_tail_is_already_folded_loses_its_one_manifest_put() {
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let same = writer.engine.writer_position().expect("tail");
-    let basis = same.read_basis.basis.manifest_no();
+    let basis = same.read_basis().basis.manifest_no();
     Rival::Fold(Box::new(same))
         .publish(&writer.other_process(), &writer.namespace_id)
         .await;
@@ -470,7 +470,7 @@ async fn a_fold_from_a_fresh_position_puts_on_its_basis_with_no_request_first() 
     writer.commit("first", Vec::new(), &["/a"]).await;
     let input = writer.engine.writer_position().expect("tail");
     let next = input
-        .read_basis
+        .read_basis()
         .basis
         .manifest_no()
         .successor()
@@ -482,7 +482,7 @@ async fn a_fold_from_a_fresh_position_puts_on_its_basis_with_no_request_first() 
     crate::manifest::load_manifest_segments(
         &*writer.store,
         Some(&namespace.segment_cache),
-        input.read_basis.basis.manifest(),
+        input.read_basis().basis.manifest(),
     )
     .await
     .expect("the session's manifest");
@@ -509,7 +509,7 @@ async fn a_fold_whose_put_lands_at_an_emptied_number_publishes_on_the_newest_man
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let held = writer.engine.writer_position().expect("tail");
-    let basis = held.read_basis.basis.manifest_no();
+    let basis = held.read_basis().basis.manifest_no();
     let emptied = metadata_manifest_object(
         &writer.namespace_id,
         &basis.successor().expect("next manifest number"),
@@ -523,7 +523,7 @@ async fn a_fold_whose_put_lands_at_an_emptied_number_publishes_on_the_newest_man
     crate::manifest::load_manifest_segments(
         &*writer.store,
         Some(&namespace.segment_cache),
-        held.read_basis.basis.manifest(),
+        held.read_basis().basis.manifest(),
     )
     .await
     .expect("the session's manifest");
@@ -576,8 +576,9 @@ async fn a_fold_survives_repeated_compaction_publications() {
             .engine
             .writer_position()
             .expect("tail")
-            .read_basis
-            .basis;
+            .read_basis()
+            .basis
+            .clone();
         let folded = writer
             .fold_against(&vec![Rival::CompactorClaim; rivals])
             .await;
@@ -600,7 +601,7 @@ async fn a_fold_survives_repeated_compaction_publications() {
                     .engine
                     .writer_position()
                     .expect("tail")
-                    .read_basis
+                    .read_basis()
                     .basis,
                 basis
             );
@@ -624,10 +625,10 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
                 .engine
                 .writer_position()
                 .expect("tail")
-                .read_basis
+                .read_basis()
                 .basis
                 .manifest(),
-            &folded.manifest.manifest
+            &folded.current.manifest().manifest()
         );
         writer.commit("second", Vec::new(), &["/b"]).await;
         let publish = request_counts(&writer.store);
@@ -683,7 +684,7 @@ async fn a_snapshot_that_loses_its_fold_to_a_compaction_reads_no_wal_object() {
         .engine
         .writer_position()
         .expect("tail")
-        .read_basis
+        .read_basis()
         .basis
         .manifest_no();
     let other = writer.other_process();
@@ -727,9 +728,9 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let input = writer.engine.writer_position().expect("tail");
-    let head = input.read_basis.head.clone();
+    let head = input.read_basis().head.clone();
     let claim_no = input
-        .read_basis
+        .read_basis()
         .basis
         .manifest_no()
         .successor()
@@ -763,15 +764,15 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
         claim_no.successor().expect("the number after the claim")
     );
     assert_eq!(
-        folded.manifest.writer_epoch,
+        folded.current.manifest().payload().writer_epoch,
         WriterEpoch(head.writer_epoch.0 + 1)
     );
     assert_eq!(
-        folded.manifest.folded_wal_no,
+        folded.current.manifest().payload().folded_wal_no,
         head.wal_no.successor().expect("the new writer's fence")
     );
 
-    writer.engine.record_manifest_published(folded.manifest);
+    writer.engine.record_manifest_published(folded.current);
     assert!(writer.engine.read_position().is_none());
     let results = writer
         .engine
@@ -817,38 +818,47 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
         let mut writer = Writer::open().await;
         writer.commit("first", Vec::new(), &["/a"]).await;
         let input = writer.engine.writer_position().expect("tail");
-        let before = input.read_basis.basis.clone();
+        let before = input.read_basis().basis.clone();
         let folded = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
             .fold_wal_tail(Some(input), &deadline())
             .await
             .expect("fold");
+        let current = if (epoch_after, wal_after) == (0, 0) {
+            folded.current.clone()
+        } else {
+            let payload = folded.current.manifest().payload();
+            crate::test_support::held_manifest(
+                loonfs_types::format::manifest::NamespaceManifestPayload {
+                    writer_epoch: WriterEpoch(payload.writer_epoch.0 + epoch_after),
+                    folded_wal_no: WalNo(payload.folded_wal_no.0 + wal_after),
+                    ..payload.clone()
+                },
+                folded.current.checked().clone(),
+            )
+        };
         let recorded = outcome.map(|outcome| FoldedWalTail {
             response: FoldWalResponse {
                 outcome,
                 ..folded.response.clone()
             },
-            manifest: PublishedManifest {
-                writer_epoch: WriterEpoch(folded.manifest.writer_epoch.0 + epoch_after),
-                folded_wal_no: WalNo(folded.manifest.folded_wal_no.0 + wal_after),
-                ..folded.manifest.clone()
-            },
-            basis: folded.basis.clone(),
+            current,
         });
         // As the publisher does, a fold that ended reports the manifest that
         // covers its tail, and a fold that failed reports nothing.
         if let Some(recorded) = recorded {
-            writer.engine.record_manifest_published(recorded.manifest);
+            writer.engine.record_manifest_published(recorded.current);
         }
         let position = writer.engine.read_position();
+        let folded_manifest = folded.current.manifest().manifest();
         let expected = match expected {
-            Position::Moves => Some(&folded.manifest.manifest),
+            Position::Moves => Some(&folded_manifest),
             Position::Drops => None,
             Position::Stays => Some(before.manifest()),
         };
         assert_eq!(
             position
                 .as_ref()
-                .map(|position| position.read_basis.basis.manifest()),
+                .map(|position| position.read_basis().basis.manifest()),
             expected,
             "epoch +{epoch_after}, WAL number +{wal_after}, {outcome:?}"
         );
@@ -873,21 +883,27 @@ async fn a_fold_covered_past_its_start_moves_the_position_onto_the_covering_fold
         .await
         .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
-    assert_eq!(folded.manifest.folded_wal_no, newest.read_basis.head.wal_no);
-    assert!(input.read_basis.head.wal_no < newest.read_basis.head.wal_no);
+    assert_eq!(
+        folded.current.manifest().payload().folded_wal_no,
+        newest.read_basis().head.wal_no
+    );
+    assert!(input.read_basis().head.wal_no < newest.read_basis().head.wal_no);
 
     writer
         .engine
-        .record_manifest_published(folded.manifest.clone());
+        .record_manifest_published(folded.current.clone());
     let moved = writer
         .engine
         .writer_position()
         .expect("the position moves onto the covering fold");
-    assert_eq!(moved.read_basis.basis.manifest(), &folded.manifest.manifest);
-    assert_eq!(moved.read_basis.head.seq, newest.read_basis.head.seq);
     assert_eq!(
-        moved.read_basis.head.folded_wal_no,
-        newest.read_basis.head.wal_no
+        moved.read_basis().basis.manifest(),
+        &folded.current.manifest().manifest()
+    );
+    assert_eq!(moved.read_basis().head.seq, newest.read_basis().head.seq);
+    assert_eq!(
+        moved.read_basis().head.folded_wal_no,
+        newest.read_basis().head.wal_no
     );
     assert_eq!(moved.wal_tail_objects(), 0);
     assert!(moved.tail.chunks().is_empty());

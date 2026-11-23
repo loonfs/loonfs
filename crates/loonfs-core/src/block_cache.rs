@@ -529,6 +529,55 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         existing
     }
 
+    /// Replaces the entry under `key` with the value that `change` returns
+    /// for it, and returns the key's entry after the call, or `None` when the
+    /// key has no entry.
+    ///
+    /// The cache's lock covers reading the entry and replacing it, so a value
+    /// derived from an entry that an invalidation or an eviction dropped is
+    /// never inserted. (`change` runs under that lock, so it combines values
+    /// and does nothing else.) `change` returns `None` to keep the entry. A
+    /// value heavier than the whole budget drops the key, as
+    /// [`Self::insert_if`] does.
+    pub(crate) fn replace_present(&self, key: &K, change: impl FnOnce(&V) -> Option<V>) -> Option<V>
+    where
+        K: Clone,
+    {
+        if self.disabled() {
+            return None;
+        }
+        let mut dropped = Vec::new();
+        let kept = {
+            let mut inner = self.lock();
+            let cached = inner.entries.get(key).map(|slot| slot.block.clone())?;
+            let Some(value) = change(&cached) else {
+                return Some(cached);
+            };
+            match self.entry_charge(key, &value) {
+                Ok(entry_charge) => {
+                    self.put(
+                        &mut inner,
+                        key.clone(),
+                        value.clone(),
+                        entry_charge,
+                        None,
+                        &mut dropped,
+                    );
+                    Some(value)
+                }
+                Err(charged_bytes) => {
+                    if let Some(slot) = inner.drop_key(key) {
+                        dropped.push(slot.block);
+                    }
+                    self.record_rejection(charged_bytes);
+                    None
+                }
+            }
+        };
+        drop(dropped);
+        kept
+    }
+
     /// Returns the charge of an entry of `block` under `key`, or the bytes
     /// that the entry would have been charged if that's more than the whole
     /// budget.

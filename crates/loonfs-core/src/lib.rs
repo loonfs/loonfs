@@ -180,8 +180,9 @@ pub mod control {
     pub use crate::namespace::status::NamespaceStorageDiagnostics;
     #[cfg(any(test, feature = "test-support"))]
     pub use crate::namespace::status::NamespaceWalTailUsage;
-    pub use crate::namespace::{Held, MetadataBasis, ReadBasis, SnapshotReadBasis};
-    pub use crate::wal::probe_namespace_wal;
+    pub use crate::namespace::{
+        Checked, Held, HeldManifestForm, MetadataBasis, ReadBasis, SnapshotReadBasis,
+    };
 }
 
 /// Commit publication types for runtime integrations. Consumed by `loonfs`'s
@@ -219,8 +220,7 @@ pub use error::{
 pub use loonfs_types::options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use manifest::{
     ExtensionBasis, ExtensionPublication, FloorObjectReport, FoldWalOutcome, FoldWalResponse,
-    FoldedWalTail, ManifestLoadError, PublicationReport, PublishedManifest, RetentionPlan,
-    RetentionTarget,
+    FoldedWalTail, ManifestLoadError, PublicationReport, RetentionPlan, RetentionTarget,
 };
 pub use merge::{
     MergeAllowance, MergePlan, MergeRequest, MergeReservation, ReplayPlan, MERGE_COMMITS_PAGE_BYTES,

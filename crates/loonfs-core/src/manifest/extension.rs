@@ -115,7 +115,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 published: None,
             });
         }
-        let published = update.current_manifest();
+        let published = update.current.clone();
         Ok(PublicationReport {
             response: ExtensionPublication::Published(ExtensionBasis {
                 basis: update.current,

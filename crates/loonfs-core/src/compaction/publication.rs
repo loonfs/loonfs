@@ -126,7 +126,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             }) => Ok(outcome),
             Ok(update) => Ok(CompactionUnitOutcome::Published {
                 group: spec.group(),
-                manifest: update.current_manifest(),
+                manifest: update.current,
                 input_runs: spec.input_runs(),
                 rows_read: result.rows_read,
                 rows_written: result.rows_written,

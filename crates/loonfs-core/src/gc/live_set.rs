@@ -13,7 +13,6 @@ use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
-use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use crate::wal::wal_no_is_unfolded;
@@ -71,12 +70,10 @@ impl LiveSet {
     ) -> Result<Option<Self>> {
         let namespace_id = &namespace.namespace_id;
         let now_ms = clock.request_at_ms();
-        let current = match namespace.find_newest_manifest().await? {
+        let current = match namespace.find_newest_manifest(clock.origin()).await? {
             NewestManifest::Absent => return Err(namespace.namespace_not_found()),
             NewestManifest::Retired => return Ok(None),
-            NewestManifest::Manifest(current, boundary) => {
-                Held::new(current, clock.origin(), boundary)
-            }
+            NewestManifest::Manifest(current) => current,
         };
         let found = NamespaceRoots::new(namespace, current.manifest().payload(), now_ms).status;
         let current = match found {

@@ -109,7 +109,10 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     // tip, so it keeps its position for the replay below.
     let floor =
         crate::commit::engine::tests::advance_in_session(&mut engine, original.committed_seq).await;
-    assert_eq!(floor.retention_floor_seq, original.committed_seq);
+    assert_eq!(
+        floor.manifest().payload().retention_floor_seq,
+        original.committed_seq
+    );
     compact_and_check_pair(
         &store,
         &namespace_id,
@@ -164,6 +167,8 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     assert_eq!(
         crate::commit::engine::tests::advance_in_session(&mut engine, later.committed_seq)
             .await
+            .manifest()
+            .payload()
             .retention_floor_seq,
         later.committed_seq
     );

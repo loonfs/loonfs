@@ -22,6 +22,29 @@ pub fn content_writes() -> crate::Permits {
     )
 }
 
+/// Returns `payload` encoded as a manifest that a check at `checked` found
+/// the newest, with no boundary kept, for a test that moves a head onto a
+/// manifest that it builds in memory.
+pub fn held_manifest(
+    payload: loonfs_types::format::manifest::NamespaceManifestPayload,
+    checked: crate::time::Observation,
+) -> crate::namespace::Held<crate::control::LoadedManifest> {
+    let object_key = loonfs_objectstore::keys::metadata_manifest_object(
+        &payload.namespace_id,
+        &payload.manifest_no,
+    );
+    let encoded = crate::manifest::publish::encode_manifest(payload);
+    crate::namespace::Held::new(
+        crate::control::LoadedManifest {
+            object_key,
+            manifest_bytes: encoded.as_bytes().len() as u64,
+            envelope: Arc::new(encoded.envelope().clone()),
+        },
+        checked,
+        crate::namespace::boundary::KeptBoundary::default(),
+    )
+}
+
 /// The commit ID of the binding rows that tests build.
 #[cfg(test)]
 pub(crate) fn binding_commit_id() -> loonfs_types::CommitId {
@@ -399,7 +422,7 @@ pub(crate) async fn half_done_fork<S: ObjectStore + Clone>(
     let fixture = NamespaceFixture::new(store, source, setup);
     let namespace = &fixture.namespace;
     if let crate::namespace::control::NewestManifest::Absent = namespace
-        .find_newest_manifest()
+        .find_newest_manifest(observed_now())
         .await
         .expect("find the source")
     {
@@ -625,7 +648,7 @@ pub async fn folded_manifest<S: ObjectStore>(
     let folded = namespace
         .fold_wal_tail(None, &namespace.start_clock())
         .await?;
-    Ok(folded.basis)
+    Ok(folded.current)
 }
 
 /// Returns the inode ID of the item visible at `absolute_path` in the

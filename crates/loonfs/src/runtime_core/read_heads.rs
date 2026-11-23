@@ -15,8 +15,8 @@ use crate::{Consistency, CoreError, NamespaceId, SnapshotId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
-    project_anchor_tail, ActiveNamespaceCatalogEntry, Held, LoadedManifest, NamespaceReadAnchor,
-    ReadBasis, SnapshotReadBasis, VerifiedNamespaceCatalogEntry,
+    project_anchor_tail, ActiveNamespaceCatalogEntry, Checked, Held, LoadedManifest,
+    NamespaceReadAnchor, ReadBasis, SnapshotReadBasis, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::time::Observation;
@@ -134,34 +134,30 @@ impl RuntimeCore {
             // a newer manifest and a collection then deleted the WAL object,
             // the WAL probe finds nothing, but the manifest check finds the
             // newer manifest, or the boundary above the view's manifest.
-            let check_due =
-                head.basis_checked.age_ms() >= self.inner.config.manifest_revalidation_interval_ms;
+            let check_due = head.basis().checked().age_ms()
+                >= self.inner.config.manifest_revalidation_interval_ms;
             let observed = self.observation();
-            let mut context = self.read_context(head.read_basis.clone(), None);
-            let probed = loonfs_core::control::probe_namespace_wal(
-                self.store(),
-                &self.inner.head_and_wal_tail_cache,
-                &mut context,
-            )
-            .instrument(phase_span!(self, Phase::ValidationWalProbe, namespace_id))
-            .await
-            .map_err(MetadataProjectionLoadError::LoadHead)?;
+            let probed = head
+                .probe_wal(
+                    self.store(),
+                    &self.inner.head_and_wal_tail_cache,
+                    observed.clone(),
+                )
+                .instrument(phase_span!(self, Phase::ValidationWalProbe, namespace_id))
+                .await
+                .map_err(MetadataProjectionLoadError::LoadHead)?;
             let current = probed
                 && (!check_due
-                    || self
-                        .check_cached_manifest(&namespace, &mut head)
+                    || head
+                        .check_manifest(&namespace, observed)
                         .instrument(phase_span!(
                             self,
                             Phase::ValidationManifestProbe,
                             namespace_id
                         ))
-                        .await?);
+                        .await?
+                        == Checked::Newest);
             if current {
-                head.head_confirmed = observed.clone();
-                if check_due {
-                    head.basis_checked = observed;
-                }
-                head.read_basis.head = context.into_read_basis().head;
                 return Ok(head);
             }
         }
@@ -183,30 +179,7 @@ impl RuntimeCore {
                 tail,
             );
         }
-        Ok(cached_head(loaded, observed))
-    }
-
-    /// Returns whether the manifest of `head` is the namespace's newest: no
-    /// manifest follows it, and it's above the manifest boundary. The head
-    /// keeps the boundary that the call read.
-    async fn check_cached_manifest(
-        &self,
-        namespace: &loonfs_core::NamespaceStore<crate::SharedObjectStore>,
-        head: &mut CachedHead,
-    ) -> std::result::Result<bool, CoreError> {
-        let manifest_no = head.read_basis.basis.manifest_no();
-        if namespace
-            .manifest_has_successor(manifest_no)
-            .await
-            .map_err(MetadataProjectionLoadError::LoadHead)?
-        {
-            return Ok(false);
-        }
-        let above;
-        (above, head.boundary) = namespace
-            .above_boundary(manifest_no, std::mem::take(&mut head.boundary))
-            .await?;
-        Ok(above)
+        Ok(cached_head(&loaded, observed))
     }
 
     /// Returns the read context of the namespace's current head, confirmed
@@ -246,8 +219,8 @@ impl RuntimeCore {
         {
             Some(position) => (
                 self.read_context(
-                    position.read_basis.clone(),
-                    Some(Arc::clone(&position.tail)),
+                    position.read_basis().clone(),
+                    Some(Arc::clone(position.tail())),
                 ),
                 ReadHeadSource::Position,
             ),
@@ -266,7 +239,7 @@ impl RuntimeCore {
                         (head, source)
                     }
                 };
-                (self.read_context(head.read_basis.clone(), None), source)
+                (self.read_context(head.read_basis().clone(), None), source)
             }
         };
         self.inner.instruments.read_head(source);
@@ -292,8 +265,8 @@ impl RuntimeCore {
     ) -> Option<Arc<CachedHead>> {
         let max_staleness_ms = max_staleness_ms?;
         let cached = self.inner.head_and_wal_tail_cache.get_head(namespace_id)?;
-        let confirmed = cached.head_confirmed.age_ms() < max_staleness_ms
-            && cached.basis_checked.is_within_revalidation_bound();
+        let confirmed = cached.head_confirmed().age_ms() < max_staleness_ms
+            && cached.basis().checked().is_within_revalidation_bound();
         if !confirmed {
             return None;
         }
@@ -375,31 +348,24 @@ impl RuntimeCore {
     /// Pins the metadata view of the snapshot `created`, which this runtime
     /// wrote on the namespace, from the record in memory.
     ///
-    /// `verified` is the newest manifest and the manifest boundary that the
-    /// snapshot's verification read after the record write, in a check at
-    /// `checked`. That check confirms the position of the namespace's writer
-    /// session for the live head, as a `strong` read would. Without a
-    /// position that the check confirms, the live head is confirmed as a
-    /// `strong` read confirms it.
+    /// `verified` is the newest manifest, with the check that the snapshot's
+    /// verification made after the record write. That check confirms the
+    /// position of the namespace's writer session for the live head, as a
+    /// `strong` read would. Without a position that the check confirms, the
+    /// live head is confirmed as a `strong` read confirms it.
     pub(crate) async fn pinned_read_at_created_snapshot(
         &self,
         namespace_id: &NamespaceId,
         created: &CreatedSnapshot,
-        verified: Held<LoadedManifest>,
-        checked: Observation,
+        verified: &Held<LoadedManifest>,
     ) -> Result<PinnedRead> {
-        let checked_position = self.record_writer_position_check(
-            namespace_id,
-            checked,
-            verified.manifest().payload().manifest_no,
-            verified.boundary().clone(),
-        );
+        let checked_position = self.record_writer_position_check(namespace_id, verified);
         let live = match checked_position {
             Some(position) => {
                 self.inner.instruments.read_head(ReadHeadSource::Position);
                 self.read_context(
-                    position.read_basis.clone(),
-                    Some(Arc::clone(&position.tail)),
+                    position.read_basis().clone(),
+                    Some(Arc::clone(position.tail())),
                 )
             }
             None => {
@@ -483,17 +449,8 @@ impl RuntimeCore {
     }
 }
 
-/// Returns the head that a load observed at `observed` read, with both its
-/// manifest check and its head confirmed at that observation.
-fn cached_head(anchor: NamespaceReadAnchor, observed: Observation) -> CachedHead {
-    let boundary = anchor.held().boundary().clone();
-    CachedHead {
-        read_basis: ReadBasis {
-            basis: anchor.basis(),
-            head: anchor.read_state,
-        },
-        basis_checked: observed.clone(),
-        head_confirmed: observed,
-        boundary,
-    }
+/// Returns the head that a load observed at `observed` read, with the
+/// anchor's check and its head confirmed at that observation.
+fn cached_head(anchor: &NamespaceReadAnchor, observed: Observation) -> CachedHead {
+    CachedHead::new(anchor.held_basis(), observed)
 }

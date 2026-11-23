@@ -22,7 +22,7 @@ use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::snapshot::ensure_live;
 use crate::snapshot::record::write_snapshot_record;
-use crate::time::OperationClock;
+use crate::time::{Observation, OperationClock};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, RebasedFrom, SnapshotOwner, SnapshotPayload};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -190,9 +190,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// active manifest, it returns a target that the fork finishes.
     pub async fn find_fork_target(&self, new_namespace_id: &NamespaceId) -> Result<ForkTarget> {
         let target = self.namespace.with_namespace(new_namespace_id.clone());
-        let initializing = match target.find_existing_namespace().await? {
+        let observed = Observation::now(Arc::clone(&self.namespace.timer));
+        let initializing = match target.find_existing_namespace(observed).await? {
             None => false,
-            Some(ExistingNamespace::Initializing(..)) => true,
+            Some(ExistingNamespace::Initializing(_)) => true,
             Some(ExistingNamespace::Active) => {
                 return Err(CoreError::NamespaceExists {
                     namespace_id: new_namespace_id.clone(),
@@ -442,7 +443,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<NamespaceMetadata> {
         let payload = newest.manifest().payload();
         if payload.status.is_active() {
-            target.install_active_head(&newest, clock.origin());
+            target.install_active_head(&newest);
             return Ok(crate::namespace::status::created_namespace(payload));
         }
         deadline.ensure_before(clock)?;
@@ -457,16 +458,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         {
             // Another call that finished the fork may have used the same fork
             // snapshot, so the call deletes nothing.
-            return match target.find_newest_manifest().await {
-                Ok(NewestManifest::Manifest(current, boundary))
-                    if current.payload().status.is_active() =>
+            return match target.find_newest_manifest(clock.origin()).await {
+                Ok(NewestManifest::Manifest(current))
+                    if current.manifest().payload().status.is_active() =>
                 {
-                    let created = crate::namespace::status::created_namespace(current.payload());
-                    target.install_active_head(
-                        &Held::new(current, clock.origin(), boundary),
-                        clock.origin(),
-                    );
-                    Ok(created)
+                    target.install_active_head(&current);
+                    Ok(crate::namespace::status::created_namespace(
+                        current.manifest().payload(),
+                    ))
                 }
                 _ => Err(error),
             };
@@ -538,12 +537,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         // Only a head whose tail has commits has a manifest 2, which folds the
         // tail. A tail of fences and floor objects changes nothing that the
         // fork keeps, so the fork point is the source manifest's head.
-        let head = head.filter(|head| head.head.seq > built_from.head_seq);
+        let head = head.filter(|head| head.head().seq > built_from.head_seq);
         let fork_basis = ForkBasis {
             manifest: built_from.manifest(),
             fork_point_seq: head
                 .as_ref()
-                .map_or(built_from.head_seq, |head| head.head.seq),
+                .map_or(built_from.head_seq, |head| head.head().seq),
             source_snapshot_id: SnapshotId::generate(built_from.snapshot_id.manifest_no()),
             forked_from_snapshot_id: built_from.snapshot_id.clone(),
             fork_point_snapshot_id: SnapshotId::generate(ManifestNo(if head.is_some() {
@@ -609,7 +608,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 .await?;
             if head
                 .tail_state
-                .has_commit_older_than_max_age(head.head.seq, clock.request_at_ms())
+                .has_commit_older_than_max_age(head.head().seq, clock.request_at_ms())
             {
                 return Ok(None);
             }
@@ -618,8 +617,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 .create_verified_snapshot_record(
                     None,
                     Some(expires_at_ms),
-                    head.held.manifest(),
-                    head.held.boundary().clone(),
+                    &head.manifest_segments.loaded_manifest(),
+                    head.basis.boundary().clone(),
                     clock,
                 )
                 .await
@@ -735,10 +734,8 @@ async fn load_initializing_target<S: ObjectStore>(
     target: &NamespaceStore<S>,
     clock: &OperationClock,
 ) -> Result<Held<LoadedManifest>> {
-    match target.find_existing_namespace().await? {
-        Some(ExistingNamespace::Initializing(newest, boundary)) => {
-            Ok(Held::new(newest, clock.origin(), boundary))
-        }
+    match target.find_existing_namespace(clock.origin()).await? {
+        Some(ExistingNamespace::Initializing(newest)) => Ok(newest),
         Some(ExistingNamespace::Active) => Err(CoreError::NamespaceExists {
             namespace_id: target.namespace_id().clone(),
         }),
@@ -764,7 +761,7 @@ async fn rebased_from<S: ObjectStore + ?Sized>(
 ) -> Result<RebasedFrom> {
     let resume_after_seq = merge_start(
         &head.metadata_view(),
-        &head.head,
+        head.head(),
         rebase.source_namespace_id,
         rebase.fork_point_seq,
     )

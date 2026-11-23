@@ -126,13 +126,14 @@ async fn a_sessions_floor_object_orders_its_restores_around_the_floor() {
     assert_eq!(report.retention_floor_seq, expired_seq);
     assert_eq!(report.manifest_retention_floor_seq, CommitSeq(0));
     assert_eq!(
-        after.read_basis.head.wal_no.0,
-        before.read_basis.head.wal_no.0 + 1
+        after.read_basis().head.wal_no.0,
+        before.read_basis().head.wal_no.0 + 1
     );
-    assert_eq!(after.read_basis.head.seq, before.read_basis.head.seq);
+    assert_eq!(after.read_basis().head.seq, before.read_basis().head.seq);
     assert_eq!(after.retention_floor_seq(), expired_seq);
     assert_eq!(
-        after.read_basis.head.writer_epoch, before.read_basis.head.writer_epoch,
+        after.read_basis().head.writer_epoch,
+        before.read_basis().head.writer_epoch,
         "the advance claims no epoch"
     );
 
@@ -148,9 +149,9 @@ async fn a_sessions_floor_object_orders_its_restores_around_the_floor() {
         .fold_wal_tail(engine.writer_position(), &context("writer").clock())
         .await
         .expect("fold")
-        .manifest;
-    assert_eq!(folded.retention_floor_seq, expired_seq);
-    assert!(folded.manifest.head_seq >= restored_commit.committed_seq);
+        .current;
+    assert_eq!(folded.manifest().payload().retention_floor_seq, expired_seq);
+    assert!(folded.manifest().manifest().head_seq >= restored_commit.committed_seq);
     engine.record_manifest_published(folded);
     let (above, above_seq) = delete(&mut engine, "above").await;
     publish(

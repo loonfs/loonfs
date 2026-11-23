@@ -3,19 +3,19 @@
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result as CoreResult};
 use crate::limits::MAX_POSITION_MOVES;
-use crate::manifest::{metadata_basis_from_manifest, PublishedManifest};
+use crate::manifest::metadata_basis_from_manifest;
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
-use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
-use crate::namespace::held::Held;
+use crate::namespace::held::{Checked, Held};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::{ensure_writer_not_fenced, AcquiredWriter};
 use crate::segment::MetadataSegmentCache;
+use crate::time::Observation;
 use crate::wal::{discover_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
-use loonfs_types::{CommitSeq, ManifestNo, WriterEpoch};
+use loonfs_types::format::control::NamespaceStatus;
+use loonfs_types::{CommitSeq, ManifestNo};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -56,6 +56,13 @@ impl NamespaceReadAnchor {
     /// build on.
     pub fn held(&self) -> &Held<LoadedManifest> {
         &self.held
+    }
+
+    /// Returns the anchor's head and the manifest it was read above, kept by
+    /// reference with the same check, as a cached head or a writer position
+    /// keeps them.
+    pub fn held_basis(&self) -> Held<ReadBasis> {
+        self.held.with_head(self.read_state.clone())
     }
 }
 
@@ -102,11 +109,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// An initializing namespace has no WAL objects, so the basis's head is
     /// the manifest's own.
-    pub async fn find_initializing_read_basis(&self) -> CoreResult<Option<ReadBasis>> {
-        let NewestManifest::Manifest(current, _) = self.find_newest_manifest().await? else {
+    ///
+    /// `observed` is an observation that the caller read before the call.
+    pub async fn find_initializing_read_basis(
+        &self,
+        observed: Observation,
+    ) -> CoreResult<Option<ReadBasis>> {
+        let NewestManifest::Manifest(current) = self.find_newest_manifest(observed).await? else {
             return Ok(None);
         };
-        let manifest = &current;
+        let manifest = current.manifest();
         Ok(
             matches!(manifest.payload().status, NamespaceStatus::Initializing {}).then(|| {
                 ReadBasis {
@@ -127,7 +139,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// manifest.
     ///
     /// After the WAL tail above the manifest, the call checks the manifest
-    /// with [`Self::check_anchor_manifest`]. A successor, or a manifest at or
+    /// with [`Self::check_newest`]. A successor, or a manifest at or
     /// below the boundary, makes the call find the newest manifest from the
     /// boundary and start again (format spec, "Replaying the visible WAL").
     /// A tombstone has no successor, so it isn't checked.
@@ -175,10 +187,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         held,
                         tail,
                     };
-                    if !check_manifest
-                        || anchor.read_state.status.is_deleted()
-                        || self.check_anchor_manifest(&mut anchor).await?
-                    {
+                    if !check_manifest || anchor.read_state.status.is_deleted() {
+                        return Ok(anchor);
+                    }
+                    // The check completes the discovery that found the
+                    // manifest, so it confirms the manifest at the time that
+                    // discovery began.
+                    let observed = anchor.held.checked().clone();
+                    if self.check_newest(&mut anchor.held, observed).await? == Checked::Newest {
                         return Ok(anchor);
                     }
                     held = self
@@ -200,26 +216,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Err(CoreError::contention_exhausted(&held.manifest().object_key))
     }
 
-    /// Returns whether the anchor's manifest is the newest: a HEAD request
-    /// for its successor, and when there is none, the manifest boundary (see
-    /// [`Self::above_boundary`]). The anchor keeps the boundary that the call
-    /// read.
-    pub(crate) async fn check_anchor_manifest(
-        &self,
-        anchor: &mut NamespaceReadAnchor,
-    ) -> CoreResult<bool> {
-        let manifest_no = anchor.held.manifest().payload().manifest_no;
-        if self.manifest_has_successor(manifest_no).await? {
-            return Ok(false);
-        }
-        let (newest, boundary) = self
-            .above_boundary(manifest_no, anchor.held.boundary().clone())
-            .await?;
-        anchor.held.raise_boundary(boundary);
-        Ok(newest)
-    }
-
-    pub async fn manifest_has_successor(
+    pub(crate) async fn manifest_has_successor(
         &self,
         manifest_no: ManifestNo,
     ) -> Result<bool, ControlObjectLoadError> {
@@ -229,37 +226,48 @@ impl<S: ObjectStore> NamespaceStore<S> {
         self.manifest_exists(next).await
     }
 
-    /// Returns the manifests above `basis`, oldest first, for a position at
-    /// `basis` to move onto, while each is an active manifest of `writer_epoch`.
+    /// Returns the newest manifest above `held`, a writer position's basis,
+    /// for the position to move onto, when every manifest above `held` is an
+    /// active manifest of the position's writer epoch, checked at `observed`,
+    /// an observation that the caller read before the HEAD request that found
+    /// a successor of `held`.
     ///
-    /// Manifest numbers are consecutive, so the walk loads each successor until
-    /// one is missing. It returns `None` when `basis` has no successor, when it
-    /// finds a manifest of another writer epoch (another writer's claim) or a
-    /// tombstone, which settles that the position can't move, and when it finds
-    /// more than [`MAX_POSITION_MOVES`] manifests.
+    /// Manifest numbers are consecutive, so the walk loads each successor
+    /// until one is missing, and then reads the manifest boundary (see
+    /// [`Self::above_boundary`]). It returns `None` when `held` has no
+    /// successor, when it finds a manifest of another writer epoch (another
+    /// writer's claim) or a tombstone, which settles that the position can't
+    /// move, when it finds more than [`MAX_POSITION_MOVES`] manifests, and
+    /// when the newest manifest is at or below the boundary, because a
+    /// collection may have deleted the manifests after it.
     pub async fn same_epoch_manifests_above(
         &self,
-        basis: &ManifestRef,
-        writer_epoch: WriterEpoch,
-    ) -> Result<Option<Vec<PublishedManifest>>, ControlObjectLoadError> {
-        let mut moves = Vec::new();
-        let mut manifest_no = basis.manifest_no;
-        while moves.len() <= MAX_POSITION_MOVES {
+        held: &Held<ReadBasis>,
+        observed: Observation,
+    ) -> CoreResult<Option<Held<LoadedManifest>>> {
+        let writer_epoch = held.head().writer_epoch;
+        let mut newest = None;
+        let mut moves = 0;
+        let mut manifest_no = held.manifest_no();
+        while moves <= MAX_POSITION_MOVES {
             let Ok(next) = manifest_no.successor() else {
                 break;
             };
             let Some(loaded) = self.load_manifest_by_no(next).await? else {
-                return Ok((!moves.is_empty()).then_some(moves));
+                let Some(newest) = newest else {
+                    return Ok(None);
+                };
+                let (above, boundary) = self
+                    .above_boundary(manifest_no, held.boundary().clone())
+                    .await?;
+                return Ok(above.then(|| Held::new(newest, observed, boundary)));
             };
             let payload = loaded.payload();
             if payload.writer_epoch != writer_epoch || payload.status.is_deleted() {
                 break;
             }
-            moves.push(PublishedManifest::new(
-                &loaded.envelope,
-                None,
-                KeptBoundary::default(),
-            ));
+            newest = Some(loaded);
+            moves += 1;
             manifest_no = next;
         }
         Ok(None)

@@ -204,17 +204,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> crate::error::Result<Option<Held<LoadedManifest>>> {
         let segments = self
             .load_held_manifest(
-                position.read_basis.basis.manifest(),
-                position.boundary.clone(),
+                position.read_basis().basis.manifest(),
+                position.basis().boundary().clone(),
             )
             .await?;
-        Ok(segments.map(|segments| {
-            Held::new(
-                segments.loaded_manifest(),
-                position.basis_checked.clone(),
-                position.boundary.clone(),
-            )
-        }))
+        Ok(segments.map(|segments| position.basis().decoded(segments.loaded_manifest())))
     }
 }
 

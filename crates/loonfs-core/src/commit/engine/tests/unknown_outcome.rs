@@ -266,7 +266,7 @@ async fn a_publish_future_dropped_while_planning_leaves_the_session_owing_no_fen
     let tip = engine
         .writer_position()
         .expect("the position after alpha")
-        .read_basis
+        .read_basis()
         .head
         .wal_no;
     assert_eq!(

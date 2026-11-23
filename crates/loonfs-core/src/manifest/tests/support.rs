@@ -105,7 +105,7 @@ pub(super) async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Si
         rows.sort_by_key(|row| row.row_key_for_family(family));
         append_rows_to_metadata(&mut metadata_state, family, "snapshot projection", &rows)?;
     }
-    Ok((projection.head, metadata_state.build()))
+    Ok((projection.head().clone(), metadata_state.build()))
 }
 
 /// Every lifecycle test in this file takes snapshots as one user owner; owner-specific

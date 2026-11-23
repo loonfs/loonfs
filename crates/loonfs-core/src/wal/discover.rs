@@ -168,7 +168,7 @@ pub(super) fn corrupt(object_key: &str, error: impl std::fmt::Display) -> Contro
 ///   garbage collection might be deleting them while the probe reads. Discovery
 ///   from the current manifest still reports a gap above its folded boundary as
 ///   corruption.
-pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
+pub(crate) async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     store: &S,
     head_and_wal_tail_cache: &HeadAndWalTailCache,
     context: &mut RuntimeReadContext,

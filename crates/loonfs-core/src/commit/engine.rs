@@ -7,7 +7,7 @@ use super::publish_view::WriterPosition;
 use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result, WriterFence};
 use crate::manifest::retention::verify_manifest_segments_exist;
-use crate::manifest::{FloorObjectReport, ManifestLoadError, PublishedManifest};
+use crate::manifest::{FloorObjectReport, ManifestLoadError};
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::held::Held;
@@ -212,31 +212,14 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// new manifest as a successor and drop the position. The position keeps
     /// the WAL tail above the new manifest.
     ///
-    /// The last check of the position's manifest stays valid after a move.
-    /// That check found no successor of the old manifest, so it happened
-    /// before the new manifest was published, and no manifest after the new
-    /// one existed then either. Once the position is on a manifest that this
-    /// runtime published or found current, the start of that call is a check
-    /// of the manifest too, because no manifest followed it then, so the
-    /// position keeps the younger of the two checks. The position keeps the
-    /// higher of its manifest boundary and the one that `manifest` carries.
-    pub fn record_manifest_published(&mut self, manifest: PublishedManifest) {
+    /// The position merges `manifest`'s check (see [`Held::merge`]).
+    pub fn record_manifest_published(&mut self, manifest: Held<LoadedManifest>) {
         let state = &mut self.position;
         let Some(position) = state.current.as_mut() else {
             return;
         };
         if !position.move_to(&manifest) {
             state.invalidate_projection();
-            return;
-        }
-        position.boundary = std::mem::take(&mut position.boundary).higher(manifest.boundary);
-        let Some(started) = manifest.started else {
-            return;
-        };
-        if position.read_basis.basis.manifest() == &manifest.manifest
-            && started.age_ms() < position.basis_checked.age_ms()
-        {
-            position.basis_checked = started;
         }
     }
 
@@ -286,12 +269,11 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         {
             Ok(acquired_writer) => acquired_writer,
             Err(error @ CoreError::NamespaceNotFound { .. }) => {
-                let NewestManifest::Manifest(current, boundary) =
-                    self.namespace.find_newest_manifest().await?
+                let NewestManifest::Manifest(current) =
+                    self.namespace.find_newest_manifest(clock.origin()).await?
                 else {
                     return Err(error);
                 };
-                let current = Held::new(current, clock.origin(), boundary);
                 let payload = current.manifest().payload();
                 if !matches!(payload.status, NamespaceStatus::Initializing {}) {
                     return Err(error);
@@ -543,9 +525,14 @@ impl PositionState {
             None => self.current.take(),
         };
         let loaded = namespace
-            .load_publish_metadata_view(acquired_writer, cached_position, acquired_anchor)
+            .load_publish_metadata_view(
+                acquired_writer,
+                cached_position,
+                acquired_anchor,
+                attempt.clone(),
+            )
             .await;
-        let mut view = match loaded {
+        let view = match loaded {
             Ok(value) => value,
             Err(error) => {
                 self.invalidate_projection();
@@ -556,10 +543,6 @@ impl PositionState {
                 return Err(error);
             }
         };
-        if view.tail_discovered {
-            // Discovery checked the basis no earlier than this attempt began.
-            view.position.basis_checked = attempt.clone();
-        }
         Ok(LoadedPublishView { view, attempt })
     }
 
@@ -690,7 +673,7 @@ impl PositionState {
                 head,
                 wal_bytes,
             } => {
-                position.read_basis.head = head;
+                position.basis.read_basis_mut().head = head;
                 if let Err(error) =
                     Arc::make_mut(&mut position.tail).push_object(namespace_id, &records, wal_bytes)
                 {
@@ -749,7 +732,7 @@ async fn classify_replaced_basis<S: ObjectStore>(
     if !report.results.iter().any(found_segment_missing) {
         return report;
     }
-    let replaced_manifest_no = position.read_basis.basis.manifest_no();
+    let replaced_manifest_no = position.basis.manifest_no();
     let current_manifest_no = match namespace.load_current_manifest().await {
         Ok(current) => current.payload().manifest_no,
         Err(_) => return report,

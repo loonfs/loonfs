@@ -231,7 +231,7 @@ impl PublisherRegistry {
         let folded = self
             .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unchanged)
             .await?;
-        self.move_views(namespace_id, folded.manifest.clone()).await;
+        self.move_views(namespace_id, folded.current.clone()).await;
         turns.record(round, &folded);
         if folded.response.outcome == FoldWalOutcome::Published {
             if let Some(publisher) = self.live_publisher(namespace_id) {
@@ -288,7 +288,7 @@ impl PublisherRegistry {
     ) -> Result<(Held<LoadedManifest>, RwLockReadGuard<'a, ()>)> {
         let shared = turns.fold.read().await;
         if let Some(folded) = turns.folded_after(arrival) {
-            return Ok((folded.basis, shared));
+            return Ok((folded.current, shared));
         }
         drop(shared);
         // The fold lock is released from exclusive mode, not downgraded to
@@ -307,7 +307,7 @@ impl PublisherRegistry {
         let folded = turns
             .folded_after(arrival)
             .expect("a fold after the arrival should have completed under the fold lock");
-        Ok((folded.basis, shared))
+        Ok((folded.current, shared))
     }
 
     fn unfenced_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {

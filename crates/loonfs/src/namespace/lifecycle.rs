@@ -78,7 +78,7 @@ impl<M: crate::Mode> Namespace<M> {
                 let Some(basis) = self
                     .core
                     .namespace_store(&self.namespace_id)
-                    .find_initializing_read_basis()
+                    .find_initializing_read_basis(self.core.observation())
                     .await?
                 else {
                     return Err(error);
