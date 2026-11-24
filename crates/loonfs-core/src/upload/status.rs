@@ -22,7 +22,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         actor_id: &ActorId,
     ) -> Result<UploadSessionView> {
         let now_ms = self.now_ms();
-        let head = context.read_basis().head();
+        let head = self.namespace.context_read_basis(context).head();
         let loaded = self
             .namespace
             .load_upload_session_state(head, upload_id)

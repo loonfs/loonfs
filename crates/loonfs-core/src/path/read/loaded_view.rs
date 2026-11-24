@@ -40,8 +40,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         context: &RuntimeReadContext,
     ) -> Result<LoadedMetadataView<'_, S>> {
-        let ReadBasis { head, basis } = context.read_basis();
-        crate::namespace::control::ensure_head_identity(head, &self.namespace_id)?;
+        let ReadBasis { head, basis } = self.context_read_basis(context);
         let head = head.clone();
         let manifest_no = basis.manifest_no();
         let loaded_basis = self.load_context_segments(context).await?;

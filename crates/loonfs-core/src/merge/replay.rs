@@ -135,9 +135,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// namespace, a rebase's new fork read at `context`. `source`, read at
     /// `source_context`, is this namespace read through its fork point
     /// snapshot, which describes the namespace that the rebase forked at the
-    /// new fork's fork point, and a context at another manifest returns
-    /// `namespace_corrupt`, as a context of another namespace does
+    /// new fork's fork point. A `source_context` at another manifest, or of
+    /// another namespace than this one, returns `namespace_corrupt`
     /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
+    /// A `source_context` built for another namespace than `source` panics,
+    /// as in every read.
     ///
     /// The plan takes the range's start from this namespace's own replay
     /// rows or `resume_after_seq`, and checks it against both floors, as

@@ -187,7 +187,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         context: &RuntimeReadContext,
     ) -> crate::error::Result<DecodedManifest> {
-        let manifest = context.read_basis().basis().manifest();
+        let manifest = self.context_read_basis(context).basis().manifest();
         match &context.kept_by {
             KeptBy::Current => {
                 self.load_live_manifest(manifest, context.boundary().clone())

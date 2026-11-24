@@ -26,7 +26,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// ([format section 8.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#83-reads-deletion-and-expiry)).
     ///
     /// A missing snapshot, a deleted snapshot, and a snapshot that expired at or
-    /// before the wall-clock time of the call return `snapshot_not_found`.
+    /// before the wall-clock time of the call return `snapshot_not_found`. The
+    /// call panics when `live_head` is another namespace's head.
     pub async fn load_snapshot_read_basis(
         &self,
         live_head: &NamespaceReadState,
@@ -44,12 +45,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 
     /// Resolves the read basis of the snapshot `record`, which this process
-    /// wrote, from the record in memory instead of a load of the record.
+    /// wrote, from the record in memory instead of a load of the record. The
+    /// call panics when `live_head` is another namespace's head.
     pub async fn load_created_snapshot_read_basis(
         &self,
         live_head: &NamespaceReadState,
         record: SnapshotPayload,
     ) -> Result<SnapshotReadBasis> {
+        let live_head = self.own_head(live_head);
         let snapshot_id = record.snapshot_id.clone();
         load_snapshot_read_basis_from_record(&self.store, &self.segment_cache, live_head, record)
             .await
@@ -175,15 +178,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// before the wall-clock time of the call, or the id of a fork snapshot
     /// returns `snapshot_not_found`.
     ///
-    /// `_live`, a read context of the namespace, proves that the namespace is
+    /// `live`, a read context of the namespace, proves that the namespace is
     /// live, and `administrator` proves the caller administers the namespace,
     /// because snapshots are only for the administrator.
     pub async fn get_snapshot(
         &self,
         administrator: &Administrator,
-        _live: &RuntimeReadContext,
+        live: &RuntimeReadContext,
         snapshot_id: &SnapshotId,
     ) -> Result<Snapshot> {
+        self.namespace.context_read_basis(live);
         administrator.assert_for(&self.namespace.namespace_id);
         let now_ms = self.now_ms();
         let loaded = ensure_live(
@@ -197,7 +201,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Moves the expiry of an unexpired snapshot that isn't deleted to
     /// `requested_expires_at_ms`, never earlier. A snapshot without an expiry is returned unchanged.
-    /// `_live`, a read context of the namespace, proves that the namespace is
+    /// `live`, a read context of the namespace, proves that the namespace is
     /// live, and `administrator` proves the caller administers the namespace.
     ///
     /// Each compare-and-swap checks the call's publication budget first, as a
@@ -207,10 +211,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn extend_snapshot(
         &self,
         administrator: &Administrator,
-        _live: &RuntimeReadContext,
+        live: &RuntimeReadContext,
         snapshot_id: &SnapshotId,
         requested_expires_at_ms: u64,
     ) -> Result<Snapshot> {
+        self.namespace.context_read_basis(live);
         administrator.assert_for(&self.namespace.namespace_id);
         let clock = self.namespace.start_clock();
         let object_key = snapshot_record(&self.namespace.namespace_id, snapshot_id);

@@ -110,15 +110,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// A deleted snapshot and a snapshot that expired at or before the
     /// wall-clock time of the call are left out.
     ///
-    /// `_live`, a read context of the namespace, proves that the namespace is
+    /// `live`, a read context of the namespace, proves that the namespace is
     /// live, and `administrator` proves the caller administers the namespace,
     /// because snapshots are only for the administrator.
     pub async fn list_snapshots_page(
         &self,
         administrator: &Administrator,
-        _live: &RuntimeReadContext,
+        live: &RuntimeReadContext,
         request: PageRequest<SnapshotPageCursor>,
     ) -> Result<Page<Snapshot, SnapshotPageCursor>> {
+        self.namespace.context_read_basis(live);
         administrator.assert_for(&self.namespace.namespace_id);
         let request = PageRequest {
             limit: request.limit,

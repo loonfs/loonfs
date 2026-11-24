@@ -2,7 +2,10 @@
 //! content write permits, and run policy that its operations use. Each
 //! operation is a method in the module that implements it.
 
+use crate::engine::RuntimeReadContext;
+use crate::namespace::basis::ReadBasis;
 use crate::namespace::head_cache::HeadAndWalTailCache;
+use crate::namespace::state::NamespaceReadState;
 use crate::object_cache::ObjectCache;
 use crate::permits::Permits;
 use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
@@ -88,5 +91,28 @@ impl<S> NamespaceStore<S> {
     /// Returns the namespace these components belong to.
     pub fn namespace_id(&self) -> &NamespaceId {
         &self.namespace_id
+    }
+
+    /// Returns `head` after checking that it's a head of this store's
+    /// namespace. The check compares only the namespace ID, so a head of
+    /// this namespace passes whatever its status.
+    ///
+    /// Panics when `head` is another namespace's head. That's a bug in the
+    /// caller, and without the panic this store would read or write the other
+    /// namespace's objects through this namespace's caches and permits.
+    pub(crate) fn own_head<'a>(&self, head: &'a NamespaceReadState) -> &'a NamespaceReadState {
+        assert_eq!(
+            head.namespace_id, self.namespace_id,
+            "a namespace store should act only on its own namespace's head"
+        );
+        head
+    }
+
+    /// Returns the head and metadata basis that `context` reads, after
+    /// checking the head with [`Self::own_head`].
+    pub(crate) fn context_read_basis<'a>(&self, context: &'a RuntimeReadContext) -> &'a ReadBasis {
+        let read_basis = context.read_basis();
+        self.own_head(&read_basis.head);
+        read_basis
     }
 }

@@ -65,19 +65,6 @@ pub(crate) enum NewestManifest {
     Manifest(Held<LoadedManifest>),
 }
 
-pub(crate) fn ensure_head_identity(
-    head: &NamespaceReadState,
-    namespace_id: &NamespaceId,
-) -> crate::error::Result<()> {
-    if &head.namespace_id != namespace_id {
-        return Err(CoreError::NamespaceCorrupt(format!(
-            "head namespace `{}` does not match requested namespace `{}`",
-            head.namespace_id, namespace_id
-        )));
-    }
-    Ok(())
-}
-
 /// Returns `namespace_not_found` for a namespace that's initializing, because
 /// LoonFS treats it as missing, and `namespace_deleted` for a tombstone.
 pub fn ensure_namespace_live(

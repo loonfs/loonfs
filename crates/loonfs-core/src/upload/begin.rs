@@ -42,7 +42,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         actor_id: &ActorId,
     ) -> Result<UploadSession> {
         let clock = self.namespace.start_clock();
-        let head = context.read_basis().head();
+        let head = self.namespace.context_read_basis(context).head();
         create_upload_session(
             &self.namespace.store,
             head,
@@ -60,7 +60,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         actor_id: &ActorId,
     ) -> Result<DirectPutUploadTarget> {
         let clock = self.namespace.start_clock();
-        let head = context.read_basis().head();
+        let head = self.namespace.context_read_basis(context).head();
         let content_id = ContentId::generate();
         let object_key = content_blob(&head.pool_id, &content_id);
         let session = create_upload_session(
@@ -91,7 +91,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         options: DirectMultipartUploadOptions,
     ) -> Result<DirectMultipartUploadTarget> {
         let clock = self.namespace.start_clock();
-        let head = context.read_basis().head();
+        let head = self.namespace.context_read_basis(context).head();
         let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
         let content_id = ContentId::generate();
         let object_key = content_blob(&head.pool_id, &content_id);

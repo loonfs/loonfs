@@ -32,7 +32,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         bytes: &[u8],
     ) -> Result<PreparedContent> {
         let _permit = self.namespace.content_writes.acquire().await;
-        let head = context.read_basis().head();
+        let head = self.namespace.context_read_basis(context).head();
         let clock = self.namespace.start_clock();
         let session =
             open_owned_staging_session(&self.namespace.store, head, actor_id, &clock).await?;
@@ -61,7 +61,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         body: ByteStream,
     ) -> Result<PreparedContent> {
         let _permit = self.namespace.content_writes.acquire().await;
-        let head = context.read_basis().head();
+        let head = self.namespace.context_read_basis(context).head();
         self.namespace
             .stage_owned_stream(head, actor_id, body, &self.namespace.start_clock())
             .await

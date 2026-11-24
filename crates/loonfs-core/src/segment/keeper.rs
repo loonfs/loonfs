@@ -115,7 +115,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// extension that finds one of its own segments missing under that
     /// manifest.
     pub async fn ensure_context_kept(&self, context: &RuntimeReadContext) -> Result<()> {
-        self.check_kept(context.read_basis().basis().manifest_no(), &context.kept_by)
-            .await
+        self.check_kept(
+            self.context_read_basis(context).basis().manifest_no(),
+            &context.kept_by,
+        )
+        .await
     }
 }
