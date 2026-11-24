@@ -3773,13 +3773,9 @@ async fn a_writer_keeps_its_tail_out_of_the_read_cache() {
     commit("after-fold").await.expect("commit after the fold");
 
     let stats = writer.metadata_cache().stats();
-    // The fold moves the cached head that the create installed. The move
-    // looks up that head's tail once, finds none, and drops the head.
-    assert_eq!(
-        stats.wal_tails.misses,
-        heads.wal_tails.misses + 1,
-        "{stats:?}"
-    );
+    // The fold drops the cached head that the create installed, without a
+    // tail lookup.
+    assert_eq!(stats.wal_tails.misses, heads.wal_tails.misses, "{stats:?}");
     assert_eq!(stats.wal_tails.inserts, 0, "{stats:?}");
     assert_eq!(stats.wal_tails.evictions, 0, "{stats:?}");
     assert_eq!(

@@ -1336,12 +1336,14 @@ async fn a_restarted_runtime_reads_a_folded_file_from_the_ssd_tier() {
     assert!(cache.stats().segment_ssd.expect("the SSD tier").hits > 0);
 }
 
-/// Checks that an extension's publication in a runtime without the
-/// namespace's writer session moves that runtime's cached head onto the
-/// published manifest, and caches that manifest, so the next read sees the
-/// published entry and the WAL tail from the cache, with no request.
+/// Checks that an extension's publication in a runtime whose writer session
+/// on the namespace hasn't committed, so reads there start from the cached
+/// head, drops that runtime's cached head and caches
+/// the published manifest, so the next read finds the published entry with
+/// one discovery that reads no manifest, and the read after it sends no
+/// request.
 #[tokio::test]
-async fn a_read_after_an_extension_publication_sends_no_request() {
+async fn a_read_after_an_extension_publication_runs_one_discovery() {
     use crate::{Consistency, ReadAt, StatOptions};
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
     use loonfs_types::format::manifest::ExtensionEntry;
@@ -1418,6 +1420,23 @@ async fn a_read_after_an_extension_publication_sends_no_request() {
         .await
         .expect("find the entry");
     assert_eq!(found, Some(entry));
+    // Discovery reads the boundary, lists the manifests, reads the boundary
+    // again, replays the two WAL objects above the cached manifest and finds
+    // the next one missing, and checks the manifest with a successor HEAD
+    // and a boundary read.
+    let counts = store.counts();
+    assert_eq!(
+        (
+            counts.gets_with_metadata,
+            counts.lists,
+            counts.gets,
+            counts.heads
+        ),
+        (3, 1, 3, 1),
+        "{:?}",
+        store.snapshot()
+    );
+    store.reset();
     namespace_handle
         .stat_with_options("/file", &stat)
         .await

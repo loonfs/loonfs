@@ -640,12 +640,6 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         drop(removed);
     }
 
-    /// Makes a load or a check of the key in flight insert nothing
-    /// afterwards, as [`Self::invalidate`] does, and keeps the key's entry.
-    pub(crate) fn invalidate_in_flight(&self, key: &K) {
-        self.lock().count_drop(key);
-    }
-
     fn disabled(&self) -> bool {
         self.config.max_decoded_bytes == 0
     }
