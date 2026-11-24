@@ -182,10 +182,9 @@ async fn an_ambiguous_manifest_read_back_after_its_budget_settles_the_put() {
 }
 
 /// Checks that of two retention window changes with the same content, which
-/// store different bytes, the change whose put loses reports
-/// `CoveredByCurrent`.
+/// store different bytes, the change whose put loses reports `Lost`.
 #[tokio::test]
-async fn window_changes_with_the_same_content_report_the_loser_as_covered() {
+async fn window_changes_with_the_same_content_report_the_loser_as_lost() {
     for race_at_put in [false, true] {
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
@@ -225,10 +224,7 @@ async fn window_changes_with_the_same_content_report_the_loser_as_covered() {
             winning.expect("winner"),
             ManifestPublicationOutcome::Published(_)
         );
-        assert_matches!(
-            losing.expect("loser"),
-            ManifestPublicationOutcome::CoveredByCurrent(_)
-        );
+        assert_matches!(losing.expect("loser"), ManifestPublicationOutcome::Lost(_));
     }
 }
 
@@ -347,7 +343,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         // The create's two manifests, the claim, and the winner's manifest.
         assert_eq!(keys.len(), 4);
         if newer_head {
-            assert_matches!(losing, ManifestPublicationOutcome::PredecessorChanged(_));
+            assert_matches!(losing, ManifestPublicationOutcome::Lost(_));
             let mut retry = second;
             retry.manifest_no = retry.manifest_no.successor().expect("next number");
             assert_matches!(
@@ -355,7 +351,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                 ManifestPublicationOutcome::Published(_)
             );
         } else {
-            assert_matches!(losing, ManifestPublicationOutcome::CoveredByCurrent(_));
+            assert_matches!(losing, ManifestPublicationOutcome::Lost(_));
         }
     }
 }
