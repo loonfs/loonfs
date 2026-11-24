@@ -23,14 +23,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// content may be published.
     ///
     /// `basis` is the namespace's head of any status, not a read context,
-    /// because LoonFS aborts the sessions of a deleted namespace too.
+    /// because LoonFS aborts the sessions of a deleted namespace too. The
+    /// call panics when `basis` is another namespace's head.
     pub async fn abort_upload(
         &self,
         basis: &ReadBasis,
         upload_id: &UploadId,
         actor_id: &ActorId,
     ) -> Result<UploadSession> {
-        let head = basis.head();
+        let head = self.namespace.own_head(basis.head());
         let clock = self.namespace.start_clock();
         let namespace_id = &head.namespace_id;
         let loaded = self

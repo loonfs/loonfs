@@ -554,9 +554,7 @@ async fn source_and_fork_context() -> (
 /// Checks that reading a file through the source namespace's engine with a
 /// read context of the fork panics.
 #[tokio::test]
-#[should_panic(
-    expected = "a namespace store should read only contexts built for its own namespace"
-)]
+#[should_panic(expected = "a namespace store should act only on its own namespace's head")]
 async fn a_read_with_another_namespaces_context_panics() {
     let (_temp_dir, store, source_namespace_id, fork_context) = source_and_fork_context().await;
     let _ = namespace_engine(&store, &source_namespace_id, &default_writer())
@@ -567,9 +565,7 @@ async fn a_read_with_another_namespaces_context_panics() {
 /// Checks that reading the namespace metadata through the source namespace's
 /// engine with a read context of the fork panics.
 #[tokio::test]
-#[should_panic(
-    expected = "a namespace store should read only contexts built for its own namespace"
-)]
+#[should_panic(expected = "a namespace store should act only on its own namespace's head")]
 async fn namespace_metadata_with_another_namespaces_context_panics() {
     let (_temp_dir, store, source_namespace_id, fork_context) = source_and_fork_context().await;
     let _ = namespace_engine(&store, &source_namespace_id, &default_writer())
@@ -580,9 +576,7 @@ async fn namespace_metadata_with_another_namespaces_context_panics() {
 /// Checks that beginning an upload through the source namespace's engine with
 /// a read context of the fork panics.
 #[tokio::test]
-#[should_panic(
-    expected = "a namespace store should read only contexts built for its own namespace"
-)]
+#[should_panic(expected = "a namespace store should act only on its own namespace's head")]
 async fn an_upload_with_another_namespaces_context_panics() {
     let (_temp_dir, store, source_namespace_id, fork_context) = source_and_fork_context().await;
     let _ = namespace_engine(&store, &source_namespace_id, &default_writer())
@@ -593,9 +587,7 @@ async fn an_upload_with_another_namespaces_context_panics() {
 /// Checks that listing snapshots through the source namespace's engine with
 /// a read context of the fork panics.
 #[tokio::test]
-#[should_panic(
-    expected = "a namespace store should read only contexts built for its own namespace"
-)]
+#[should_panic(expected = "a namespace store should act only on its own namespace's head")]
 async fn a_snapshot_listing_with_another_namespaces_context_panics() {
     let (_temp_dir, store, source_namespace_id, fork_context) = source_and_fork_context().await;
     let engine = namespace_engine(&store, &source_namespace_id, &default_writer());
@@ -607,6 +599,21 @@ async fn a_snapshot_listing_with_another_namespaces_context_panics() {
                 limit: loonfs_test_support::ids::page_limit(1),
                 cursor: None,
             },
+        )
+        .await;
+}
+
+/// Checks that aborting an upload through the source namespace's engine with
+/// the fork's head panics before the session is loaded.
+#[tokio::test]
+#[should_panic(expected = "a namespace store should act only on its own namespace's head")]
+async fn an_abort_with_another_namespaces_head_panics() {
+    let (_temp_dir, store, source_namespace_id, fork_context) = source_and_fork_context().await;
+    let _ = namespace_engine(&store, &source_namespace_id, &default_writer())
+        .abort_upload(
+            fork_context.read_basis(),
+            &loonfs_types::UploadId::generate(),
+            &loonfs_test_support::test_actor(),
         )
         .await;
 }
