@@ -26,7 +26,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::FutureExt;
-use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
+use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
 use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, StdMonotonicTimer};
 use object_store::client::{HttpClient, HttpRequestBody};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
@@ -421,9 +421,8 @@ impl ResumableUpload {
         let response = signer
             .retry
             .run(key, "put_chunk", chunk.len() as u64, || {
-                let mut request = http::Request::put(&self.session)
-                    .header(CONTENT_LENGTH, chunk.len())
-                    .header(CONTENT_RANGE, &content_range);
+                let mut request =
+                    http::Request::put(&self.session).header(CONTENT_RANGE, &content_range);
                 if let Some(full) = &full_checksum {
                     request = request.header(GCS_HASH_HEADER, crc32c_header(full));
                 }
@@ -515,6 +514,7 @@ mod tests {
     use crate::GcpGcsCredentials;
     use crate::{ObjectStoreError, ObjectStoreExtension};
     use bytes::Bytes;
+    use http::header::CONTENT_LENGTH;
     use loonfs_test_support::clock::TokioClock;
     use loonfs_types::Checksum;
     use loonfs_types::MonotonicTimer;
@@ -775,6 +775,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_media_upload_sends_content_length_zero() {
+        use super::*;
+        use futures::{stream, StreamExt};
+        let requests = UploadRequests::default();
+        let signer = test_signer(HttpClient::new(requests.clone()));
+        let mut parts = PartReader::new(stream::empty().boxed(), 3);
+        let head = parts.next_part().await.expect("head").unwrap_or_default();
+        // The test checks only the request's headers, so the response of the
+        // test service doesn't matter.
+        let _ = signer.put_if_absent("key", head, parts, 1).await;
+        let requests = requests.0.lock().expect("requests");
+        let (url, headers, bytes) = requests.last().expect("media upload");
+        assert!(url.contains("uploadType=media"), "{url}");
+        assert!(bytes.is_empty());
+        assert_eq!(
+            headers.get(CONTENT_LENGTH).map(|value| value.as_bytes()),
+            Some(&b"0"[..])
+        );
+    }
+
+    #[tokio::test]
     async fn small_assemblies_read_sources_and_create_with_one_media_request() {
         use super::*;
         let requests = UploadRequests::default();
@@ -811,6 +832,7 @@ mod tests {
             assert_eq!(requests.len(), sources.len() + 1);
             if !sources.is_empty() {
                 assert!(requests[0].0.contains("alt=media&generation=1"));
+                assert!(!requests[0].1.contains_key(CONTENT_LENGTH));
             }
             let (url, headers, bytes) = requests.last().expect("create");
             assert!(url.contains("uploadType=media&ifGenerationMatch=0"));

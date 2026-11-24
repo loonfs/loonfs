@@ -42,10 +42,31 @@ pub(crate) async fn send(
     request: http::request::Builder,
     body: HttpRequestBody,
 ) -> Result<SignedResponse> {
-    let request = request
+    send_request(client, key, with_body(key, request, body)?).await
+}
+
+/// Builds `request` with `body`, and sets `Content-Length` when the method
+/// defines a body.
+pub(crate) fn with_body(
+    key: &str,
+    request: http::request::Builder,
+    body: HttpRequestBody,
+) -> Result<HttpRequest> {
+    let mut request = request
         .body(body)
         .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
-    send_request(client, key, request).await
+    // HTTP asks a request whose method defines a body to send the body's
+    // length, even when the body is empty (RFC 9110 section 8.6). The HTTP
+    // library leaves the header off an empty body, and some providers refuse
+    // that request with `411 Length Required`.
+    let method = request.method();
+    if [http::Method::POST, http::Method::PUT, http::Method::PATCH].contains(method) {
+        let length = request.body().content_length();
+        request
+            .headers_mut()
+            .insert(http::header::CONTENT_LENGTH, length.into());
+    }
+    Ok(request)
 }
 
 /// Sends one built request, whose headers an adapter may have signed, and

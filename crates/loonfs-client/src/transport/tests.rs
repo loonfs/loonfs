@@ -280,6 +280,7 @@ async fn services_receive_identical_body_and_identity_on_retries_but_not_provide
             ("loonfs-principals", "usr_demo"),
             ("loonfs-actor", "actor"),
             ("content-type", "application/json"),
+            ("content-length", "15"),
         ]
     );
     assert!(requests[0].2["authorization"].is_sensitive());
@@ -644,6 +645,7 @@ async fn response_progress_resets_inactivity_without_resetting_total_deadlines()
             .build(
                 &client.request(Operation::retry(Method::GET), "http://127.0.0.1/content"),
                 Body::empty(),
+                Some(0),
             )
             .expect("request");
         let response = client.send(request, attempt.map(Duration::from_millis));

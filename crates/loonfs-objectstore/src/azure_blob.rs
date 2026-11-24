@@ -24,7 +24,7 @@ use crate::provider_object_store::{
 };
 use crate::retry::{one_attempt_retry_config, provider_retry_config, TransportRetry};
 use crate::signed_request::{
-    ensure_succeeded, metadata_from_signed_head, send_request, SignedResponse,
+    ensure_succeeded, metadata_from_signed_head, send_request, with_body, SignedResponse,
 };
 use crate::signed_upload::{PartReader, ProviderSigner};
 use crate::store_io_runtime::StoreIoRuntime;
@@ -36,7 +36,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
-use http::header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH, RANGE};
+use http::header::{CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH, RANGE};
 use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, StdMonotonicTimer};
 use object_store::azure::{
     AzureAuthorizer, AzureCredentialProvider, MicrosoftAzure, MicrosoftAzureBuilder,
@@ -188,9 +188,7 @@ impl AzureRequestSigner {
         request: http::request::Builder,
         body: HttpRequestBody,
     ) -> Result<SignedResponse> {
-        let mut request = request
-            .body(body)
-            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+        let mut request = with_body(key, request, body)?;
         let credential = self
             .credentials
             .get_credential()
@@ -227,9 +225,7 @@ impl AzureRequestSigner {
                 async move {
                     self.send_checked(
                         key,
-                        http::Request::put(url)
-                            .header(CONTENT_LENGTH, payload.len())
-                            .header(CONTENT_CRC64_HEADER, crc64),
+                        http::Request::put(url).header(CONTENT_CRC64_HEADER, crc64),
                         HttpRequestBody::from(payload),
                     )
                     .await
@@ -271,7 +267,6 @@ impl AzureRequestSigner {
                 self.send_checked(
                     key,
                     http::Request::put(url)
-                        .header(CONTENT_LENGTH, 0)
                         .header(COPY_SOURCE_HEADER, source_url.as_str())
                         .header(SOURCE_RANGE_HEADER, source_range),
                     HttpRequestBody::empty(),
@@ -299,7 +294,6 @@ impl AzureRequestSigner {
             .send_checked(
                 key,
                 http::Request::put(&url)
-                    .header(CONTENT_LENGTH, body.len())
                     .header(CONTENT_TYPE, "application/xml")
                     .header(IF_NONE_MATCH, "*")
                     .header(
@@ -343,7 +337,6 @@ impl ProviderSigner for AzureRequestSigner {
             .send_checked(
                 key,
                 http::Request::put(&url)
-                    .header(CONTENT_LENGTH, bytes.len())
                     .header(IF_NONE_MATCH, "*")
                     .header(BLOB_TYPE_HEADER, "BlockBlob")
                     .header(CONTENT_CRC64_HEADER, &crc64)
@@ -498,6 +491,7 @@ fn stored_crc64(headers: &http::HeaderMap, name: &str) -> Option<Checksum> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::header::CONTENT_LENGTH;
     use loonfs_test_support::clock::TokioClock;
     use object_store::client::{
         HttpError, HttpRequest, HttpResponse, HttpResponseBody, HttpService,
