@@ -286,9 +286,10 @@ async fn fence_retries_end_with_the_acquisition_budget() {
         error,
         crate::error::CoreError::MetadataPublicationBudgetExceeded { .. }
     );
-    // Each load of the namespace takes a third of the budget, so the budget
-    // runs out after the third collision.
-    assert_eq!(store.attempts(), 3);
+    // Each load of the namespace takes a third of the budget. The claim's
+    // load and the loads after the first two collisions use up the budget,
+    // so the check before the third put fails.
+    assert_eq!(store.attempts(), 2);
     assert!(store
         .list_prefix(&wal_prefix(&namespace_id))
         .await

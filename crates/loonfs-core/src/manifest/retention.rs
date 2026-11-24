@@ -4,20 +4,15 @@
 use super::publish::ManifestChange;
 use super::published::PublicationReport;
 use crate::engine::{NamespaceEngine, Writable};
-use crate::error::{CoreError, Result};
-use crate::limits::{GC_GRACE_WINDOW_MS, MAX_CONTENTION_ATTEMPTS};
+use crate::error::Result;
+use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::LoadedManifest;
-use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
-use crate::time::Observation;
-use crate::wal::{prepare_wal_object, publish_wal_object, wal_no_is_unfolded, WalPublishError};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::{CommitSeq, RetentionWindow, SetRetentionWindowResponse};
 use std::num::NonZeroU64;
-use std::sync::Arc;
 
 /// Where a retention advance moves the floor.
 ///
@@ -138,14 +133,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// object at the number after the tip with put-if-absent, with the
     /// writer epoch of the manifest that the attempt's discovery loaded.
     /// After a put that succeeds, the attempt checks whether the floor object
-    /// is live (see [`wal_no_is_unfolded`]). A dead floor object, or a put
-    /// that finds the number taken, starts the next attempt, for at most
-    /// `MAX_CONTENTION_ATTEMPTS` attempts, and the last attempt's error is
-    /// returned when every attempt failed. The call
-    /// claims no epoch and writes nothing when the view's floor is already
-    /// at or above `target`. An unknown put outcome returns
-    /// `outcome_unknown`, and a deleted namespace returns
-    /// `namespace_deleted`.
+    /// is live, and a dead floor object, or a put that finds the number
+    /// taken, starts the next attempt, as a fence's put does. The attempts
+    /// stop when the publication budget runs out or after
+    /// `MAX_UNFOLDED_WAL_OBJECTS` attempts, and the call then returns
+    /// `store_contention`. The call claims no epoch and writes
+    /// nothing when the view's floor is already at or above `target`. An
+    /// unknown put outcome returns `outcome_unknown`, and a deleted namespace
+    /// returns `namespace_deleted`.
     pub async fn publish_floor_object(
         &self,
         planned: &LoadedManifest,
@@ -165,69 +160,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         target: CommitSeq,
     ) -> Result<FloorObjectReport> {
-        let mut last_error = None;
-        for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
-            let observed = Observation::now(Arc::clone(&self.timer));
-            let anchor = self.load_live_read_anchor(observed.clone()).await?;
-            let head = &anchor.read_state;
-            let manifest_retention_floor_seq = anchor.current_manifest().retention_floor_seq();
-            if head.retention_floor_seq >= target {
-                return Ok(FloorObjectReport {
-                    retention_floor_seq: head.retention_floor_seq,
-                    manifest_retention_floor_seq,
-                });
-            }
-            let floor_object = prepare_wal_object(
-                head,
-                head.writer_epoch,
-                WalObjectBody::Floor {
-                    retention_floor_seq: target,
-                },
-            )?;
-            match publish_wal_object(&self.store, &floor_object).await {
-                Ok(()) => {
-                    let floored_head = head.after_wal_object(floor_object.envelope().payload());
-                    if self
-                        .floor_object_is_live(anchor.held, &floored_head, observed)
-                        .await?
-                    {
-                        return Ok(FloorObjectReport {
-                            retention_floor_seq: floored_head.retention_floor_seq,
-                            manifest_retention_floor_seq,
-                        });
-                    }
-                    // A collection may have emptied the number before the
-                    // put, so another publication took the number first.
-                    last_error = Some(WalPublishError::NumberTaken.into());
-                }
-                Err(error @ CoreError::WalPublish(WalPublishError::NumberTaken)) => {
-                    last_error = Some(error);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Err(last_error.expect("every attempt should have failed with an error"))
-    }
-
-    /// Returns whether the floor object that `floored_head` ends with is
-    /// live against the newest manifest (see [`wal_no_is_unfolded`]).
-    ///
-    /// The newest manifest is `planned`, the manifest that the put was
-    /// planned from, when a check finds `planned` the newest, and otherwise
-    /// the manifest loaded from the manifest boundary (see
-    /// [`Self::refresh_live`]). When the namespace is deleted by then, the
-    /// call returns `namespace_deleted`, as a fence's check does.
-    async fn floor_object_is_live(
-        &self,
-        planned: Held<LoadedManifest>,
-        floored_head: &crate::namespace::state::NamespaceReadState,
-        observed: Observation,
-    ) -> Result<bool> {
-        let newest = self.refresh_live(planned, observed).await?;
-        Ok(wal_no_is_unfolded(
-            floored_head.wal_no,
-            newest.manifest().folded_wal_no(),
-        ))
+        let anchor = self.put_floor_object(target).await?;
+        Ok(FloorObjectReport {
+            retention_floor_seq: anchor.retention_floor_seq(),
+            manifest_retention_floor_seq: anchor.current_manifest().retention_floor_seq(),
+        })
     }
 }
 
