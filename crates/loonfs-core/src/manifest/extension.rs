@@ -6,7 +6,6 @@ use super::published::PublicationReport;
 use super::validate::validate_manifest;
 use crate::engine::{NamespaceEngine, RuntimeReadContext, Writable};
 use crate::error::Result;
-use crate::manifest::load_basis_metadata_segments;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::held::Held;
 use crate::time::OperationClock;
@@ -157,18 +156,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
         name: &ExtensionName,
     ) -> Result<Option<ExtensionEntry>> {
-        let loaded = load_basis_metadata_segments(
-            &self.namespace.store,
-            Some(&self.namespace.segment_cache),
-            &context.read_basis().basis,
-        )
-        .await?;
-        Ok(loaded
-            .segments
-            .manifest()
-            .payload()
-            .extensions
-            .get(name)
-            .cloned())
+        let decoded = self.namespace.load_context_manifest(context).await?;
+        Ok(decoded.manifest.payload().extensions.get(name).cloned())
     }
 }

@@ -92,7 +92,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         expires_at_ms: Option<u64>,
         context: &RuntimeReadContext,
     ) -> Result<CreatedSnapshot> {
-        let segments = self
+        let decoded = self
             .namespace
             .load_held_manifest(
                 context.read_basis().basis.manifest(),
@@ -104,7 +104,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .create_verified_snapshot_record(
                 None,
                 expires_at_ms,
-                &segments.loaded_manifest(),
+                &decoded.manifest,
                 context.boundary().clone(),
                 &self.namespace.start_clock(),
             )

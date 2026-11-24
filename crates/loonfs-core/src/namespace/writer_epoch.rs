@@ -210,12 +210,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
         if state.writer.is_some() || !state.status.is_active() {
             return Ok(None);
         }
-        let segments = self
+        let decoded = self
             .load_held_manifest(
                 head.read_basis().basis.manifest(),
                 head.basis().boundary().clone(),
             )
             .await?;
-        Ok(segments.map(|segments| head.basis().decoded(segments.loaded_manifest())))
+        Ok(decoded.map(|decoded| head.basis().decoded(decoded.manifest)))
     }
 }

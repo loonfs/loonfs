@@ -69,7 +69,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
             });
         };
         let basis = load_snapshot_basis(&self.store, &self.segment_cache, loaded.state).await?;
-        manifest_statistics(basis.segments.manifest(), basis.segments.manifest_bytes)
+        manifest_statistics(
+            &basis.decoded.manifest.envelope,
+            basis.decoded.manifest.manifest_bytes,
+        )
     }
 }
 

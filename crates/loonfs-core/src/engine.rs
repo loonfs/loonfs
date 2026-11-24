@@ -17,6 +17,7 @@ use crate::path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
     LoadedMetadataView, RetainedRevisionsPage, RetainedRevisionsPageCursor,
 };
+use crate::segment::KeptBy;
 use crate::storage::content::DurableContentValidationError;
 use crate::storage::content_location::ContentLocation;
 use crate::storage::content_stream::{FileContentStream, StreamRange};
@@ -80,6 +81,10 @@ pub struct RuntimeReadContext {
     /// live context it was made from, because the boundary belongs to the
     /// namespace and not to one manifest.
     boundary: KeptBoundary,
+    /// What keeps the segments of the manifest that the context reads
+    /// above: the snapshot for a context from [`Self::at_snapshot`], and
+    /// otherwise the namespace's current manifest.
+    pub(crate) kept_by: KeptBy,
 }
 
 impl RuntimeReadContext {
@@ -106,6 +111,7 @@ impl RuntimeReadContext {
             visible_seq: None,
             authorization: None,
             boundary: basis.boundary().clone(),
+            kept_by: KeptBy::Current,
         }
     }
 
@@ -130,11 +136,12 @@ impl RuntimeReadContext {
             None => Arc::new(live),
         };
         Self {
-            read_basis: basis.0,
+            read_basis: basis.basis,
             tail: None,
             visible_seq: None,
             authorization: Some(authorization),
             boundary,
+            kept_by: KeptBy::Snapshot(basis.snapshot_id),
         }
     }
 

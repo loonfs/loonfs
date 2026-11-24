@@ -581,7 +581,7 @@ impl Maintenance {
             async {
                 let report = self
                     .core
-                    .run_again_after_replaced_manifest(namespace_id, || {
+                    .run_again_after_replaced_manifest(|| {
                         self.publish_retention_floor(namespace_id, options)
                     })
                     .await?;
@@ -606,12 +606,10 @@ impl Maintenance {
     /// The plan and the floor object's check of the planned manifest's
     /// segments read the manifest that the advance plans from. That manifest
     /// can be a writer position's, which a newer manifest may have replaced,
-    /// and a collection may then have deleted its segments. So a missing
-    /// segment returns `manifest_replaced` when the planned manifest isn't the
-    /// current one (see
-    /// [`NamespaceStore::ensure_manifest_current`](loonfs_core::NamespaceStore::ensure_manifest_current)),
-    /// and the caller plans again from the newest manifest. A missing segment
-    /// of the current manifest stays `namespace_corrupt`.
+    /// and a collection may then have deleted its segments. A read that finds
+    /// a segment missing then returns `manifest_replaced`, and the caller
+    /// plans again from the newest manifest. A missing segment of the current
+    /// manifest stays `namespace_corrupt`.
     async fn publish_retention_floor(
         &self,
         namespace_id: &NamespaceId,
@@ -619,43 +617,31 @@ impl Maintenance {
     ) -> Result<FloorObjectReport> {
         let store = self.core.namespace_store(namespace_id);
         let (planned, retention_floor_seq) = self.load_retention_view(namespace_id).await?;
-        let published = async {
-            let plan = store
-                .plan_retention_floor(&planned, retention_floor_seq, options.target)
-                .await?;
-            Ok(match plan {
-                RetentionPlan::Stays(retention_floor_seq) => FloorObjectReport {
-                    retention_floor_seq,
-                    manifest_retention_floor_seq: planned.retention_floor_seq(),
-                },
-                RetentionPlan::Moves(target) => match self
-                    .publisher
-                    .submit_retention_advance(namespace_id, planned.clone(), target)
-                    .await
-                {
-                    Some(report) => report?,
-                    None => {
-                        let report = store.publish_floor_object(&planned, target).await?;
-                        // A session that opened in this runtime after the
-                        // check above keeps a position that may end below
-                        // the floor object, and a fold from that position
-                        // would miss the floor object.
-                        self.publisher.drop_session_position(namespace_id).await;
-                        report
-                    }
-                },
-            })
-        }
-        .await;
-        match published {
-            Err(Error::Core(error)) if error.is_missing_segment() => {
-                store
-                    .ensure_manifest_current(planned.payload().manifest_no)
-                    .await?;
-                Err(error.into())
-            }
-            published => published,
-        }
+        let plan = store
+            .plan_retention_floor(&planned, retention_floor_seq, options.target)
+            .await?;
+        Ok(match plan {
+            RetentionPlan::Stays(retention_floor_seq) => FloorObjectReport {
+                retention_floor_seq,
+                manifest_retention_floor_seq: planned.retention_floor_seq(),
+            },
+            RetentionPlan::Moves(target) => match self
+                .publisher
+                .submit_retention_advance(namespace_id, planned.clone(), target)
+                .await
+            {
+                Some(report) => report?,
+                None => {
+                    let report = store.publish_floor_object(&planned, target).await?;
+                    // A session that opened in this runtime after the
+                    // check above keeps a position that may end below
+                    // the floor object, and a fold from that position
+                    // would miss the floor object.
+                    self.publisher.drop_session_position(namespace_id).await;
+                    report
+                }
+            },
+        })
     }
 
     /// Returns the manifest and the retention floor that a retention advance

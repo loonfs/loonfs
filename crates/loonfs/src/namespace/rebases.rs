@@ -174,23 +174,16 @@ impl Namespace<Writable> {
         self.plan_commit(request, merges, reservation, |new_fork, allowance| {
             Box::pin(async move {
                 let new_fork = &new_fork;
-                let basis = self
+                // The plan runs inside the new fork's read loop, which runs the
+                // plan again after a replaced manifest of either namespace, so
+                // the source namespace is read here without a loop of its own.
+                let fork = self
                     .core
-                    .read(
-                        source_namespace_id,
-                        Some(Consistency::Strong),
-                        |fork| async move {
-                            Ok(new_fork
-                                .engine
-                                .check_replay(
-                                    &new_fork.context,
-                                    &fork.engine,
-                                    &fork.context,
-                                    request,
-                                )
-                                .await?)
-                        },
-                    )
+                    .pinned_read(source_namespace_id, Some(Consistency::Strong))
+                    .await?;
+                let basis = new_fork
+                    .engine
+                    .check_replay(&new_fork.context, &fork.engine, &fork.context, request)
                     .await?;
                 let prepared_at_ms = self.core.now_ms();
                 let (fork, merge_snapshot) = self

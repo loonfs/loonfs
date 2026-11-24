@@ -4,10 +4,8 @@
 use crate::error::Result;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::manifest::validate::validate_manifest_row_seq_range;
-use crate::segment::data_block_load::{
-    decode_data_blocks_from_object, load_segment_data_block_span,
-};
-use crate::segment::index_block_load::load_segment_index_for_compaction;
+use crate::segment::data_block_load::decode_data_blocks_from_object;
+use crate::segment::VerifiedMetadataSegments;
 use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -295,13 +293,15 @@ impl MetadataSegmentRowIterator {
     }
 }
 
-pub(crate) struct MetadataSegmentBlockLoader<'a, S: ?Sized> {
-    store: &'a S,
+/// Loads the blocks of a compaction's input segments through the segments of
+/// the manifest that the compaction plans from.
+pub(crate) struct MetadataSegmentBlockLoader<'a, S: ObjectStore + ?Sized> {
+    segments: &'a VerifiedMetadataSegments<'a, S>,
 }
 
-impl<'a, S: ?Sized> MetadataSegmentBlockLoader<'a, S> {
-    pub(crate) fn new(store: &'a S) -> Self {
-        Self { store }
+impl<'a, S: ObjectStore + ?Sized> MetadataSegmentBlockLoader<'a, S> {
+    pub(crate) fn new(segments: &'a VerifiedMetadataSegments<'a, S>) -> Self {
+        Self { segments }
     }
 }
 
@@ -315,8 +315,10 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
         &self,
         segment: MetadataSegmentInput,
     ) -> Result<(Arc<Vec<SegmentIndexEntry>>, MetadataSegmentInput)> {
-        let (index, object) =
-            load_segment_index_for_compaction(self.store, &segment.descriptor).await?;
+        let (index, object) = self
+            .segments
+            .load_index_for_compaction(&segment.descriptor)
+            .await?;
         Ok((index, MetadataSegmentInput { object, ..segment }))
     }
 
@@ -329,7 +331,8 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
         let blocks = match &segment.object {
             Some(object) => decode_data_blocks_from_object(&segment.descriptor, object, &entries)?,
             None => {
-                load_segment_data_block_span(self.store, None, None, &segment.descriptor, &entries)
+                self.segments
+                    .load_data_blocks_for_compaction(&segment.descriptor, &entries)
                     .await?
             }
         };

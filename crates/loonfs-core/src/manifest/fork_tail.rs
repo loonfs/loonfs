@@ -3,15 +3,16 @@
 //! ([format spec](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#92-forking-a-namespace)).
 
 use super::fold::ManifestProjection;
-use super::load::{load_basis_metadata_segments, metadata_basis_from_manifest};
+use super::load::{load_referenced_manifest, manifest_base_state, DecodedManifest};
 use super::publish::ManifestChange;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::fork::ForkDeadline;
 use crate::namespace::held::Held;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
+use crate::segment::runs::runs_newest_first;
+use crate::segment::{KeptBy, SegmentKeeper};
 use crate::time::OperationClock;
 use crate::wal::{load_replayed_wal_tail_through_seq, ProjectedWalTail, WalTailLoadError};
 use loonfs_objectstore::ObjectStore;
@@ -56,17 +57,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
         fork_basis: &ForkBasis,
         epoch_bound: WriterEpoch,
     ) -> Result<ForkPointTail> {
-        let basis = load_basis_metadata_segments(
-            &self.store,
-            Some(&self.segment_cache),
-            &MetadataBasis::new(fork_basis.manifest.clone()),
-        )
-        .await?;
-        let base_head = NamespaceReadState::from(basis.segments.manifest().payload());
+        let decoded =
+            load_referenced_manifest(&self.store, Some(&self.segment_cache), &fork_basis.manifest)
+                .await?;
+        let base_head = NamespaceReadState::from(decoded.manifest.payload());
         let replayed = load_replayed_wal_tail_through_seq(
             &self.store,
             &base_head,
-            &basis.base_state,
+            &manifest_base_state(&decoded.manifest.envelope),
             fork_basis.fork_point_seq,
             epoch_bound,
         )
@@ -119,17 +117,32 @@ impl<S: ObjectStore> NamespaceStore<S> {
             tail.seq > payload.head_seq,
             "a fork publishes manifest 2 only for a tail with commits"
         );
+        // Manifest 1 lists the source's runs, and the snapshot of the source
+        // that the fork was built from keeps those runs' segments until the
+        // fork's own fork point snapshot keeps them. So a segment that the fold finds missing is a
+        // corrupt store while that snapshot admits a read, whether or not
+        // another call published the fork's manifest 2 since.
+        let fork_basis = payload.fork_basis.as_ref().ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "manifest 1 of fork `{}` records no fork basis",
+                self.namespace_id
+            ))
+        })?;
+        let source = self.with_namespace(fork_basis.manifest.owner_namespace_id.clone());
+        let keeper = SegmentKeeper::new(
+            source,
+            KeptBy::Snapshot(fork_basis.forked_from_snapshot_id.clone()),
+        );
+        let decoded = DecodedManifest {
+            manifest: manifest_1.manifest().clone(),
+            scan_runs: Arc::new(runs_newest_first(payload)),
+        };
         let projection = ManifestProjection {
             basis: manifest_1.with_head(NamespaceReadState {
                 seq: tail.seq,
                 ..NamespaceReadState::from(payload)
             }),
-            manifest_segments: metadata_basis_from_manifest(
-                &self.store,
-                Some(&self.segment_cache),
-                manifest_1.manifest(),
-            )
-            .segments,
+            manifest_segments: self.segments(decoded, keeper).segments,
             tail_state: Arc::clone(&tail.tail),
         };
         let layouts = self.materialize_tail_content(&projection).await?;

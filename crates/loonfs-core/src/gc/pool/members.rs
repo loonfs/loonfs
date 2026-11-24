@@ -385,7 +385,7 @@ async fn read_member_roots<S: ObjectStore>(
     let member_roots = NamespaceRoots::new(member, anchor.current_manifest().payload(), now_ms);
     // A tombstone's runs cover its whole WAL, so it has no tail.
     if member_roots.status == RetirementStatus::Active {
-        let tail = project_anchor_tail(&member.store, &member.segment_cache, &anchor)?;
+        let tail = project_anchor_tail(&anchor)?;
         let mut roots = lock(roots);
         for revision in tail.revisions() {
             roots

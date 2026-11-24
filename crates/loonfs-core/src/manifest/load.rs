@@ -7,9 +7,9 @@
 use super::error::ManifestLoadError;
 use super::validate::{validate_manifest, validate_namespace_manifest};
 use crate::commit::publish_view::WriterPosition;
+use crate::engine::RuntimeReadContext;
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
-use crate::namespace::basis::MetadataBasis;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::control::LoadedManifest;
@@ -22,6 +22,7 @@ use crate::segment::cache::{
 };
 use crate::segment::runs::{manifest_cache_heap_bytes, runs_newest_first, MetadataRunManifest};
 use crate::segment::scan::VerifiedMetadataSegments;
+use crate::segment::{KeptBy, SegmentKeeper};
 use crate::wal::{replay_discovered_tail, ProjectedWalTail};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
@@ -107,27 +108,121 @@ impl<S: ObjectStore + ?Sized> LoadedMetadataBasis<'_, S> {
         &self,
         anchor: &NamespaceReadAnchor,
     ) -> crate::error::Result<Arc<ProjectedWalTail>> {
-        let replayed = replay_discovered_tail(
-            &self.replay_head(&anchor.read_state),
-            &self.base_state,
-            &anchor.tail,
-        )
-        .map_err(CoreError::MetadataProjection)?;
-        Ok(Arc::new(replayed.projected_tail))
+        project_manifest_tail(self.segments.manifest(), &self.base_state, anchor)
     }
 }
 
-pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
-    store: &'a S,
-    segment_cache: Option<&'a MetadataSegmentCache>,
-    basis: &MetadataBasis,
-) -> crate::error::Result<LoadedMetadataBasis<'a, S>> {
-    let manifest = basis.manifest();
-    let segments = load_manifest_segments(store, segment_cache, manifest).await?;
-    Ok(metadata_basis_from_segments(segments))
+/// Returns the rows that `manifest` contributes outside its segments: the
+/// root inode of a manifest that lists no runs, and no row otherwise.
+pub(crate) fn manifest_base_state(manifest: &NamespaceManifestEnvelope) -> MetadataState {
+    if manifest.payload().runs.is_empty() {
+        bootstrap_metadata_state(manifest.payload().created_at_ms)
+    } else {
+        MetadataState::default()
+    }
+}
+
+/// Replays `anchor`'s WAL tail above `manifest`, the anchor's manifest, over
+/// `base_state`, the rows that the manifest contributes outside its
+/// segments.
+pub(crate) fn project_manifest_tail(
+    manifest: &NamespaceManifestEnvelope,
+    base_state: &MetadataState,
+    anchor: &NamespaceReadAnchor,
+) -> crate::error::Result<Arc<ProjectedWalTail>> {
+    let replayed = replay_discovered_tail(
+        &head_from_manifest(&anchor.read_state, manifest),
+        base_state,
+        &anchor.tail,
+    )
+    .map_err(CoreError::MetadataProjection)?;
+    Ok(Arc::new(replayed.projected_tail))
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
+    /// Returns the keeper `kept_by`, which this namespace's store checks.
+    pub(crate) fn keeper(&self, kept_by: KeptBy) -> SegmentKeeper<'_> {
+        SegmentKeeper::new(self, kept_by)
+    }
+
+    /// Returns the segments of `decoded`, which `keeper` keeps in the store,
+    /// read through this namespace's segment cache.
+    pub(crate) fn segments<'a>(
+        &'a self,
+        decoded: DecodedManifest,
+        keeper: SegmentKeeper<'a>,
+    ) -> LoadedMetadataBasis<'a, S> {
+        metadata_basis_from_segments(VerifiedMetadataSegments::from_decoded(
+            &self.store,
+            Some(&self.segment_cache),
+            decoded,
+            keeper,
+        ))
+    }
+
+    /// Returns the segments of `manifest`, a manifest of this namespace that
+    /// was current when this process loaded it.
+    pub(crate) fn current_segments(&self, manifest: &LoadedManifest) -> LoadedMetadataBasis<'_, S> {
+        let decoded = DecodedManifest {
+            manifest: manifest.clone(),
+            scan_runs: Arc::new(runs_newest_first(manifest.payload())),
+        };
+        self.segments(decoded, self.keeper(KeptBy::Current))
+    }
+
+    /// Loads the segments of the manifest that `context` reads above (see
+    /// [`Self::load_context_manifest`]).
+    pub(crate) async fn load_context_segments(
+        &self,
+        context: &RuntimeReadContext,
+    ) -> crate::error::Result<LoadedMetadataBasis<'_, S>> {
+        let decoded = self.load_context_manifest(context).await?;
+        Ok(self.segments(decoded, self.keeper(context.kept_by.clone())))
+    }
+
+    /// Loads the manifest that `context` reads above. A current manifest is
+    /// loaded with [`Self::load_live_manifest`]. When a snapshot's manifest
+    /// is missing, the call returns the load's error.
+    pub(crate) async fn load_context_manifest(
+        &self,
+        context: &RuntimeReadContext,
+    ) -> crate::error::Result<DecodedManifest> {
+        let manifest = context.read_basis().basis().manifest();
+        match &context.kept_by {
+            KeptBy::Current => {
+                self.load_live_manifest(manifest, context.boundary().clone())
+                    .await
+            }
+            KeptBy::Snapshot(_) => {
+                load_referenced_manifest(&self.store, Some(&self.segment_cache), manifest).await
+            }
+        }
+    }
+
+    /// Loads `manifest`, a manifest of this namespace that a read keeps by
+    /// reference with the manifest boundary `kept`, as
+    /// [`Self::load_held_manifest`] does. When the store doesn't have the
+    /// manifest and the manifest is at or below the boundary, the call
+    /// returns `ManifestReplaced` from [`Self::ensure_manifest_current`], so
+    /// the read runs again from the newest manifest.
+    pub(crate) async fn load_live_manifest(
+        &self,
+        manifest: &ManifestRef,
+        kept: KeptBoundary,
+    ) -> crate::error::Result<DecodedManifest> {
+        if let Some(decoded) = self.load_held_manifest(manifest, kept).await? {
+            return Ok(decoded);
+        }
+        self.ensure_manifest_current(manifest.manifest_no).await?;
+        Err(ManifestLoadError::MissingManifest {
+            object_key: metadata_manifest_object(
+                &manifest.owner_namespace_id,
+                &manifest.manifest_no,
+            ),
+        }
+        .into())
+    }
+
     /// Loads `manifest`, which a holder keeps by reference with the manifest
     /// boundary `kept`, through the segment cache, or returns `None` when the
     /// store doesn't have the manifest and the manifest is at or below the
@@ -149,8 +244,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         manifest: &ManifestRef,
         kept: KeptBoundary,
-    ) -> crate::error::Result<Option<VerifiedMetadataSegments<'_, S>>> {
-        let loaded = load_manifest_segments(&self.store, Some(&self.segment_cache), manifest).await;
+    ) -> crate::error::Result<Option<DecodedManifest>> {
+        let loaded =
+            load_referenced_manifest(&self.store, Some(&self.segment_cache), manifest).await;
         if matches!(
             loaded,
             Err(CoreError::MetadataProjection(
@@ -176,7 +272,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         manifest_no: ManifestNo,
     ) -> Result<Option<LoadedManifest>, ManifestLoadError> {
-        match load_manifest_segments_for_inspection(
+        match load_decoded_manifest(
             &self.store,
             Some(&self.segment_cache),
             &self.namespace_id,
@@ -184,7 +280,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         )
         .await
         {
-            Ok(segments) => Ok(Some(segments.loaded_manifest())),
+            Ok(decoded) => Ok(Some(decoded.manifest)),
             Err(ManifestLoadError::MissingManifest { .. }) => Ok(None),
             Err(error) => Err(error),
         }
@@ -199,22 +295,29 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         position: &WriterPosition,
     ) -> crate::error::Result<Option<Held<LoadedManifest>>> {
-        let segments = self
+        let decoded = self
             .load_held_manifest(
                 position.read_basis().basis.manifest(),
                 position.basis().boundary().clone(),
             )
             .await?;
-        Ok(segments.map(|segments| position.basis().decoded(segments.loaded_manifest())))
+        Ok(decoded.map(|decoded| position.basis().decoded(decoded.manifest)))
     }
 }
 
+/// Returns the segments of `manifest`, a current manifest in `store`, for a
+/// test that reads its rows through `segment_cache`.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
     manifest: &LoadedManifest,
 ) -> LoadedMetadataBasis<'a, S> {
     let scan_runs = Arc::new(runs_newest_first(manifest.payload()));
+    let keeper = SegmentKeeper::new(
+        crate::test_support::namespace_store(store, &manifest.payload().namespace_id),
+        KeptBy::Current,
+    );
     metadata_basis_from_segments(VerifiedMetadataSegments::new(
         store,
         segment_cache,
@@ -222,6 +325,7 @@ pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(
         Arc::clone(&manifest.envelope),
         manifest.manifest_bytes,
         scan_runs,
+        keeper,
     ))
 }
 
@@ -250,11 +354,7 @@ fn metadata_basis_from_segments<S: ObjectStore + ?Sized>(
     segments: VerifiedMetadataSegments<'_, S>,
 ) -> LoadedMetadataBasis<'_, S> {
     LoadedMetadataBasis {
-        base_state: if segments.manifest().payload().runs.is_empty() {
-            bootstrap_metadata_state(segments.manifest().payload().created_at_ms)
-        } else {
-            MetadataState::default()
-        },
+        base_state: manifest_base_state(segments.manifest()),
         segments,
     }
 }
@@ -276,13 +376,22 @@ pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
         })
 }
 
-/// Loads a durable manifest reference and verifies every field before exposing its segments.
-pub(crate) async fn load_manifest_segments<'a, S: ObjectStore + ?Sized>(
-    store: &'a S,
-    segment_cache: Option<&'a MetadataSegmentCache>,
+/// A manifest loaded and validated through the segment cache, with its runs
+/// newest first. The cache entry keeps the runs, so a load of a cached
+/// manifest doesn't group them again.
+pub(crate) struct DecodedManifest {
+    pub(crate) manifest: LoadedManifest,
+    pub(crate) scan_runs: Arc<Vec<MetadataRunManifest>>,
+}
+
+/// Loads the manifest that a durable reference identifies, and checks every
+/// field of the reference against the manifest.
+pub(crate) async fn load_referenced_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
     reference: &ManifestRef,
-) -> crate::error::Result<VerifiedMetadataSegments<'a, S>> {
-    let segments = load_manifest_segments_for_inspection(
+) -> crate::error::Result<DecodedManifest> {
+    let decoded = load_decoded_manifest(
         store,
         segment_cache,
         &reference.owner_namespace_id,
@@ -295,20 +404,21 @@ pub(crate) async fn load_manifest_segments<'a, S: ObjectStore + ?Sized>(
             reference.owner_namespace_id
         ),
         reference,
-        segments.manifest(),
+        &decoded.manifest.envelope,
     )?;
-    Ok(segments)
+    Ok(decoded)
 }
 
-/// Inspects an object by ID, validating its envelope and segment descriptors.
-/// This does not verify a root or snapshot reference. Authoritative reads
-/// and publication paths must use `load_manifest_segments` instead.
-pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?Sized>(
-    store: &'a S,
-    segment_cache: Option<&'a MetadataSegmentCache>,
+/// Loads manifest `manifest_no` of `namespace_id` by its number, and
+/// validates its envelope and segment descriptors. This doesn't check a
+/// root or snapshot reference, so reads and publications load a manifest
+/// with [`load_referenced_manifest`] instead.
+pub(crate) async fn load_decoded_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     manifest_no: &ManifestNo,
-) -> Result<VerifiedMetadataSegments<'a, S>, ManifestLoadError> {
+) -> Result<DecodedManifest, ManifestLoadError> {
     let manifest_key = metadata_manifest_object(namespace_id, manifest_no);
     // Manifests are immutable per object key, so the decoded and validated
     // envelope is cacheable forever under that key.
@@ -333,14 +443,36 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
         }
         None => fetch().await?,
     };
-    let (manifest, scan_runs, manifest_bytes) = decoded.into_manifest(&manifest_key)?;
-    Ok(VerifiedMetadataSegments::new(
+    let (envelope, scan_runs, manifest_bytes) = decoded.into_manifest(&manifest_key)?;
+    Ok(DecodedManifest {
+        manifest: LoadedManifest {
+            object_key: manifest_key,
+            manifest_bytes,
+            envelope,
+        },
+        scan_runs,
+    })
+}
+
+/// Loads manifest `manifest_no` of `namespace_id` as
+/// [`load_decoded_manifest`] does, for a test that reads its rows.
+#[cfg(test)]
+pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    segment_cache: Option<&'a MetadataSegmentCache>,
+    namespace_id: &NamespaceId,
+    manifest_no: &ManifestNo,
+) -> Result<VerifiedMetadataSegments<'a, S>, ManifestLoadError> {
+    let decoded = load_decoded_manifest(store, segment_cache, namespace_id, manifest_no).await?;
+    let keeper = SegmentKeeper::new(
+        crate::test_support::namespace_store(store, namespace_id),
+        KeptBy::Current,
+    );
+    Ok(VerifiedMetadataSegments::from_decoded(
         store,
         segment_cache,
-        manifest_key,
-        manifest,
-        manifest_bytes,
-        scan_runs,
+        decoded,
+        keeper,
     ))
 }
 

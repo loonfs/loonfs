@@ -1576,6 +1576,131 @@ async fn a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_succeed(
     }
 }
 
+/// Checks that a read of the namespace's metadata and a lookup of an
+/// extension's entry, as grep looks up its own, succeed from a writer
+/// position whose manifest a collection deleted when neither the segment
+/// cache nor the store has the manifest. Each finds the manifest missing at
+/// or below the manifest boundary, returns `ManifestReplaced`, and runs again
+/// from the newest manifest.
+#[tokio::test]
+async fn reads_of_the_manifest_alone_from_a_collected_position_succeed() {
+    for metadata in [true, false] {
+        let name = if metadata {
+            "collected-metadata"
+        } else {
+            "collected-extension-entry"
+        };
+        let (fixture, _, _) = position_on_a_collected_manifest(name, false, History::Files).await;
+        if metadata {
+            fixture
+                .reader
+                .metadata_with_options(&loonfs::LiveReadOptions::default())
+                .await
+                .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+        } else {
+            let entry = fixture
+                .reader
+                .read_through_views(|| async {
+                    let view = fixture.reader.read_view().await?;
+                    view.find_extension_entry(
+                        &loonfs_types::ExtensionName::parse("grep").expect("extension name"),
+                    )
+                    .await
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+            assert_eq!(entry, None);
+        }
+    }
+}
+
+/// Checks that an eventual read of the next merge range succeeds when the
+/// writer position's manifest was collected, the runtime's segment
+/// cache still has that manifest, and every segment of the namespace's merge
+/// index that the manifest lists is gone. The read finds a segment of the
+/// position's manifest missing, the manifest isn't current, and the read
+/// runs again from the newest manifest.
+#[tokio::test]
+async fn a_next_merge_range_from_a_position_on_a_collected_manifest_succeeds() {
+    let name = "collected-merge-range";
+    let (fixture, _, _) = position_on_a_collected_manifest(name, true, History::Merged).await;
+    fixture
+        .namespace
+        .next_merge_range(&namespace_id(&format!("{name}-fork")))
+        .await
+        .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+}
+
+/// Checks that an eventual read of the next merge range succeeds when the
+/// writer session's position in the fork is on a manifest that a collection
+/// deleted, the runtime caches no manifest, and the namespace's own position
+/// is current. The read finds the fork's manifest missing at or below the
+/// fork's manifest boundary, the loop drops the runtime's view of the fork,
+/// and the read runs again from the fork's newest manifest.
+#[tokio::test]
+async fn a_next_merge_range_from_a_fork_position_on_a_collected_manifest_succeeds() {
+    use loonfs_objectstore::ObjectStore;
+    let name = "collected-fork-range";
+    let cache = MetadataCache::builder()
+        .max_segment_bytes(0)
+        .max_manifest_bytes(0)
+        .build();
+    let fixture = fixture_with_cache(name, Parked::WalPuts, cache).await;
+    let store: SharedObjectStore = fixture.recording.clone();
+    let actor = loonfs_test_support::test_actor();
+    let fork = namespace_id(&format!("{name}-fork"));
+    fixture
+        .writer
+        .fork_namespace(&fixture.namespace_id, &fork, &actor)
+        .await
+        .expect("fork");
+    let fork_namespace = fixture.writer.open_namespace(&fork).expect("open the fork");
+    fork_namespace
+        .put_file("/forked.txt", b"fork", &actor)
+        .await
+        .expect("a commit in the fork");
+    fixture
+        .writer
+        .maintenance(writer_id(name))
+        .fold_wal(&fork)
+        .await
+        .expect("fold the fork");
+    fixture.writer.drain().await.expect("drain");
+    let position = loonfs_core::test_support::namespace_store(store.clone(), &fork)
+        .load_current_manifest()
+        .await
+        .expect("the fork position's manifest");
+    let peer_id = format!("{name}-peer");
+    let peer = peer(&fixture, &peer_id).await;
+    let maintenance = peer.maintenance(writer_id(&peer_id));
+    for index in 0..8 {
+        fork_namespace
+            .put_file(&format!("/{index}.txt"), b"file", &actor)
+            .await
+            .expect("put");
+        maintenance.fold_wal(&fork).await.expect("fold");
+    }
+    maintenance
+        .maintain_metadata_while_due(&fork, &loonfs::MaintenanceCancellation::default())
+        .await
+        .expect("compact");
+    loonfs::test_support::maintenance_past_the_grace_window(store.clone())
+        .await
+        .gc(&fork)
+        .await
+        .expect("collect");
+    let key = metadata_manifest_object(&fork, &position.manifest().manifest_no);
+    assert!(
+        store.head(&key).await.expect("HEAD").is_none(),
+        "the collection deletes the fork position's manifest"
+    );
+    fixture
+        .namespace
+        .next_merge_range(&fork)
+        .await
+        .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+}
+
 /// Checks that a rebase creates its new fork when the writer position's
 /// manifest was collected, the runtime's segment cache still has that
 /// manifest, and every segment of the namespace's merge index that the

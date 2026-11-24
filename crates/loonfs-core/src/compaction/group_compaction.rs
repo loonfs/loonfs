@@ -88,6 +88,9 @@ pub(crate) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
 /// Compacting one family group: the shared engine, whatever is driving it.
 struct GroupCompaction<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
+    /// The segments of the manifest that the compaction plans from, through
+    /// which it reads its input.
+    basis: &'a VerifiedMetadataSegments<'a, S>,
     /// The cache that receives the segments the compaction writes. The compaction
     /// reads its input without any cache.
     output_cache: &'a MetadataSegmentCache,
@@ -149,7 +152,7 @@ impl ProgressReporter {
 
 impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
     fn new(
-        basis: &'a VerifiedMetadataSegments<'_, S>,
+        basis: &'a VerifiedMetadataSegments<'a, S>,
         output_cache: &'a MetadataSegmentCache,
         namespace_id: &'a NamespaceId,
         spec: &MetadataCompactionSpec,
@@ -171,6 +174,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
         };
         Self {
             store: basis.store,
+            basis,
             basis_runs: &basis.scan_runs,
             output_run_no: basis.manifest().payload().next_run_no,
             chain_filter: ChainFilter::NotNeeded,
@@ -236,7 +240,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
                 count.saturating_add(segment.row_count)
             });
         let mut filter = BloomFilter::new(expected_ids, self.output_run_no.0);
-        let loader = MetadataSegmentBlockLoader::new(self.store);
+        let loader = MetadataSegmentBlockLoader::new(self.basis);
         for run in self.basis_runs {
             let segments = group_run_descriptors(run, MetadataFamilyGroup::Revisions)
                 .cloned()
@@ -448,7 +452,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
     /// then contains.
     async fn refill(&mut self, iterators: &mut [MetadataSegmentRowIterator]) -> Result<()> {
         let resident = refill_iterators(
-            &MetadataSegmentBlockLoader::new(self.store),
+            &MetadataSegmentBlockLoader::new(self.basis),
             iterators,
             self.run_policy.max_decoded_input_bytes_per_step.get(),
         )

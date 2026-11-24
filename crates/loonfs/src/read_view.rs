@@ -7,7 +7,7 @@ use crate::pagers::{
     RetainedRevisionsPager, SnapshotFilesPager,
 };
 use crate::pinned_read::PinnedRead;
-use crate::runtime_core::{classify_read_result, ensure_source_current, RuntimeCore};
+use crate::runtime_core::RuntimeCore;
 use crate::{
     CommitSeq, ContentRef, CoreError, CurrentFileState, DownloadOptions, Error, FileBytes,
     FileContentStream, InodeId, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
@@ -145,8 +145,7 @@ impl ReadView {
     where
         Error: From<E>,
     {
-        let result = read.await.map_err(Error::from);
-        classify_read_result(&self.core, &self.pinned.context, &self.source, result).await
+        read.await.map_err(Error::from)
     }
 
     fn snapshot_id(&self) -> Option<&SnapshotId> {
@@ -331,10 +330,15 @@ impl ReadView {
     }
 
     /// Returns `manifest_replaced` when a newer manifest replaced the manifest
-    /// that this view reads above, for an extension that finds one of its own
-    /// segments missing from the store.
+    /// that this view reads above, and `snapshot_not_found` when this view
+    /// reads a snapshot that no longer admits a read, for an extension that
+    /// finds one of its own segments missing from the store.
     pub async fn ensure_manifest_current(&self) -> Result<()> {
-        ensure_source_current(&self.core, &self.pinned.context, &self.source).await
+        Ok(self
+            .core
+            .namespace_store(self.namespace_id())
+            .ensure_context_kept(&self.pinned.context)
+            .await?)
     }
 
     /// Resolves an absolute path against this view.

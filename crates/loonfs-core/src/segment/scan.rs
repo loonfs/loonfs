@@ -3,7 +3,11 @@
 
 use super::block_memo::SessionBlockMemo;
 use super::cache::MetadataSegmentCache;
-use super::index_block_load::load_segment_filter;
+use super::data_block_load::load_segment_data_block_span;
+use super::index_block_load::{load_segment_filter, load_segment_index_for_compaction};
+#[cfg(any(test, feature = "test-support"))]
+use super::keeper::KeptBy;
+use super::keeper::SegmentKeeper;
 use super::runs::{MetadataFamilySegments, MetadataRunManifest};
 use super::scan_load::{ScanDescriptor, ScanLoader};
 use crate::compaction::run_iterator::{refill_iterators, SegmentRowIterator};
@@ -11,15 +15,19 @@ use crate::heap_bytes::HeapBytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::MAX_SCAN_DECODED_BYTES;
 use crate::manifest::error::ManifestLoadError;
+use crate::manifest::DecodedManifest;
 #[cfg(test)]
 use crate::metadata::MetadataState;
 use crate::namespace::control::LoadedManifest;
+use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
+use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
 use loonfs_types::format::segment_blocks::{key_range_may_intersect, string_prefix_upper_bound};
+use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::CommitSeq;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -98,6 +106,8 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     /// [`MAX_BLOCK_MEMO_BYTES`](crate::limits::MAX_BLOCK_MEMO_BYTES), until
     /// the view ends.
     pub(super) block_memo: SessionBlockMemo,
+    /// What keeps the segments in the store.
+    pub(crate) keeper: SegmentKeeper<'a>,
     #[cfg(test)]
     pub(super) peak_page_rows: std::sync::atomic::AtomicUsize,
     /// The most data blocks that this view's scans have kept at once.
@@ -145,6 +155,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             0,
             loonfs_types::ActorId::parse("runs").expect("a static actor id should parse"),
         );
+        let namespace_id = payload.namespace_id.clone();
         let manifest = loonfs_types::format::manifest::encode_namespace_manifest_json(payload)
             .expect("an initial manifest should encode")
             .into_envelope();
@@ -155,13 +166,21 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             Arc::new(manifest),
             0,
             Arc::new(scan_runs),
+            SegmentKeeper::new(
+                crate::test_support::namespace_store(store, &namespace_id),
+                KeptBy::Current,
+            ),
         )
     }
 }
 
 impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     /// Returns the segments of `manifest`, stored at `manifest_object_key`,
-    /// with an empty block memo.
+    /// which `keeper` keeps in the store, with an empty block memo.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each part of the segments is required, and each has its own type"
+    )]
     pub(crate) fn new(
         store: &'a S,
         segment_cache: Option<&'a MetadataSegmentCache>,
@@ -169,6 +188,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         manifest: Arc<NamespaceManifestEnvelope>,
         manifest_bytes: u64,
         scan_runs: Arc<Vec<MetadataRunManifest>>,
+        keeper: SegmentKeeper<'a>,
     ) -> Self {
         Self {
             store,
@@ -178,11 +198,101 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             manifest_bytes,
             scan_runs,
             block_memo: SessionBlockMemo::default(),
+            keeper,
             #[cfg(test)]
             peak_page_rows: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             peak_resident_blocks: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Returns the segments of `decoded`, a manifest that a load returned,
+    /// which `keeper` keeps in the store, with an empty block memo.
+    pub(crate) fn from_decoded(
+        store: &'a S,
+        segment_cache: Option<&'a MetadataSegmentCache>,
+        decoded: DecodedManifest,
+        keeper: SegmentKeeper<'a>,
+    ) -> Self {
+        let DecodedManifest {
+            manifest,
+            scan_runs,
+        } = decoded;
+        Self::new(
+            store,
+            segment_cache,
+            manifest.object_key,
+            manifest.envelope,
+            manifest.manifest_bytes,
+            scan_runs,
+            keeper,
+        )
+    }
+
+    /// Returns `result`, a load of these segments, with its error replaced as
+    /// [`SegmentKeeper::load_error`] replaces it.
+    async fn kept<T>(&self, result: Result<T, ManifestLoadError>) -> crate::error::Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => Err(self
+                .keeper
+                .load_error(self.manifest.payload().manifest_no, error)
+                .await),
+        }
+    }
+
+    /// Checks that every segment that the manifest lists exists, with one
+    /// HEAD request for each segment.
+    pub(crate) async fn verify_segments_exist(&self) -> crate::error::Result<()> {
+        let object_keys = self
+            .manifest
+            .payload()
+            .runs
+            .iter()
+            .flat_map(|run| &run.segments)
+            .map(metadata_segment_object_key)
+            .collect::<std::collections::BTreeSet<_>>();
+        let verified = stream::iter(object_keys)
+            .map(|object_key| async move {
+                match self.store.head(&object_key).await.map_err(|error| {
+                    ManifestLoadError::ReadSegment {
+                        object_key: object_key.clone(),
+                        message: error.public_message().into_owned(),
+                        kind: error.kind(),
+                    }
+                })? {
+                    Some(_) => Ok(()),
+                    None => Err(ManifestLoadError::MissingSegment { object_key }),
+                }
+            })
+            .buffer_unordered(STORE_READS_IN_FLIGHT)
+            .try_collect()
+            .await;
+        self.kept(verified).await
+    }
+
+    /// Loads the index of `descriptor`, a compaction input segment of this
+    /// manifest, without the memo or the block cache, with the segment's
+    /// bytes when the load fetched the whole object (see
+    /// [`load_segment_index_for_compaction`]).
+    pub(crate) async fn load_index_for_compaction(
+        &self,
+        descriptor: &MetadataSegmentRef,
+    ) -> crate::error::Result<(Arc<Vec<SegmentIndexEntry>>, Option<Bytes>)> {
+        let loaded = load_segment_index_for_compaction(self.store, descriptor).await;
+        self.kept(loaded).await
+    }
+
+    /// Loads the data blocks of `entries` in `descriptor`, a compaction input
+    /// segment of this manifest, without the memo or the block cache.
+    pub(crate) async fn load_data_blocks_for_compaction(
+        &self,
+        descriptor: &MetadataSegmentRef,
+        entries: &[SegmentIndexEntry],
+    ) -> crate::error::Result<Vec<Arc<DecodedDataBlock>>> {
+        let loaded =
+            load_segment_data_block_span(self.store, None, None, descriptor, entries).await;
+        self.kept(loaded).await
     }
 
     /// The same segments with an empty block memo of their own, so the
@@ -195,6 +305,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             Arc::clone(&self.manifest),
             self.manifest_bytes,
             Arc::clone(&self.scan_runs),
+            self.keeper.clone(),
         )
     }
 
@@ -221,7 +332,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         key: &str,
         filter_probe: &str,
         blocks_per_refill: BlocksPerRefill,
-    ) -> Result<Option<MetadataRow>, ManifestLoadError> {
+    ) -> crate::error::Result<Option<MetadataRow>> {
         // Matching on the stored row key: the scan already selected the rows
         // by that key, and recomputing keys from rows allocates per row.
         Ok(self
@@ -290,7 +401,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         filter_probe: &str,
         limit: usize,
         blocks_per_refill: BlocksPerRefill,
-    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
+    ) -> crate::error::Result<Vec<(String, MetadataRow)>> {
         let upper_bound = string_prefix_upper_bound(prefix);
         let upper_bound = upper_bound.as_deref();
         let mut candidates = Vec::new();
@@ -386,7 +497,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         limit: usize,
         filter_probe: Option<&str>,
         blocks_per_refill: BlocksPerRefill,
-    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
+    ) -> crate::error::Result<Vec<(String, MetadataRow)>> {
         self.scan_range_bounded(
             family,
             lower_bound,
@@ -413,7 +524,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         bounds: PageBounds,
         filter_probe: Option<&str>,
         blocks_per_refill: BlocksPerRefill,
-    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
+    ) -> crate::error::Result<Vec<(String, MetadataRow)>> {
         let mut candidates = Vec::new();
         for run in self.scan_runs.iter() {
             self.push_run_candidates(&mut candidates, run, family, lower_bound, upper_bound)?;
@@ -477,7 +588,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         bounds: PageBounds,
         blocks_per_refill: BlocksPerRefill,
         filter_admitted: bool,
-    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
+    ) -> crate::error::Result<Vec<(String, MetadataRow)>> {
         if bounds.max_rows == 0 {
             return Ok(Vec::new());
         }
@@ -534,8 +645,8 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             if iterators.is_empty() {
                 break;
             }
-            let _resident_blocks =
-                refill_iterators(&loader, &mut iterators, MAX_SCAN_DECODED_BYTES).await?;
+            let refilled = refill_iterators(&loader, &mut iterators, MAX_SCAN_DECODED_BYTES).await;
+            let _resident_blocks = self.kept(refilled).await?;
             #[cfg(test)]
             self.peak_resident_blocks
                 .fetch_max(_resident_blocks, std::sync::atomic::Ordering::Relaxed);
@@ -611,7 +722,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         &self,
         descriptors: Vec<ScanDescriptor<'d>>,
         filter_probe: Option<&str>,
-    ) -> Result<Vec<ScanDescriptor<'d>>, ManifestLoadError> {
+    ) -> crate::error::Result<Vec<ScanDescriptor<'d>>> {
         let Some(filter_probe) = filter_probe else {
             return Ok(descriptors);
         };
@@ -628,9 +739,8 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         &self,
         descriptors: &[ScanDescriptor<'_>],
         filter_probe: &str,
-    ) -> Result<Vec<bool>, ManifestLoadError> {
-        let mut admissions = Vec::with_capacity(descriptors.len());
-        let mut checks = stream::iter(0..descriptors.len())
+    ) -> crate::error::Result<Vec<bool>> {
+        let admissions = stream::iter(0..descriptors.len())
             .map(|index| {
                 let descriptor = descriptors[index];
                 async move {
@@ -638,11 +748,10 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
                         .await
                 }
             })
-            .buffered(STORE_READS_IN_FLIGHT);
-        while let Some(admits) = checks.try_next().await? {
-            admissions.push(admits);
-        }
-        Ok(admissions)
+            .buffered(STORE_READS_IN_FLIGHT)
+            .try_collect()
+            .await;
+        self.kept(admissions).await
     }
 }
 

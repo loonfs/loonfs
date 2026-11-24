@@ -108,10 +108,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// which the call finds from the manifest boundary, is above manifest
     /// `manifest_no`, and `Ok` when it isn't.
     ///
-    /// A caller that read rows from a manifest kept in memory, numbered
-    /// `manifest_no`, calls this function when it finds a segment missing. A
-    /// collection keeps the segments of the current manifest and of the
-    /// manifests that snapshots pin, and it can delete the segments of a
+    /// A load of the segments of a current manifest, numbered `manifest_no`,
+    /// calls this function when it finds a segment missing (see
+    /// [`SegmentKeeper::load_error`](crate::segment::SegmentKeeper::load_error)).
+    /// A collection keeps the segments of the current manifest and of the
+    /// manifests that snapshots keep, and it can delete the segments of a
     /// manifest that a newer manifest replaced. So the missing segment means
     /// a corrupt store only when manifest `manifest_no` is still the current
     /// manifest, and otherwise the caller reads again from the current
@@ -123,6 +124,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let current_manifest_no = self.load_current_manifest().await?.payload().manifest_no;
         if current_manifest_no > manifest_no {
             return Err(CoreError::ManifestReplaced {
+                namespace_id: self.namespace_id.clone(),
                 replaced_manifest_no: manifest_no,
                 current_manifest_no,
             });

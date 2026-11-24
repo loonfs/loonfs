@@ -112,12 +112,8 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
         .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("cold discovery");
-    let tail = crate::namespace::read_anchor::project_anchor_tail(
-        &store,
-        &crate::cache::MetadataSegmentCache::unshared(0),
-        &anchor,
-    )
-    .expect("replay discovery");
+    let tail =
+        crate::namespace::read_anchor::project_anchor_tail(&anchor).expect("replay discovery");
     assert_eq!(anchor.read_state.seq, CommitSeq(9));
     assert_eq!(anchor.read_state.wal_no, WalNo(12));
     assert!(tail

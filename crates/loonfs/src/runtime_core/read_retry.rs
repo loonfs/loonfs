@@ -1,86 +1,14 @@
-//! Read failure classification and one refresh of an ordinary read.
+//! Reads that run again after a newer manifest replaced the manifest that
+//! they read above.
 
 use super::{HeadConfirmation, RuntimeCore};
 use crate::pinned_read::PinnedRead;
-use crate::read_view::ReadSource;
 use crate::trace::phase_span;
 use crate::{CommitSeq, Consistency, CoreError, Error, NamespaceId, Result};
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::Phase;
-use loonfs_core::{ManifestLoadError, MetadataProjectionLoadError, RuntimeReadContext};
 use loonfs_types::ManifestNo;
 use tracing::Instrument;
-
-/// A read that finds a segment missing returns what a new read of `source`
-/// would. A snapshot that still admits a read keeps the segment, so the
-/// original error stands as corruption.
-///
-/// A read at the head that finds its manifest missing does the same when
-/// the manifest is at or below the manifest boundary. A missing manifest
-/// above the boundary is a corrupt store, and the original error stands.
-pub(crate) async fn classify_read_result<T>(
-    core: &RuntimeCore,
-    context: &RuntimeReadContext,
-    source: &ReadSource,
-    result: Result<T>,
-) -> Result<T> {
-    let missing_manifest = match &result {
-        Err(Error::Core(CoreError::MetadataProjection(
-            MetadataProjectionLoadError::ManifestLoad(error),
-        ))) => match (error, source) {
-            (ManifestLoadError::MissingSegment { .. }, _) => false,
-            (ManifestLoadError::MissingManifest { .. }, ReadSource::Head) => true,
-            _ => return result,
-        },
-        _ => return result,
-    };
-    if missing_manifest
-        && core
-            .namespace_store(&context.read_basis().head().namespace_id)
-            .above_boundary(
-                context.read_basis().basis().manifest_no(),
-                context.boundary().clone(),
-            )
-            .await?
-            .0
-    {
-        return result;
-    }
-    ensure_source_current(core, context, source).await?;
-    result
-}
-
-/// Returns what a new read of `source` would return before it reads: for the
-/// head, `ManifestReplaced` when a newer manifest replaced the manifest that
-/// `context` reads above, and for a snapshot, the snapshot's error when the
-/// snapshot no longer admits a read.
-pub(crate) async fn ensure_source_current(
-    core: &RuntimeCore,
-    context: &RuntimeReadContext,
-    source: &ReadSource,
-) -> Result<()> {
-    let namespace = core.namespace_store(&context.read_basis().head().namespace_id);
-    match source {
-        ReadSource::Head => {
-            let replaced_manifest_no = context.read_basis().basis().manifest_no();
-            let current = namespace.load_current_manifest().await?;
-            let current_manifest_no = current.payload().manifest_no;
-            if current_manifest_no > replaced_manifest_no {
-                return Err(CoreError::ManifestReplaced {
-                    replaced_manifest_no,
-                    current_manifest_no,
-                }
-                .into());
-            }
-        }
-        ReadSource::Snapshot(snapshot_id) => {
-            namespace
-                .load_snapshot_read_basis(context.read_basis().head(), snapshot_id)
-                .await?;
-        }
-    }
-    Ok(())
-}
 
 /// Returns the error of a read that found its manifest replaced on every
 /// run: `store_contention`, because the `stale_head` code is a write's
@@ -159,7 +87,7 @@ impl RuntimeCore {
         // Boxed, because without the box, a crate that awaits a read fails to
         // compile with "queries overflow the depth limit!" while the compiler
         // computes the layout of the caller's future.
-        Box::pin(self.run_again_after_replaced_manifest(namespace_id, || {
+        Box::pin(self.run_again_after_replaced_manifest(|| {
             let first = first.take();
             async move {
                 let pinned = match first {
@@ -170,8 +98,7 @@ impl RuntimeCore {
                             .await?
                     }
                 };
-                let context = pinned.context.clone();
-                classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await
+                read(pinned).await
             }
         }))
         .await
@@ -183,14 +110,15 @@ impl RuntimeCore {
     /// `store_contention`.
     ///
     /// Before each run after the first, the method drops this runtime's view
-    /// of the namespace (see [`Self::forget_namespace_view`]). `attempt` reads
-    /// at the namespace's head as the head is when the run starts, so a run
-    /// after a drop loads the head by discovery, and reads a newer manifest
-    /// than the run before it read. [`Self::read_at_least`] runs an ordinary
-    /// read through this method, with a head that it pins for each run.
+    /// of the namespace whose manifest the last run found replaced (see
+    /// [`Self::forget_namespace_view`]), which can differ from the namespace
+    /// that the read started from, such as a fork that a merge reads. `attempt` reads each namespace at its head as the head is when
+    /// the run starts, so a run after a drop loads that namespace's head by
+    /// discovery, and reads a newer manifest than the run before it read.
+    /// [`Self::read_at_least`] runs an ordinary read through this method,
+    /// with a head that it pins for each run.
     pub(crate) async fn run_again_after_replaced_manifest<T, F, Fut>(
         &self,
-        namespace_id: &NamespaceId,
         mut attempt: F,
     ) -> Result<T>
     where
@@ -199,17 +127,18 @@ impl RuntimeCore {
     {
         for _ in 1..MAX_CONTENTION_ATTEMPTS {
             match attempt().await {
-                Err(Error::Core(CoreError::ManifestReplaced { .. })) => {
-                    self.forget_namespace_view(namespace_id).await;
+                Err(Error::Core(CoreError::ManifestReplaced { namespace_id, .. })) => {
+                    self.forget_namespace_view(&namespace_id).await;
                 }
                 result => return result,
             }
         }
         match attempt().await {
             Err(Error::Core(CoreError::ManifestReplaced {
+                namespace_id,
                 current_manifest_no,
                 ..
-            })) => Err(replaced_on_every_run(namespace_id, current_manifest_no)),
+            })) => Err(replaced_on_every_run(&namespace_id, current_manifest_no)),
             result => result,
         }
     }
@@ -266,6 +195,7 @@ mod tests {
                 .read_through_views(|| async {
                     if runs.fetch_add(1, Ordering::SeqCst) < replaced_runs {
                         return Err(Error::from(CoreError::ManifestReplaced {
+                            namespace_id: namespace_id("replaced-reads"),
                             replaced_manifest_no: ManifestNo(1),
                             current_manifest_no: ManifestNo(2),
                         }));

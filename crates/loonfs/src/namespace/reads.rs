@@ -8,7 +8,6 @@ use crate::pagers::{
 };
 use crate::pinned_read::PinnedRead;
 use crate::read_view::{validate_view_cursor, ReadSource, ReadView, SnapshotBoundCursor};
-use crate::runtime_core::classify_read_result;
 use crate::trace::{self, operation_span};
 use crate::{
     CommitSeq, Consistency, ContentRef, CoreError, DiffOptions, DownloadOptions, Error, FileBytes,
@@ -117,10 +116,7 @@ impl<M: crate::Mode> Namespace<M> {
                     .core
                     .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
                     .await?;
-                let context = pinned.context.clone();
-                let source = ReadSource::Snapshot(snapshot_id.clone());
-                let result = read(pinned, source.clone()).await;
-                classify_read_result(&self.core, &context, &source, result).await
+                read(pinned, ReadSource::Snapshot(snapshot_id.clone())).await
             }
         }
     }
@@ -162,11 +158,12 @@ impl<M: crate::Mode> Namespace<M> {
     /// reads through them. A read through a view returns `ManifestReplaced`
     /// when a newer manifest replaced the view's manifest and a collection
     /// removed that manifest's segments. Each time `read` returns that error,
-    /// this method drops the runtime's view of the namespace and runs `read`
-    /// again, so the next run's views load the namespace's head from the
-    /// store, up to `MAX_CONTENTION_ATTEMPTS` runs in all. An ordinary read of
-    /// the namespace runs again the same way. If every run returns `ManifestReplaced`, this method
-    /// returns `store_contention`.
+    /// this method drops the runtime's view of the namespace whose manifest
+    /// was replaced and runs `read` again, so the next run's views load that
+    /// namespace's head from the store, up to `MAX_CONTENTION_ATTEMPTS` runs
+    /// in all. An ordinary read of the namespace runs again the same way. If
+    /// every run returns `ManifestReplaced`, this method returns
+    /// `store_contention`.
     pub async fn read_through_views<T, F, Fut>(&self, read: F) -> Result<T>
     where
         F: FnMut() -> Fut,
@@ -174,8 +171,7 @@ impl<M: crate::Mode> Namespace<M> {
     {
         trace::in_operation(
             operation_span!(self.core, "read_through_views", self.namespace_id),
-            self.core
-                .run_again_after_replaced_manifest(&self.namespace_id, read),
+            self.core.run_again_after_replaced_manifest(read),
         )
         .await
     }

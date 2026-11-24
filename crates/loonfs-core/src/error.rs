@@ -349,17 +349,21 @@ pub enum CoreError {
         actual: CommitSeq,
     },
     /// A read or a publication on a manifest that a newer manifest replaced
-    /// found a metadata segment missing. Garbage collection keeps the
-    /// segments of the current manifest and of snapshots' manifests, so a
-    /// successor can drop the replaced manifest's. A read runs again at the
+    /// found the manifest, or a metadata segment it lists, missing. Garbage
+    /// collection keeps the current manifest and the manifests that
+    /// snapshots keep, with their segments, so it can delete a replaced
+    /// manifest and that manifest's segments. A read runs again at the
     /// current manifest, and the publisher plans the commit again on it. The
     /// code is `stale_head`, which a client sees when a publication raced the
     /// head on every attempt. A read that found its manifest replaced on every
-    /// attempt returns `store_contention` instead.
+    /// attempt returns `store_contention` instead. `namespace_id` is the
+    /// namespace whose manifest was replaced, which can differ from the
+    /// namespace that the read started from, such as a merge's fork.
     #[error(
-        "manifest `{replaced_manifest_no}` was replaced by manifest `{current_manifest_no}`, and a segment it lists is missing"
+        "manifest `{replaced_manifest_no}` was replaced by manifest `{current_manifest_no}`, and it or a segment it lists is missing"
     )]
     ManifestReplaced {
+        namespace_id: NamespaceId,
         replaced_manifest_no: ManifestNo,
         current_manifest_no: ManifestNo,
     },
@@ -448,28 +452,6 @@ pub fn classify_store_failure(kind: ObjectStoreErrorKind) -> ErrorCode {
 }
 
 impl CoreError {
-    /// Returns whether this error reports a metadata segment that a read of
-    /// a manifest's rows found missing, in a batch itself or in one of its
-    /// operations.
-    ///
-    /// A collection can delete the segments of a manifest that a newer
-    /// manifest replaced, so a caller that read from a manifest it kept in
-    /// memory asks whether that manifest is still current (see
-    /// [`NamespaceStore::ensure_manifest_current`](crate::NamespaceStore::ensure_manifest_current))
-    /// before it reports the store as corrupt.
-    pub fn is_missing_segment(&self) -> bool {
-        let error = match self {
-            Self::FailedOperation { error, .. } => error.as_ref(),
-            error => error,
-        };
-        matches!(
-            error,
-            Self::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
-                crate::manifest::ManifestLoadError::MissingSegment { .. }
-            ))
-        )
-    }
-
     /// Builds the core error for a failed object-store operation on
     /// `object_key`.
     ///
@@ -591,20 +573,33 @@ impl CoreError {
         }
     }
 
+    /// Returns this error with the index of the commit operation that failed
+    /// with it. `ManifestReplaced` is returned as it is, because it reports
+    /// the commit's basis and not the operation, and the commit is published
+    /// again on the current manifest.
     pub(crate) fn at_operation(self, operation_index: usize) -> Self {
         let Ok(operation_index) = u32::try_from(operation_index) else {
             return self;
         };
+        if matches!(self, Self::ManifestReplaced { .. }) {
+            return self;
+        }
         Self::FailedOperation {
             operation_index,
             error: Box::new(self),
         }
     }
 
+    /// Returns this error with the index of the commit precondition that
+    /// failed with it. `ManifestReplaced` is returned as it is, as
+    /// [`Self::at_operation`] returns it.
     pub(crate) fn at_precondition(self, precondition_index: usize) -> Self {
         let Ok(precondition_index) = u32::try_from(precondition_index) else {
             return self;
         };
+        if matches!(self, Self::ManifestReplaced { .. }) {
+            return self;
+        }
         Self::FailedPrecondition {
             precondition_index,
             error: Box::new(self),

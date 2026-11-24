@@ -2,7 +2,6 @@
 
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::Result;
-use crate::manifest::load_basis_metadata_segments;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -34,12 +33,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .load_live_read_anchor(crate::test_support::observed_now())
             .await?;
         // A diagnostic leaves the namespace's segment cache as it was.
-        let tail = crate::manifest::load::metadata_basis_from_manifest(
-            &self.store,
-            None,
-            loaded.current_manifest(),
-        )
-        .project_tail(&loaded)?;
+        let tail = crate::namespace::read_anchor::project_anchor_tail(&loaded)?;
         Ok(NamespaceWalTailUsage {
             head_seq: loaded.read_state.seq,
             wal_tail_objects: loaded.read_state.unfolded_wal_objects(),
@@ -103,15 +97,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
     ) -> Result<NamespaceMetadata> {
         self.ensure_live_context(context)?;
-        let loaded = load_basis_metadata_segments(
-            &self.namespace.store,
-            Some(&self.namespace.segment_cache),
-            &context.read_basis().basis,
-        )
-        .await?;
+        let decoded = self.namespace.load_context_manifest(context).await?;
         Ok(namespace_metadata(
             context.read_basis().head.clone(),
-            loaded.segments.manifest().payload(),
+            decoded.manifest.payload(),
         ))
     }
 }

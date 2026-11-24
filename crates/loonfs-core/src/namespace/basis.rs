@@ -2,7 +2,7 @@
 
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::control::ManifestRef;
-use loonfs_types::ManifestNo;
+use loonfs_types::{ManifestNo, SnapshotId};
 
 /// The manifest that a read replays the WAL tail above.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,4 +53,8 @@ impl ReadBasis {
 /// is the one constructor that takes it, together with the live context at
 /// whose head the snapshot's reads are authorized.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SnapshotReadBasis(pub(crate) ReadBasis);
+pub struct SnapshotReadBasis {
+    pub(crate) basis: ReadBasis,
+    /// The snapshot, which keeps the manifest and its segments in the store.
+    pub(crate) snapshot_id: SnapshotId,
+}

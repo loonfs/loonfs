@@ -1035,6 +1035,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         .next()
         .map(metadata_segment_object_key)
         .expect("current manifest references a segment");
+    drop(segments);
     let failed_key = selected_key.clone();
     let store = FailStore::matching(
         setup_store,
