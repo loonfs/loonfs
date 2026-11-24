@@ -440,6 +440,12 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     completion.expect("completion wins the blocked abort CAS");
     let report = report.expect("collection");
     assert_eq!(report.deleted.upload_sessions, 0);
+    assert_eq!(report.retained.upload_session_window, 1);
+    assert_eq!(
+        report.next_reclamation_at_ms,
+        Some(inside.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS),
+        "the losing abort keeps the session for the completed-content grace"
+    );
     let session = read_upload_session(&store, &pool_id, &upload_id)
         .await
         .expect("completed session retained");
@@ -448,6 +454,46 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
         store.head(&content_key).await.expect("head").is_some(),
         "the losing abort must not clean up the winner's content"
     );
+}
+
+/// Checks that a collection whose abort loses to a client's abort releases
+/// the content and reports the client's abort time plus the grace window.
+#[tokio::test]
+async fn a_client_abort_that_wins_before_gc_abort_reports_a_deadline_from_the_client_abort_time() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
+        .await
+        .expect("bootstrap")
+        .pool_id;
+    let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
+    let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS + 1);
+    let client_at_ms = aged.now_ms + 1;
+    let content_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
+    let store = blocking_outcome_store(store, BlockedOutcome::Aborted);
+    let gc = collect_at(&store, &pool_id, aged.now_ms);
+    let client = async {
+        store.wait_until_blocked().await;
+        let result = abort(&store, &namespace_id, &upload_id, client_at_ms).await;
+        store.release();
+        result
+    };
+    let (report, aborted) = tokio::join!(gc, client);
+    assert_matches!(
+        aborted.expect("the client's abort wins").status,
+        loonfs_types::UploadSessionStatus::Aborted { aborted_at_ms } if aborted_at_ms == client_at_ms
+    );
+    let report = report.expect("collection");
+    assert_eq!(report.deleted.upload_sessions, 0);
+    assert_eq!(report.retained.upload_session_window, 1);
+    assert_eq!(
+        report.next_reclamation_at_ms,
+        Some(client_at_ms + GC_GRACE_WINDOW_MS)
+    );
+    assert!(store.head(&content_key).await.expect("head").is_none());
 }
 
 #[tokio::test]

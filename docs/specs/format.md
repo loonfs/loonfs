@@ -542,7 +542,7 @@ A session uses two write-once put-if-absent records rather than one mutated reco
 +---------+
 ```
 
-Completion verifies bytes before creating the outcome record, while abort creates the outcome record before deleting the object or provider upload. Put-if-absent ensures whichever finishes first wins. After an unknown-outcome put, the caller reads the outcome record back and won if it matches what it sent.
+Completion verifies bytes before creating the outcome record, while abort creates the outcome record before deleting the object or provider upload. Put-if-absent ensures whichever finishes first wins. After an unknown-outcome put, or a put that fails its precondition, the caller reads the outcome record back and acts on the outcome it finds, whichever request wrote it.
 
 Because GC deletes the session record before the outcome record ([Upload-session cleanup](#116-upload-session-cleanup)), a request MUST check that the session record still exists after writing an outcome record, and MUST NOT return admission evidence or delete content if the session record is gone (preventing a paused request from reviving a cleaned-up session).
 
@@ -1310,12 +1310,12 @@ Pool collection compares a deleted namespace's retirement deadline against its o
 
 | Session and namespace | Action |
 | --- | --- |
-| Open session | Keep until expiry plus `T`, then write an aborted outcome record and clean up its content and provider transfer state. If an outcome record already exists, keep the session. |
+| Open session | Keep until expiry plus `T`, then write an aborted outcome record and clean up its content and provider transfer state. If another request ended the session first with an abort, clean up its content and provider transfer state right away, and keep its records until abort time plus `T`. If it ended with a completion, keep its records until the completed-content grace passes, whatever the namespace's status. |
 | Aborted session | Keep until abort time plus `T`, then run content and provider cleanup again and delete its records. |
 | Completed session in an active or initializing namespace | Keep until the completed-content grace passes, then delete its records. Content follows [Content roots](#119-content-roots). |
 | Session in a deleted namespace, before retirement deadline | Keep it and report the deadline. |
 | Session in a deleted namespace, at or after retirement deadline | Apply retired-namespace rules, even if a snapshot delays retirement. |
-| Completed session in a retired namespace | Delete its records immediately (no extra completion grace). Content follows [Content roots](#119-content-roots). |
+| Completed session in a retired namespace, which the listing showed as completed | Delete its records immediately (no extra completion grace). Content follows [Content roots](#119-content-roots). |
 | Orphan outcome record (no matching session record) | Delete once its provider age is at least `T`. |
 
 Garbage collection always deletes the session record before the outcome record. Deleting the outcome first would make a crash leave an apparently open session that a later pass would abort, potentially deleting committed content. An orphan outcome record never issues admission evidence and protects no content. It appears only if a collector crashed between the two deletes or if a late completion or abort wrote it after the session was cleaned up (see [Upload sessions](#51-upload-sessions)). Waiting until an orphan outcome's provider age reaches `T` protects against non-atomic listings that miss a newly created session record while catching its outcome record.

@@ -3,7 +3,7 @@
 
 use super::direct::validate_upload_checksum;
 use super::proxied::find_proxied_content_ref;
-use super::records::{create_upload_outcome, OutcomeCreation};
+use super::records::create_upload_outcome;
 use super::session::{ensure_session_actor, ensure_session_open, upload_mode};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
@@ -88,10 +88,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             content_ref: verified.clone(),
         };
         let standing =
-            match create_upload_outcome(&self.store, catalog.pool_id(), session, &outcome).await? {
-                OutcomeCreation::Created => outcome,
-                OutcomeCreation::Existing(existing) => existing,
-            };
+            create_upload_outcome(&self.store, catalog.pool_id(), session, &outcome).await?;
         replay_terminal_completion(
             &standing,
             &session.namespace_id,
