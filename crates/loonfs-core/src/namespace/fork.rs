@@ -623,7 +623,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 )
                 .await
             {
-                Ok((created, basis)) => return Ok(Some((created.record, basis, head))),
+                Ok((record, basis)) => return Ok(Some((record, basis, head))),
                 Err(CoreError::HeadMoved(_)) => {}
                 Err(error) => return Err(error),
             }

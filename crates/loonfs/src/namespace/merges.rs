@@ -14,7 +14,7 @@ use crate::{
 };
 use futures::future::BoxFuture;
 use loonfs_core::limits::{MAX_CONTENTION_ATTEMPTS, OPERATION_SNAPSHOT_TTL_MS};
-use loonfs_core::{CreatedSnapshot, MergeAllowance, MergeRequest};
+use loonfs_core::{MergeAllowance, MergeRequest};
 use loonfs_types::format::wal::MergeRecord;
 use std::sync::{Mutex, MutexGuard};
 
@@ -37,16 +37,14 @@ pub(crate) enum PlannedMerge<R = ()> {
 }
 
 /// The commit that makes a merge, the reservation that the merge keeps, the
-/// merge's record, whose range a later plan of the request applies, what
+/// merge's record, whose range a later plan of the request applies, and what
 /// the plan reports with the commit (nothing for a merge, which refuses a
-/// conflict, and the conflict report for a replay commit), and the snapshot on
-/// the fork's manifest that the plan read, which the commit releases.
+/// conflict, and the conflict report for a replay commit).
 pub(crate) struct PlannedCommit<R = ()> {
     pub(crate) candidate: CommitCandidate,
     pub(crate) reservation: MergeReservation,
     pub(crate) record: MergeRecord,
     pub(crate) report: R,
-    pub(crate) merge_snapshot: CreatedSnapshot,
 }
 
 /// How the commit of a merge, or of a replay commit, ended.
@@ -234,38 +232,33 @@ impl Namespace<Writable> {
                     .check_merge(&main.context, &fork.engine, &fork.context, request)
                     .await?;
                 let prepared_at_ms = self.core.now_ms();
-                let (fork, merge_snapshot) = self
+                let fork = self
                     .snapshot_fork(source_namespace_id, prepared_at_ms)
                     .await?;
-                let planned = async {
-                    let plan = main
-                        .engine
-                        .plan_merge(
-                            &main.context,
-                            &fork.engine,
-                            &fork.context,
-                            request,
-                            prepared_at_ms,
-                            allowance,
-                        )
-                        .await?;
-                    let record = plan.record().clone();
-                    Ok::<_, Error>((plan.into_candidate()?, record, ()))
-                }
-                .await;
-                self.planned_with_merge_snapshot(source_namespace_id, merge_snapshot, planned)
-                    .await
+                let plan = main
+                    .engine
+                    .plan_merge(
+                        &main.context,
+                        &fork.engine,
+                        &fork.context,
+                        request,
+                        prepared_at_ms,
+                        allowance,
+                    )
+                    .await?;
+                let record = plan.record().clone();
+                Ok::<_, Error>((plan.into_candidate()?, record, ()))
             })
         })
         .await
     }
 
     /// Returns the merge or replay commit that this namespace committed under
-    /// the request's commit ID, or the commit, its record, its report, and
-    /// the snapshot on the fork that `plan` plans from this namespace's head under
-    /// `reservation`, or under a reservation of the allowance in `merges`
-    /// that this call takes. `plan` plans against the merge allowance with
-    /// the reservation, and grows the reservation as it plans.
+    /// the request's commit ID, or the commit, its record, and its report
+    /// that `plan` plans from this namespace's head under `reservation`, or
+    /// under a reservation of the allowance in `merges` that this call takes.
+    /// `plan` plans against the merge allowance with the reservation, and
+    /// grows the reservation as it plans.
     ///
     /// The receipt lookup comes first, so a retry of a commit that committed
     /// reserves nothing and writes nothing, even after the fork was deleted.
@@ -285,9 +278,7 @@ impl Namespace<Writable> {
         plan: impl Fn(PinnedRead, MergeAllowance) -> Plan,
     ) -> Result<PlannedMerge<R>>
     where
-        Plan: std::future::Future<
-            Output = Result<(CommitCandidate, MergeRecord, R, CreatedSnapshot)>,
-        >,
+        Plan: std::future::Future<Output = Result<(CommitCandidate, MergeRecord, R)>>,
     {
         let held = Mutex::new(reservation);
         self.core
@@ -302,13 +293,12 @@ impl Namespace<Writable> {
                     None => self.session().reserve_merge(merges)?,
                 };
                 match plan(target, reservation.allowance()).await {
-                    Ok((candidate, record, report, merge_snapshot)) => {
+                    Ok((candidate, record, report)) => {
                         Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {
                             candidate,
                             reservation,
                             record,
                             report,
-                            merge_snapshot,
                         })))
                     }
                     Err(error) => {
@@ -326,8 +316,7 @@ impl Namespace<Writable> {
     /// [`ErrorCode::is_stale_plan`](crate::ErrorCode::is_stale_plan)), up to
     /// [`MAX_MERGE_PLANS`] plans in all. A later plan applies the first
     /// plan's range, so it never merges a longer range, and a merge of the
-    /// fork that committed in between returns `merge_range_conflict`. Each
-    /// plan's snapshot on the fork is released once its commit returns.
+    /// fork that committed in between returns `merge_range_conflict`.
     pub(crate) async fn commit_merge<'a, R>(
         &'a self,
         request: &MergeRequest,
@@ -341,17 +330,13 @@ impl Namespace<Writable> {
                 reservation,
                 record,
                 report,
-                merge_snapshot,
             } = match planned {
                 PlannedMerge::Committed { commit, conflicts } => {
                     return Ok(MergeOutcome::Found { commit, conflicts })
                 }
                 PlannedMerge::Candidate(planned) => *planned,
             };
-            let committed = self.submit_merge(candidate, &reservation).await;
-            self.release_merge_snapshot(&request.source_namespace_id, &merge_snapshot)
-                .await;
-            match committed {
+            match self.submit_merge(candidate, &reservation).await {
                 Err(error) if error.code().is_stale_plan() && plans < MAX_MERGE_PLANS => {
                     plans += 1;
                     let request = MergeRequest {
@@ -382,8 +367,7 @@ impl Namespace<Writable> {
 
     /// Reads the fork's head and takes a snapshot of the fork's current
     /// manifest without a fold, for a merge or a replay commit prepared at
-    /// `prepared_at_ms`, and returns the read with the snapshot
-    /// ([Cross-namespace copies and
+    /// `prepared_at_ms`, and returns the read ([Cross-namespace copies and
     /// moves](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#97-cross-namespace-copies-and-moves)).
     ///
     /// The read is the fork's current manifest and WAL tail, as
@@ -396,11 +380,11 @@ impl Namespace<Writable> {
     /// advance, and a compaction of the fork in between can replace the
     /// manifest, and the collector keeps only what the current manifest and the
     /// snapshots' manifests refer to. The snapshot expires with the plan's
-    /// content proofs, so a merge that can't release it leaves it to the fork's
-    /// collector. When a newer manifest replaced the one that the read found,
-    /// the call drops this runtime's view of the fork, so the next read loads
-    /// the fork's head from the store, and takes the snapshot again, up to
-    /// `MAX_CONTENTION_ATTEMPTS` snapshots in all.
+    /// content proofs, and garbage collection of the fork deletes its record
+    /// the grace window after it expires. When a newer manifest replaced the
+    /// one that the read found, the call drops this runtime's view of the
+    /// fork, so the next read loads the fork's head from the store, and takes
+    /// the snapshot again, up to `MAX_CONTENTION_ATTEMPTS` snapshots in all.
     ///
     /// When the fork's tail has a commit older than
     /// [`MAX_TAIL_COMMIT_AGE_MS`](loonfs_core::limits::MAX_TAIL_COMMIT_AGE_MS),
@@ -410,7 +394,7 @@ impl Namespace<Writable> {
         &self,
         fork_id: &NamespaceId,
         prepared_at_ms: u64,
-    ) -> Result<(PinnedRead, CreatedSnapshot)> {
+    ) -> Result<PinnedRead> {
         let expires_at_ms = Some(prepared_at_ms + OPERATION_SNAPSHOT_TTL_MS);
         let engine = self
             .core
@@ -438,7 +422,10 @@ impl Namespace<Writable> {
                     attempts += 1;
                     self.core.forget_namespace_view(fork_id).await;
                 }
-                created => return Ok((fork, created?)),
+                created => {
+                    created?;
+                    return Ok(fork);
+                }
             }
         }
     }
@@ -458,7 +445,7 @@ impl Namespace<Writable> {
         &self,
         fork_id: &NamespaceId,
         expires_at_ms: Option<u64>,
-    ) -> Result<(PinnedRead, CreatedSnapshot)> {
+    ) -> Result<PinnedRead> {
         let (created, verified) = self
             .mode
             .publisher
@@ -473,50 +460,9 @@ impl Namespace<Writable> {
                 }
             })
             .await?;
-        let fork = self
-            .core
+        self.core
             .pinned_read_at_created_snapshot(fork_id, &created, &verified)
-            .await?;
-        Ok((fork, created))
-    }
-
-    /// Returns `planned` with the snapshot its plan read the fork through, or
-    /// releases the snapshot and returns the plan's error.
-    pub(super) async fn planned_with_merge_snapshot<R>(
-        &self,
-        fork_id: &NamespaceId,
-        merge_snapshot: CreatedSnapshot,
-        planned: Result<(CommitCandidate, MergeRecord, R)>,
-    ) -> Result<(CommitCandidate, MergeRecord, R, CreatedSnapshot)> {
-        match planned {
-            Ok((candidate, record, report)) => Ok((candidate, record, report, merge_snapshot)),
-            Err(error) => {
-                self.release_merge_snapshot(fork_id, &merge_snapshot).await;
-                Err(error)
-            }
-        }
-    }
-
-    /// Deletes the snapshot that a merge's plan took on the fork, with the
-    /// version of the record that the snapshot's creation stored. A snapshot
-    /// that the delete leaves behind expires, and the fork's collector deletes
-    /// it.
-    async fn release_merge_snapshot(
-        &self,
-        fork_id: &NamespaceId,
-        merge_snapshot: &CreatedSnapshot,
-    ) {
-        let engine = self
-            .core
-            .writer_engine(&self.mode.writer.writer_id, fork_id);
-        if let Err(error) = engine.delete_created_snapshot(merge_snapshot).await {
-            tracing::warn!(
-                namespace_id = %fork_id,
-                snapshot_id = %merge_snapshot.record.snapshot_id,
-                error = %error,
-                "could not release a merge's snapshot on the fork"
-            );
-        }
+            .await
     }
 
     /// Returns a maintenance value that folds as this runtime's writer.

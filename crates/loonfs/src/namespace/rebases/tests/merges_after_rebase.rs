@@ -380,9 +380,8 @@ async fn a_merge_of_a_new_fork_with_fresh_positions_sends_these_requests_in_orde
         "put main-rebase Snapshot",
         "head main-rebase MetadataManifest 00000000000000000005",
         "get main-rebase Boundary",
-        // The commit, and the release of the snapshot.
+        // The commit.
         "put main WalObject 00000000000000000004",
-        "swap main-rebase Snapshot",
     ];
     assert_eq!(request_lines(&store.take()), expected);
 }

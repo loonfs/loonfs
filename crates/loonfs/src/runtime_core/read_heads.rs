@@ -20,7 +20,8 @@ use loonfs_core::control::{
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::time::Observation;
 use loonfs_core::Phase;
-use loonfs_core::{CreatedSnapshot, MetadataProjectionLoadError, RuntimeReadContext};
+use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
+use loonfs_types::format::control::SnapshotPayload;
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -320,7 +321,7 @@ impl RuntimeCore {
     pub(crate) async fn pinned_read_at_created_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        created: &CreatedSnapshot,
+        created: &SnapshotPayload,
         verified: &Held<LoadedManifest>,
     ) -> Result<PinnedRead> {
         let checked_position = self.record_writer_position_check(namespace_id, verified);
@@ -336,7 +337,7 @@ impl RuntimeCore {
         };
         let basis = self
             .namespace_store(namespace_id)
-            .load_created_snapshot_read_basis(live.read_basis().head(), created.record.clone())
+            .load_created_snapshot_read_basis(live.read_basis().head(), created.clone())
             .await
             .map_err(Error::from)?;
         Ok(self.pinned_read_at_basis(namespace_id, basis, live))

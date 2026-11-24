@@ -4,7 +4,6 @@
 //! An expired or deleted snapshot can't be used or retrieved, and the snapshot
 //! listing leaves it out, but its record stays until garbage collection deletes it.
 
-use super::create::CreatedSnapshot;
 use super::read_basis::load_snapshot_read_basis_from_record;
 use super::record::{encode_snapshot_record, LoadedSnapshotRecord};
 use crate::control_update::{retry_while_contended, CasOutcome};
@@ -286,15 +285,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         snapshot_id: &SnapshotId,
     ) -> Result<DeleteSnapshotResponse> {
         administrator.assert_for(&self.namespace.namespace_id);
-        self.delete_snapshot_record(snapshot_id).await
-    }
-
-    /// Deletes a snapshot as [`Self::delete_snapshot`] does, without the
-    /// proof.
-    async fn delete_snapshot_record(
-        &self,
-        snapshot_id: &SnapshotId,
-    ) -> Result<DeleteSnapshotResponse> {
         let clock = self.namespace.start_clock();
         retry_while_contended(|| async {
             let Some(loaded) = self.namespace.load_snapshot_record(snapshot_id).await? else {
@@ -312,45 +302,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 .await
         })
         .await??;
-        Ok(self.deleted_snapshot(snapshot_id))
-    }
-
-    /// Deletes the snapshot that this process wrote as `created`, with one
-    /// compare-and-swap against the version that the write stored. A record
-    /// that changed after the write, and a write that returned no version,
-    /// delete as [`Self::delete_snapshot`] does, which loads the record first.
-    ///
-    /// A merge calls this function to delete its snapshot of the fork, so the
-    /// function makes no administrator check, for the reason that
-    /// [`Self::create_verified_snapshot`] describes.
-    pub async fn delete_created_snapshot(
-        &self,
-        created: &CreatedSnapshot,
-    ) -> Result<DeleteSnapshotResponse> {
-        let snapshot_id = &created.record.snapshot_id;
-        if let Some(etag) = &created.etag {
-            let now_ms = self.namespace.start_clock().now_ms();
-            if let CasOutcome::Settled(()) = self
-                .namespace
-                .mark_snapshot_deleted(
-                    created.record.clone(),
-                    PutMode::CompareAndSwap {
-                        expected_etag: etag.clone(),
-                    },
-                    now_ms,
-                )
-                .await?
-            {
-                return Ok(self.deleted_snapshot(snapshot_id));
-            }
-        }
-        self.delete_snapshot_record(snapshot_id).await
-    }
-
-    fn deleted_snapshot(&self, snapshot_id: &SnapshotId) -> DeleteSnapshotResponse {
-        DeleteSnapshotResponse {
+        Ok(DeleteSnapshotResponse {
             namespace_id: self.namespace.namespace_id.clone(),
             snapshot_id: snapshot_id.clone(),
-        }
+        })
     }
 }
