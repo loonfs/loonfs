@@ -60,10 +60,7 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
     )
     .with_run_policy(crate::test_support::one_delta_run_policy())
     .engine()
-    .compact_metadata_unit(
-        None,
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
+    .compact_from_current()
     .await
     .expect("compact bindings");
     assert_matches!(

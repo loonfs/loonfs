@@ -7,7 +7,7 @@ mod rebase;
 
 use super::*;
 use crate::changes::list_changes_after;
-use crate::compaction::{CompactionUnitOutcome, MetadataCompactionCancellation};
+use crate::compaction::CompactionUnitOutcome;
 use crate::manifest::RetentionTarget;
 use crate::test_support::NamespaceFixture;
 use loonfs_types::format::wal::{ForkRange, MergeRecord, MAX_WAL_OBJECT_BYTES};
@@ -791,7 +791,7 @@ async fn advance_floor_and_compact(
     for _ in 0..32 {
         let outcome = maintainer
             .engine()
-            .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
+            .compact_from_current()
             .await
             .expect("compact a family group");
         if matches!(outcome, CompactionUnitOutcome::NotNeeded) {

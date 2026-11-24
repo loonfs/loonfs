@@ -2202,7 +2202,7 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             fixture
         }
         .engine()
-        .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
+        .compact_from_current()
         .await
         .expect("run the unit");
         // The put that lost, and the retry unless the inputs moved.
@@ -2342,7 +2342,7 @@ async fn a_unit_whose_puts_lose_to_unrelated_publications_publishes_without_rewr
         fixture
     }
     .engine()
-    .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
+    .compact_from_current()
     .await
     .expect("run the unit");
 
@@ -2439,7 +2439,7 @@ async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
             fixture
         }
         .engine()
-        .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
+        .compact_from_current()
         .await
         .expect("run a unit")
         {
@@ -2901,59 +2901,45 @@ fn publication_requests(namespace: &NamespaceId, next: ManifestNo) -> Vec<(&'sta
     ]
 }
 
-/// Checks that a compaction unit without a basis finds the current manifest
-/// once to plan, that a unit with a basis loads nothing to plan, and that
-/// both publish on the manifest they planned from with their put and no
-/// request before it, and read the manifest boundary after the put.
+/// Checks that a compaction unit loads nothing to plan, publishes on the
+/// manifest it planned from with its put and no request before it, and reads
+/// the manifest boundary after the put.
 #[tokio::test]
-async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
+async fn a_unit_loads_no_manifest_to_plan() {
     use loonfs_test_support::stores::RecordingStore;
 
-    for with_basis in [false, true] {
-        let directory = tempdir().expect("tempdir");
-        let namespace = NamespaceId::parse("unit-requests").expect("namespace");
-        let store = LocalFsStore::new(directory.path()).expect("store");
-        seed_bindings_workload(&store, &namespace).await;
-        let current = current_manifest_number(&store, &namespace).await;
-        let basis = match with_basis {
-            true => Some(
-                crate::test_support::namespace_store(&store, &namespace)
-                    .load_current_basis(crate::test_support::observed_now())
-                    .await
-                    .expect("current manifest"),
-            ),
-            false => None,
-        };
-        let next = current.successor().expect("next manifest number");
-        let store = RecordingStore::new(store, KeyPredicate::any());
-        let outcome = {
-            let mut fixture = crate::test_support::NamespaceFixture::new(
-                &store,
-                &namespace,
-                &crate::test_support::writer_at("test-writer", 0),
-            );
-            fixture.namespace.run_policy = compact_everything_policy();
-            fixture
-        }
-        .engine()
-        .compact_metadata_unit(basis, &MetadataCompactionCancellation::default())
+    let directory = tempdir().expect("tempdir");
+    let namespace = NamespaceId::parse("unit-requests").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    seed_bindings_workload(&store, &namespace).await;
+    let current = current_manifest_number(&store, &namespace).await;
+    let basis = crate::test_support::namespace_store(&store, &namespace)
+        .load_current_basis(crate::test_support::observed_now())
         .await
-        .expect("run a compaction unit");
-        assert_matches!(
-            outcome,
-            CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest().manifest().manifest_no == next
+        .expect("current manifest");
+    let next = current.successor().expect("next manifest number");
+    let store = RecordingStore::new(store, KeyPredicate::any());
+    let outcome = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace,
+            &crate::test_support::writer_at("test-writer", 0),
         );
-        let mut expected = match with_basis {
-            true => Vec::new(),
-            false => discovery_requests(&namespace, current),
-        };
-        expected.extend(publication_requests(&namespace, next));
-        assert_eq!(
-            control_requests(&namespace, &store.take()),
-            expected,
-            "with a basis: {with_basis}"
-        );
+        fixture.namespace.run_policy = compact_everything_policy();
+        fixture
     }
+    .engine()
+    .compact_metadata_unit(basis, &MetadataCompactionCancellation::default())
+    .await
+    .expect("run a compaction unit");
+    assert_matches!(
+        outcome,
+        CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest().manifest().manifest_no == next
+    );
+    assert_eq!(
+        control_requests(&namespace, &store.take()),
+        publication_requests(&namespace, next)
+    );
 }
 
 /// Checks that a finalization whose put loses to a compaction of the same
@@ -3047,7 +3033,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         fixture
     }
     .engine()
-    .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
+    .compact_from_current()
     .await
     .expect("publish");
     assert_matches!(
@@ -3108,7 +3094,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         fixture
     }
     .engine()
-    .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
+    .compact_from_current()
     .await
     .expect_err("a stopped publication should fail the compaction unit");
     assert_eq!(current_manifest_number(&failing, &namespace).await, before);

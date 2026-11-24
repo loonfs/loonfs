@@ -1608,10 +1608,7 @@ async fn compactions_read_input_without_the_cache_and_insert_only_their_output()
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
+    .compact_from_current()
     .await
     .expect("run a compaction unit");
     assert_matches!(outcome, CompactionUnitOutcome::Published { .. });

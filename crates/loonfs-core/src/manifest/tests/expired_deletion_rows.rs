@@ -1170,7 +1170,7 @@ async fn a_compaction_unit_reads_each_slot_index_segment_at_most_twice() {
         store.reset();
         let outcome = fixture
             .engine()
-            .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
+            .compact_from_current()
             .await
             .expect("run a compaction unit");
         let slot_index_reads = reads_of(&store.take_gets(), &slot_index);

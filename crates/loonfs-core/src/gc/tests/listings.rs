@@ -360,10 +360,7 @@ async fn snapshot_views_add_segment_reads_only_for_uncovered_layout_segments() {
             for _ in 0..16 {
                 let outcome = fixture
                     .engine()
-                    .compact_metadata_unit(
-                        None,
-                        &crate::compaction::MetadataCompactionCancellation::default(),
-                    )
+                    .compact_from_current()
                     .await
                     .expect("compact");
                 if matches!(
@@ -478,10 +475,7 @@ async fn a_collection_reads_each_extent_filter_once_however_many_snapshot_views_
     while !matches!(
         fixture
             .engine()
-            .compact_metadata_unit(
-                None,
-                &crate::compaction::MetadataCompactionCancellation::default()
-            )
+            .compact_from_current()
             .await
             .expect("compact"),
         CompactionUnitOutcome::Published {

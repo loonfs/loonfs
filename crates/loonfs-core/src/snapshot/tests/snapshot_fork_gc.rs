@@ -79,10 +79,7 @@ impl Fixture {
         )
         .with_run_policy(crate::test_support::one_delta_run_policy())
         .engine()
-        .compact_metadata_unit(
-            None,
-            &crate::compaction::MetadataCompactionCancellation::default(),
-        )
+        .compact_from_current()
         .await
         .expect("replace old runs");
         assert_matches!(report, CompactionUnitOutcome::Published { .. });

@@ -77,8 +77,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Runs one metadata compaction unit.
     ///
     /// The unit plans from `basis`, a manifest that the caller already has,
-    /// or from the current manifest that it loads when `basis` is `None`, and
-    /// reads its input runs without the cache. The walk that builds a base
+    /// and reads its input runs without the cache. The walk that builds a base
     /// compaction's kept inode filter reads through the cache. The unit
     /// compacts the whole window that the namespace's run policy selects,
     /// whatever the number of rows its runs list, and the compaction checks
@@ -86,9 +85,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// `finalize_metadata_compaction`, starting from the
     /// manifest it planned from, and finalization retries a lost put over the
     /// manifest that won while the unit's input segments are unchanged. The
-    /// unit's time bound starts at the start of the call, before any load (see
-    /// `METADATA_COMPACTION_BUDGET_MS`). A call without a basis reloads durable
-    /// state, so callers may repeat it safely across process restarts.
+    /// unit's time bound starts at the start of the call (see
+    /// `METADATA_COMPACTION_BUDGET_MS`).
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
@@ -98,18 +96,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     )]
     pub async fn compact_metadata_unit(
         &self,
-        basis: Option<Held<LoadedManifest>>,
+        basis: Held<LoadedManifest>,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<CompactionUnitOutcome> {
         let compaction = self.namespace.start_clock();
-        let basis = match basis {
-            Some(basis) => basis,
-            None => {
-                self.namespace
-                    .load_current_basis(compaction.origin())
-                    .await?
-            }
-        };
         let current = basis.manifest();
         let payload = current.payload();
         ensure_namespace_live(&payload.namespace_id, payload.status)?;

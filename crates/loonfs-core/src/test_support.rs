@@ -810,10 +810,7 @@ pub async fn drain_compaction<S: ObjectStore + ?Sized>(
         let outcome = NamespaceFixture::new(store, namespace_id, &writer_at("test-writer", 0))
             .with_run_policy(policy)
             .engine()
-            .compact_metadata_unit(
-                None,
-                &crate::compaction::MetadataCompactionCancellation::default(),
-            )
+            .compact_from_current()
             .await
             .expect("compaction step");
         match outcome {
@@ -834,6 +831,22 @@ pub async fn drain_compaction<S: ObjectStore + ?Sized>(
                 return (manifest_no, published);
             }
         }
+    }
+}
+
+impl<S: ObjectStore> NamespaceWriterEngine<S> {
+    /// Loads the namespace's current manifest and runs one metadata
+    /// compaction unit planned from it, without a cancellation.
+    pub async fn compact_from_current(&self) -> crate::error::Result<crate::CompactionUnitOutcome> {
+        let basis = self
+            .namespace
+            .load_current_basis(self.namespace.start_clock().origin())
+            .await?;
+        self.compact_metadata_unit(
+            basis,
+            &crate::compaction::MetadataCompactionCancellation::default(),
+        )
+        .await
     }
 }
 

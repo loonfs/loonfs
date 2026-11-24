@@ -262,17 +262,17 @@ impl Maintenance {
     ///
     /// Stops when nothing is due, when `cancellation` is set, when the
     /// namespace's writer session in this runtime is closed or its namespace
-    /// deleted, after three abandoned units in a row, or after it publishes 16 compaction units.
-    /// Work still due after the 16th unit waits for the next call. A unit
-    /// that loses its manifest put to another publication tries again over
-    /// the manifest that won, so only an abandoned unit counts as a lost
-    /// race. Setting `cancellation` ends a wait for a lock or a permit and
-    /// drops a fold in progress at once, and a running compaction unit stops
-    /// at its next block. A close or a delete of the session stops the call
-    /// before its next unit. A dropped call leaves what a crash would:
-    /// unreferenced segments, or a manifest the runtime learns of the way it
-    /// learns of another process's. Fails with the first error. Keeps no
-    /// state between calls.
+    /// deleted, after three abandoned units in a row, or after it publishes 16
+    /// compaction units. Work still due after the 16th unit waits for the next
+    /// call. A unit that loses its manifest put to another publication tries
+    /// again over the manifest that won, so only an abandoned unit counts as a
+    /// lost race. Setting `cancellation` ends a wait for a lock or a permit and
+    /// drops a fold in progress at once, and a running compaction unit stops at
+    /// its next block. A close or a delete of the session stops the call before
+    /// its next unit. A dropped call leaves what a crash would: unreferenced
+    /// segments, or a manifest the runtime learns of the way it learns of
+    /// another process's. Fails with the first error. Keeps no state between
+    /// calls.
     ///
     /// The response reports the compaction units the call published, and an
     /// outcome. The outcome is [`MetadataMaintenanceOutcome::CaughtUp`] when

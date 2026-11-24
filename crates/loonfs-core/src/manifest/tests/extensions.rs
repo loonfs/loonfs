@@ -141,7 +141,7 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
         .clone()
         .with_run_policy(crate::test_support::one_delta_run_policy())
         .engine()
-        .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
+        .compact_from_current()
         .await
         .expect("compact");
     assert!(matches!(compacted, CompactionUnitOutcome::Published { .. }));
@@ -235,7 +235,7 @@ impl EntryCopy {
                     .clone()
                     .with_run_policy(crate::test_support::one_delta_run_policy())
                     .engine()
-                    .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
+                    .compact_from_current()
                     .await
                     .expect("compact");
                 assert!(matches!(compacted, CompactionUnitOutcome::Published { .. }));

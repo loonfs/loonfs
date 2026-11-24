@@ -2072,10 +2072,7 @@ async fn snapshots_append_past_the_threshold_and_compaction_drains() {
             fixture
         }
         .engine()
-        .compact_metadata_unit(
-            None,
-            &crate::compaction::MetadataCompactionCancellation::default(),
-        )
+        .compact_from_current()
         .await
         .expect("compaction step");
         match report {
@@ -2177,7 +2174,7 @@ async fn a_unit_whose_replaced_basis_lost_an_input_segment_is_abandoned() {
         .with_run_policy(crate::test_support::one_delta_run_policy())
         .engine()
         .compact_metadata_unit(
-            Some(basis),
+            basis,
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await;
@@ -2228,10 +2225,7 @@ async fn a_unit_honors_its_run_budget_and_reads_only_the_selected_runs() {
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
+    .compact_from_current()
     .await
     .expect("admitted unit");
     let super::CompactionUnitOutcome::Published {
@@ -2303,10 +2297,7 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
+    .compact_from_current()
     .await
     .expect("first compaction unit");
     assert_matches!(
@@ -2380,10 +2371,7 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
+    .compact_from_current()
     .await
     .expect("below-trigger step");
     assert_matches!(below_trigger, super::CompactionUnitOutcome::NotNeeded);
@@ -2509,10 +2497,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
+    .compact_from_current()
     .await
     .expect("first unit");
     let super::CompactionUnitOutcome::Published {
@@ -2539,10 +2524,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
             fixture
         }
         .engine()
-        .compact_metadata_unit(
-            None,
-            &crate::compaction::MetadataCompactionCancellation::default(),
-        )
+        .compact_from_current()
         .await
         .expect("resumed unit");
         match report {
@@ -2689,10 +2671,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
+    .compact_from_current()
     .await
     .expect_err("over-budget compaction must abort");
     assert_matches!(
@@ -2717,10 +2696,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
+    .compact_from_current()
     .await
     .expect("in-budget retry compacts the unit");
     assert_matches!(report, super::CompactionUnitOutcome::Published { .. });
@@ -2773,10 +2749,7 @@ async fn compact_with<S: ObjectStore + ?Sized>(
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
+    .compact_from_current()
     .await
     .expect("run a compaction unit")
 }

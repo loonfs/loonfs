@@ -963,10 +963,7 @@ async fn writer_after_own_compaction<'a>(
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
+    .compact_from_current()
     .await
     .expect("own compaction");
     let manifest = match compacted {

@@ -44,10 +44,7 @@ async fn compact_and_check_pair(
     for _ in 0..32 {
         let outcome = fixture
             .engine()
-            .compact_metadata_unit(
-                None,
-                &crate::compaction::MetadataCompactionCancellation::default(),
-            )
+            .compact_from_current()
             .await
             .expect("compact a family group");
         let namespace = crate::test_support::namespace_store(store, namespace_id);

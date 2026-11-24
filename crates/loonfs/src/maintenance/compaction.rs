@@ -112,17 +112,17 @@ impl Maintenance {
     /// Runs size-tiered compaction units on `namespace_id` while a unit is
     /// due, and reports how many units the call published.
     ///
-    /// This is the namespace's one compaction loop, which a writer session
-    /// runs after its folds and a host's metadata calls run after their
-    /// folds. Each unit compacts the whole size-tiered window that the
-    /// namespace's run policy selects. The first unit plans from `observed`, the current manifest
-    /// that the caller loaded from the store, when it's given. The call stops when nothing is
-    /// due, when `cancellation` is set, when the namespace's writer session in this
-    /// runtime is closed or its namespace deleted, after
-    /// [`MAX_LOST_COMPACTION_RACES`] abandoned units in a row, or after it
-    /// publishes [`MAX_COMPACTION_UNITS_PER_CALL`] units. A close or a delete
-    /// stops the loop before its next unit, and `cancellation` also stops a
-    /// unit in progress at its next block. The response's outcome is
+    /// This is the namespace's one compaction loop, which a writer session runs
+    /// after its folds and a host's metadata calls run after their folds. Each
+    /// unit compacts the whole size-tiered window that the namespace's run
+    /// policy selects. The first unit plans from `observed`, the current
+    /// manifest that the caller loaded from the store, when it's given. The
+    /// call stops when nothing is due, when `cancellation` is set, when the
+    /// namespace's writer session in this runtime is closed or its namespace
+    /// deleted, after [`MAX_LOST_COMPACTION_RACES`] abandoned units in a row,
+    /// or after it publishes [`MAX_COMPACTION_UNITS_PER_CALL`] units. A close
+    /// or a delete stops the loop before its next unit, and `cancellation` also
+    /// stops a unit in progress at its next block. The response's outcome is
     /// [`MetadataMaintenanceOutcome::CaughtUp`] only when the call stopped
     /// because no unit was due.
     pub(crate) async fn compact_namespace(
@@ -294,7 +294,7 @@ impl Maintenance {
         let started_at_ms = self.core.timer().monotonic_now_ms();
         let outcome = self
             .engine(namespace_id)
-            .compact_metadata_unit(Some(basis), cancellation)
+            .compact_metadata_unit(basis, cancellation)
             .await
             .map_err(Error::from);
         let elapsed_ms = self
