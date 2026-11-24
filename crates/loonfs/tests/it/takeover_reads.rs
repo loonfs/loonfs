@@ -302,13 +302,15 @@ impl Takeover {
     async fn while_a_commit_waits(&self, during: impl std::future::Future<Output = ()>) {
         self.gate.block_next();
         let actor = loonfs_test_support::test_actor();
-        let (parked, ()) =
-            futures::join!(self.namespace.create_directory("/during", &actor), async {
-                bounded(STEP, self.gate.wait_until_blocked())
-                    .await
-                    .expect("A's commit waits at its WAL put");
-                during.await;
-            });
+        // The commit is boxed to keep the layout of this future under the
+        // compiler's depth limit.
+        let commit = Box::pin(self.namespace.create_directory("/during", &actor));
+        let (parked, ()) = futures::join!(commit, async {
+            bounded(STEP, self.gate.wait_until_blocked())
+                .await
+                .expect("A's commit waits at its WAL put");
+            during.await;
+        });
         assert_eq!(
             parked.expect_err("B took over during A's commit").code(),
             ErrorCode::WriterFenced
