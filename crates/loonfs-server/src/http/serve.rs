@@ -4,7 +4,6 @@
 use super::host_routes::router;
 use super::tls::{self, TlsListener};
 use crate::config::{MemorySizing, ServerConfig, TransportConfig, ValidatedServerConfig};
-use crate::scheduler::{GrepIndexing, Scheduler, SchedulerState};
 use crate::{Result, ServerError};
 use axum::serve::ListenerExt as _;
 use axum::Router;
@@ -17,7 +16,10 @@ use loonfs::{
     ConfiguredObjectStoreKind, LoonFs, Maintenance, SharedObjectStore, Writable, WriterId,
 };
 use loonfs_grep::{GrepBlockCache, GrepService, GrepWorker};
-use loonfs_http::{HttpConfig, HttpHandles, HttpMetrics, HttpState, Namespaces, RequestLimit};
+use loonfs_http::{
+    GrepIndexing, HttpConfig, HttpHandles, HttpMetrics, HttpState, Namespaces, RequestLimit,
+    Scheduler, SchedulerState,
+};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use loonfs_types::config::ConfigFieldError;
@@ -98,7 +100,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
     } = build_handles(
         &config,
         &memory,
-        maintenance_writer_id,
+        maintenance_writer_id.clone(),
         store,
         &metrics,
         std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
@@ -128,10 +130,11 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
     let namespaces = Arc::new(Namespaces::<SchedulerState>::new(runtime.clone()));
     let scheduler = Scheduler::new(
         config.scheduler_config(),
-        runtime.object_store(),
-        config.maintenance.maintains().then(|| maintenance.clone()),
         Arc::clone(&namespaces),
-        runtime.monotonic_timer(),
+        config
+            .maintenance
+            .maintains()
+            .then_some(maintenance_writer_id),
         grep_worker
             .as_ref()
             .map(|worker| GrepIndexing::new(worker.clone(), grep_policy)),
@@ -514,7 +517,7 @@ where
         scheduler,
         deadline_ms,
     } = settlement;
-    let scheduler = scheduler.start();
+    let running = scheduler.start();
     let (listener_close_tx, listener_close_rx) = tokio::sync::oneshot::channel();
     let mut server = Box::pin(serve_connections(
         listener,
@@ -556,7 +559,7 @@ where
     drop(server);
     // The scheduler waits under the same deadline, and is aborted when the
     // deadline ends.
-    let stopped = scheduler.stop(deadline.as_mut(), deadline_ms).await;
+    let stopped = running.stop(deadline.as_mut(), deadline_ms).await;
     let runtime_settled = runtime.shutdown().await;
     // Nothing reads through the cache any more, so the SSD tier can write
     // the blocks it queued and stop.

@@ -468,6 +468,11 @@ impl<S: HostState> Namespaces<S> {
         result
     }
 
+    /// Returns the runtime that the table opens sessions with.
+    pub(crate) fn runtime(&self) -> &LoonFs<Writable> {
+        &self.runtime
+    }
+
     /// Advances a host walk with one table lookup, and unlocks the table between entries.
     pub fn next_held_id(&self, after: Option<&NamespaceId>) -> Option<NamespaceId> {
         use std::ops::Bound::{Excluded, Unbounded};

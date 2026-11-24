@@ -1,10 +1,12 @@
 //! The LoonFS HTTP API as a library: the routes and handlers that serve a
-//! LoonFS runtime, and the OpenAPI document that describes them.
+//! LoonFS runtime, the OpenAPI document that describes them, and the
+//! maintenance [`Scheduler`] that a host builds over its [`Namespaces`] table.
 //! Hosts own configuration, listeners, shutdown, and operational routes.
 
 #![warn(missing_docs)]
 
 mod http;
+mod scheduler;
 mod state;
 
 pub use http::metrics::HttpMetrics;
@@ -13,6 +15,12 @@ pub use http::openapi_document;
 pub use http::request_limit::RequestLimit;
 pub use http::usage::{UsageRecorder, UsageReport};
 pub use http::{authenticate_routes, error_response, observe_routes, panic_message, router};
+pub use scheduler::{
+    GrepIndexing, RunningScheduler, Scheduler, SchedulerConfig, SchedulerState, SweepReport,
+    DEFAULT_GC_INTERVAL_MS, DEFAULT_IDLE_SESSION_CLOSE_AFTER_MS, DEFAULT_MAINTENANCE_INTERVAL_MS,
+    DEFAULT_MAX_CONCURRENT_MAINTENANCE, DEFAULT_METADATA_RETRY_INTERVAL_MS,
+    DEFAULT_SWEEP_INTERVAL_MS,
+};
 pub use state::{
     AuthPolicy, HeldNamespace, HostState, HttpConfig, HttpHandles, HttpState, JobMode, Namespaces,
     WriterSessions, DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS,

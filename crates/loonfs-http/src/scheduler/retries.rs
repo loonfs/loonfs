@@ -7,8 +7,8 @@ use crate::scheduler::SchedulerState;
 use crate::scheduler::StepRetry;
 use crate::scheduler::MAX_STEP_BACKOFF_MS;
 
+use crate::HeldNamespace;
 use loonfs::{ErrorCode, NamespaceId, PoolId};
-use loonfs_http::HeldNamespace;
 
 use std::sync::Mutex;
 
@@ -36,7 +36,7 @@ impl CallFailure {
     }
 
     /// Whether the failure counts against the call. A namespace that is
-    /// gone, or a server that is shutting down, doesn't.
+    /// gone, or a host that is shutting down, doesn't.
     fn counts(&self) -> bool {
         !self.namespace_gone() && self.code() != ErrorCode::ShuttingDown
     }
@@ -135,7 +135,7 @@ impl Scheduler {
 
     /// The backoff after a call's first failure: one maintenance interval.
     fn first_backoff_ms(&self) -> u64 {
-        self.inner.config.maintenance_interval_ms
+        self.inner.config.maintenance_interval_ms.get()
     }
 
     /// Records how one call ended on a namespace, and returns the call's

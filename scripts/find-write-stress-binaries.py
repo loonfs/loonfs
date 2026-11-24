@@ -10,7 +10,7 @@ targets = {
     ("crates/loonfs-cli/tests/it/main.rs", True): "cli",
     ("crates/loonfs/src/lib.rs", True): "runtime",
     ("crates/loonfs-core/src/lib.rs", True): "core",
-    ("crates/loonfs-server/src/lib.rs", True): "server",
+    ("crates/loonfs-http/src/lib.rs", True): "http",
     ("crates/loonfs-cli/src/main.rs", False): "loonfs",
     ("crates/loonfs-server/src/main.rs", False): "loonfs-server",
 }

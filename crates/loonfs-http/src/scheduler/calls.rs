@@ -12,6 +12,7 @@ use crate::scheduler::Scheduler;
 use crate::scheduler::SchedulerInner;
 use crate::scheduler::SchedulerState;
 use crate::scheduler::MAX_GREP_STEPS_PER_INDEX_STEP;
+use crate::HeldNamespace;
 use futures::FutureExt as _;
 use loonfs::SharedObjectStore;
 use loonfs::{
@@ -21,7 +22,6 @@ use loonfs::{
 use loonfs_grep::{
     GrepBuildOutcome, GrepError, GrepProgress, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps,
 };
-use loonfs_http::HeldNamespace;
 
 use std::collections::hash_map::Entry;
 use std::sync::Mutex;
@@ -107,7 +107,7 @@ impl Scheduler {
             }
             held.handle.has_current_writer_position()
         });
-        let interval_ms = inner.config.metadata_retry_interval_ms;
+        let interval_ms = inner.config.metadata_retry_interval_ms.get();
         let work_wait_ms = match outcome {
             Ok(MetadataMaintenanceOutcome::CaughtUp) if positioned => 0,
             _ => next_due_at_ms.map_or(interval_ms, |due_at_ms| {
@@ -293,9 +293,9 @@ impl Scheduler {
     /// `namespace_deleted`, which isn't a failure.
     ///
     /// A floor that moves is recorded in a floor object in the WAL, through
-    /// the namespace's writer session in this server when the server has
-    /// one, and the advance then folds the namespace, so a manifest records
-    /// the floor. The advance opens no session and fences no writer. For
+    /// the namespace's writer session in this host when the host has one,
+    /// and the advance then folds the namespace, so a manifest records the
+    /// floor. The advance opens no session and fences no writer. For
     /// when the deletions below the new floor expire, and when their rows are
     /// removed, see [Advancing the floor on a
     /// schedule](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#advancing-the-floor-on-a-schedule).
@@ -341,9 +341,10 @@ impl Scheduler {
         grep: &GrepIndexing,
         namespace_id: &NamespaceId,
     ) -> Result<bool, GrepError> {
-        let mut steps = grep
-            .worker
-            .steps(namespace_id, self.inner.config.maintenance_interval_ms);
+        let mut steps = grep.worker.steps(
+            namespace_id,
+            self.inner.config.maintenance_interval_ms.get(),
+        );
         // A grep step changes the pending entry only once it succeeds, so the
         // index step publishes the grep steps before a failed one, and then
         // reports the failure.

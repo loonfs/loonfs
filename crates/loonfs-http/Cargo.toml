@@ -31,7 +31,7 @@ serde_json.workspace = true
 serde_path_to_error.workspace = true
 serde_urlencoded.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tower.workspace = true
 tracing.workspace = true
 utoipa = { workspace = true, optional = true }
@@ -49,7 +49,7 @@ loonfs-client.workspace = true
 loonfs-core = { workspace = true, features = ["test-support"] }
 loonfs-test-support.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "test-util"] }
 ureq.workspace = true
 
 [features]

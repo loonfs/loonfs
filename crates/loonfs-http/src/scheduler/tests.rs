@@ -1,14 +1,13 @@
 //! Sweeps, session steps, and their store request costs.
 
 use super::retries::MaintenanceCall;
-use super::{GrepIndexing, Scheduler, SchedulerState, StepRetry, SweepReport};
-use crate::config::{GrepConfig, JobMode, ServerConfig};
+use super::{GrepIndexing, Scheduler, SchedulerConfig, SchedulerState, StepRetry, SweepReport};
+use crate::{HeldNamespace, JobMode, Namespaces, WriterSessions};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
 use loonfs::{LoonFs, Maintenance, Namespace, NamespaceId, SharedObjectStore, Writable};
 use loonfs_grep::entry::{grep_extension_name, GrepIndexStatus};
 use loonfs_grep::{GrepWorker, GrepWorkerConfig};
-use loonfs_http::{HeldNamespace, Namespaces, WriterSessions};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -58,9 +57,9 @@ const DAY_MS: u64 = 24 * 60 * MINUTE_MS;
 
 /// Returns the idle fold age, in milliseconds, of the runtime that `config`
 /// builds, and zero when the runtime doesn't fold idle tails.
-fn idle_fold_after_ms(config: &ServerConfig) -> u64 {
+fn idle_fold_after_ms(config: &TestConfig) -> u64 {
     config
-        .runtime_config()
+        .runtime
         .idle_fold_after_ms
         .map_or(0, std::num::NonZeroU64::get)
 }
@@ -76,14 +75,14 @@ struct SchedulerServer {
 }
 
 impl SchedulerServer {
-    async fn start(store: SharedObjectStore, config: &ServerConfig, now_ms: u64) -> Self {
+    async fn start(store: SharedObjectStore, config: &TestConfig, now_ms: u64) -> Self {
         let clock = Arc::new(ManualClock::new(now_ms));
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let runtime = LoonFs::builder_with_store(store, loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("sweep-server"))
             .config(loonfs::RuntimeConfig {
                 min_publish_interval_ms: 0,
-                ..config.runtime_config()
+                ..config.runtime.clone()
             })
             .wall_clock(clock.clone())
             .monotonic_timer(clock.clone())
@@ -91,8 +90,9 @@ impl SchedulerServer {
             .build()
             .await
             .expect("build the server runtime");
-        let maintenance = runtime.maintenance(writer_id("sweep-server-maintenance"));
-        let grep_worker = config.grep.mode.maintains().then(|| {
+        let maintenance_writer_id = writer_id("sweep-server-maintenance");
+        let maintenance = runtime.maintenance(maintenance_writer_id.clone());
+        let grep_worker = config.grep.map(|_| {
             GrepWorker::new(
                 runtime.object_store(),
                 runtime.read_only(),
@@ -100,22 +100,16 @@ impl SchedulerServer {
                 loonfs_grep::GrepStepBudget::default(),
             )
         });
-        let grep = grep_worker.clone().map(|worker| {
-            GrepIndexing::new(
-                worker,
-                config
-                    .grep
-                    .worker
-                    .build_policy()
-                    .expect("build the grep policy"),
-            )
+        let grep = grep_worker.clone().zip(config.grep).map(|(worker, grep)| {
+            GrepIndexing::new(worker, grep.build_policy().expect("build the grep policy"))
         });
         let scheduler = Scheduler::new(
-            config.scheduler_config(),
-            runtime.object_store(),
-            config.maintenance.maintains().then(|| maintenance.clone()),
+            config.scheduler,
             Arc::new(Namespaces::new(runtime.clone())),
-            runtime.monotonic_timer(),
+            config
+                .maintenance
+                .maintains()
+                .then_some(maintenance_writer_id),
             grep,
             recorder.as_ref(),
         );
@@ -236,28 +230,35 @@ impl SchedulerServer {
     }
 }
 
-/// A config with every default, and `grep` maintained when asked.
-fn scheduler_config(grep: Option<GrepWorkerConfig>) -> ServerConfig {
-    let mut config: ServerConfig = toml::from_str(
-        r#"
-bind = "127.0.0.1:0"
-writer_id = "sweep-server"
-content_token_secret = "sweep-test-secret"
+/// The settings of a test host: those of its runtime and its scheduler,
+/// whether it maintains the store, and those of its grep worker when it
+/// maintains the grep index.
+struct TestConfig {
+    runtime: loonfs::RuntimeConfig,
+    scheduler: SchedulerConfig,
+    maintenance: JobMode,
+    grep: Option<GrepWorkerConfig>,
+}
 
-[store]
-kind = "local_fs"
-root = "unused"
-"#,
-    )
-    .expect("parse the scheduler test config");
-    if let Some(worker) = grep {
-        config.grep = GrepConfig {
-            mode: JobMode::ServeAndMaintain,
-            worker,
-            ..GrepConfig::default()
-        };
+/// A config with every default, and `grep` maintained when asked. The
+/// runtime records remote traces, as the reference server's runtime does.
+fn scheduler_config(grep: Option<GrepWorkerConfig>) -> TestConfig {
+    TestConfig {
+        runtime: loonfs::RuntimeConfig {
+            trace_mode: loonfs::TraceMode::Remote,
+            ..loonfs::RuntimeConfig::default()
+        },
+        scheduler: SchedulerConfig {
+            max_concurrent_maintenance: crate::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+            maintenance_interval_ms: crate::DEFAULT_MAINTENANCE_INTERVAL_MS,
+            metadata_retry_interval_ms: crate::DEFAULT_METADATA_RETRY_INTERVAL_MS,
+            gc_interval_ms: crate::DEFAULT_GC_INTERVAL_MS,
+            sweep_interval_ms: crate::DEFAULT_SWEEP_INTERVAL_MS,
+            idle_session_close_after_ms: crate::DEFAULT_IDLE_SESSION_CLOSE_AFTER_MS,
+        },
+        maintenance: JobMode::ServeAndMaintain,
+        grep,
     }
-    config
 }
 
 /// A writer that ran before the server started, on the real clock.
@@ -751,7 +752,7 @@ async fn a_panicking_call_is_backed_off_and_the_next_namespace_still_runs_its_st
         server.retry(&names[1], MaintenanceCall::Metadata),
         StepRetry {
             retry_at_ms: server.scheduler.inner.timer.monotonic_now_ms()
-                + config.metadata_retry_interval_ms.get(),
+                + config.scheduler.metadata_retry_interval_ms.get(),
             attempts: 1,
         },
         "the panic counts as a failure, and the session steps wait for its retry time"
@@ -770,7 +771,7 @@ async fn a_panicking_call_is_backed_off_and_the_next_namespace_still_runs_its_st
 /// session from closing while a test holds it.
 async fn held_failing_server(
     directory: &std::path::Path,
-    config: &ServerConfig,
+    config: &TestConfig,
     failing: OperationSelector,
 ) -> (
     Arc<FailStore<LocalFsStore>>,
@@ -891,21 +892,21 @@ async fn a_failing_metadata_step_waits_its_interval() {
     let mut config = scheduler_config(None);
     assert_eq!(
         (
-            config.maintenance_interval_ms.get(),
-            config.metadata_retry_interval_ms.get()
+            config.scheduler.maintenance_interval_ms.get(),
+            config.scheduler.metadata_retry_interval_ms.get()
         ),
         (5_000, 5 * MINUTE_MS)
     );
     // Keeps collection from coming due while the clock runs.
-    config.gc_interval_ms = const { std::num::NonZeroU64::new(30 * DAY_MS).unwrap() };
+    config.scheduler.gc_interval_ms = const { std::num::NonZeroU64::new(30 * DAY_MS).unwrap() };
     // The tail is due from the first run, so each metadata step folds it
     // and reaches the failing store.
-    config.idle_fold_after_ms = Some(1);
+    config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
     let (store, server, namespace_id, held) =
         held_failing_server(directory.path(), &config, OperationSelector::Any).await;
     store.fail_all();
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     server
         .run_steps_through_retries(&namespace_id, MaintenanceCall::Metadata, &WAIT_SECONDS)
@@ -929,7 +930,7 @@ async fn a_failing_metadata_step_waits_its_interval() {
         .expect("write another tail");
     store.fail_all();
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert_eq!(
         server
@@ -948,15 +949,17 @@ async fn a_failing_collection_backs_off_from_one_interval_to_an_hour() {
     const WAIT_SECONDS: [u64; 12] = [5, 10, 20, 40, 80, 160, 320, 640, 1_280, 2_560, 3_600, 3_600];
     let directory = tempdir().expect("tempdir");
     let mut config = scheduler_config(None);
-    config.idle_fold_after_ms = Some(0);
+    config.runtime.idle_fold_after_ms = None;
     let (store, server, namespace_id, _held) =
         held_failing_server(directory.path(), &config, OperationSelector::List).await;
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert!(server.metadata_caught_up(&namespace_id).await);
     store.fail_all();
-    server.run_steps_after(config.gc_interval_ms.get()).await;
+    server
+        .run_steps_after(config.scheduler.gc_interval_ms.get())
+        .await;
     assert_eq!(server.call_failures(MaintenanceCall::Gc), 1);
     server
         .run_steps_through_retries(&namespace_id, MaintenanceCall::Gc, &WAIT_SECONDS)
@@ -972,18 +975,20 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
     let directory = tempdir().expect("tempdir");
     let mut config = scheduler_config(None);
     // The first run folds the tail, so only collection is left due.
-    config.idle_fold_after_ms = Some(1);
+    config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
     let (store, server, namespace_id, held) =
         held_failing_server(directory.path(), &config, OperationSelector::List).await;
     let namespaces = &server.scheduler.inner.namespaces;
     drop(held);
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
     store.fail_all();
 
-    server.run_steps_after(config.gc_interval_ms.get()).await;
+    server
+        .run_steps_after(config.scheduler.gc_interval_ms.get())
+        .await;
     assert_eq!(server.call_failures(MaintenanceCall::Gc), 1);
     assert_eq!(
         held_ids(namespaces),
@@ -992,7 +997,7 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
     );
 
     let attempts = || server.retry(&namespace_id, MaintenanceCall::Gc).attempts;
-    while super::retries::backoff_ms(config.maintenance_interval_ms.get(), attempts())
+    while super::retries::backoff_ms(config.scheduler.maintenance_interval_ms.get(), attempts())
         < super::MAX_STEP_BACKOFF_MS
     {
         let failures = server.call_failures(MaintenanceCall::Gc);
@@ -1005,7 +1010,7 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
         assert!(!held_ids(namespaces).is_empty());
     }
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert!(
         held_ids(namespaces).is_empty(),
@@ -1030,7 +1035,7 @@ async fn a_parked_namespace_does_not_hold_up_later_pages() {
         OperationSelector::Any,
     ));
     let mut config = scheduler_config(None);
-    config.max_concurrent_maintenance = const { std::num::NonZeroUsize::new(2).unwrap() };
+    config.scheduler.max_concurrent_maintenance = const { std::num::NonZeroUsize::new(2).unwrap() };
     let server = SchedulerServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS)
         .await
         .page_limit(page_limit(2));
@@ -1091,7 +1096,7 @@ async fn a_listing_failure_on_a_later_page_lets_started_namespaces_finish_and_fa
         OperationSelector::Any,
     ));
     let mut config = scheduler_config(None);
-    config.max_concurrent_maintenance = const { std::num::NonZeroUsize::new(2).unwrap() };
+    config.scheduler.max_concurrent_maintenance = const { std::num::NonZeroUsize::new(2).unwrap() };
     let server = SchedulerServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS)
         .await
         .page_limit(page_limit(1));
@@ -1185,7 +1190,7 @@ async fn a_stop_between_two_pages_leaves_the_sweep_not_complete() {
         OperationSelector::Any,
     ));
     let mut config = scheduler_config(None);
-    config.max_concurrent_maintenance = const { std::num::NonZeroUsize::new(1).unwrap() };
+    config.scheduler.max_concurrent_maintenance = const { std::num::NonZeroUsize::new(1).unwrap() };
     let server = SchedulerServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS)
         .await
         .page_limit(page_limit(1));

@@ -2,16 +2,16 @@
 //! retention window.
 
 use super::{
-    idle_fold_after_ms, local_store, scheduler_config, seed_writer, SchedulerServer, DAY_MS,
+    idle_fold_after_ms, local_store, scheduler_config, seed_writer, SchedulerServer, TestConfig,
+    DAY_MS,
 };
-use crate::config::ServerConfig;
 use crate::scheduler::lock;
 use crate::scheduler::retries::MaintenanceCall;
+use crate::WriterSessions as _;
 use loonfs::{
     AdvanceRetentionFloorOptions, CommitSeq, CreateNamespaceOptions, NamespaceDiagnostics,
     NamespaceId, RetentionTarget, RetentionWindow, SharedObjectStore,
 };
-use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -44,9 +44,9 @@ fn window(window_ms: u64) -> RetentionWindow {
 }
 
 /// A config with every default, and `window_ms` as its retention window.
-pub(super) fn retention_config(window_ms: Option<u64>) -> ServerConfig {
+pub(super) fn retention_config(window_ms: Option<u64>) -> TestConfig {
     let mut config = scheduler_config(None);
-    config.retention_window_ms = window_ms.map(window);
+    config.runtime.default_retention_window_ms = window_ms.map(window);
     config
 }
 
@@ -324,7 +324,7 @@ async fn session_steps_never_advance_the_floor_and_the_next_sweep_does() {
     server.run_steps_after(2 * WINDOW_MS).await;
     for _ in 0..3 {
         server
-            .run_steps_after(config.maintenance_interval_ms.get())
+            .run_steps_after(config.scheduler.maintenance_interval_ms.get())
             .await;
     }
     let entry = server
@@ -457,7 +457,9 @@ async fn a_failing_advance_fails_once_per_sweep_until_it_succeeds() {
     store.fail_all();
 
     for sweeps in 1..=3 {
-        server.sweep_after(config.sweep_interval_ms.get()).await;
+        server
+            .sweep_after(config.scheduler.sweep_interval_ms.get())
+            .await;
         assert_eq!(
             server.retention_failures(),
             sweeps,
@@ -475,7 +477,9 @@ async fn a_failing_advance_fails_once_per_sweep_until_it_succeeds() {
     );
 
     store.clear();
-    server.sweep_after(config.sweep_interval_ms.get()).await;
+    server
+        .sweep_after(config.scheduler.sweep_interval_ms.get())
+        .await;
     assert_eq!(
         server.diagnostics(&namespace_id).await.retention_floor_seq,
         seq,

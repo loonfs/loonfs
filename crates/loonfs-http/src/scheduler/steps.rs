@@ -4,12 +4,12 @@
 use super::calls::Overlap;
 use super::retries::{CallFailure, MaintenanceCall};
 use super::{contain, lock, RunningScheduler, Scheduler, SchedulerState};
+use crate::HeldNamespace;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{
     CommitSeq, ErrorCode, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus,
 };
-use loonfs_http::HeldNamespace;
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::time::MissedTickBehavior;
@@ -112,7 +112,7 @@ impl Scheduler {
             Some(Err(code)) if code.is_namespace_gone() => Due::Close(Close::Ended),
             metadata => {
                 // Metadata that another process maintains needs no step from
-                // this server.
+                // this host.
                 let metadata_settled = inner.maintenance.is_none()
                     || metadata.map_or(!positioned, |answer| {
                         answer == Ok(MetadataMaintenanceOutcome::CaughtUp)
@@ -171,7 +171,7 @@ impl Scheduler {
     }
 
     /// Whether a collection step is pending for a held session at `seq`:
-    /// this server maintains the store, the session has published, its seq
+    /// this host maintains the store, the session has published, its seq
     /// moved since the last collection, and `gc_interval_ms` passed since
     /// that collection.
     fn collection_pending(
@@ -185,12 +185,12 @@ impl Scheduler {
             && held.host_state.collection_pending(
                 seq,
                 inner.timer.monotonic_now_ms(),
-                inner.config.gc_interval_ms,
+                inner.config.gc_interval_ms.get(),
             )
     }
 
     /// Whether an index step is pending for a held session at `seq`: this
-    /// server maintains the grep index, and the index is marked dirty or the
+    /// host maintains the grep index, and the index is marked dirty or the
     /// scheduler last brought it up to date at another seq.
     fn index_pending(&self, held: &HeldNamespace<SchedulerState>, seq: Option<CommitSeq>) -> bool {
         self.inner.grep.is_some() && (held.index_dirty || held.host_state.indexed_seq != seq)
@@ -221,7 +221,7 @@ impl Scheduler {
                     .close_if_idle(
                         namespace_id,
                         seq,
-                        inner.config.idle_session_close_after_ms,
+                        inner.config.idle_session_close_after_ms.get(),
                         |held| {
                             // A failing step keeps an idle session held, so
                             // the scheduler retries the step on its backoff,
@@ -245,14 +245,18 @@ impl Scheduler {
         .map(|_| ())
     }
 
-    pub(crate) fn start(&self) -> RunningScheduler {
+    /// Starts the scheduler's two loops on the current Tokio runtime: a sweep
+    /// at start and then every `sweep_interval_ms`, and the due steps of each
+    /// held session every `maintenance_interval_ms`. The reference server
+    /// starts them when it serves.
+    pub fn start(&self) -> RunningScheduler {
         let inner = &self.inner;
         let config = &inner.config;
         tracing::info!(
-            maintenance_interval_ms = config.maintenance_interval_ms,
-            metadata_retry_interval_ms = config.metadata_retry_interval_ms,
-            gc_interval_ms = config.gc_interval_ms,
-            sweep_interval_ms = config.sweep_interval_ms,
+            maintenance_interval_ms = config.maintenance_interval_ms.get(),
+            metadata_retry_interval_ms = config.metadata_retry_interval_ms.get(),
+            gc_interval_ms = config.gc_interval_ms.get(),
+            sweep_interval_ms = config.sweep_interval_ms.get(),
             max_concurrent_maintenance = config.max_concurrent_maintenance.get(),
             maintains = inner.maintenance.is_some(),
             maintains_grep_index = inner.grep.is_some(),
@@ -260,7 +264,7 @@ impl Scheduler {
         );
         let scheduler = self.clone();
         RunningScheduler {
-            stop: inner.stop.clone(),
+            scheduler: self.clone(),
             task: tokio::spawn(async move {
                 tokio::join!(scheduler.run_sweeps(), scheduler.run_sessions());
             }),
@@ -274,7 +278,7 @@ impl Scheduler {
     async fn run_sweeps(&self) {
         let inner = &self.inner;
         let mut interval =
-            tokio::time::interval(Duration::from_millis(inner.config.sweep_interval_ms));
+            tokio::time::interval(Duration::from_millis(inner.config.sweep_interval_ms.get()));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -292,8 +296,9 @@ impl Scheduler {
     )]
     async fn run_sessions(&self) {
         let inner = &self.inner;
-        let mut interval =
-            tokio::time::interval(Duration::from_millis(inner.config.maintenance_interval_ms));
+        let mut interval = tokio::time::interval(Duration::from_millis(
+            inner.config.maintenance_interval_ms.get(),
+        ));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // Each interval starts the steps of every held session that has no
         // steps still pending or running, so a session runs one set of steps
@@ -326,7 +331,7 @@ impl Scheduler {
 
 /// Walks the IDs of the held sessions, without cloning writer handles.
 pub(super) fn held_ids(
-    namespaces: &loonfs_http::Namespaces<SchedulerState>,
+    namespaces: &crate::Namespaces<SchedulerState>,
 ) -> impl Iterator<Item = NamespaceId> + '_ {
     let mut after = None;
     std::iter::from_fn(move || {
