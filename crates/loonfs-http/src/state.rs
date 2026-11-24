@@ -305,9 +305,8 @@ impl HostState for () {
 /// the fence failed with `writer_fenced`, and the open drops the handle
 /// without a close, because the session can't be used again. The open then
 /// starts a new session, whose first publish takes the namespace back. While
-/// the old session's work ends, an open can fail with retryable
-/// `writer_session_closed`. Sustained fencing of one namespace means two
-/// writers receive its traffic.
+/// the old session's work ends, an open fails with the same `writer_fenced`.
+/// Sustained fencing of one namespace means two writers receive its traffic.
 pub struct Namespaces<S> {
     runtime: LoonFs<Writable>,
     handles: Mutex<BTreeMap<NamespaceId, Arc<Mutex<HeldNamespace<S>>>>>,

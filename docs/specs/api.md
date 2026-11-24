@@ -289,7 +289,7 @@ Automatic retry is narrower than HTTP status codes alone suggest. Clients may re
 
 Other 503 codes require specific action before retrying and include no `Retry-After` header:
 
-- `writer_session_closed` requires routing to the node assigned to the namespace (or waiting briefly if that node is draining a fenced session before a later request opens a new one).
+- `writer_session_closed` requires routing to the node assigned to the namespace.
 - `store_contention` requires caller-controlled backoff, because LoonFS already exhausted its internal CAS attempts, publication time budget, or manifest-reload retries.
 - `maintenance_required` and `index_lagging` require running maintenance.
 - `storage_permission_denied` requires fixing storage credentials or bucket policy.
@@ -617,7 +617,7 @@ The server also drops a session when the namespace is deleted through that serve
 
 - The request that hits the fence fails with `writer_fenced` and isn't resubmitted.
 - The session (including all in-flight handle clones) can never publish again.
-- While in-flight work on the fenced session drains, a new open can return `writer_session_closed` (503). Once that work finishes, a later request opens a fresh session whose first publish reclaims the namespace.
+- While in-flight work on the fenced session drains, a new open returns the same `writer_fenced` (409). Once that work finishes, a later request opens a fresh session whose first publish reclaims the namespace.
 - Fencing one namespace doesn't affect sessions for other namespaces, and each dropped fenced session logs a warning with the namespace ID.
 
 Sustained fencing of one namespace indicates split-brain routing and should be resolved by routing the namespace to a single writer. Neither a `retention` job nor the reference server's sweep fences an active writer, because both record the new floor in a "[floor object](glossary.md#floor-object)" (a WAL object containing no commits) without claiming a writer epoch (see [Retention jobs](#retention-jobs)).

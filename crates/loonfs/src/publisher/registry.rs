@@ -315,8 +315,9 @@ impl PublisherRegistry {
     /// A session whose last handle dropped stays in the table until its
     /// admitted work finishes, and an open before then continues it: a
     /// second session would acquire a new epoch and fence that work. A fenced
-    /// session cannot continue: an open fails while its work ends, then starts
-    /// a new session even while old handles still exist.
+    /// session can't continue, so an open fails with the session's
+    /// `writer_fenced` while its work ends, then starts a new session even
+    /// while old handles still exist.
     pub(crate) fn open_session(
         &self,
         namespace_id: &NamespaceId,
@@ -326,11 +327,9 @@ impl PublisherRegistry {
             return Err(CoreError::ShuttingDown);
         }
         if let Some(live) = state.sessions.get(namespace_id) {
-            if live.publisher.session_is_fenced() {
+            if let Some(fenced) = live.publisher.unfenced_session().err() {
                 if !live.publisher.lock_state().has_ended(false) {
-                    return Err(CoreError::WriterSessionClosed {
-                        namespace_id: namespace_id.clone(),
-                    });
+                    return Err(fenced);
                 }
                 live.publisher.read_position.clear();
                 state.sessions.remove(namespace_id);
