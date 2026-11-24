@@ -36,11 +36,11 @@ const DEFAULT_MAX_ADMITTED_BYTES: NonZeroUsize = NonZeroUsize::new(64 * 1024 * 1
 /// Default merge allowance, the estimated peak memory of the merges that
 /// plan and publish at once.
 ///
-/// Admission estimates a merge's peak as three times its planned WAL bytes.
+/// Admission estimates a merge's peak as five times its planned WAL bytes.
 /// A file create whose content has a layout of one extent plans 5,432
-/// bytes, so the default admits a merge of about 32,900 file creates while
+/// bytes, so the default admits a merge of about 19,800 file creates while
 /// no other merge is admitted. One WAL object fits about 98,800 creates,
-/// and an allowance of 1.5 GiB, three times the WAL object's 512 MiB,
+/// and an allowance of 2.5 GiB, five times the WAL object's 512 MiB,
 /// admits every merge that fits one WAL object.
 pub const DEFAULT_MAX_MERGE_BYTES: usize = 512 * 1024 * 1024;
 
@@ -56,7 +56,7 @@ pub const DEFAULT_MAX_MERGE_BYTES: usize = 512 * 1024 * 1024;
 /// work of every runtime that shares it. Publication admission never waits: a request
 /// past an admitted total fails at once with `commit_queue_full`. A merge
 /// isn't charged to the byte total. Merges share the merge allowance by
-/// their reservations, which grow while they plan to their estimates, three
+/// their reservations, which grow while they plan to their estimates, five
 /// times their planned WAL bytes or the memory that planning uses, whichever
 /// is larger. A merge whose reservation doesn't fit beside the others fails
 /// at once with `server_busy`, and a merge whose estimate exceeds the whole
@@ -288,7 +288,7 @@ impl ExecutionBudgetBuilder {
     }
 
     /// Sets the merge allowance, which limits the estimated peak memory of
-    /// the merges that plan and publish at once. A merge's estimate is three
+    /// the merges that plan and publish at once. A merge's estimate is five
     /// times its planned WAL bytes, or the memory that planning the merge
     /// uses, whichever is larger. The runtimes that share the budget admit
     /// merges while their reservations fit the allowance, and a merge whose

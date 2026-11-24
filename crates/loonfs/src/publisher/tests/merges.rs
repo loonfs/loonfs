@@ -137,10 +137,10 @@ async fn a_merge_is_published_alone_in_its_wal_object() {
 }
 
 /// Checks that the publisher admits and publishes a merge whose estimated
-/// peak, three times its planned WAL bytes, fits the merge allowance,
-/// although the merge is above the budget's byte total and above its
-/// namespace's byte allowance, which refuse a lighter ordinary commit with
-/// `commit_queue_full`. Two merges whose reservations fit the allowance are
+/// peak, `MERGE_PEAK_PER_PLANNED_BYTE` times its planned WAL bytes, fits
+/// the merge allowance, although the merge is above the budget's byte total
+/// and above its namespace's byte allowance, which refuse a lighter ordinary
+/// commit with `commit_queue_full`. Two merges whose reservations fit the allowance are
 /// admitted at once, and both commit. A merge whose peak is above the
 /// allowance fails with `merge_too_large`, which reports the peak and the
 /// allowance.
@@ -155,7 +155,8 @@ async fn merges_that_fit_the_allowance_are_admitted_together() {
     let ordinary = CommitCandidate::new(create_directory_request("ordinary", "ordinary"));
     assert!(ordinary.estimated_retained_bytes() < prepared.estimated_retained_bytes);
     let ordinary_bytes = ordinary.estimated_retained_bytes() + 512 + namespace_id.as_str().len();
-    let merge_peak = 3 * prepared.wal_record_bytes_upper_bound;
+    let merge_peak = super::super::admission::MERGE_PEAK_PER_PLANNED_BYTE
+        * prepared.wal_record_bytes_upper_bound;
     let publisher_with_allowance = |max_merge_bytes: usize| {
         let mut core = TestCore::unpaced();
         let below_the_merge = NonZeroUsize::new(ordinary_bytes - 1).expect("limit");
