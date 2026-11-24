@@ -190,7 +190,7 @@ impl Namespace<Writable> {
                     .snapshot_fork(source_namespace_id, prepared_at_ms)
                     .await?;
                 let planned = async {
-                    let source = self
+                    let snapshot = self
                         .core
                         .pinned_read_at_snapshot(&self.namespace_id, &basis.fork_point_snapshot_id)
                         .await?;
@@ -200,8 +200,7 @@ impl Namespace<Writable> {
                             &new_fork.context,
                             &fork.engine,
                             &fork.context,
-                            &source.engine,
-                            &source.context,
+                            &snapshot.context,
                             request,
                             prepared_at_ms,
                             allowance,
