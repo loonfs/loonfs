@@ -156,8 +156,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// manifest after the fold's own predecessor makes the fold rebuild against
     /// it. The rebuild keeps the tail it read when the manifest is at the same
     /// head (see `same_head`), and loads the tail again otherwise, which
-    /// folds a new writer's log after the writer's claim. A namespace tombstone
-    /// stops the fold.
+    /// folds a new writer's log after the writer's claim. When an attempt
+    /// finds a segment of its manifest missing and a newer manifest replaced
+    /// that manifest, the next attempt rebuilds against the newest manifest
+    /// the same way (see [`Self::ensure_manifest_current`]). A missing
+    /// segment of the current manifest returns `namespace_corrupt`. A
+    /// namespace tombstone stops the fold.
     pub async fn fold_wal_tail(
         &self,
         held: Option<WriterPosition>,
@@ -193,7 +197,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .await;
         let update = match folded {
             Ok(update) => update,
-            // Every attempt lost its manifest number to another publication.
+            // Every attempt lost its put to another publication or found its
+            // manifest replaced.
             Err(CoreError::StoreContention { .. }) => {
                 return Err(CoreError::WalPublish(WalPublishError::NumberTaken))
             }
@@ -408,10 +413,6 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
         // Over a manifest at the same head, everything the fold has is
         // still right:
         // - Tail rows: see `same_head`.
-        // - Deletion roots: the fold reads each one through the winner's
-        //   runs, which contain the same view at `head_seq`. A compaction keeps
-        //   every view at or above the floor, and the floor is at most
-        //   `head_seq`.
         // - Activity: a successor at the same `head_seq` keeps it, so the
         //   basis activity plus the tail's is still the total.
         // - Run numbers: the retry takes its runs and run number from the
@@ -447,25 +448,53 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
                 }
             }
         }
-        let layouts = match self.layouts.take() {
-            Some(layouts) => layouts,
-            None => {
-                self.namespace
-                    .materialize_tail_content(&self.projection)
-                    .await?
+        // The projection reads the rows of `current`, which can be a writer
+        // position's manifest kept in memory. A newer manifest may have
+        // replaced that manifest, and a collection may then have deleted its
+        // segments. So when a read finds a segment missing and a newer
+        // manifest replaced `current`, the attempt returns `Again`, and the
+        // next attempt builds on the newest manifest through the rebuild
+        // above, as an attempt after a lost put does. A missing segment of
+        // the current manifest stays `namespace_corrupt`.
+        let built = async {
+            let layouts = match self.layouts.take() {
+                Some(layouts) => layouts,
+                None => {
+                    self.namespace
+                        .materialize_tail_content(&self.projection)
+                        .await?
+                }
+            };
+            self.clock
+                .ensure_metadata_publication_budget(&self.namespace.namespace_id)?;
+            let manifest = self
+                .namespace
+                .build_namespace_manifest_for_projection(&self.projection, &layouts)
+                .await?;
+            Result::Ok((manifest, layouts))
+        }
+        .await;
+        match built {
+            Ok((manifest, layouts)) => {
+                self.layouts = Some(layouts);
+                Ok(ManifestChange::Next(
+                    Box::new(manifest),
+                    FoldWalOutcome::Published,
+                ))
             }
-        };
-        self.clock
-            .ensure_metadata_publication_budget(&self.namespace.namespace_id)?;
-        let manifest = self
-            .namespace
-            .build_namespace_manifest_for_projection(&self.projection, &layouts)
-            .await?;
-        self.layouts = Some(layouts);
-        Ok(ManifestChange::Next(
-            Box::new(manifest),
-            FoldWalOutcome::Published,
-        ))
+            Err(error) if error.is_missing_segment() => {
+                match self
+                    .namespace
+                    .ensure_manifest_current(payload.manifest_no)
+                    .await
+                {
+                    Ok(()) => Err(error),
+                    Err(CoreError::ManifestReplaced { .. }) => Ok(ManifestChange::Again),
+                    Err(check_error) => Err(check_error),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
