@@ -18,12 +18,13 @@ use tokio::sync::oneshot;
 /// The estimated peak memory of publishing a merge, as a multiple of the
 /// merge's planned WAL bytes. Publication builds the commit's deltas and
 /// encodes its WAL object while the merge's operations are still in memory.
-/// In measurements of merges of file creates, taken when a file create
-/// planned about 4,850 bytes, the peak was about 8,600 bytes for each
-/// create with 13-byte names and about 15,100 with 255-byte names. A file
-/// create whose content has a layout of one extent now plans 5,432 bytes,
-/// so the estimate is 16,296 bytes for each create, which covers both.
-const MERGE_PEAK_PER_PLANNED_BYTE: usize = 3;
+/// In measurements on S3, a merge's own memory (caches left out) grows by
+/// 2.9 bytes for each planned byte in a merge of file creates, 4.3 in a
+/// merge of file creates with edits, 3.9 in a merge of deletes, and 2.5 in
+/// a merge of directory renames. Five is above the steepest of these, 4.3,
+/// with a margin. A file create whose content has a layout of one extent plans
+/// 5,432 bytes, so the estimate is 27,160 bytes for each create.
+pub(super) const MERGE_PEAK_PER_PLANNED_BYTE: usize = 5;
 
 /// The bytes of the merge allowance that a merge reserves before it plans,
 /// or the whole allowance when the allowance is smaller. At the default
@@ -501,8 +502,8 @@ mod tests {
     }
 
     /// A merge under the namespace `main` whose planned WAL bytes are
-    /// `planned_bytes`, so the merge allowance is charged three times those
-    /// bytes.
+    /// `planned_bytes`, so the merge allowance is charged
+    /// [`MERGE_PEAK_PER_PLANNED_BYTE`] times those bytes.
     fn merge(planned_bytes: usize) -> PreparedCandidate {
         let mut candidate = PreparedCandidate::new(loonfs_core::test_support::merge_candidate(
             CommitCandidate::new(super::super::tests::create_directory_request(
@@ -562,7 +563,7 @@ mod tests {
         ));
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
 
-        let mut large = merge(4096);
+        let mut large = merge(16384 / MERGE_PEAK_PER_PLANNED_BYTE);
         large.estimated_retained_bytes = 8192;
         let permit = admit_merge(&admission, &namespace_id, &large)
             .expect("a merge above the namespace allowance and the byte total");
@@ -587,7 +588,8 @@ mod tests {
     }
 
     /// Checks that merges share the allowance by their reservations. A merge
-    /// whose estimated peak, three times its planned WAL bytes, exceeds the
+    /// whose estimated peak, [`MERGE_PEAK_PER_PLANNED_BYTE`] times its
+    /// planned WAL bytes, exceeds the
     /// whole allowance fails with `merge_too_large`, reports the peak and the
     /// allowance, and charges nothing. Two merges from two runtimes that
     /// share a budget each reserve [`MIN_MERGE_RESERVED_BYTES`] at once, and
@@ -623,7 +625,8 @@ mod tests {
             );
         };
 
-        let error = admit_merge(&first_runtime, &namespace_id, &merge(allowance / 3 + 1))
+        let too_large = allowance / MERGE_PEAK_PER_PLANNED_BYTE + 1;
+        let error = admit_merge(&first_runtime, &namespace_id, &merge(too_large))
             .err()
             .expect("a merge above the allowance");
         assert_matches!(
@@ -633,7 +636,8 @@ mod tests {
                 estimated_bytes,
                 max_bytes,
                 split_at_seq: None,
-            } if estimated_bytes == 3 * (allowance / 3 + 1) && max_bytes == allowance
+            } if estimated_bytes == MERGE_PEAK_PER_PLANNED_BYTE * too_large
+                && max_bytes == allowance
         );
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
 
@@ -662,7 +666,8 @@ mod tests {
 
         drop(second);
         let one = budget.stats();
-        let growing = merge(MIN_MERGE_RESERVED_BYTES / 3 + 1);
+        let planned = MIN_MERGE_RESERVED_BYTES / MERGE_PEAK_PER_PLANNED_BYTE + 1;
+        let growing = merge(planned);
         let error = admit_merge(&second_runtime, &namespace_id, &growing)
             .err()
             .expect("no room to grow beside the first merge");
@@ -671,7 +676,7 @@ mod tests {
         drop(first);
         let alone =
             admit_merge(&second_runtime, &namespace_id, &growing).expect("the same merge alone");
-        let peak = 3 * (MIN_MERGE_RESERVED_BYTES / 3 + 1);
+        let peak = MERGE_PEAK_PER_PLANNED_BYTE * planned;
         assert_eq!(budget.stats().admitted_merge_bytes, peak);
         gauges(1, peak);
         drop(alone);
@@ -883,13 +888,21 @@ mod tests {
 
         let allowance = 512 * 1024 * 1024;
         assert_matches!(
-            admit_merge(admission, &namespaces[0], &merge(allowance / 3 + 1))
-                .err(),
+            admit_merge(
+                admission,
+                &namespaces[0],
+                &merge(allowance / MERGE_PEAK_PER_PLANNED_BYTE + 1)
+            )
+            .err(),
             Some(CoreError::MergeTooLarge { max_bytes, .. }) if max_bytes == allowance
         );
         drop(
-            admit_merge(admission, &namespaces[0], &merge(allowance / 3))
-                .expect("a merge within the default allowance"),
+            admit_merge(
+                admission,
+                &namespaces[0],
+                &merge(allowance / MERGE_PEAK_PER_PLANNED_BYTE),
+            )
+            .expect("a merge within the default allowance"),
         );
 
         let mut running = Vec::new();
