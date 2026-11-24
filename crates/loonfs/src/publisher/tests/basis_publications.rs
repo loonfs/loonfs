@@ -1,6 +1,8 @@
 //! Manifest publications that build on a live session's writer position,
 //! which put the position's successor without a request first and read
-//! neither the manifest boundary nor a WAL object before the put.
+//! neither the manifest boundary nor a WAL object before the put. A
+//! retention advance checks the position first, and its fold then puts the
+//! successor of the checked position.
 
 use super::*;
 use loonfs_test_support::stores::RecordedOperation;
@@ -156,11 +158,13 @@ async fn an_explicit_fold_from_a_live_session_puts_on_its_basis_with_no_request_
 }
 
 /// Checks that a retention advance in a runtime with the namespace's live
-/// session creates its floor object at the session's tip and then folds the
-/// floor object on the session's position. The fold's put is the advance's
-/// one manifest request.
+/// session checks the session's position as a strong read does, creates its
+/// floor object at the session's tip, and then folds the floor object on the
+/// session's position. The check is a HEAD of the manifest after the
+/// position's manifest and a read of the manifest boundary, and the fold's
+/// put is the advance's one manifest put.
 #[tokio::test]
-async fn a_retention_advance_from_a_live_session_folds_on_its_basis_with_no_request_first() {
+async fn a_retention_advance_from_a_live_session_checks_the_position_and_folds_on_its_basis() {
     let clock = Arc::new(ManualClock::at_system_time());
     let fixture = Fixture::new({
         let clock = Arc::clone(&clock);
@@ -191,9 +195,23 @@ async fn a_retention_advance_from_a_live_session_folds_on_its_basis_with_no_requ
     .expect("the advance returns")
     .expect("advance the floor");
     assert!(advanced.retention_floor_seq > CommitSeq(0));
+    let manifest = format!("basis MetadataManifest {:020}", next.0);
+    let expected = [
+        // The check of the position.
+        vec![format!("head {manifest}"), "get basis Boundary".to_owned()],
+        // The check that the planned manifest's segments exist.
+        vec!["head basis MetadataSegment".to_owned(); 5],
+        // The floor object, and the fold that records its floor.
+        vec![
+            "put basis WalObject 00000000000000000003".to_owned(),
+            format!("put {manifest}"),
+            "get basis Boundary".to_owned(),
+        ],
+    ]
+    .concat();
     assert_eq!(
-        fixture.manifest_requests(),
-        vec![("put", fixture.manifest(next))]
+        loonfs_test_support::stores::request_lines(&fixture.store.take()),
+        expected
     );
     fixture.shut_down().await;
 }

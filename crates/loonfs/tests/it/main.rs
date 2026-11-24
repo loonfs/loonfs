@@ -53,6 +53,7 @@ mod read_view;
 mod replaced_basis;
 mod restore_deleted;
 mod retained_views;
+mod retention_window_change;
 mod retired_commit;
 mod runtime_config;
 mod session_folds;
