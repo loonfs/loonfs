@@ -186,33 +186,28 @@ impl Namespace<Writable> {
                     .check_replay(&new_fork.context, &fork.engine, &fork.context, request)
                     .await?;
                 let prepared_at_ms = self.core.now_ms();
-                let (fork, merge_snapshot) = self
+                let fork = self
                     .snapshot_fork(source_namespace_id, prepared_at_ms)
                     .await?;
-                let planned = async {
-                    let snapshot = self
-                        .core
-                        .pinned_read_at_snapshot(&self.namespace_id, &basis.fork_point_snapshot_id)
-                        .await?;
-                    let plan = new_fork
-                        .engine
-                        .plan_replay(
-                            &new_fork.context,
-                            &fork.engine,
-                            &fork.context,
-                            &snapshot.context,
-                            request,
-                            prepared_at_ms,
-                            allowance,
-                        )
-                        .await?;
-                    let record = plan.record().clone();
-                    let report = plan.conflicts().to_vec();
-                    Ok::<_, Error>((plan.into_candidate(), record, report))
-                }
-                .await;
-                self.planned_with_merge_snapshot(source_namespace_id, merge_snapshot, planned)
-                    .await
+                let snapshot = self
+                    .core
+                    .pinned_read_at_snapshot(&self.namespace_id, &basis.fork_point_snapshot_id)
+                    .await?;
+                let plan = new_fork
+                    .engine
+                    .plan_replay(
+                        &new_fork.context,
+                        &fork.engine,
+                        &fork.context,
+                        &snapshot.context,
+                        request,
+                        prepared_at_ms,
+                        allowance,
+                    )
+                    .await?;
+                let record = plan.record().clone();
+                let report = plan.conflicts().to_vec();
+                Ok::<_, Error>((plan.into_candidate(), record, report))
             })
         })
         .await

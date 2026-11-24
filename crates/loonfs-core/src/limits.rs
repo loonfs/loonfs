@@ -314,9 +314,8 @@ pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 /// such as the snapshot of the fork that a merge or a rebase plans from,
 /// and of the content proofs of the operation's plan.
 ///
-/// The operation deletes its snapshot when it ends. The lifetime is for an
-/// operation that can't delete its snapshot, so that the namespace's
-/// collector deletes the snapshot after it expires.
+/// The snapshot expires after this lifetime, and the namespace's collector
+/// deletes it after the grace window.
 pub const OPERATION_SNAPSHOT_TTL_MS: u64 = 5 * 60 * 1000;
 
 /// Elapsed monotonic time, from the start of a pool's collection, within

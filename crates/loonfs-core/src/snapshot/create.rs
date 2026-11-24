@@ -41,27 +41,27 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         administrator.assert_for(&self.namespace.namespace_id);
         self.create_verified_snapshot(name, expires_at_ms, basis)
             .await
-            .map(|(created, _)| super::snapshot_summary(created.record))
+            .map(|(record, _)| super::snapshot_summary(record))
     }
 
     /// Creates a snapshot as [`Self::create_snapshot`] does, and returns the
-    /// record with the version that its write stored, beside the newest
-    /// manifest and the manifest boundary that the verification read.
+    /// record beside the newest manifest and the manifest boundary that the
+    /// verification read.
     ///
     /// A merge calls this function to snapshot its fork, so the function
     /// makes no administrator check. A merge isn't only for the
     /// administrator, because it needs the subject's rights on the inodes it
     /// applies, and its snapshot keeps the fork's manifest safe from garbage
-    /// collection while the merge plans and commits. The
-    /// record that this call writes is a user snapshot like any other, so
-    /// the merge sets an expiry on it and deletes it with
-    /// [`Self::delete_created_snapshot`] once the merge's commit returns.
+    /// collection while the merge plans and commits. The record that this
+    /// call writes is a user snapshot like any other, so the merge sets an
+    /// expiry on the record, and garbage collection deletes the record the
+    /// grace window after it expires.
     pub async fn create_verified_snapshot(
         &self,
         name: Option<String>,
         expires_at_ms: Option<u64>,
         basis: Held<LoadedManifest>,
-    ) -> Result<(CreatedSnapshot, Held<LoadedManifest>)> {
+    ) -> Result<(SnapshotPayload, Held<LoadedManifest>)> {
         self.namespace
             .create_verified_snapshot_record(
                 name,
@@ -76,7 +76,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates an unnamed snapshot that expires at `expires_at_ms` of the
     /// manifest that `context` reads, without folding the WAL tail first
     /// (format spec, "Creating and verifying a snapshot"), and returns the
-    /// record with the version that its write stored.
+    /// record.
     ///
     /// The manifest comes from the segment cache or from the store. If a
     /// collection deleted the manifest before the load, or the manifest
@@ -91,7 +91,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         expires_at_ms: Option<u64>,
         context: &RuntimeReadContext,
-    ) -> Result<CreatedSnapshot> {
+    ) -> Result<SnapshotPayload> {
         let decoded = self
             .namespace
             .load_held_manifest(
@@ -109,19 +109,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 &self.namespace.start_clock(),
             )
             .await
-            .map(|(created, _)| created)
+            .map(|(record, _)| record)
     }
-}
-
-/// A snapshot record that this process wrote, with the version of the record
-/// that the write stored.
-#[derive(Debug, Clone)]
-pub struct CreatedSnapshot {
-    /// The record as the write stored it.
-    pub record: SnapshotPayload,
-    /// The record's version, for a compare-and-swap, or `None` when the store
-    /// returned no version.
-    pub etag: Option<String>,
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
@@ -156,7 +145,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             clock,
         )
         .await
-        .map(|(created, basis)| (created.record, basis))
     }
 
     /// Creates a verified user snapshot of `manifest`, with the label `name`
@@ -168,11 +156,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// read it (format spec, "Creating and verifying a snapshot"). The call
     /// returns `stale_head` when the manifest stopped being current before
     /// the snapshot's verification, so the caller can read a fresh basis and
-    /// take a snapshot again. Returns the snapshot record with the version
-    /// that its write stored, and the newest manifest with the manifest
-    /// boundary that the verification read, checked at the start of `clock`.
-    /// A call that fails after it starts writing the record leaves the record
-    /// deleted at its key (see `delete_failed_snapshot`).
+    /// take a snapshot again. Returns the snapshot record, and the newest
+    /// manifest with the manifest boundary that the verification read,
+    /// checked at the start of `clock`. A call that fails after it starts
+    /// writing the record leaves the record deleted at its key (see
+    /// `delete_failed_snapshot`).
     pub(crate) async fn create_verified_snapshot_record(
         &self,
         name: Option<String>,
@@ -180,7 +168,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         manifest: &LoadedManifest,
         kept: KeptBoundary,
         clock: &OperationClock,
-    ) -> Result<(CreatedSnapshot, Held<LoadedManifest>)> {
+    ) -> Result<(SnapshotPayload, Held<LoadedManifest>)> {
         validate_snapshot_request(name.as_deref(), expires_at_ms)?;
         let record = self.new_snapshot_record(
             SnapshotOwner::User {
@@ -192,18 +180,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
             clock,
         );
         let verification = async {
-            let written = write_snapshot_record(&self.store, &record, clock).await?;
-            let verified = self
-                .verify_snapshot_basis(manifest, kept, clock.origin())
-                .await?;
-            Ok::<_, CoreError>((written.etag, verified))
+            write_snapshot_record(&self.store, &record, clock).await?;
+            self.verify_snapshot_basis(manifest, kept, clock.origin())
+                .await
         }
         .await;
         let error = match verification {
-            Ok((etag, SnapshotBasisVerification::Verified(basis))) => {
-                return Ok((CreatedSnapshot { record, etag }, basis))
-            }
-            Ok((_, SnapshotBasisVerification::Invalid)) => manifest_replaced(),
+            Ok(SnapshotBasisVerification::Verified(basis)) => return Ok((record, basis)),
+            Ok(SnapshotBasisVerification::Invalid) => manifest_replaced(),
             // Only the record's write returns this error, and only when the
             // budget was spent before its first put, so a call that returns
             // it sent no put and has no record to delete. A write that sent a

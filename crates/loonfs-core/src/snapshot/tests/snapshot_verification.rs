@@ -114,15 +114,9 @@ async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replace
         .await
         .expect("snapshot of the current manifest");
     assert_eq!(verified.manifest().manifest(), basis.manifest().manifest());
-    assert_eq!(
-        created.record.head_seq,
-        basis.manifest().manifest().head_seq
-    );
+    assert_eq!(created.head_seq, basis.manifest().manifest().head_seq);
     let head = namespace.load_read_state().await.expect("head");
-    assert!(
-        head.seq > created.record.head_seq,
-        "the tail stays unfolded"
-    );
+    assert!(head.seq > created.head_seq, "the tail stays unfolded");
     assert_eq!(
         namespace
             .load_current_basis(crate::test_support::observed_now())
@@ -164,7 +158,7 @@ async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replace
             .state;
         assert_eq!(
             record.owner.deleted_at_ms().is_none(),
-            record.snapshot_id == created.record.snapshot_id,
+            record.snapshot_id == created.snapshot_id,
             "only the verified snapshot isn't deleted"
         );
     }

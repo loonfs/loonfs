@@ -26,7 +26,6 @@ use loonfs_types::{
     ManifestNo, MergeConflictKind, FEATURE_MERGES,
 };
 use std::assert_matches;
-use std::num::NonZeroU64;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -577,12 +576,13 @@ async fn a_merge_reads_the_forks_tail_above_a_folded_manifest() {
 }
 
 /// Checks that a merge's plan takes a snapshot of the fork's current
-/// manifest while the merge runs, without folding the fork, and that the
-/// merge deletes the snapshot once it commits. The fork's `/b.txt` is in its
-/// WAL tail, so the snapshot's head is below the fork's head. The request's
-/// commit ID is the longest that the commit ID grammar accepts.
+/// manifest, without folding the fork, and that the snapshot stays in the
+/// fork's snapshot listing after the merge commits, until it expires. The
+/// fork's `/b.txt` is in its WAL tail, so the snapshot's head is below the
+/// fork's head. The request's commit ID is the longest that the commit ID
+/// grammar accepts.
 #[tokio::test]
-async fn a_merge_releases_the_snapshot_its_plan_took_on_the_fork() {
+async fn a_merge_leaves_the_snapshot_its_plan_took_on_the_fork_to_expire() {
     let family = family().await;
     let request = family.request(&"m".repeat(128));
     let manifests = family.manifest_nos().await;
@@ -593,23 +593,21 @@ async fn a_merge_releases_the_snapshot_its_plan_took_on_the_fork() {
         manifests,
         "the plan folds nothing"
     );
-    let record = &planned.merge_snapshot.record;
-    assert_eq!(Some(record.snapshot_id.manifest_no()), manifests[1]);
-    assert!(record.head_seq < fork_head, "{record:?}");
     let page = family
         .fork
         .list_snapshots()
         .page()
         .await
         .expect("the fork's snapshots while the merge is planned");
-    assert_eq!(
-        page.snapshots
-            .iter()
-            .map(|snapshot| (snapshot.snapshot_id.clone(), snapshot.name.clone()))
-            .collect::<Vec<_>>(),
-        vec![(planned.merge_snapshot.record.snapshot_id.clone(), None)],
-        "the plan takes a snapshot of the fork, with no name"
-    );
+    let [snapshot] = &page.snapshots[..] else {
+        panic!(
+            "the plan takes one snapshot of the fork: {:?}",
+            page.snapshots
+        );
+    };
+    assert_eq!(snapshot.name, None, "the plan's snapshot has no name");
+    assert_eq!(Some(snapshot.snapshot_id.manifest_no()), manifests[1]);
+    assert!(snapshot.captured_seq < fork_head, "{snapshot:?}");
     let mut replans = 0;
     family
         .commit(&request, planned, |request, reservation| {
@@ -623,16 +621,15 @@ async fn a_merge_releases_the_snapshot_its_plan_took_on_the_fork() {
         .await
         .expect("the merge");
     assert_eq!(replans, 0, "the plan commits");
-    let released = family
+    let after = family
         .fork
         .list_snapshots()
         .page()
         .await
         .expect("the fork's snapshots after the merge");
-    assert!(
-        released.snapshots.is_empty(),
-        "the merge releases its snapshot: {:?}",
-        released.snapshots
+    assert_eq!(
+        after.snapshots, page.snapshots,
+        "the snapshot stays until it expires"
     );
 }
 
@@ -1212,10 +1209,8 @@ async fn a_merge_with_fresh_positions_sends_these_requests_in_order() {
         // extent under the pool's prefix, so the commit's reference has a
         // layout.
         "assemble pool ContentBlob",
-        // The commit is one WAL put, and the release is one compare-and-swap
-        // against the version that the record's write stored.
+        // The commit is one WAL put.
         "put main WalObject 00000000000000000005",
-        "swap main-fork Snapshot",
     ];
     assert_eq!(request_lines(&store.take()), expected);
 }
@@ -1244,43 +1239,6 @@ async fn the_next_merge_range_with_fresh_positions_checks_each_position() {
             "head main-fork MetadataManifest 00000000000000000005",
             "get main-fork Boundary",
         ]
-    );
-}
-
-/// Checks that a merge whose snapshot was extended between the plan and the
-/// commit still deletes the snapshot. The extension changes the record's
-/// version, so the release's compare-and-swap against the version from the
-/// snapshot's creation fails, and the release loads the record and swaps
-/// again.
-#[tokio::test]
-async fn a_merge_releases_its_snapshot_after_an_extension() {
-    let family = family().await;
-    let request = family.request("merge");
-    let planned = family.plan(&request).await;
-    family
-        .fork
-        .extend_snapshot(
-            &planned.merge_snapshot.record.snapshot_id,
-            NonZeroU64::new(600_000).expect("ttl"),
-        )
-        .await
-        .expect("extend the merge's snapshot");
-    family
-        .commit(&request, planned, |_, _| {
-            Box::pin(async { panic!("the plan commits") })
-        })
-        .await
-        .expect("the merge");
-    let released = family
-        .fork
-        .list_snapshots()
-        .page()
-        .await
-        .expect("the fork's snapshots after the merge");
-    assert!(
-        released.snapshots.is_empty(),
-        "the merge releases its snapshot: {:?}",
-        released.snapshots
     );
 }
 
