@@ -7,14 +7,16 @@ use crate::scheduler::retries::CallFailure;
 use crate::{HostState, Namespaces};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::metrics::MetricsRecorder;
-use loonfs::{CommitSeq, Maintenance, MaintenanceCancellation, NamespaceId, SharedObjectStore};
+use loonfs::{
+    CommitSeq, Maintenance, MaintenanceCancellation, NamespaceId, SharedObjectStore, WriterId,
+};
 use loonfs_grep::{GramIndexBuildPolicy, GrepWorker};
 use loonfs_objectstore::layout::{list_namespace_ids, list_pool_ids, MAX_NAMESPACE_IDS_PER_PAGE};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::{panic_message, EffectiveLimit, MonotonicTimer};
 use std::collections::HashMap;
 use std::future::Future;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -137,7 +139,7 @@ pub(crate) struct StepRetry {
 /// reaches one hour. A session that was closed or fenced, or whose namespace
 /// is gone, closes once no caller has its handle.
 ///
-/// A scheduler built without a maintenance handle belongs to a host that
+/// A scheduler built without a maintenance writer ID belongs to a host that
 /// doesn't maintain the store, such as the reference server when its
 /// maintenance mode is `serve_only` or `disabled`. Folds, compactions,
 /// sweeps, and collections are another process's work there, so the
@@ -261,19 +263,19 @@ struct Covered {
 pub const DEFAULT_MAX_CONCURRENT_MAINTENANCE: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 /// The default of [`SchedulerConfig::maintenance_interval_ms`], which the
 /// reference server's config uses.
-pub const DEFAULT_MAINTENANCE_INTERVAL_MS: u64 = 5_000;
+pub const DEFAULT_MAINTENANCE_INTERVAL_MS: NonZeroU64 = NonZeroU64::new(5_000).unwrap();
 /// The default of [`SchedulerConfig::metadata_retry_interval_ms`], which the
 /// reference server's config uses.
-pub const DEFAULT_METADATA_RETRY_INTERVAL_MS: u64 = 300_000;
+pub const DEFAULT_METADATA_RETRY_INTERVAL_MS: NonZeroU64 = NonZeroU64::new(300_000).unwrap();
 /// The default of [`SchedulerConfig::gc_interval_ms`], which the reference
 /// server's config uses.
-pub const DEFAULT_GC_INTERVAL_MS: u64 = 3_600_000;
+pub const DEFAULT_GC_INTERVAL_MS: NonZeroU64 = NonZeroU64::new(3_600_000).unwrap();
 /// The default of [`SchedulerConfig::sweep_interval_ms`], which the
 /// reference server's config uses.
-pub const DEFAULT_SWEEP_INTERVAL_MS: u64 = 86_400_000;
+pub const DEFAULT_SWEEP_INTERVAL_MS: NonZeroU64 = NonZeroU64::new(86_400_000).unwrap();
 /// The default of [`SchedulerConfig::idle_session_close_after_ms`], which the
 /// reference server's config uses.
-pub const DEFAULT_IDLE_SESSION_CLOSE_AFTER_MS: u64 = 1_800_000;
+pub const DEFAULT_IDLE_SESSION_CLOSE_AFTER_MS: NonZeroU64 = NonZeroU64::new(1_800_000).unwrap();
 
 /// The cadence and limits of the scheduler, under the names of the
 /// reference server's config settings.
@@ -284,24 +286,24 @@ pub struct SchedulerConfig {
     pub max_concurrent_maintenance: NonZeroUsize,
     /// Milliseconds between the scheduler's runs of each held session's due
     /// steps, and the backoff after a step's first failure.
-    pub maintenance_interval_ms: u64,
+    pub maintenance_interval_ms: NonZeroU64,
     /// Milliseconds before a metadata step that left work runs again.
-    pub metadata_retry_interval_ms: u64,
+    pub metadata_retry_interval_ms: NonZeroU64,
     /// The minimum time, in milliseconds, between two collections of a held
     /// session whose seq moved.
-    pub gc_interval_ms: u64,
+    pub gc_interval_ms: NonZeroU64,
     /// Milliseconds between sweeps, after the sweep at start.
-    pub sweep_interval_ms: u64,
+    pub sweep_interval_ms: NonZeroU64,
     /// How long, in milliseconds, after a held session's last open the
     /// scheduler waits before it closes the session, when the session has
     /// nothing due and no caller.
-    pub idle_session_close_after_ms: u64,
+    pub idle_session_close_after_ms: NonZeroU64,
 }
 
 struct SchedulerInner {
     store: SharedObjectStore,
-    /// The maintenance handle of a host that maintains the store, and `None`
-    /// for one that doesn't.
+    /// The maintenance of the runtime that `namespaces` was built from, for a
+    /// host that maintains the store, and `None` for one that doesn't.
     maintenance: Option<Maintenance>,
     grep: Option<GrepIndexing>,
     namespaces: Arc<Namespaces<SchedulerState>>,
@@ -333,14 +335,16 @@ impl Scheduler {
     /// Builds a scheduler over the sessions of `namespaces`, with the cadence
     /// and limits in `config`, and starts no loop. The scheduler reads the
     /// store and the monotonic timer of the runtime that `namespaces` was
-    /// built from. `maintenance` is the maintenance handle of a host that
-    /// maintains the store, and `None` for one that runs only the close step.
+    /// built from, and it runs maintenance through that runtime too.
+    /// `maintenance_writer_id` is the writer ID that the maintenance of a
+    /// host that maintains the store records, and `None` for a host that
+    /// runs only the close step.
     /// `grep` is the indexing of a host that maintains the grep index, and
     /// `None` otherwise. The scheduler registers its metrics with `recorder`.
     pub fn new(
         config: SchedulerConfig,
         namespaces: Arc<Namespaces<SchedulerState>>,
-        maintenance: Option<Maintenance>,
+        maintenance_writer_id: Option<WriterId>,
         grep: Option<GrepIndexing>,
         recorder: &dyn MetricsRecorder,
     ) -> Self {
@@ -349,7 +353,7 @@ impl Scheduler {
             inner: Arc::new(SchedulerInner {
                 store: runtime.object_store(),
                 timer: runtime.monotonic_timer(),
-                maintenance,
+                maintenance: maintenance_writer_id.map(|writer_id| runtime.maintenance(writer_id)),
                 grep,
                 namespaces,
                 config,
@@ -392,7 +396,7 @@ impl Scheduler {
     /// After the [`Scheduler`] is stopped, no namespace starts its steps, no
     /// pool starts its collection, and a running compaction unit stops at its
     /// next block.
-    /// A scheduler without a maintenance handle lists nothing and returns a
+    /// A scheduler without a maintenance writer ID lists nothing and returns a
     /// report of zero namespaces and pools that isn't complete.
     pub async fn run_sweep(&self) -> SweepReport {
         let inner = &self.inner;

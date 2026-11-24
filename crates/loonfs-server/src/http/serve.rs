@@ -100,7 +100,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
     } = build_handles(
         &config,
         &memory,
-        maintenance_writer_id,
+        maintenance_writer_id.clone(),
         store,
         &metrics,
         std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
@@ -131,7 +131,10 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
     let scheduler = Scheduler::new(
         config.scheduler_config(),
         Arc::clone(&namespaces),
-        config.maintenance.maintains().then(|| maintenance.clone()),
+        config
+            .maintenance
+            .maintains()
+            .then_some(maintenance_writer_id),
         grep_worker
             .as_ref()
             .map(|worker| GrepIndexing::new(worker.clone(), grep_policy)),

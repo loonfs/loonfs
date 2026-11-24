@@ -324,7 +324,7 @@ async fn session_steps_never_advance_the_floor_and_the_next_sweep_does() {
     server.run_steps_after(2 * WINDOW_MS).await;
     for _ in 0..3 {
         server
-            .run_steps_after(config.scheduler.maintenance_interval_ms)
+            .run_steps_after(config.scheduler.maintenance_interval_ms.get())
             .await;
     }
     let entry = server
@@ -457,7 +457,9 @@ async fn a_failing_advance_fails_once_per_sweep_until_it_succeeds() {
     store.fail_all();
 
     for sweeps in 1..=3 {
-        server.sweep_after(config.scheduler.sweep_interval_ms).await;
+        server
+            .sweep_after(config.scheduler.sweep_interval_ms.get())
+            .await;
         assert_eq!(
             server.retention_failures(),
             sweeps,
@@ -475,7 +477,9 @@ async fn a_failing_advance_fails_once_per_sweep_until_it_succeeds() {
     );
 
     store.clear();
-    server.sweep_after(config.scheduler.sweep_interval_ms).await;
+    server
+        .sweep_after(config.scheduler.sweep_interval_ms.get())
+        .await;
     assert_eq!(
         server.diagnostics(&namespace_id).await.retention_floor_seq,
         seq,

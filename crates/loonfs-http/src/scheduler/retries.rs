@@ -135,7 +135,7 @@ impl Scheduler {
 
     /// The backoff after a call's first failure: one maintenance interval.
     fn first_backoff_ms(&self) -> u64 {
-        self.inner.config.maintenance_interval_ms
+        self.inner.config.maintenance_interval_ms.get()
     }
 
     /// Records how one call ended on a namespace, and returns the call's

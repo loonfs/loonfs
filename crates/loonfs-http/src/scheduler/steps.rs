@@ -185,7 +185,7 @@ impl Scheduler {
             && held.host_state.collection_pending(
                 seq,
                 inner.timer.monotonic_now_ms(),
-                inner.config.gc_interval_ms,
+                inner.config.gc_interval_ms.get(),
             )
     }
 
@@ -221,7 +221,7 @@ impl Scheduler {
                     .close_if_idle(
                         namespace_id,
                         seq,
-                        inner.config.idle_session_close_after_ms,
+                        inner.config.idle_session_close_after_ms.get(),
                         |held| {
                             // A failing step keeps an idle session held, so
                             // the scheduler retries the step on its backoff,
@@ -253,10 +253,10 @@ impl Scheduler {
         let inner = &self.inner;
         let config = &inner.config;
         tracing::info!(
-            maintenance_interval_ms = config.maintenance_interval_ms,
-            metadata_retry_interval_ms = config.metadata_retry_interval_ms,
-            gc_interval_ms = config.gc_interval_ms,
-            sweep_interval_ms = config.sweep_interval_ms,
+            maintenance_interval_ms = config.maintenance_interval_ms.get(),
+            metadata_retry_interval_ms = config.metadata_retry_interval_ms.get(),
+            gc_interval_ms = config.gc_interval_ms.get(),
+            sweep_interval_ms = config.sweep_interval_ms.get(),
             max_concurrent_maintenance = config.max_concurrent_maintenance.get(),
             maintains = inner.maintenance.is_some(),
             maintains_grep_index = inner.grep.is_some(),
@@ -278,7 +278,7 @@ impl Scheduler {
     async fn run_sweeps(&self) {
         let inner = &self.inner;
         let mut interval =
-            tokio::time::interval(Duration::from_millis(inner.config.sweep_interval_ms));
+            tokio::time::interval(Duration::from_millis(inner.config.sweep_interval_ms.get()));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -296,8 +296,9 @@ impl Scheduler {
     )]
     async fn run_sessions(&self) {
         let inner = &self.inner;
-        let mut interval =
-            tokio::time::interval(Duration::from_millis(inner.config.maintenance_interval_ms));
+        let mut interval = tokio::time::interval(Duration::from_millis(
+            inner.config.maintenance_interval_ms.get(),
+        ));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // Each interval starts the steps of every held session that has no
         // steps still pending or running, so a session runs one set of steps

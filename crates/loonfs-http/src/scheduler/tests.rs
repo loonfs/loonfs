@@ -90,7 +90,8 @@ impl SchedulerServer {
             .build()
             .await
             .expect("build the server runtime");
-        let maintenance = runtime.maintenance(writer_id("sweep-server-maintenance"));
+        let maintenance_writer_id = writer_id("sweep-server-maintenance");
+        let maintenance = runtime.maintenance(maintenance_writer_id.clone());
         let grep_worker = config.grep.map(|_| {
             GrepWorker::new(
                 runtime.object_store(),
@@ -105,7 +106,10 @@ impl SchedulerServer {
         let scheduler = Scheduler::new(
             config.scheduler,
             Arc::new(Namespaces::new(runtime.clone())),
-            config.maintenance.maintains().then(|| maintenance.clone()),
+            config
+                .maintenance
+                .maintains()
+                .then_some(maintenance_writer_id),
             grep,
             recorder.as_ref(),
         );
@@ -748,7 +752,7 @@ async fn a_panicking_call_is_backed_off_and_the_next_namespace_still_runs_its_st
         server.retry(&names[1], MaintenanceCall::Metadata),
         StepRetry {
             retry_at_ms: server.scheduler.inner.timer.monotonic_now_ms()
-                + config.scheduler.metadata_retry_interval_ms,
+                + config.scheduler.metadata_retry_interval_ms.get(),
             attempts: 1,
         },
         "the panic counts as a failure, and the session steps wait for its retry time"
@@ -888,13 +892,13 @@ async fn a_failing_metadata_step_waits_its_interval() {
     let mut config = scheduler_config(None);
     assert_eq!(
         (
-            config.scheduler.maintenance_interval_ms,
-            config.scheduler.metadata_retry_interval_ms
+            config.scheduler.maintenance_interval_ms.get(),
+            config.scheduler.metadata_retry_interval_ms.get()
         ),
         (5_000, 5 * MINUTE_MS)
     );
     // Keeps collection from coming due while the clock runs.
-    config.scheduler.gc_interval_ms = 30 * DAY_MS;
+    config.scheduler.gc_interval_ms = const { std::num::NonZeroU64::new(30 * DAY_MS).unwrap() };
     // The tail is due from the first run, so each metadata step folds it
     // and reaches the failing store.
     config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
@@ -902,7 +906,7 @@ async fn a_failing_metadata_step_waits_its_interval() {
         held_failing_server(directory.path(), &config, OperationSelector::Any).await;
     store.fail_all();
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     server
         .run_steps_through_retries(&namespace_id, MaintenanceCall::Metadata, &WAIT_SECONDS)
@@ -926,7 +930,7 @@ async fn a_failing_metadata_step_waits_its_interval() {
         .expect("write another tail");
     store.fail_all();
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert_eq!(
         server
@@ -949,12 +953,12 @@ async fn a_failing_collection_backs_off_from_one_interval_to_an_hour() {
     let (store, server, namespace_id, _held) =
         held_failing_server(directory.path(), &config, OperationSelector::List).await;
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert!(server.metadata_caught_up(&namespace_id).await);
     store.fail_all();
     server
-        .run_steps_after(config.scheduler.gc_interval_ms)
+        .run_steps_after(config.scheduler.gc_interval_ms.get())
         .await;
     assert_eq!(server.call_failures(MaintenanceCall::Gc), 1);
     server
@@ -977,13 +981,13 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
     let namespaces = &server.scheduler.inner.namespaces;
     drop(held);
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
     store.fail_all();
 
     server
-        .run_steps_after(config.scheduler.gc_interval_ms)
+        .run_steps_after(config.scheduler.gc_interval_ms.get())
         .await;
     assert_eq!(server.call_failures(MaintenanceCall::Gc), 1);
     assert_eq!(
@@ -993,7 +997,7 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
     );
 
     let attempts = || server.retry(&namespace_id, MaintenanceCall::Gc).attempts;
-    while super::retries::backoff_ms(config.scheduler.maintenance_interval_ms, attempts())
+    while super::retries::backoff_ms(config.scheduler.maintenance_interval_ms.get(), attempts())
         < super::MAX_STEP_BACKOFF_MS
     {
         let failures = server.call_failures(MaintenanceCall::Gc);
@@ -1006,7 +1010,7 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
         assert!(!held_ids(namespaces).is_empty());
     }
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert!(
         held_ids(namespaces).is_empty(),

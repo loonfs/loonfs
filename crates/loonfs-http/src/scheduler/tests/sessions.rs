@@ -50,7 +50,7 @@ async fn session_steps_fold_idle_tails_from_the_position_and_then_cost_nothing()
     store.reset();
     for _ in 0..100 {
         server
-            .run_steps_after(config.scheduler.maintenance_interval_ms)
+            .run_steps_after(config.scheduler.maintenance_interval_ms.get())
             .await;
     }
     assert!(
@@ -79,7 +79,7 @@ async fn session_steps_fold_idle_tails_from_the_position_and_then_cost_nothing()
         };
         let first_retry_at_ms = retry_at_ms();
         server
-            .run_steps_after(config.scheduler.metadata_retry_interval_ms - 1)
+            .run_steps_after(config.scheduler.metadata_retry_interval_ms.get() - 1)
             .await;
         assert_eq!(
             retry_at_ms(),
@@ -98,7 +98,7 @@ async fn session_steps_fold_idle_tails_from_the_position_and_then_cost_nothing()
         assert!(server.wal_tail_objects(&namespace_id).await > 0);
         server
             .run_steps_after(
-                idle_fold_after_ms(&config) - config.scheduler.metadata_retry_interval_ms,
+                idle_fold_after_ms(&config) - config.scheduler.metadata_retry_interval_ms.get(),
             )
             .await;
         assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
@@ -106,7 +106,7 @@ async fn session_steps_fold_idle_tails_from_the_position_and_then_cost_nothing()
         store.reset();
         for _ in 0..20 {
             server
-                .run_steps_after(config.scheduler.maintenance_interval_ms)
+                .run_steps_after(config.scheduler.maintenance_interval_ms.get())
                 .await;
         }
         assert!(
@@ -164,7 +164,7 @@ async fn session_steps_leave_a_tail_below_the_fold_triggers_until_it_is_idle() {
     );
     let tail_objects = server.wal_tail_objects(&namespace_id).await;
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert!(
         server.metadata_left_due(&namespace_id),
@@ -238,7 +238,7 @@ async fn a_metadata_step_waits_for_the_sessions_fold_instead_of_folding_the_tail
         blocking.release();
     };
     tokio::join!(
-        server.run_steps_after(config.scheduler.maintenance_interval_ms),
+        server.run_steps_after(config.scheduler.maintenance_interval_ms.get()),
         release
     );
 
@@ -297,7 +297,7 @@ async fn a_sweep_folds_every_idle_tail() {
     drop(namespaces.open(&unpositioned).await.expect("open"));
     for _ in 0..3 {
         server
-            .run_steps_after(config.scheduler.maintenance_interval_ms)
+            .run_steps_after(config.scheduler.maintenance_interval_ms.get())
             .await;
     }
     assert!(
@@ -383,7 +383,7 @@ async fn session_steps_finish_more_than_sixteen_metadata_units_without_another_p
         .current_manifest_no
         .expect("manifest");
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     let after = server
         .maintenance
@@ -400,7 +400,7 @@ async fn session_steps_finish_more_than_sixteen_metadata_units_without_another_p
     assert!(server.metadata_left_due(&namespace_id));
     store.reset();
     server
-        .run_steps_after(config.scheduler.metadata_retry_interval_ms)
+        .run_steps_after(config.scheduler.metadata_retry_interval_ms.get())
         .await;
     assert!(
         !store.take().is_empty(),
@@ -408,7 +408,7 @@ async fn session_steps_finish_more_than_sixteen_metadata_units_without_another_p
     );
     for _ in 0..8 {
         server
-            .run_steps_after(config.scheduler.metadata_retry_interval_ms)
+            .run_steps_after(config.scheduler.metadata_retry_interval_ms.get())
             .await;
     }
     assert!(server.metadata_caught_up(&namespace_id).await);
@@ -479,7 +479,7 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
         .expect("claim newer compactor");
     store.reset();
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     let operations = store.take();
     assert_eq!(
@@ -491,7 +491,7 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
     assert!(server.metadata_left_due(&namespace_id));
     for _ in 0..59 {
         server
-            .run_steps_after(config.scheduler.maintenance_interval_ms)
+            .run_steps_after(config.scheduler.maintenance_interval_ms.get())
             .await;
     }
     assert!(
@@ -499,7 +499,7 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
         "a fenced compactor is not retried at every interval"
     );
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert!(
         !store.take().is_empty(),
@@ -546,13 +546,15 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .await
         .expect("publish");
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     server.scheduler.run_due_steps().await;
     store.reset();
     server
         .run_steps_after(
-            config.scheduler.gc_interval_ms - config.scheduler.maintenance_interval_ms - 1,
+            config.scheduler.gc_interval_ms.get()
+                - config.scheduler.maintenance_interval_ms.get()
+                - 1,
         )
         .await;
     assert!(store.take().is_empty());
@@ -568,7 +570,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .key()
         .starts_with(&loonfs_objectstore::keys::namespace_prefix(&moved))));
     server
-        .run_steps_after(config.scheduler.gc_interval_ms)
+        .run_steps_after(config.scheduler.gc_interval_ms.get())
         .await;
     assert!(
         store.take().is_empty(),
@@ -579,7 +581,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .expect("publish");
     store.reset();
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert_eq!(
         list_count(&store.take()),
@@ -613,7 +615,7 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
         .expect("publish");
     server.enable_index(&namespace_id).await;
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     server.scheduler.run_due_steps().await;
     drop(held);
@@ -628,7 +630,8 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
     store.reset();
     server
         .run_steps_after(
-            config.scheduler.idle_session_close_after_ms - config.scheduler.maintenance_interval_ms,
+            config.scheduler.idle_session_close_after_ms.get()
+                - config.scheduler.maintenance_interval_ms.get(),
         )
         .await;
     assert_eq!(
@@ -650,7 +653,7 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
     assert_eq!(held_ids(namespaces).len(), 1);
     assert!(store.take().is_empty());
     server
-        .run_steps_after(config.scheduler.idle_session_close_after_ms + 1)
+        .run_steps_after(config.scheduler.idle_session_close_after_ms.get() + 1)
         .await;
     server.scheduler.run_due_steps().await;
     store.reset();
@@ -732,7 +735,7 @@ async fn session_steps_close_a_fenced_session_and_the_session_of_a_deleted_names
     assert_eq!(error.code(), loonfs::ErrorCode::WriterFenced, "{error:?}");
     store.reset();
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert_eq!(
         held_ids(namespaces),
@@ -745,7 +748,7 @@ async fn session_steps_close_a_fenced_session_and_the_session_of_a_deleted_names
     );
     drop(held);
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert!(held_ids(namespaces).is_empty(), "the fenced session closes");
 
@@ -753,7 +756,7 @@ async fn session_steps_close_a_fenced_session_and_the_session_of_a_deleted_names
     held.delete().await.expect("delete the namespace");
     drop(held);
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert!(
         held_ids(namespaces).is_empty(),
@@ -799,7 +802,7 @@ async fn a_session_closes_when_its_index_step_finds_the_namespace_deleted() {
         .await
         .expect("delete the namespace");
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert!(
         held_ids(namespaces).is_empty(),
@@ -818,7 +821,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(None);
-    config.scheduler.idle_session_close_after_ms = 1;
+    config.scheduler.idle_session_close_after_ms = std::num::NonZeroU64::MIN;
     config.runtime.idle_fold_after_ms = std::num::NonZeroU64::new(60_000);
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespaces = &server.scheduler.inner.namespaces;
@@ -859,7 +862,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
         .expect("publish");
     drop(handle);
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert_eq!(
         held_ids(namespaces).len(),
@@ -870,7 +873,9 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
     assert!(server.wal_tail_objects(&unfolded).await > 0);
     store.reset();
     server
-        .run_steps_after(idle_fold_after_ms(&config) - config.scheduler.maintenance_interval_ms - 1)
+        .run_steps_after(
+            idle_fold_after_ms(&config) - config.scheduler.maintenance_interval_ms.get() - 1,
+        )
         .await;
     assert!(
         store.take().is_empty(),
@@ -919,7 +924,7 @@ async fn a_session_that_maintained_itself_leaves_the_session_steps_nothing_to_do
     let scheduler = super::Scheduler::new(
         scheduler_config(None).scheduler,
         namespaces,
-        Some(runtime.maintenance(writer_id("maintenance"))),
+        Some(writer_id("maintenance")),
         None,
         &recorder,
     );
@@ -964,7 +969,7 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
     drop(handle);
 
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert_eq!(
         server.idle_fold_due_at_ms(&namespace_id),
@@ -974,7 +979,9 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
     assert!(server.wal_tail_objects(&namespace_id).await > 0);
     store.reset();
     server
-        .run_steps_after(idle_fold_after_ms(&config) - config.scheduler.maintenance_interval_ms - 1)
+        .run_steps_after(
+            idle_fold_after_ms(&config) - config.scheduler.maintenance_interval_ms.get() - 1,
+        )
         .await;
     assert!(
         store.take().is_empty(),
@@ -988,7 +995,9 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
     );
 
     server
-        .run_steps_after(config.scheduler.idle_session_close_after_ms - idle_fold_after_ms(&config))
+        .run_steps_after(
+            config.scheduler.idle_session_close_after_ms.get() - idle_fold_after_ms(&config),
+        )
         .await;
     assert_eq!(
         held_ids(namespaces).len(),
@@ -1051,7 +1060,7 @@ async fn a_scheduler_without_maintenance_closes_idle_and_ended_sessions_without_
     );
 
     server
-        .run_steps_after(config.scheduler.idle_session_close_after_ms - 1)
+        .run_steps_after(config.scheduler.idle_session_close_after_ms.get() - 1)
         .await;
     assert_eq!(held_ids(namespaces), vec![idle_ns.clone()]);
 

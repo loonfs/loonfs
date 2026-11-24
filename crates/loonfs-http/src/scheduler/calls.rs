@@ -107,7 +107,7 @@ impl Scheduler {
             }
             held.handle.has_current_writer_position()
         });
-        let interval_ms = inner.config.metadata_retry_interval_ms;
+        let interval_ms = inner.config.metadata_retry_interval_ms.get();
         let work_wait_ms = match outcome {
             Ok(MetadataMaintenanceOutcome::CaughtUp) if positioned => 0,
             _ => next_due_at_ms.map_or(interval_ms, |due_at_ms| {
@@ -341,9 +341,10 @@ impl Scheduler {
         grep: &GrepIndexing,
         namespace_id: &NamespaceId,
     ) -> Result<bool, GrepError> {
-        let mut steps = grep
-            .worker
-            .steps(namespace_id, self.inner.config.maintenance_interval_ms);
+        let mut steps = grep.worker.steps(
+            namespace_id,
+            self.inner.config.maintenance_interval_ms.get(),
+        );
         // A grep step changes the pending entry only once it succeeds, so the
         // index step publishes the grep steps before a failed one, and then
         // reports the failure.

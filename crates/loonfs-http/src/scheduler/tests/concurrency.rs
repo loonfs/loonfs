@@ -58,7 +58,7 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
         .expect("publish");
         server
             .clock
-            .advance_ms(config.scheduler.maintenance_interval_ms);
+            .advance_ms(config.scheduler.maintenance_interval_ms.get());
         store.block_next();
         let parked = tokio::spawn({
             let scheduler = server.scheduler.clone();
@@ -145,7 +145,7 @@ async fn a_publish_during_a_metadata_step_is_folded_by_the_next_run() {
         .expect("publish");
     server
         .clock
-        .advance_ms(config.scheduler.maintenance_interval_ms);
+        .advance_ms(config.scheduler.maintenance_interval_ms.get());
     store.block_next();
     let steps = tokio::spawn({
         let scheduler = server.scheduler.clone();
@@ -159,7 +159,7 @@ async fn a_publish_during_a_metadata_step_is_folded_by_the_next_run() {
     steps.await.expect("finish the step");
     store.inner().reset();
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert!(
         !store.inner().take().is_empty(),
@@ -223,7 +223,7 @@ async fn session_steps_share_slots_with_a_parked_sweep_and_continue_when_a_slot_
             .expect("publish");
         server
             .clock
-            .advance_ms(config.scheduler.maintenance_interval_ms);
+            .advance_ms(config.scheduler.maintenance_interval_ms.get());
         store.inner().reset();
         let mut steps = Box::pin(server.scheduler.run_due_steps());
         if slots == 1 {
@@ -336,9 +336,11 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
     let seq = held.last_published_seq();
     drop(held);
     server
-        .run_steps_after(config.scheduler.maintenance_interval_ms)
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
-    server.clock.advance_ms(config.scheduler.gc_interval_ms);
+    server
+        .clock
+        .advance_ms(config.scheduler.gc_interval_ms.get());
     store.block_next();
     let steps = tokio::spawn({
         let scheduler = server.scheduler.clone();
@@ -365,7 +367,7 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
     );
     store.inner().reset();
     server
-        .run_steps_after(config.scheduler.gc_interval_ms)
+        .run_steps_after(config.scheduler.gc_interval_ms.get())
         .await;
     assert!(
         store.inner().take().is_empty(),
@@ -390,7 +392,7 @@ async fn a_step_parked_in_one_session_does_not_stop_another_sessions_fold_on_the
     config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
     // The runs before the first commit make the step from the store, and
     // that step waits the retry interval, which the manual clock then passes.
-    config.scheduler.metadata_retry_interval_ms = 1;
+    config.scheduler.metadata_retry_interval_ms = std::num::NonZeroU64::MIN;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -416,7 +418,7 @@ async fn a_step_parked_in_one_session_does_not_stop_another_sessions_fold_on_the
     store.block_next();
     server
         .clock
-        .advance_ms(config.scheduler.maintenance_interval_ms);
+        .advance_ms(config.scheduler.maintenance_interval_ms.get());
     loonfs_test_support::clock::bounded(Duration::from_secs(60), store.wait_until_blocked())
         .await
         .expect("the session steps park at the fold of the first session");
@@ -433,7 +435,7 @@ async fn a_step_parked_in_one_session_does_not_stop_another_sessions_fold_on_the
         .expect("publish");
     server
         .clock
-        .advance_ms(config.scheduler.maintenance_interval_ms);
+        .advance_ms(config.scheduler.maintenance_interval_ms.get());
     loonfs_test_support::clock::bounded(Duration::from_secs(60), async {
         while server.wal_tail_objects(&folded).await > 0 {
             tokio::time::advance(Duration::from_millis(1)).await;

@@ -45,7 +45,7 @@ async fn session_steps_index_publishes_and_lifecycle_changes_then_cost_nothing()
             .await
             .expect("publish");
         server
-            .run_steps_after(config.scheduler.maintenance_interval_ms)
+            .run_steps_after(config.scheduler.maintenance_interval_ms.get())
             .await;
         server.scheduler.run_due_steps().await;
         store.reset();
@@ -162,7 +162,10 @@ async fn a_session_written_at_every_interval_is_indexed_at_every_interval_and_st
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let mut config = scheduler_config(Some(GrepWorkerConfig::default()));
     // Two intervals without an open would make the session idle.
-    config.scheduler.idle_session_close_after_ms = 2 * config.scheduler.maintenance_interval_ms;
+    config.scheduler.idle_session_close_after_ms = config
+        .scheduler
+        .maintenance_interval_ms
+        .saturating_mul(const { std::num::NonZeroU64::new(2).unwrap() });
     let server = SchedulerServer::start(store, &config, 0).await;
     let namespaces = &server.scheduler.inner.namespaces;
     let namespace_id = namespace_id("steady");
@@ -183,7 +186,7 @@ async fn a_session_written_at_every_interval_is_indexed_at_every_interval_and_st
             .await
             .expect("publish");
         server
-            .run_steps_after(config.scheduler.maintenance_interval_ms)
+            .run_steps_after(config.scheduler.maintenance_interval_ms.get())
             .await;
         assert_eq!(
             server
@@ -217,7 +220,10 @@ async fn a_session_written_at_every_interval_still_collects_on_its_interval() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let mut config = scheduler_config(Some(GrepWorkerConfig::default()));
-    config.scheduler.gc_interval_ms = 3 * config.scheduler.maintenance_interval_ms;
+    config.scheduler.gc_interval_ms = config
+        .scheduler
+        .maintenance_interval_ms
+        .saturating_mul(const { std::num::NonZeroU64::new(3).unwrap() });
     let server = SchedulerServer::start(store, &config, 0).await;
     let namespaces = &server.scheduler.inner.namespaces;
     let namespace_id = namespace_id("steady-collected");
@@ -244,7 +250,7 @@ async fn a_session_written_at_every_interval_still_collects_on_its_interval() {
             .expect("publish");
         let before = collected_seq();
         server
-            .run_steps_after(config.scheduler.maintenance_interval_ms)
+            .run_steps_after(config.scheduler.maintenance_interval_ms.get())
             .await;
         collections += usize::from(collected_seq() != before);
     }
@@ -285,7 +291,7 @@ async fn session_steps_finish_a_backfill_without_a_local_commit_before_closing()
     let server = SchedulerServer::start(store.clone(), &config, now_ms).await;
     server.enable_index(&namespace_id).await;
     server
-        .run_steps_after(config.scheduler.idle_session_close_after_ms + 1)
+        .run_steps_after(config.scheduler.idle_session_close_after_ms.get() + 1)
         .await;
     assert_matches!(
         server.grep_status(&namespace_id).await,
@@ -379,7 +385,7 @@ async fn pending_reorganization_keeps_an_idle_session_open() {
     server.enable_index(&namespace_id).await;
     drop(held);
     server
-        .run_steps_after(config.scheduler.idle_session_close_after_ms + 1)
+        .run_steps_after(config.scheduler.idle_session_close_after_ms.get() + 1)
         .await;
     server.scheduler.run_due_steps().await;
     let worker = server.grep_worker.as_ref().expect("worker");
