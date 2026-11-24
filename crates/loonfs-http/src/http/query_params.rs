@@ -1,16 +1,13 @@
 //! Shared query-parameter checks for HTTP handlers.
 
 use super::error::ApiResponseError;
-use loonfs::READ_REVALIDATION_BOUND_MS;
-use loonfs::{Consistency, ErrorCode, ReadAt, ReadConsistency, SnapshotId};
+use loonfs::{Consistency, ErrorCode, ReadAt, SnapshotId};
 use loonfs_types::LimitError;
 
-// The `limit` and `max_staleness_ms` query parameters declare these bounds
-// to OpenAPI as literals, because the `IntoParams` derive takes only a
-// literal bound.
+// The `limit` query parameter declares these bounds to OpenAPI as literals,
+// because the `IntoParams` derive takes only a literal bound.
 const _: () = assert!(loonfs_types::MAX_PAGE_LIMIT == 1000);
 const _: () = assert!(loonfs_types::DEFAULT_PAGE_LIMIT == 1000);
-const _: () = assert!(READ_REVALIDATION_BOUND_MS == 1_200_000);
 
 pub(super) fn required_query_param<T>(value: Option<T>, name: &str) -> Result<T, ApiResponseError> {
     value.ok_or_else(|| {
@@ -23,48 +20,23 @@ pub(super) fn required_query_param<T>(value: Option<T>, name: &str) -> Result<T,
 }
 
 /// Returns what a read reads at, from its `snapshot_id` and its decoded
-/// `consistency` and `max_staleness_ms`, whether the request sets them as
-/// query parameters or as body fields. A read with a `snapshot_id` has no
-/// consistency setting, so a request can't set `consistency` with one.
+/// `consistency`, whether the request sets them as query parameters or as
+/// body fields. A live read that sets no consistency is `eventual`. A read
+/// with a `snapshot_id` has no consistency, so a request can't set
+/// `consistency` with one.
 pub(super) fn read_at(
     snapshot_id: Option<SnapshotId>,
-    consistency: Option<ReadConsistency>,
-    max_staleness_ms: Option<u64>,
+    consistency: Option<Consistency>,
 ) -> Result<ReadAt, ApiResponseError> {
-    let Some(snapshot_id) = snapshot_id else {
-        return live_consistency(consistency, max_staleness_ms).map(ReadAt::Live);
-    };
-    if consistency.is_some() {
-        return Err(ApiResponseError::new(
+    match (snapshot_id, consistency) {
+        (None, consistency) => Ok(ReadAt::Live(consistency.unwrap_or_default())),
+        (Some(snapshot_id), None) => Ok(ReadAt::Snapshot(snapshot_id)),
+        (Some(_), Some(_)) => Err(ApiResponseError::new(
             ErrorCode::InvalidRequest,
             "consistency cannot be combined with snapshot_id, because a snapshot read has no \
-             consistency setting",
+             consistency",
         )
-        .with_param("consistency"));
-    }
-    live_consistency(None, max_staleness_ms)?;
-    Ok(ReadAt::Snapshot(snapshot_id))
-}
-
-/// Returns the consistency of a live read from its decoded `consistency`
-/// and `max_staleness_ms`, or `None`, the runtime's default, when the
-/// request sets neither. The runtime refuses a maximum staleness above the
-/// revalidation bound when the read starts.
-pub(super) fn live_consistency(
-    consistency: Option<ReadConsistency>,
-    max_staleness_ms: Option<u64>,
-) -> Result<Option<Consistency>, ApiResponseError> {
-    match consistency {
-        Some(ReadConsistency::Eventual) => Ok(Some(Consistency::Eventual { max_staleness_ms })),
-        None | Some(ReadConsistency::Strong) if max_staleness_ms.is_some() => {
-            Err(ApiResponseError::new(
-                ErrorCode::InvalidRequest,
-                "max_staleness_ms requires consistency=eventual",
-            )
-            .with_param("max_staleness_ms"))
-        }
-        None => Ok(None),
-        Some(ReadConsistency::Strong) => Ok(Some(Consistency::Strong)),
+        .with_param("consistency")),
     }
 }
 

@@ -1379,11 +1379,8 @@ async fn a_read_after_an_extension_publication_sends_no_request() {
         .await
         .expect("maintenance runtime");
     let maintenance = runtime.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-    let eventual = Consistency::Eventual {
-        max_staleness_ms: Some(1_000),
-    };
     let stat = StatOptions {
-        at: ReadAt::Live(Some(eventual)),
+        at: ReadAt::Live(Consistency::Eventual),
         ..StatOptions::default()
     };
     let namespace_handle = runtime
@@ -1412,7 +1409,7 @@ async fn a_read_after_an_extension_publication_sends_no_request() {
     store.reset();
     let pinned = maintenance
         .core
-        .pinned_read(&namespace, eventual)
+        .pinned_read(&namespace, Consistency::Eventual)
         .await
         .expect("read the namespace");
     let found = pinned

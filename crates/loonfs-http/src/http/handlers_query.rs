@@ -1,7 +1,7 @@
 //! The `query/v0` API group: derived-index reads.
 
 use super::extractors::ContextHeaders;
-use super::query_params::{effective_page_limit, live_consistency, required_query_param};
+use super::query_params::{effective_page_limit, required_query_param};
 use super::{AppQuery, HttpState, NamespaceIdPath, NoBody, NoQuery};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
@@ -10,7 +10,7 @@ use loonfs::SharedObjectStore;
 use loonfs_grep::{
     GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepService, GrepWorker, NamespaceReads,
 };
-use loonfs_types::options::ReadConsistency;
+use loonfs_types::options::Consistency;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::GrepIndex;
@@ -65,14 +65,10 @@ pub(super) struct GrepQuery {
     /// The opaque cursor that the previous page returned.
     cursor: Option<String>,
     /// How recently a first page confirms the namespace head that it reads. `eventual` (the
-    /// default, unless the server's `consistency` setting is `strong`) reads at the head that the
-    /// server confirmed last while that confirmation is younger than the maximum staleness, and
-    /// `strong` confirms the head before the read. A later page reads at the first page's head.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// default) reads at the head that the server confirmed last while that confirmation is younger
+    /// than the server's `max_staleness_ms`, and `strong` confirms the head before the read. A
+    /// later page reads at the first page's head.
+    consistency: Option<Consistency>,
 }
 
 #[cfg_attr(
@@ -158,7 +154,7 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
         scope,
         allow_stale: query.allow_stale.unwrap_or(false),
         allow_scan: query.allow_scan.unwrap_or(false),
-        consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
+        consistency: query.consistency.unwrap_or_default(),
     })
 }
 

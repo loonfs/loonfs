@@ -2262,7 +2262,7 @@ These defaults configure the reference producer and runtime without changing the
 | Maximum commit-message size | 4,096 bytes |
 | `MANIFEST_PROBE_WINDOW` (manifest numbers probed at once above a manifest whose successor exists) | 8 |
 
-`max_staleness_ms` sets the default staleness bound for `eventual` reads (see [Replaying the visible WAL](#42-replaying-the-visible-wal)). Neither `max_staleness_ms` nor `manifest_revalidation_interval_ms` may exceed `READ_REVALIDATION_BOUND_MS`.
+`max_staleness_ms` sets the staleness bound for `eventual` reads (see [Replaying the visible WAL](#42-replaying-the-visible-wal)). Neither `max_staleness_ms` nor `manifest_revalidation_interval_ms` may exceed `READ_REVALIDATION_BOUND_MS`.
 
 Decoders MUST NOT treat target block or segment sizes as hard limits. The reference block reader initially reserves `min(decoded_bytes, 64 KiB)` and grows on demand while capping output at `decoded_bytes + 1` bytes (see [Block-segment encoding](#a7-block-segment-encoding)). Request admission limits are defined in the [API specification][api-spec], and hard manifest/WAL document caps are defined in [Control and manifest payloads](#a4-control-and-manifest-payloads) and [WAL records](#a5-wal-records).
 

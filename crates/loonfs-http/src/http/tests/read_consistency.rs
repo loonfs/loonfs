@@ -1,14 +1,14 @@
-//! The `consistency` and `max_staleness_ms` parameters of the live read
-//! routes. The GET routes take them as query parameters, and the download
-//! routes take them as fields of the JSON body.
+//! The `consistency` parameter of the live read routes. The GET routes take
+//! it as a query parameter, and the download routes take it as a field of the
+//! JSON body.
 
 use super::direct_download::LoopbackIssuer;
 use super::fixtures::{self, test_app, test_options, TestAppOptions};
 use crate::JobMode;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use loonfs::SharedObjectStore;
 use loonfs::READ_REVALIDATION_BOUND_MS;
-use loonfs::{ReadConsistency, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_test_support::ids::namespace_id;
@@ -34,11 +34,9 @@ struct Fixture {
 /// Creates a namespace `demo` with one file through a separate writer
 /// runtime, and a server over the same store that has no writer session for
 /// the namespace, so its reads start from the read cache. The server's
-/// default maximum staleness is the revalidation bound, so an eventual read
-/// stays inside it for the whole test, and `consistency` sets the runtime's
-/// default consistency, or keeps the runtime's own default when `None`. The
-/// server can presign object reads, so it grants downloads.
-async fn fixture(name: &str, consistency: Option<ReadConsistency>) -> Fixture {
+/// maximum staleness is `max_staleness_ms`. The server can presign object
+/// reads, so it grants downloads.
+async fn fixture(name: &str, max_staleness_ms: u64) -> Fixture {
     let directory = tempfile::tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -71,8 +69,7 @@ async fn fixture(name: &str, consistency: Option<ReadConsistency>) -> Fixture {
         options,
         TestAppOptions {
             store: Some(store),
-            max_staleness_ms: Some(READ_REVALIDATION_BOUND_MS),
-            consistency,
+            max_staleness_ms: Some(max_staleness_ms),
             direct_transfers: Some(DirectTransferIssuers {
                 get: LoopbackIssuer::at("http://objects"),
                 put: None,
@@ -95,9 +92,9 @@ async fn fixture(name: &str, consistency: Option<ReadConsistency>) -> Fixture {
 struct LiveRead {
     /// The route, with its required query parameters.
     uri: String,
-    /// The JSON body of a download route, which takes the consistency
-    /// parameters as fields next to the ones here, or `None` for a GET route,
-    /// which takes them in its query string.
+    /// The JSON body of a download route, which takes `consistency` as a
+    /// field next to the ones here, or `None` for a GET route, which takes it
+    /// in its query string.
     body: Option<Value>,
     /// Whether the route takes `snapshot_id`.
     takes_snapshot: bool,
@@ -228,24 +225,13 @@ impl Fixture {
     }
 }
 
-/// Checks that every live read route accepts both consistency values, with and
-/// without a maximum staleness, up to the revalidation bound.
+/// Checks that every live read route accepts both consistency values.
 #[tokio::test]
 async fn consistency_parameters_parse_on_every_live_read_route() {
-    let fixture = fixture("consistency-parse", None).await;
+    let fixture = fixture("consistency-parse", READ_REVALIDATION_BOUND_MS).await;
     for read in fixture.live_reads() {
-        for parameters in [
-            vec![("consistency", json!("strong"))],
-            vec![("consistency", json!("eventual"))],
-            vec![
-                ("consistency", json!("eventual")),
-                ("max_staleness_ms", json!(0)),
-            ],
-            vec![
-                ("consistency", json!("eventual")),
-                ("max_staleness_ms", json!(READ_REVALIDATION_BOUND_MS)),
-            ],
-        ] {
+        for consistency in ["strong", "eventual"] {
+            let parameters = [("consistency", json!(consistency))];
             let (status, body) = fixture.send(read.request(&parameters)).await;
             assert_eq!(
                 status,
@@ -258,72 +244,57 @@ async fn consistency_parameters_parse_on_every_live_read_route() {
     }
 }
 
-/// Checks that each live read route rejects `max_staleness_ms` without
-/// `consistency=eventual`, a maximum staleness above the revalidation bound, an unknown
-/// consistency value, and `consistency` together with `snapshot_id`, with
-/// `invalid_request` for the parameter at fault and before any store
-/// request.
+/// Checks that each live read route rejects an unknown consistency value
+/// and `consistency` together with `snapshot_id` with `invalid_request` for
+/// `consistency`, and rejects a `max_staleness_ms` parameter as unknown, each
+/// before any store request.
 #[tokio::test]
 async fn consistency_rejections_identify_the_parameter() {
-    let fixture = fixture("consistency-rejections", None).await;
+    let fixture = fixture("consistency-rejections", READ_REVALIDATION_BOUND_MS).await;
     for read in fixture.live_reads() {
-        let mut cases = vec![
-            (vec![("max_staleness_ms", json!(10))], "max_staleness_ms"),
-            (
-                vec![
-                    ("consistency", json!("strong")),
-                    ("max_staleness_ms", json!(10)),
-                ],
-                "max_staleness_ms",
-            ),
-            (
-                vec![
-                    ("consistency", json!("eventual")),
-                    ("max_staleness_ms", json!(READ_REVALIDATION_BOUND_MS + 1)),
-                ],
-                "max_staleness_ms",
-            ),
-            (
-                vec![
-                    ("consistency", json!("eventual")),
-                    ("max_staleness_ms", json!("soon")),
-                ],
-                "max_staleness_ms",
-            ),
-            (vec![("consistency", json!("sometimes"))], "consistency"),
-        ];
+        let mut cases = vec![vec![("consistency", json!("sometimes"))]];
         // The revision download routes refuse a snapshot on its own, and the
         // trash and revision listings don't take one, so they never reach
         // the consistency check with one.
         if read.takes_snapshot {
             for consistency in ["eventual", "strong"] {
-                cases.push((
-                    vec![
-                        ("consistency", json!(consistency)),
-                        ("snapshot_id", json!(SNAPSHOT_ID)),
-                    ],
-                    "consistency",
-                ));
+                cases.push(vec![
+                    ("consistency", json!(consistency)),
+                    ("snapshot_id", json!(SNAPSHOT_ID)),
+                ]);
             }
         }
-        for (parameters, field) in cases {
+        for parameters in cases {
             fixture.recording.reset();
             let (status, body) = fixture.send(read.request(&parameters)).await;
             let context = format!("{} {parameters:?}", read.uri);
             assert_eq!(status, StatusCode::BAD_REQUEST, "{context}");
             let error: ErrorResponse = serde_json::from_slice(&body).expect("error body");
             assert_eq!(error.code, ErrorCode::InvalidRequest.as_str(), "{context}");
-            assert_eq!(error.param, Some(read.param(field)), "{context}");
+            assert_eq!(error.param, Some(read.param("consistency")), "{context}");
             assert_eq!(fixture.recording.take(), [], "{context}");
         }
+        fixture.recording.reset();
+        let parameters = [("max_staleness_ms", json!(10))];
+        let (status, body) = fixture.send(read.request(&parameters)).await;
+        let context = format!("{} {parameters:?}", read.uri);
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{context}");
+        let error: ErrorResponse = serde_json::from_slice(&body).expect("error body");
+        assert_eq!(error.code, ErrorCode::InvalidRequest.as_str(), "{context}");
+        assert!(
+            error.message.contains("unknown field `max_staleness_ms`"),
+            "{context}: {}",
+            error.message
+        );
+        assert_eq!(fixture.recording.take(), [], "{context}");
     }
 }
 
 /// Checks that an eventual read through the server within its maximum
 /// staleness sends no store request, and that a `strong` read of the same
 /// entry confirms the head with the store. A read that doesn't set
-/// `consistency` takes the runtime's default, which is eventual unless the
-/// server sets `strong`.
+/// `consistency` is eventual, and on a server whose maximum staleness is zero
+/// every read confirms the head.
 #[tokio::test]
 async fn an_eventual_read_within_its_maximum_staleness_sends_no_store_request() {
     let entry = LiveRead::get(
@@ -334,15 +305,15 @@ async fn an_eventual_read_within_its_maximum_staleness_sends_no_store_request() 
         "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/children?include_attributes=false".to_owned(),
         true,
     );
-    for (setting, unset_confirms) in [(None, false), (Some(ReadConsistency::Strong), true)] {
+    for (setting, eventual_confirms) in [(READ_REVALIDATION_BOUND_MS, false), (0, true)] {
         let fixture = fixture("consistency-no-request", setting).await;
         for read in [&entry, &children] {
             let (status, _) = fixture.send(read.request(&[])).await;
             assert_eq!(status, StatusCode::OK, "warm read of {}", read.uri);
         }
         for (consistency, confirms) in [
-            (None, unset_confirms),
-            (Some("eventual"), false),
+            (None, eventual_confirms),
+            (Some("eventual"), eventual_confirms),
             (Some("strong"), true),
         ] {
             let parameters = consistency
@@ -356,7 +327,7 @@ async fn an_eventual_read_within_its_maximum_staleness_sends_no_store_request() 
             assert_eq!(
                 !fixture.recording.take().is_empty(),
                 confirms,
-                "{setting:?} server, {consistency:?}"
+                "server staleness {setting}, {consistency:?}"
             );
         }
     }
@@ -364,12 +335,12 @@ async fn an_eventual_read_within_its_maximum_staleness_sends_no_store_request() 
 
 /// Checks that the trash and revision listings and the download requests see
 /// a write made through another runtime when they're `strong`, and that an
-/// `eventual` read within its maximum staleness reads the head that the
+/// `eventual` read within the server's maximum staleness reads the head that the
 /// server confirmed before the write. The eventual reads come first,
 /// because a strong read moves the server's confirmed head forward.
 #[tokio::test]
 async fn a_strong_read_sees_a_write_through_another_runtime_and_an_eventual_read_may_not() {
-    let fixture = fixture("consistency-follows-writes", None).await;
+    let fixture = fixture("consistency-follows-writes", READ_REVALIDATION_BOUND_MS).await;
     let warm = LiveRead::get(
         "/v0/namespaces/demo/filesystem/entry?path=/file.txt".to_owned(),
         true,

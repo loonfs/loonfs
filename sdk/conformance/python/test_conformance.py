@@ -227,7 +227,6 @@ class ReadConsistencyRequest:
     actor_id: ActorId
     content_utf8: str
     commit_ids: ReadConsistencyCommitIds
-    max_staleness_ms: int
     snapshot_name: str
 
 
@@ -2381,13 +2380,8 @@ def test_read_consistency(cases: dict[str, ConformanceCase], harness: Harness) -
     )
     inode_id = client.files.retrieve(namespace_id, path=request.path).inode_id
 
-    for consistency, max_staleness_ms in [
-        ("strong", None),
-        ("eventual", request.max_staleness_ms),
-    ]:
+    for consistency in ["strong", "eventual"]:
         settings: dict[str, Any] = {"consistency": consistency}
-        if max_staleness_ms is not None:
-            settings["max_staleness_ms"] = max_staleness_ms
         trash = client.trash.list(namespace_id, **settings)
         assert len(trash.entries) == expected.trash_entry_count, consistency
         for revisions in [

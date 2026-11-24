@@ -43,7 +43,7 @@ fn is_manifest_get(
 /// Returns the options of a strong stat.
 fn strong() -> StatOptions {
     StatOptions {
-        at: ReadAt::Live(Some(Consistency::Strong)),
+        at: ReadAt::Live(Consistency::Strong),
         ..StatOptions::default()
     }
 }
@@ -269,7 +269,7 @@ async fn strong_reads_after_a_commit_send_one_manifest_check_each() {
         .read_file_with_options(
             "/small.txt",
             &ReadFileOptions {
-                at: ReadAt::Live(Some(Consistency::Strong)),
+                at: ReadAt::Live(Consistency::Strong),
             },
         )
         .await
@@ -286,8 +286,8 @@ async fn strong_reads_after_a_commit_send_one_manifest_check_each() {
     assert_eq!(fixture.head_sources(), (positions + 2, anchors));
 }
 
-/// Checks that a read with the default consistency (eventual) in the
-/// writer's runtime within its maximum staleness of the position's last
+/// Checks that an `eventual` read in the writer's runtime within the
+/// runtime's maximum staleness of the position's last
 /// check starts from the writer's position and sends no store request.
 #[tokio::test]
 async fn an_eventual_read_starts_from_the_position_with_no_store_request() {
@@ -1828,7 +1828,7 @@ async fn a_strong_read_from_a_collected_manifest_reads_the_newest_manifest() {
         .read_file_with_options(
             "/small.txt",
             &ReadFileOptions {
-                at: ReadAt::Live(Some(Consistency::Strong)),
+                at: ReadAt::Live(Consistency::Strong),
             },
         )
         .await

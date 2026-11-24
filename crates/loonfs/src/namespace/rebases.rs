@@ -179,7 +179,7 @@ impl Namespace<Writable> {
                 // the source namespace is read here without a loop of its own.
                 let fork = self
                     .core
-                    .pinned_read(source_namespace_id, Some(Consistency::Strong))
+                    .pinned_read(source_namespace_id, Consistency::Strong)
                     .await?;
                 let basis = new_fork
                     .engine

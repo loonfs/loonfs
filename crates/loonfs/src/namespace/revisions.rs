@@ -240,17 +240,21 @@ impl<M: crate::Mode> Namespace<M> {
                 let _permit = self.core.read_permit().await;
                 let max_bytes = self.core.max_read_content_bytes();
                 self.core
-                    .read(&self.namespace_id, None, |pinned| async move {
-                        Ok(pinned
-                            .engine
-                            .read_file_revision(
-                                absolute_path,
-                                revision_no,
-                                &pinned.context,
-                                Some(max_bytes),
-                            )
-                            .await?)
-                    })
+                    .read(
+                        &self.namespace_id,
+                        crate::Consistency::Eventual,
+                        |pinned| async move {
+                            Ok(pinned
+                                .engine
+                                .read_file_revision(
+                                    absolute_path,
+                                    revision_no,
+                                    &pinned.context,
+                                    Some(max_bytes),
+                                )
+                                .await?)
+                        },
+                    )
                     .await
             },
         )
@@ -346,17 +350,21 @@ impl<M: crate::Mode> Namespace<M> {
                 let _permit = self.core.read_permit().await;
                 let max_bytes = self.core.max_read_content_bytes();
                 self.core
-                    .read(&self.namespace_id, None, |pinned| async move {
-                        Ok(pinned
-                            .engine
-                            .read_file_revision_by_inode(
-                                inode_id,
-                                revision_no,
-                                &pinned.context,
-                                Some(max_bytes),
-                            )
-                            .await?)
-                    })
+                    .read(
+                        &self.namespace_id,
+                        crate::Consistency::Eventual,
+                        |pinned| async move {
+                            Ok(pinned
+                                .engine
+                                .read_file_revision_by_inode(
+                                    inode_id,
+                                    revision_no,
+                                    &pinned.context,
+                                    Some(max_bytes),
+                                )
+                                .await?)
+                        },
+                    )
                     .await
             },
         )

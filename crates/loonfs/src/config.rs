@@ -2,7 +2,7 @@
 //! policy, and inline content policy.
 
 use crate::trace::TraceMode;
-use crate::{ReadConsistency, RetentionWindow};
+use crate::RetentionWindow;
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_types::config::ConfigFieldError;
 use serde::{Deserialize, Serialize};
@@ -202,8 +202,9 @@ pub struct RuntimeConfig {
     /// [`READ_REVALIDATION_BOUND_MS`](crate::READ_REVALIDATION_BOUND_MS)
     /// fails the build with [`Error::Config`](crate::Error::Config).
     pub manifest_revalidation_interval_ms: u64,
-    /// Maximum staleness, in milliseconds, of an eventual read that doesn't
-    /// set its own (see [`Consistency::Eventual`](crate::Consistency::Eventual)).
+    /// Maximum staleness, in milliseconds, of an `eventual` read (see
+    /// [`Consistency::Eventual`](crate::Consistency::Eventual)), the
+    /// consistency of every read that doesn't ask for `strong`.
     ///
     /// An eventual read reads at the head that the runtime confirmed last
     /// (the position of the namespace's writer session, or else the cached
@@ -213,11 +214,6 @@ pub struct RuntimeConfig {
     /// [`READ_REVALIDATION_BOUND_MS`](crate::READ_REVALIDATION_BOUND_MS)
     /// fails the build with [`Error::Config`](crate::Error::Config).
     pub max_staleness_ms: u64,
-    /// Consistency of a read that doesn't set its own, including every read
-    /// that takes no options. Defaults to [`ReadConsistency::Eventual`],
-    /// whose reads take [`Self::max_staleness_ms`]. A host whose readers
-    /// follow writes made in other processes sets [`ReadConsistency::Strong`].
-    pub consistency: ReadConsistency,
     /// Mode label of the runtime's trace spans. Defaults to
     /// [`TraceMode::Embedded`].
     pub trace_mode: TraceMode,
@@ -266,7 +262,6 @@ impl Default for RuntimeConfig {
             max_read_content_bytes: DEFAULT_MAX_READ_CONTENT_BYTES,
             manifest_revalidation_interval_ms: DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS,
             max_staleness_ms: DEFAULT_MAX_STALENESS_MS,
-            consistency: ReadConsistency::Eventual,
             trace_mode: TraceMode::Embedded,
             min_publish_interval_ms: DEFAULT_MIN_PUBLISH_INTERVAL_MS,
             publication: PublicationPolicy::default(),

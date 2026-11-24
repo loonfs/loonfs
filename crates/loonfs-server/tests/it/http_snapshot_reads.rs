@@ -579,7 +579,7 @@ async fn snapshot_revision_listings_stop_at_the_captured_revision() {
             ("snapshot_id", snapshot_id),
             ("consistency", "strong"),
         ]))
-        .expect_err("a snapshot listing has no consistency setting");
+        .expect_err("a snapshot listing has no consistency");
         assert_eq!(status, 400, "{route}");
         assert_eq!(error.code, "invalid_request", "{route}");
         assert_eq!(error.param.as_deref(), Some("consistency"), "{route}");

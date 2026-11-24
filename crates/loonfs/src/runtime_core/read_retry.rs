@@ -26,10 +26,6 @@ impl RuntimeCore {
     /// replaced the read's basis, up to `MAX_CONTENTION_ATTEMPTS` reads in
     /// all (see [`Self::run_again_after_replaced_manifest`]). A read whose
     /// basis was replaced on every attempt returns `store_contention`.
-    ///
-    /// A read whose maximum staleness is longer than the revalidation bound
-    /// returns `invalid_request` before the read sends a request to the store
-    /// (see [`Self::current_read_context`]).
     pub(crate) async fn read<T, F, Fut>(
         &self,
         namespace_id: &NamespaceId,
@@ -53,7 +49,9 @@ impl RuntimeCore {
     /// cached head below the sequence is older than a head that the caller
     /// has seen. When an `eventual` read's cached head is below
     /// `min_head_seq`, the read confirms the head as a `strong` read does and
-    /// runs at the confirmed head. A sequence that is still above the
+    /// runs at the confirmed head. With a maximum staleness of zero, an
+    /// `eventual` read has already confirmed its head that way, so it doesn't
+    /// confirm the head again. A sequence that is still above the
     /// confirmed head reaches `read`, which returns the core's error for it.
     pub(crate) async fn read_at_least<T, F, Fut>(
         &self,
@@ -146,16 +144,15 @@ impl RuntimeCore {
         }
     }
 
-    /// Returns whether a read confirmed as `confirmation` reads an `eventual`
-    /// head, with a read that sets no consistency taking the runtime's
-    /// default.
+    /// Returns whether a read confirmed as `confirmation` can start from a
+    /// head that it didn't confirm: an `eventual` read in a runtime whose
+    /// maximum staleness is above zero.
     fn reads_eventual(&self, confirmation: HeadConfirmation) -> bool {
         match confirmation {
-            HeadConfirmation::Consistency(consistency) => matches!(
-                consistency.unwrap_or(self.inner.config.consistency.into()),
-                Consistency::Eventual { .. }
-            ),
-            HeadConfirmation::View => false,
+            HeadConfirmation::Consistency(Consistency::Eventual) => {
+                self.inner.config.max_staleness_ms > 0
+            }
+            HeadConfirmation::Consistency(Consistency::Strong) | HeadConfirmation::View => false,
         }
     }
 }

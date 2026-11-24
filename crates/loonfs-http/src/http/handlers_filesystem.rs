@@ -6,15 +6,16 @@ use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, ContextHeaders};
 use super::handlers_uploads::content_preparation_for_puts;
-use super::query_params::{effective_page_limit, live_consistency, read_at, required_query_param};
+use super::query_params::{effective_page_limit, read_at, required_query_param};
 use super::{acquire_download_permit, AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
-    AbsolutePath, CommitSeq, DiffOptions, ErrorCode, ListChangesOptions, ListFileRevisionsOptions,
-    ListOptions, ListTrashOptions, ReadConsistency, ReadFileStreamOptions, SnapshotId, StatOptions,
+    AbsolutePath, CommitSeq, Consistency, DiffOptions, ErrorCode, ListChangesOptions,
+    ListFileRevisionsOptions, ListOptions, ListTrashOptions, ReadFileStreamOptions, SnapshotId,
+    StatOptions,
 };
 use loonfs_types::options::CommitSplitting;
 #[cfg(feature = "openapi")]
@@ -40,15 +41,11 @@ pub(super) struct PathQuery {
     include_attributes: Option<bool>,
     /// The snapshot whose captured path state to read.
     snapshot_id: Option<SnapshotId>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read. It can't be combined with `snapshot_id`.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined
+    /// with `snapshot_id`.
+    consistency: Option<Consistency>,
 }
 
 /// The query of a listing of a file's revisions by path.
@@ -71,15 +68,11 @@ pub(super) struct PathPageQuery {
     /// The snapshot whose state to list the file's revisions in. The listing starts at the
     /// revision that the snapshot captured.
     snapshot_id: Option<SnapshotId>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read. It can't be combined with `snapshot_id`.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined
+    /// with `snapshot_id`.
+    consistency: Option<Consistency>,
 }
 
 /// The query of a directory listing. The listing queries repeat their
@@ -113,15 +106,11 @@ pub(super) struct ListPathPageQuery {
     recursive: Option<bool>,
     /// The snapshot whose captured directory state to read.
     snapshot_id: Option<SnapshotId>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read. It can't be combined with `snapshot_id`.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined
+    /// with `snapshot_id`.
+    consistency: Option<Consistency>,
 }
 
 /// The query of a listing that has no other parameters.
@@ -154,15 +143,10 @@ pub(super) struct LivePageQuery {
     pub(super) limit: Option<u32>,
     /// The opaque cursor that the previous page returned.
     pub(super) cursor: Option<String>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read.
-    pub(super) consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    pub(super) max_staleness_ms: Option<u64>,
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read.
+    pub(super) consistency: Option<Consistency>,
 }
 
 /// The query of a content read by path.
@@ -178,15 +162,11 @@ pub(super) struct ContentQuery {
     revision_no: Option<RevisionNo>,
     /// The snapshot whose captured file revision to read.
     snapshot_id: Option<SnapshotId>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read. It can't be combined with `snapshot_id`.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined
+    /// with `snapshot_id`.
+    consistency: Option<Consistency>,
 }
 
 /// The query of the change feed.
@@ -216,15 +196,11 @@ pub(super) struct ChangesQuery {
     limit: Option<u32>,
     /// A snapshot to read the feed from. The feed ends at the sequence that the snapshot captured.
     snapshot_id: Option<SnapshotId>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read. It can't be combined with `snapshot_id`.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined
+    /// with `snapshot_id`.
+    consistency: Option<Consistency>,
 }
 
 /// The query of a diff page.
@@ -259,15 +235,10 @@ pub(super) struct DiffQuery {
         param(minimum = 1, maximum = 1000, default = 1000)
     )]
     limit: Option<u32>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read.
+    consistency: Option<Consistency>,
 }
 
 #[cfg_attr(
@@ -321,7 +292,7 @@ pub(super) async fn list_path_entries(
         options.recursive = recursive;
     }
     let limit = effective_page_limit(query.limit)?;
-    options.at = read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?;
+    options.at = read_at(query.snapshot_id, query.consistency)?;
     let listing = runtime
         .namespace(&namespace_id)
         .list_with_options(&path, &options)
@@ -375,7 +346,7 @@ pub(super) async fn get_path_entry(
     let runtime = state.runtime_for(context);
     let path = required_query_param(query.path, "path")?;
     let mut options = StatOptions {
-        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
+        at: read_at(query.snapshot_id, query.consistency)?,
         ..StatOptions::default()
     };
     if let Some(include) = query.include_attributes {
@@ -438,7 +409,7 @@ pub(super) async fn get_file_content(
     reject_snapshot_with_revision(query.snapshot_id.as_ref(), query.revision_no, "revision_no")?;
     let options = ReadFileStreamOptions {
         range: range.stream_range(),
-        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
+        at: read_at(query.snapshot_id, query.consistency)?,
         ..ReadFileStreamOptions::default()
     };
     let namespace = runtime.namespace(&namespace_id);
@@ -500,7 +471,7 @@ pub(super) async fn list_trash(
     let runtime = state.runtime_for(context);
     let namespace = runtime.namespace(&namespace_id);
     let options = ListTrashOptions {
-        consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
+        consistency: query.consistency.unwrap_or_default(),
     };
     let response = namespace
         .list_trash_with_options(&options)
@@ -555,7 +526,7 @@ pub(super) async fn list_file_revisions(
     let namespace = runtime.namespace(&namespace_id);
     let path = required_query_param(query.path, "path")?;
     let options = ListFileRevisionsOptions {
-        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
+        at: read_at(query.snapshot_id, query.consistency)?,
     };
     let response = namespace
         .list_file_revisions_with_options(&path, &options)
@@ -730,7 +701,7 @@ pub(super) async fn list_changes(
     let after_seq = required_query_param(query.after_seq, "after_seq")?;
     let limit = effective_page_limit(query.limit)?;
     let options = ListChangesOptions {
-        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
+        at: read_at(query.snapshot_id, query.consistency)?,
         commit_splitting: commit_splitting(query.split_commits),
         event_index: query.event_index.unwrap_or(0),
     };
@@ -792,7 +763,7 @@ pub(super) async fn list_diff(
         event_index: query.event_index.unwrap_or(0),
         limit: effective_page_limit(query.limit)?,
         commit_splitting: commit_splitting(query.split_commits),
-        consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
+        consistency: query.consistency.unwrap_or_default(),
     };
     let response = runtime
         .namespace(&namespace_id)

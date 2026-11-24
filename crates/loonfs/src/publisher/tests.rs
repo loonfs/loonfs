@@ -2535,7 +2535,7 @@ async fn a_deletion_that_panics_after_its_tombstone_put_acknowledges_no_later_co
     assert_eq!(queued_error.code(), ErrorCode::NamespaceDeleted);
     let strong = namespace
         .metadata_with_options(&crate::LiveReadOptions {
-            consistency: Some(crate::Consistency::Strong),
+            consistency: crate::Consistency::Strong,
         })
         .await
         .expect_err("a strong read after the tombstone");

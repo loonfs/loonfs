@@ -90,8 +90,8 @@ impl Client {
             .await
     }
 
-    /// Returns the namespace's current state, at the server's default
-    /// consistency.
+    /// Returns the namespace's current state, read as an `eventual` read
+    /// reads it.
     pub async fn get_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceMetadata> {
         self.get_namespace_with_options(namespace_id, &LiveReadOptions::default())
             .await
@@ -331,20 +331,14 @@ mod tests {
     use loonfs_types::options::{Consistency, LiveReadOptions};
     use loonfs_types::{ErrorCode, NamespaceId};
 
-    /// Checks that a namespace read and a next-range query send the
-    /// consistency parameters only when they set a consistency, and that the
-    /// next-range query identifies the fork with `source_namespace_id`.
+    /// Checks that a namespace read and a next-range query send
+    /// `consistency` only when they're `strong`, and that the next-range
+    /// query identifies the fork with `source_namespace_id`.
     #[tokio::test]
-    async fn live_reads_send_the_consistency_parameters_only_when_they_set_them() {
+    async fn live_reads_send_the_consistency_parameter_only_when_strong() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let fork_id = NamespaceId::parse("fork").expect("fork id");
-        let consistencies = [
-            None,
-            Some(Consistency::Strong),
-            Some(Consistency::Eventual {
-                max_staleness_ms: Some(2_500),
-            }),
-        ];
+        let consistencies = [Consistency::Eventual, Consistency::Strong];
         let transport = scripted_transport::script(consistencies.iter().flat_map(|_| {
             [
                 Outcome::Refused(ErrorCode::ServerError),
@@ -380,8 +374,6 @@ mod tests {
                 "source_namespace_id=fork",
                 "consistency=strong",
                 "source_namespace_id=fork&consistency=strong",
-                "consistency=eventual&max_staleness_ms=2500",
-                "source_namespace_id=fork&consistency=eventual&max_staleness_ms=2500",
             ]
         );
     }

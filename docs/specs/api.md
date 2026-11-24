@@ -680,7 +680,7 @@ The table below lists every v0 operation, its retry class, and its representativ
 | Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
 | Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`. Requires `Loonfs-Actor`, optional `namespace_id` and `retention_window_ms`. Re-sending with matching options finishes an initializing namespace (see [Creating and forking namespaces](#creating-and-forking-namespaces)). |
 | List namespaces | `list_namespaces` | `idempotent` | `GET /v0/namespaces?limit=100&cursor=...` (`limit` defaults to 100, see [Listing namespaces](#listing-namespaces)) |
-| Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}?consistency=strong` (`consistency` and `max_staleness_ms` are optional) |
+| Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}?consistency=strong` (`consistency` is optional) |
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=true&snapshot_id=...` (`include_attributes` defaults to `false`, `snapshot_id` is optional) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=true&snapshot_id=...` (`include_attributes` defaults to `false`, `snapshot_id` is optional) |
 | List path entries | `list_path_entries` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entries?path=/docs&limit=100&cursor=...&include_attributes=true&recursive=true&snapshot_id=...` (`include_attributes` and `recursive` default to `false`, `snapshot_id` is optional) |
@@ -1198,7 +1198,7 @@ A retry with the same ID and matching options finishes an initializing namespace
 }
 ```
 
-Each page reads up to `limit` namespace prefixes from object storage and loads each namespace's newest manifest at the server's default consistency. Because object storage still retains tombstones for deleted namespaces and boundary objects for retired ones ([Retirement](format.md#95-retirement)), reading each manifest is required just to filter out non-live IDs, so returning full metadata adds no extra reads. That per-namespace manifest read is also why `limit` defaults to 100 here (rather than `pagination.default_limit`, though `pagination.max_limit` still caps it).
+Each page reads up to `limit` namespace prefixes from object storage and loads each namespace's newest manifest as an `eventual` read does. Because object storage still retains tombstones for deleted namespaces and boundary objects for retired ones ([Retirement](format.md#95-retirement)), reading each manifest is required just to filter out non-live IDs, so returning full metadata adds no extra reads. That per-namespace manifest read is also why `limit` defaults to 100 here (rather than `pagination.default_limit`, though `pagination.max_limit` still caps it).
 
 Deleted, retired, and initializing namespaces (and any stray non-namespace objects under `namespaces/`) are omitted from `namespaces` while still consuming slots in the object-storage page. As a result, a page can return fewer items than `limit` (even zero) and still include `next_cursor`. Callers listing all namespaces MUST follow `next_cursor` until it's absent.
 
@@ -1212,7 +1212,7 @@ Returns the capability document defined in [The capability document](#21-the-cap
 
 ### 6.2 `GET /v0/namespaces/{ns}`
 
-Returns the metadata of one namespace without listing all namespaces. A missing or `initializing` namespace returns `404 namespace_not_found`, and a deleted or retired namespace returns `410 namespace_deleted`. The route accepts `consistency` and `max_staleness_ms` to control how recently the server confirms the head that `head_seq` and `retention_floor_seq` come from (see [Read consistency](#read-consistency)), using the server's default when omitted.
+Returns the metadata of one namespace without listing all namespaces. A missing or `initializing` namespace returns `404 namespace_not_found`, and a deleted or retired namespace returns `410 namespace_deleted`. The route accepts `consistency` to control how recently the server confirms the head that `head_seq` and `retention_floor_seq` come from (see [Read consistency](#read-consistency)), and reads as `eventual` when it's omitted.
 
 ```json
 {
@@ -1277,20 +1277,19 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
 
 #### Read consistency
 
-In a runtime without the namespace's writer session, confirming the cached head costs a WAL probe. Because reads following writes in the same runtime already see those writes (and cold opens already load fresh state via discovery), live reads default to `eventual` consistency so callers pay for head confirmation only when needed. Each live read supports two `consistency` modes:
+In a runtime without the namespace's writer session, confirming the cached head costs a WAL probe. Because reads following writes in the same runtime already see those writes (and cold opens already load fresh state via discovery), live reads default to `eventual` consistency so callers pay for head confirmation only when needed. A live read is either `eventual` or `strong`, and a read that doesn't set `consistency` is `eventual`:
 
-- **`eventual` (default unless the host sets `strong`).** Reuses the reader's last confirmed head without sending a confirmation request while that confirmation is younger than the read's maximum staleness, and confirms the head like `strong` once stale. An `eventual` read sees every commit acknowledged before the last confirmation, may miss newer commits, and never goes backward on the same runtime because the confirmed head is monotonic. For example, with 1,000 ms staleness, a reader confirmed at sequence 40 serves `eventual` reads at 40 for up to 1 second even if sequence 41 commits, while a `strong` read during that second advances the confirmed head to 41 for all later `eventual` reads.
+- **`eventual` (the default).** Reuses the reader's last confirmed head without sending a confirmation request while that confirmation is younger than the runtime's maximum staleness (`max_staleness_ms`), and confirms the head like `strong` once stale. An `eventual` read sees every commit acknowledged before the last confirmation, may miss newer commits, and never goes backward on the same runtime because the confirmed head is monotonic. For example, with 1,000 ms staleness, a reader confirmed at sequence 40 serves `eventual` reads at 40 for up to 1 second even if sequence 41 commits, while a `strong` read during that second advances the confirmed head to 41 for all later `eventual` reads.
 - **`strong`.** Confirms the head before reading, guaranteeing visibility of every commit acknowledged before the read started. Use `strong` when reading after a write or permission change made through a different process or server.
 
-Configuration and overrides:
+The runtime and the server each have a maximum staleness setting:
 
-- **Defaults.** `RuntimeConfig::consistency` (`ReadConsistency::Eventual` or `ReadConsistency::Strong`) and the reference server's `consistency` setting control the default for requests that omit `consistency`. `RuntimeConfig::max_staleness_ms` (and the server's `max_staleness_ms`) default to 1,000 ms, with `0` confirming on every read. In Rust, read option structs default consistency to `None` (or `ReadAt::Live(None)`), and option-less methods such as `Namespace::read_file_revision` always use the runtime default.
-- **Per-request staleness.** Callers can override staleness with `Consistency::Eventual { max_staleness_ms }` in Rust or `max_staleness_ms` in HTTP (accepted only together with `consistency=eventual`).
-- **Upper bound (`READ_REVALIDATION_BOUND_MS`).** Neither `max_staleness_ms` nor `manifest_revalidation_interval_ms` can exceed `READ_REVALIDATION_BOUND_MS` (1,200,000 ms, or 20 minutes). A larger setting fails runtime construction or server startup, and a read that asks for a larger `max_staleness_ms`, in Rust or over HTTP, returns `invalid_request` with `param` `max_staleness_ms` (`/max_staleness_ms` on the download routes) before the read sends a request to object storage. Any cached head whose last manifest check is older than 20 minutes is always revalidated regardless of setting, ensuring the 24-hour grace window always covers the revalidation bound plus the 15-minute presigned download URL lifetime and clock allowance ([Content roots](format.md#119-content-roots)).
+- **Maximum staleness.** `RuntimeConfig::max_staleness_ms` (and the server's `max_staleness_ms`) defaults to 1,000 ms. A setting of `0` confirms the head on every read, so a deployment whose readers follow writes made through other servers sets it to `0` instead of passing `strong` on every read. In Rust, the read option structs default to `Consistency::Eventual` (`ReadAt::Live(Consistency::Eventual)` for the options that can also read a snapshot), and option-less methods such as `Namespace::read_file_revision` read as `eventual`.
+- **Upper bound (`READ_REVALIDATION_BOUND_MS`).** Neither `max_staleness_ms` nor `manifest_revalidation_interval_ms` can exceed `READ_REVALIDATION_BOUND_MS` (1,200,000 ms, or 20 minutes). A larger setting fails runtime construction or server startup. Any cached head whose last manifest check is older than 20 minutes is always revalidated regardless of setting, ensuring the 24-hour grace window always covers the revalidation bound plus the 15-minute presigned download URL lifetime and clock allowance ([Content roots](format.md#119-content-roots)).
 
-In a runtime with the namespace's writer session, reads start from the [writer position](glossary.md#writer-position) and confirm it by checking the next manifest number (`HEAD`) and reading the manifest boundary. An `eventual` read skips the check within its staleness window and waits for it afterward, while a `strong` read always waits for a check that started after the read began so it sees another writer's claim. Because the session runs one check at a time and concurrent arrivals share the next check, a wave of concurrent `strong` reads costs at most two checks.
+In a runtime with the namespace's writer session, reads start from the [writer position](glossary.md#writer-position) and confirm it by checking the next manifest number (`HEAD`) and reading the manifest boundary. An `eventual` read skips the check within the maximum staleness and waits for it afterward, while a `strong` read always waits for a check that started after the read began so it sees another writer's claim. Because the session runs one check at a time and concurrent arrivals share the next check, a wave of concurrent `strong` reads costs at most two checks.
 
-Pinned reads (reads with `snapshot_id` or through a `ReadView`) have no consistency setting because the snapshot or view pins the state. Passing `consistency` with `snapshot_id` (or on a `ReadView` read in Rust) returns `invalid_request` with `param` `consistency`. In Rust, snapshot-capable options use `at` (`ReadAt::Live` or `ReadAt::Snapshot`) so both can't be set together. Looking up a snapshot at the live head uses `strong` confirmation, and capturing a `ReadView` uses the requested or default live consistency.
+Pinned reads (reads with `snapshot_id` or through a `ReadView`) have no consistency because the snapshot or view pins the state. Passing `consistency` with `snapshot_id` returns `invalid_request` with `param` `consistency`, and so does a `strong` read through a `ReadView` in Rust. In Rust, snapshot-capable options use `at` (`ReadAt::Live` or `ReadAt::Snapshot`) so both can't be set together. Looking up a snapshot at the live head uses `strong` confirmation, and capturing a `ReadView` uses the requested live consistency.
 
 When an `eventual` request supplies a sequence learned from a fresher read (a listing cursor's head, a change feed's `after_seq`, or a diff's `to_seq`) that is ahead of the reader's cached head, LoonFS automatically confirms the head as a `strong` read and serves the request at the confirmed head (avoiding an extra client error-and-retry round trip). If the sequence is still ahead of the confirmed head, LoonFS returns `invalid_request`. Requests with sequences at or below the cached head send no confirmation request.
 
@@ -1362,8 +1361,8 @@ Entry fields and parameters follow these rules:
 - **Forward compatibility for `inode_kind`.** Clients MUST tolerate unrecognized `inode_kind` values by treating such entries as opaque: reading universal fields (`display_name`, `inode_id`, `path`, `binding_version`) and ignoring kind-specific fields.
 - **Attributes projection (`include_attributes`).** Accepts `true` or `false` (default `false`, and other values return `invalid_request`). Attribute fields are serialized as prefixed siblings rather than a nested object so callers can read `attributes_revision_no` directly for `expected_attributes_revision_no` on their next write. `attributes_revision_no` and `attributes` are always both present or both absent, with `attributes_updated_by` and `attributes_updated_at_ms` added when a stored attribute revision exists. Never-written attributes read as `{}` at revision 0 (with no updater fields), whereas omitting `include_attributes` drops all four fields so absence never means empty.
 - **Root and non-root bindings.** The root `/` omits `parent_inode_id`, `display_name`, and `binding_version`. Every other entry includes a validated non-empty `display_name` and its current `binding_version` ([Commit identity and preconditions](#51-commit-identity-and-preconditions)).
-- **Consistency.** Accepts `consistency` (`eventual` or `strong`, default from server) and `max_staleness_ms` (0 to 1,200,000, only with `consistency=eventual`). Neither can be combined with `snapshot_id` ([Read consistency](#read-consistency)).
-- **Inode route (`GET /inodes/{inode_id}`).** Accepts `snapshot_id`, `include_attributes`, `consistency`, and `max_staleness_ms`, returning the same entry shape with the inode's current `path` (or `/` for the root). Request path limits ([Names and paths](format.md#14-names-and-paths)) don't block returning a longer derived `path`. Moves change `path` and `display_name` without changing `inode_id` or metadata. Unknown or hidden inodes return `inode_not_found`.
+- **Consistency.** Accepts `consistency` (`eventual`, the default, or `strong`), which can't be combined with `snapshot_id` ([Read consistency](#read-consistency)).
+- **Inode route (`GET /inodes/{inode_id}`).** Accepts `snapshot_id`, `include_attributes`, and `consistency`, returning the same entry shape with the inode's current `path` (or `/` for the root). Request path limits ([Names and paths](format.md#14-names-and-paths)) don't block returning a longer derived `path`. Moves change `path` and `display_name` without changing `inode_id` or metadata. Unknown or hidden inodes return `inode_not_found`.
 
 ### 6.5 `GET /filesystem/entries` and `GET /inodes/{inode_id}/children`
 
@@ -1375,7 +1374,7 @@ Ordering, addressing, and parameters:
 
 - **Ordering.** Non-recursive listings return children in canonical `name_key` order, while recursive listings walk depth first (see below). Concatenating pages in cursor order yields the complete ordered listing, and clients MUST NOT re-sort pages. The target (`path` or `inode_id`) MUST be repeated on every page. `next_cursor` is included only when more pages exist.
 - **Inode route.** Accepts `snapshot_id` and stays attached to the same directory across concurrent renames or moves (entry paths reflect the parent's location at each page's head). Unknown or deleted inodes return `inode_not_found` (including mid-pagination if deleted), and file targets return `wrong_kind` (unlike the path route, which returns a single-entry listing for a file target).
-- **`include_attributes` and consistency.** `include_attributes` defaults to `false` with the same sibling-field rules as entry reads (choose page sizes carefully since each attribute map can reach 64 KiB and `pagination.max_limit` applies). `consistency` and `max_staleness_ms` apply per page.
+- **`include_attributes` and consistency.** `include_attributes` defaults to `false` with the same sibling-field rules as entry reads (choose page sizes carefully since each attribute map can reach 64 KiB and `pagination.max_limit` applies). `consistency` applies per page.
 
 Recursive listings (`recursive=true`, default `false`, and other values return `invalid_request`):
 
@@ -1436,7 +1435,7 @@ Cursor semantics across paged routes:
 
 ### 6.6 `GET /filesystem/trash`
 
-Lists active trash entries oldest first, in ascending `(deletion_seq, inode_id)` order, using standard `limit` and `cursor` pagination plus per-page `consistency` and `max_staleness_ms` ([Read consistency](#read-consistency)). For requests with principals, permission filtering can produce a page shorter than `limit` that still includes `next_cursor`.
+Lists active trash entries oldest first, in ascending `(deletion_seq, inode_id)` order, using standard `limit` and `cursor` pagination plus a per-page `consistency` ([Read consistency](#read-consistency)). For requests with principals, permission filtering can produce a page shorter than `limit` that still includes `next_cursor`.
 
 Trash listing scans the derived `trash` family ([File and subtree deletion](format.md#16-file-and-subtree-deletion)) starting strictly above the retention floor, so expired deletions never appear and page cost is independent of older deletion history. Cursors created before a floor advance resume above the new floor.
 
@@ -1473,7 +1472,7 @@ The server streams and verifies content in bounded chunks. For files exceeding `
 
 For reads without a `Range` header, the server intentionally omits `Content-Length` so receiving `N` bytes can't signal success before full length and checksum verification completes. An I/O or checksum failure after headers are sent aborts the stream rather than writing a JSON error. Clients MUST verify clean stream completion before publishing a downloaded file (streaming directly to stdout may expose unverified prefix bytes before an abort).
 
-Revision listings (`GET /filesystem/revisions` and `GET /inodes/{inode_id}/revisions`) return revisions newest first with standard `limit`, `cursor`, `snapshot_id`, `consistency`, and `max_staleness_ms` parameters (neither response includes paths). With `snapshot_id`, both listings read the snapshot's state (the path listing resolves the path in that state), so they start at the revision that the snapshot captured, and every page returns the snapshot's `captured_seq` as `head_seq`. A cursor from a listing with `snapshot_id` is bound to that snapshot, and every later page MUST pass the same `snapshot_id` (omitting it or passing another returns `invalid_request`). Above the retention floor, revision history is complete. At or below the floor, each file keeps its newest revision, so paging reaches revision 1 only until base compaction drops older ones (cursors resume strictly after the last returned revision, so concurrent compaction neither skips nor duplicates retained revisions):
+Revision listings (`GET /filesystem/revisions` and `GET /inodes/{inode_id}/revisions`) return revisions newest first with standard `limit`, `cursor`, `snapshot_id`, and `consistency` parameters (neither response includes paths). With `snapshot_id`, both listings read the snapshot's state (the path listing resolves the path in that state), so they start at the revision that the snapshot captured, and every page returns the snapshot's `captured_seq` as `head_seq`. A cursor from a listing with `snapshot_id` is bound to that snapshot, and every later page MUST pass the same `snapshot_id` (omitting it or passing another returns `invalid_request`). Above the retention floor, revision history is complete. At or below the floor, each file keeps its newest revision, so paging reaches revision 1 only until base compaction drops older ones (cursors resume strictly after the last returned revision, so concurrent compaction neither skips nor duplicates retained revisions):
 
 ```json
 {
@@ -1504,13 +1503,13 @@ Inode-addressed content routes:
 - **`GET /inodes/{inode_id}/content`.** Streams and verifies the current revision of a visible file inode regardless of renames (requiring `read`, while deleted or unknown inodes return `inode_not_found` and directories return `wrong_kind`). With `snapshot_id`, reads the snapshot's revision and also requires `history`.
 - **`GET /inodes/{inode_id}/revisions/{revision_no}/content`.** Reads a specific revision without path resolution, keeping trashed files readable while their deletion is above the retention floor. Once the retention floor reaches the deletion, both this route and inode revision listing return `inode_not_found` for every hidden inode regardless of rights ([Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)). Directories return `wrong_kind`, missing inodes return `inode_not_found`, and missing or pruned revisions return `revision_not_found`. With `snapshot_id` (user or fork snapshot, see [Snapshots](#snapshots)), looks up the revision in the snapshot manifest (keeping it readable past the floor, rejecting post-snapshot revisions with `revision_not_found`, and requiring `history`).
 
-All three content routes accept `consistency` and `max_staleness_ms` for live reads (neither can be combined with `snapshot_id`).
+All three content routes accept `consistency` for live reads (it can't be combined with `snapshot_id`).
 
 In the embedded runtime, by-reference reads require administrator access to the reading namespace and a matching content publication in that namespace's read view (including inherited fork publications). Unreferenced content returns `path_not_found` without reading bytes, even if uploaded to that namespace, and content published after a snapshot isn't readable through that snapshot.
 
 #### Ranged reads
 
-Any of the three content routes accepts an HTTP `Range` header to return a single byte slice of a file (alongside `revision_no`, `snapshot_id`, `consistency`, and `max_staleness_ms`). Two forms are supported:
+Any of the three content routes accepts an HTTP `Range` header to return a single byte slice of a file (alongside `revision_no`, `snapshot_id`, and `consistency`). Two forms are supported:
 
 - `bytes=start-end`: inclusive byte offsets (`bytes=0-99` returns the first 100 bytes, and an `end` past EOF clamps to the last byte, so `bytes=950-1999` on a 1,000-byte file returns the last 50 bytes).
 - `bytes=start-`: bytes from `start` through EOF.
@@ -2085,7 +2084,7 @@ Download routes issue short-lived presigned GET URLs so clients can stream file 
 
 A direct download returns one presigned range per immutable extent. If some bytes of the revision are still pending WAL pieces, LoonFS materializes them into a new span object using the same writer as a fold (never rewriting existing objects, so concurrent downloads or a later fold each write their own span object, and zero-byte references materialize an empty whole object if missing). If the deployment can't materialize pending pieces, the route returns `content_not_materialized`.
 
-Path download (`POST /v0/namespaces/{ns}/filesystem/downloads`) takes `path`, optional `revision_no` or `snapshot_id` (mutually exclusive), optional `start_offset` (default 0), and optional live-read `consistency` and `max_staleness_ms` (mutually exclusive with `snapshot_id`, with invalid values reporting JSON Pointer `param` such as `/consistency`, see [Read consistency](#read-consistency)):
+Path download (`POST /v0/namespaces/{ns}/filesystem/downloads`) takes `path`, optional `revision_no` or `snapshot_id` (mutually exclusive), optional `start_offset` (default 0), and optional live-read `consistency` (mutually exclusive with `snapshot_id`, with invalid values reporting JSON Pointer `param` such as `/consistency`, see [Read consistency](#read-consistency)):
 
 ```json
 { "path": "/docs/report.txt", "revision_no": 3, "start_offset": 1048576 }
@@ -2118,7 +2117,7 @@ Path download (`POST /v0/namespaces/{ns}/filesystem/downloads`) takes `path`, op
 
 Inode-addressed download routes use the same provider checks and response shape (with `inode_id` instead of `path`):
 
-- **`POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`.** Accepts an optional body with `snapshot_id`, `start_offset`, `consistency`, and `max_staleness_ms`. Survives renames and trash deletions while above the retention floor (returning `inode_not_found` once the floor reaches the deletion, see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)). With `snapshot_id`, looks up the revision in the snapshot manifest (rejecting post-snapshot revisions with `revision_not_found`).
+- **`POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`.** Accepts an optional body with `snapshot_id`, `start_offset`, and `consistency`. Survives renames and trash deletions while above the retention floor (returning `inode_not_found` once the floor reaches the deletion, see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)). With `snapshot_id`, looks up the revision in the snapshot manifest (rejecting post-snapshot revisions with `revision_not_found`).
 - **`POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads`.** Accepts the same optional body for the current revision of a visible file inode (or the snapshot's revision when `snapshot_id` is set), following renames and returning `inode_not_found` once deleted.
 
 ```json
@@ -2160,7 +2159,7 @@ Deployments that can't presign downloads return `501 not_supported` (`feature = 
 
 Returns a page of commits after `after_seq`. Requires an administrator or the service context.
 
-The route accepts `consistency` and `max_staleness_ms` (mutually exclusive with `snapshot_id`, see [Read consistency](#read-consistency)). An `eventual` poll within its staleness window may miss very recent commits until the next confirmation, while passing an `after_seq` ahead of the cached head triggers strong head confirmation (returning `invalid_request` if still above the confirmed head).
+The route accepts `consistency` (mutually exclusive with `snapshot_id`, see [Read consistency](#read-consistency)). An `eventual` poll within the maximum staleness may miss very recent commits until the next confirmation, while passing an `after_seq` ahead of the cached head triggers strong head confirmation (returning `invalid_request` if still above the confirmed head).
 
 Each entry in `changes` is a `Commit` matching `POST /commits`, containing `committed_seq`, `commit_id`, `committed_by`, observational `committed_at_ms`, optional `message`, optional `merge` (for [merges](glossary.md#merge), which emit standard filesystem events rather than a separate merge event kind, see [Commit responses and safe retry](#52-commit-responses-and-safe-retry)), and ordered `events`. A single request operation can produce multiple events in order (for example, `put_file` creating missing parent directories, a replacing move deleting an occupant, or a copy applying copied attributes).
 
@@ -2333,7 +2332,7 @@ Query parameters:
 | `split_commits` | Allows a page to end inside a single large commit, as on the change feed (default `false`). |
 | `event_index` | `next_event_index` from the previous page, resuming the commit at `after_seq` (default `0`, requires `split_commits=true`). |
 | `limit` | Maximum commits read by this page (same default and max as `GET /changes`). |
-| `consistency`, `max_staleness_ms` | Head confirmation settings ([Read consistency](#read-consistency)). |
+| `consistency` | How recently the read confirms the head ([Read consistency](#read-consistency)). |
 
 Sequence bounds MUST satisfy `retention_floor_seq <= from_seq <= after_seq <= to_seq <= head`:
 
@@ -2608,7 +2607,7 @@ Representative request and response:
 | Query parameter | Meaning |
 | --- | --- |
 | `source_namespace_id` | Required. The fork (must be forked from this namespace, or identified by `fork_basis.rebased_from` when querying a rebase fork). |
-| `consistency`, `max_staleness_ms` | Optional head confirmation settings applied to both namespaces ([Read consistency](#read-consistency)). |
+| `consistency` | How recently the read confirms the heads of both namespaces, `eventual` when omitted ([Read consistency](#read-consistency)). |
 
 | Response field | Meaning |
 | --- | --- |
@@ -2851,7 +2850,7 @@ Search ordering, scoping, and pagination rules:
 
 - **Content values and ordering.** The index tracks "content values" identified by `(content_id, size_bytes)` so files sharing identical bytes share one posting entry. Matches are emitted once per matching line for each visible file, ordered by content value, then `inode_id`, then `byte_offset` (clients wanting inode order sort locally).
 - **Budgets.** Every page is bounded by both `limit` (match count, using `pagination.default_limit` / `pagination.max_limit`) and a per-page candidate budget (counting verified content values and checked files). As a result, a page can return fewer than `limit` matches with a `next_cursor` and can pause partway through files sharing one content value.
-- **Consistent multi-page cut.** Page 1 reads at the live head (respecting `consistency` and `max_staleness_ms`, see [Read consistency](#read-consistency)) and records `head_seq` in the cursor. Every later page reads at that same `head_seq` (triggering strong confirmation if the cursor's head is ahead of an `eventual` reader) and reports paths as of `head_seq`. Unchanged files use current `read` rights, while files whose revision or path changed since page 1 also require `history` (subjects without `history` don't see those changed files on later pages). Cursors bind to the query criteria and the grep index build: changing parameters, supplying a head beyond the confirmed head, or continuing after an index rebuild/disable-reenable returns `invalid_request`, and the retention floor passing `head_seq` returns `below_retention_floor` (prompting a fresh search from page 1).
+- **Consistent multi-page cut.** Page 1 reads at the live head (respecting `consistency`, see [Read consistency](#read-consistency)) and records `head_seq` in the cursor. Every later page reads at that same `head_seq` (triggering strong confirmation if the cursor's head is ahead of an `eventual` reader) and reports paths as of `head_seq`. Unchanged files use current `read` rights, while files whose revision or path changed since page 1 also require `history` (subjects without `history` don't see those changed files on later pages). Cursors bind to the query criteria and the grep index build: changing parameters, supplying a head beyond the confirmed head, or continuing after an index rebuild/disable-reenable returns `invalid_request`, and the retention floor passing `head_seq` returns `below_retention_floor` (prompting a fresh search from page 1).
 - **Unindexable patterns and lagging indexes.** Patterns without a 3-byte literal run return `query_unindexable` unless `allow_scan=true` (capped by `query.grep.scan_budget_files`). Tails exceeding `query.grep.tail_budget_files` return `index_lagging` unless `allow_stale=true` (reported as `tail_scanned: false`). Stale searches exclude files whose current revision is newer than the last fully indexed commit (and still exclude files deleted afterward), keeping that same cutoff recorded in the cursor across all pages even if the index catches up mid-pagination.
 - **Deleted files and authorization.** The index covers all retained revisions, and each query filters visibility at its read sequence (so deletes and restores require no index rebuild). Unreadable candidates are filtered before reading bytes (still counting against the candidate budget), and unindexed `allow_scan` walks skip unreadable directories.
 - **Subtree scoping (`path` or `inode_id`).** `path` takes a complete canonical absolute path (resolved by name key, returning `path_not_found` if missing, or empty matches if empty). `inode_id` scopes to a visible inode's descendants regardless of renames (`inode_not_found` if missing or hidden). Supplying both returns `invalid_request` with `param` `inode_id`.

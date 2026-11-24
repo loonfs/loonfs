@@ -7,14 +7,13 @@
 //! guesses tags.
 
 use super::*;
-use crate::limits::READ_REVALIDATION_BOUND_MS;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use utoipa::openapi::{schema::Schema, RefOr};
 use utoipa::ToSchema;
 
-/// Installs the named HTTP unions, the flattened `ErrorDetails` object, and the derived
-/// schemas whose bounds come from constants, in an OpenAPI component collection.
+/// Installs the named HTTP unions and the flattened `ErrorDetails` object in an OpenAPI
+/// component collection.
 ///
 /// Panics if a declaration disagrees with the derived wire schema. This runs
 /// when building the static specification, not when serving an HTTP request.
@@ -45,12 +44,6 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.plain::<UploadMode>("unknown");
     named.object::<ErrorDetails>();
     named.object::<MergeConflictVersion>();
-    named.maximum::<CreateDownloadRequest>("max_staleness_ms", READ_REVALIDATION_BOUND_MS);
-    named.maximum::<CreateDownloadByInodeRequest>("max_staleness_ms", READ_REVALIDATION_BOUND_MS);
-    named.maximum::<CreateRevisionDownloadByInodeRequest>(
-        "max_staleness_ms",
-        READ_REVALIDATION_BOUND_MS,
-    );
 
     // These are implementation fields flattened into the named payloads. The
     // document's reference-integrity test catches accidental independent reuse.
@@ -96,21 +89,6 @@ impl NamedSchemas {
         assert!(
             self.schemas.insert(name, schema).is_none(),
             "duplicate object name"
-        );
-    }
-
-    /// Sets the largest value of an integer field, which the derive takes only as a literal.
-    fn maximum<T: ToSchema>(&mut self, field: &str, maximum: u64) {
-        let name = T::name().into_owned();
-        let mut schema = Source::of::<T>().schema;
-        let property = schema["properties"]
-            .get_mut(field)
-            .expect("a bounded field should be a derived property");
-        property["maximum"] = json!(maximum);
-        self.roots.insert(name.clone());
-        assert!(
-            self.schemas.insert(name, schema).is_none(),
-            "duplicate schema name"
         );
     }
 

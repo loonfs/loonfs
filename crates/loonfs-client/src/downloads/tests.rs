@@ -554,9 +554,9 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
     );
 }
 
-/// Checks that each grant request sends `snapshot_id` for a snapshot, the
-/// consistency fields of a live read that sets a consistency, and none of
-/// them for a live read that sets none, so the server's default applies.
+/// Checks that each grant request sends `snapshot_id` for a snapshot,
+/// `consistency` for a `strong` live read, and neither for an `eventual` live
+/// read.
 #[tokio::test]
 async fn grants_send_only_the_fields_of_what_they_read_at() {
     let content_ref = ContentRef::blob_v1(
@@ -574,16 +574,10 @@ async fn grants_send_only_the_fields_of_what_they_read_at() {
     };
     let snapshot_id = SnapshotId::parse("snp_0000000000000g000000000002").expect("snapshot ID");
     let cases = [
-        (ReadAt::Live(None), serde_json::json!({})),
+        (ReadAt::Live(Consistency::Eventual), serde_json::json!({})),
         (
-            ReadAt::Live(Some(Consistency::Strong)),
+            ReadAt::Live(Consistency::Strong),
             serde_json::json!({"consistency": "strong"}),
-        ),
-        (
-            ReadAt::Live(Some(Consistency::Eventual {
-                max_staleness_ms: Some(2_500),
-            })),
-            serde_json::json!({"consistency": "eventual", "max_staleness_ms": 2500}),
         ),
         (
             ReadAt::Snapshot(snapshot_id.clone()),

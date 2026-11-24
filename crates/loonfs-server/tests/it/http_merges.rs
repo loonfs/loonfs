@@ -424,7 +424,7 @@ async fn the_next_range_query_reports_where_the_next_merge_starts() {
             &family.main,
             &family.fork,
             &loonfs_client::LiveReadOptions {
-                consistency: Some(loonfs_client::Consistency::Strong),
+                consistency: loonfs_client::Consistency::Strong,
             },
         )
         .await

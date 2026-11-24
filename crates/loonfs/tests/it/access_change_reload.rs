@@ -293,7 +293,7 @@ const COMMIT_KINDS: [&str; 4] = ["update_attributes", "put_file", "revoke", "reg
 /// Returns the options of a strong stat.
 fn strong() -> StatOptions {
     StatOptions {
-        at: ReadAt::Live(Some(Consistency::Strong)),
+        at: ReadAt::Live(Consistency::Strong),
         ..StatOptions::default()
     }
 }
@@ -318,7 +318,7 @@ async fn first_reads_after_commits_reload_nothing_after_a_compaction() {
     }
 }
 
-/// Checks that reads with the default consistency (eventual) after a
+/// Checks that `eventual` reads after a
 /// compaction on the same runtime don't reload metadata with the default
 /// one-second maximum staleness.
 ///

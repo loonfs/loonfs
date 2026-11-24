@@ -247,7 +247,7 @@ pub use options::{
     DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
     ListFileRevisionsOptions, ListOptions, ListTrashOptions, LiveReadOptions,
     MaintainMetadataOptions, MergeForkOptions, MoveOptions, PutFileOptions, ReadAt,
-    ReadConsistency, ReadFileOptions, ReadFileStreamOptions, ReadRange, RestoreDeletedDestination,
+    ReadFileOptions, ReadFileStreamOptions, ReadRange, RestoreDeletedDestination,
     RestoreDeletedOptions, StatOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
     UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };

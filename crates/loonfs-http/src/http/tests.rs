@@ -2443,7 +2443,7 @@ fn grep_error_request() -> GrepRequest {
         scope: GrepScope::Namespace,
         allow_stale: false,
         allow_scan: false,
-        consistency: None,
+        consistency: loonfs::Consistency::Eventual,
     }
 }
 
@@ -2753,7 +2753,6 @@ mod direct_download {
             TestAppOptions {
                 session_fold_at_wal_objects: None,
                 max_staleness_ms: None,
-                consistency: None,
                 monotonic_timer: None,
                 execution_budget: None,
                 usage_recorder: None,
@@ -3019,7 +3018,6 @@ mod direct_download {
             TestAppOptions {
                 session_fold_at_wal_objects: None,
                 max_staleness_ms: None,
-                consistency: None,
                 monotonic_timer: None,
                 execution_budget: None,
                 usage_recorder: None,
@@ -3503,7 +3501,6 @@ mod direct_download {
             TestAppOptions {
                 session_fold_at_wal_objects: None,
                 max_staleness_ms: None,
-                consistency: None,
                 monotonic_timer: None,
                 execution_budget: None,
                 usage_recorder: None,

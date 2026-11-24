@@ -665,6 +665,14 @@
         ],
         "type": "object"
       },
+      "Consistency": {
+        "description": "How recently a live read confirms the namespace head before it reads.\n\n`eventual` reads at the head that was confirmed last while that\nconfirmation is younger than the maximum staleness (`max_staleness_ms`, a\nsetting of the runtime or the server), and `strong` confirms the head\nbefore the read. A read of a snapshot has no consistency, because the\nsnapshot selects the state it reads.",
+        "enum": [
+          "eventual",
+          "strong"
+        ],
+        "type": "string"
+      },
       "ContentId": {
         "description": "The random ID of a content chain. An append can extend the chain without changing its ID.",
         "example": "con_4z59p0wjvx9a8b2frdhhf6mat1",
@@ -733,15 +741,8 @@
         "description": "A request to download a file inode's current revision.",
         "properties": {
           "consistency": {
-            "$ref": "#/components/schemas/ReadConsistency",
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`."
-          },
-          "max_staleness_ms": {
-            "description": "With `consistency` set to `eventual`, how old the server's last confirmation of the head can\nbe, in milliseconds. The default is the server's `max_staleness_ms`.",
-            "format": "int64",
-            "maximum": 1200000,
-            "minimum": 0,
-            "type": "integer"
+            "$ref": "#/components/schemas/Consistency",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined\nwith `snapshot_id`."
           },
           "snapshot_id": {
             "$ref": "#/components/schemas/SnapshotId",
@@ -797,15 +798,8 @@
         "description": "A request to download a file by path, and optionally a revision.",
         "properties": {
           "consistency": {
-            "$ref": "#/components/schemas/ReadConsistency",
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`."
-          },
-          "max_staleness_ms": {
-            "description": "With `consistency` set to `eventual`, how old the server's last confirmation of the head can\nbe, in milliseconds. The default is the server's `max_staleness_ms`.",
-            "format": "int64",
-            "maximum": 1200000,
-            "minimum": 0,
-            "type": "integer"
+            "$ref": "#/components/schemas/Consistency",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined\nwith `snapshot_id`."
           },
           "path": {
             "$ref": "#/components/schemas/AbsolutePath",
@@ -889,15 +883,8 @@
         "description": "A request to download one retained revision of an inode.",
         "properties": {
           "consistency": {
-            "$ref": "#/components/schemas/ReadConsistency",
-            "description": "How recently the read confirms the namespace head that it finds the revision in. `eventual`\n(the default, unless the server's `consistency` setting is `strong`) reads at the head that\nthe server confirmed last while that confirmation is younger than the maximum staleness,\nand `strong` confirms the head before the read. It can't be combined with `snapshot_id`."
-          },
-          "max_staleness_ms": {
-            "description": "With `consistency` set to `eventual`, how old the server's last confirmation of the head can\nbe, in milliseconds. The default is the server's `max_staleness_ms`.",
-            "format": "int64",
-            "maximum": 1200000,
-            "minimum": 0,
-            "type": "integer"
+            "$ref": "#/components/schemas/Consistency",
+            "description": "How recently the read confirms the namespace head that it finds the revision in. `eventual`\n(the default) reads at the head that the server confirmed last while that confirmation is\nyounger than the server's `max_staleness_ms`, and `strong` confirms the head before the\nread. It can't be combined with `snapshot_id`."
           },
           "snapshot_id": {
             "$ref": "#/components/schemas/SnapshotId",
@@ -4011,14 +3998,6 @@
         ],
         "type": "object"
       },
-      "ReadConsistency": {
-        "description": "How recently a live read confirms the namespace head, without a maximum\nstaleness.\n\nA runtime's default consistency and the `consistency` field of a download\nrequest take one of these values. `eventual` reads at the head that was\nconfirmed last while that confirmation is younger than the maximum\nstaleness, and `strong` confirms the head before the read.",
-        "enum": [
-          "eventual",
-          "strong"
-        ],
-        "type": "string"
-      },
       "ReplayForkRequest": {
         "additionalProperties": false,
         "description": "A request to replay a fork's unmerged commits into a rebase's new fork as one replay commit.",
@@ -6802,24 +6781,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           }
         ],
@@ -6984,24 +6951,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined\nwith `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           }
         ],
@@ -7394,24 +7349,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           }
         ],
@@ -7581,24 +7524,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined\nwith `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           },
           {
@@ -8059,24 +7990,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined\nwith `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           }
         ],
@@ -8252,24 +8171,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined\nwith `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           }
         ],
@@ -8452,24 +8359,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined\nwith `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           }
         ],
@@ -8639,24 +8534,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           }
         ],
@@ -9037,24 +8920,12 @@
             }
           },
           {
-            "description": "How recently a first page confirms the namespace head that it reads. `eventual` (the\ndefault, unless the server's `consistency` setting is `strong`) reads at the head that the\nserver confirmed last while that confirmation is younger than the maximum staleness, and\n`strong` confirms the head before the read. A later page reads at the first page's head.",
+            "description": "How recently a first page confirms the namespace head that it reads. `eventual` (the\ndefault) reads at the head that the server confirmed last while that confirmation is younger\nthan the server's `max_staleness_ms`, and `strong` confirms the head before the read. A\nlater page reads at the first page's head.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           }
         ],
@@ -9260,24 +9131,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined\nwith `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           }
         ],
@@ -9465,24 +9324,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined\nwith `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           }
         ],
@@ -9648,24 +9495,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined\nwith `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           },
           {
@@ -10115,24 +9950,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head. `eventual` (the default) reads at the\nhead that the server confirmed last while that confirmation is younger than the server's\n`max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined\nwith `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           }
         ],
@@ -10307,24 +10130,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head that it finds the revision in. `eventual`\n(the default, unless the server's `consistency` setting is `strong`) reads at the head that\nthe server confirmed last while that confirmation is younger than the maximum staleness, and\n`strong` confirms the head before the read. It can't be combined with `snapshot_id`.",
+            "description": "How recently the read confirms the namespace head that it finds the revision in. `eventual`\n(the default) reads at the head that the server confirmed last while that confirmation is\nyounger than the server's `max_staleness_ms`, and `strong` confirms the head before the\nread. It can't be combined with `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           },
           {
@@ -10752,24 +10563,12 @@
             }
           },
           {
-            "description": "How recently the read confirms the heads of the namespace and the fork. `eventual` (the\ndefault, unless the server's `consistency` setting is `strong`) reads at the heads that the\nserver confirmed last while those confirmations are younger than the maximum staleness, and\n`strong` confirms both heads before the read.",
+            "description": "How recently the read confirms the heads of the namespace and the fork. `eventual` (the\ndefault) reads at the heads that the server confirmed last while those confirmations are\nyounger than the server's `max_staleness_ms`, and `strong` confirms both heads before the\nread.",
             "in": "query",
             "name": "consistency",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ReadConsistency"
-            }
-          },
-          {
-            "description": "With `consistency=eventual`, how old the server's last confirmation of a head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
-            "in": "query",
-            "name": "max_staleness_ms",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "maximum": 1200000,
-              "minimum": 0,
-              "type": "integer"
+              "$ref": "#/components/schemas/Consistency"
             }
           }
         ],

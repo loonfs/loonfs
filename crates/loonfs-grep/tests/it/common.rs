@@ -299,7 +299,7 @@ pub(crate) fn request(pattern: &str) -> GrepRequest {
         allow_scan: false,
         // A query follows the worker's publication of the index, which
         // doesn't move the runtime's cached head, so it asks for `strong`.
-        consistency: Some(loonfs::Consistency::Strong),
+        consistency: loonfs::Consistency::Strong,
     }
 }
 

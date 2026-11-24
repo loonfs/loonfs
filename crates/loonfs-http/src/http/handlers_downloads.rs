@@ -25,7 +25,7 @@ use std::time::Duration;
 
 /// The JSON Pointers of the download request fields that a rejection can
 /// name.
-const DOWNLOAD_BODY_FIELDS: &[&str] = &["/consistency", "/max_staleness_ms", "/start_offset"];
+const DOWNLOAD_BODY_FIELDS: &[&str] = &["/consistency", "/start_offset"];
 
 /// Issues a short-lived download URL for a file.
 ///
@@ -78,12 +78,8 @@ pub(super) async fn create_download(
         request.revision_no,
         "/revision_no",
     )?;
-    let at = read_at(
-        request.snapshot_id,
-        request.consistency,
-        request.max_staleness_ms,
-    )
-    .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
+    let at = read_at(request.snapshot_id, request.consistency)
+        .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
     let issuer = direct_get_issuer(&state)?;
 
     let options = DownloadOptions {
@@ -164,12 +160,8 @@ pub(super) async fn create_download_by_inode(
     let request = request.unwrap_or_default();
     let runtime = state.runtime_for(context);
     let inode_id = path.inode_id;
-    let at = read_at(
-        request.snapshot_id,
-        request.consistency,
-        request.max_staleness_ms,
-    )
-    .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
+    let at = read_at(request.snapshot_id, request.consistency)
+        .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
     let issuer = direct_get_issuer(&state)?;
     let options = DownloadOptions {
         at,
@@ -234,12 +226,8 @@ pub(super) async fn create_revision_download_by_inode(
     let runtime = state.runtime_for(context);
     let inode_id = path.inode_id;
     let revision_no = path.revision_no;
-    let at = read_at(
-        request.snapshot_id,
-        request.consistency,
-        request.max_staleness_ms,
-    )
-    .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
+    let at = read_at(request.snapshot_id, request.consistency)
+        .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
     let issuer = direct_get_issuer(&state)?;
     let options = DownloadOptions {
         at,

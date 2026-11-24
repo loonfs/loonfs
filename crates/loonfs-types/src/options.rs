@@ -43,69 +43,35 @@ impl From<bool> for AttributeInclusion {
 
 /// How recently a live read confirms the namespace head before it reads.
 ///
-/// A read option that leaves its consistency unset (`None`) takes the
-/// runtime's default, which is eventual unless the host sets `strong`. A
-/// read of a snapshot has no consistency setting, because the snapshot
-/// selects the state it reads (see [`ReadAt`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Consistency {
-    /// Confirm the head before the read, so the read sees every commit
-    /// acknowledged before it started.
-    Strong,
-    /// Read at the head that was confirmed last while that confirmation is
-    /// younger than the maximum staleness, and confirm the head again after
-    /// that. The read sees every commit acknowledged before the last
-    /// confirmation, and it may miss commits acknowledged since.
-    Eventual {
-        /// How old the last confirmation can be, in milliseconds, or `None`
-        /// for the runtime's default maximum staleness. No maximum staleness
-        /// may exceed the revalidation bound (`READ_REVALIDATION_BOUND_MS`).
-        max_staleness_ms: Option<u64>,
-    },
-}
-
-/// How recently a live read confirms the namespace head, without a maximum
-/// staleness.
-///
-/// A runtime's default consistency and the `consistency` field of a download
-/// request take one of these values. `eventual` reads at the head that was
-/// confirmed last while that confirmation is younger than the maximum
-/// staleness, and `strong` confirms the head before the read.
+/// `eventual` reads at the head that was confirmed last while that
+/// confirmation is younger than the maximum staleness (`max_staleness_ms`, a
+/// setting of the runtime or the server), and `strong` confirms the head
+/// before the read. A read of a snapshot has no consistency, because the
+/// snapshot selects the state it reads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
-pub enum ReadConsistency {
+pub enum Consistency {
     /// Read at the head that was confirmed last while that confirmation is
-    /// younger than the maximum staleness.
+    /// younger than the maximum staleness (`max_staleness_ms`, a setting of
+    /// the runtime or the server), and confirm the head again after that.
+    /// The read sees every commit acknowledged before the last confirmation,
+    /// and it may miss commits acknowledged since.
     #[default]
     Eventual,
-    /// Confirm the head before the read, for a reader that follows writes
-    /// made in other processes.
+    /// Confirm the head before the read, so the read sees every commit
+    /// acknowledged before it started.
     Strong,
-}
-
-impl From<ReadConsistency> for Consistency {
-    /// Returns the consistency of a read at `consistency`, with the
-    /// runtime's default maximum staleness.
-    fn from(consistency: ReadConsistency) -> Self {
-        match consistency {
-            ReadConsistency::Eventual => Self::Eventual {
-                max_staleness_ms: None,
-            },
-            ReadConsistency::Strong => Self::Strong,
-        }
-    }
 }
 
 /// The state that a read reads: the namespace's live head, or a snapshot.
 ///
 /// A snapshot selects the state that a read of it sees, so only a live read
-/// has a consistency setting.
+/// has a consistency.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadAt {
-    /// The live head, confirmed as the consistency asks, or as the runtime's
-    /// default consistency when it's `None`.
-    Live(Option<Consistency>),
+    /// The live head, confirmed as the consistency asks.
+    Live(Consistency),
     /// The state that this snapshot, or this fork snapshot of the namespace,
     /// captured.
     Snapshot(SnapshotId),
@@ -113,15 +79,15 @@ pub enum ReadAt {
 
 impl Default for ReadAt {
     fn default() -> Self {
-        Self::Live(None)
+        Self::Live(Consistency::Eventual)
     }
 }
 
 impl From<Option<SnapshotId>> for ReadAt {
-    /// Returns a read of the snapshot, or of the live head at the runtime's
-    /// default consistency when there's no snapshot.
+    /// Returns a read of the snapshot, or an `eventual` read of the live head
+    /// when there's no snapshot.
     fn from(snapshot_id: Option<SnapshotId>) -> Self {
-        snapshot_id.map_or(Self::Live(None), Self::Snapshot)
+        snapshot_id.map_or_else(Self::default, Self::Snapshot)
     }
 }
 
@@ -149,8 +115,8 @@ impl CommitOptions {
 pub struct StatOptions {
     /// Whether to include the inode's attribute map and revision, disabled by default.
     pub include_attributes: AttributeInclusion,
-    /// The live head or the snapshot that the read reads, by default the live
-    /// head at the runtime's default consistency.
+    /// The live head or the snapshot that the read reads, by default an `eventual`
+    /// read of the live head.
     pub at: ReadAt,
 }
 
@@ -162,16 +128,16 @@ pub struct ListOptions {
     /// Whether to list the directory's whole subtree, depth first in name-key
     /// order, instead of its children only, disabled by default.
     pub recursive: bool,
-    /// The live head or the snapshot that each page reads, by default the
-    /// live head at the runtime's default consistency.
+    /// The live head or the snapshot that each page reads, by default an
+    /// `eventual` read of the live head.
     pub at: ReadAt,
 }
 
 /// Options for a read of a file's content by path or by inode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadFileOptions {
-    /// The live head or the snapshot that the read reads, by default the
-    /// live head at the runtime's default consistency. A snapshot read
+    /// The live head or the snapshot that the read reads, by default an
+    /// `eventual` read of the live head. A snapshot read
     /// returns the file revision that the snapshot captured.
     pub at: ReadAt,
 }
@@ -256,8 +222,8 @@ fn parse_range_offset(digits: &str) -> Option<u64> {
 /// Options for a direct download of a file's content by path or by inode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DownloadOptions {
-    /// The live head or the snapshot that the download reads, by default the
-    /// live head at the runtime's default consistency. A snapshot download
+    /// The live head or the snapshot that the download reads, by default an
+    /// `eventual` read of the live head. A snapshot download
     /// returns the file revision that the snapshot captured, and a download
     /// of a numbered revision can't read a snapshot.
     pub at: ReadAt,
@@ -286,8 +252,8 @@ pub enum CommitSplitting {
 /// Options for listing the change feed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListChangesOptions {
-    /// The live head or the snapshot that each page reads, by default the
-    /// live head at the runtime's default consistency. A snapshot's feed ends
+    /// The live head or the snapshot that each page reads, by default an
+    /// `eventual` read of the live head. A snapshot's feed ends
     /// at the sequence that the snapshot captured.
     pub at: ReadAt,
     /// Whether a page can end inside a commit. By default, it can't.
@@ -323,9 +289,8 @@ pub struct DiffOptions {
     pub limit: EffectiveLimit,
     /// Whether the page can end inside a commit. By default, it can't.
     pub commit_splitting: CommitSplitting,
-    /// How recently the page confirms the live head, or `None` for the
-    /// runtime's default.
-    pub consistency: Option<Consistency>,
+    /// How recently the page confirms the live head, by default `eventual`.
+    pub consistency: Consistency,
 }
 
 impl Default for DiffOptions {
@@ -337,7 +302,7 @@ impl Default for DiffOptions {
             event_index: 0,
             limit: EffectiveLimit::DEFAULT,
             commit_splitting: CommitSplitting::Whole,
-            consistency: None,
+            consistency: Consistency::Eventual,
         }
     }
 }
@@ -345,8 +310,8 @@ impl Default for DiffOptions {
 /// Options for listing a file's revisions by path or by inode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListFileRevisionsOptions {
-    /// The live head or the snapshot that each page reads, by default the
-    /// live head at the runtime's default consistency. A listing of a
+    /// The live head or the snapshot that each page reads, by default an
+    /// `eventual` read of the live head. A listing of a
     /// snapshot returns the revisions that the snapshot's manifest keeps,
     /// newest first from the revision that the snapshot captured, and every
     /// page reads the same captured head.
@@ -357,17 +322,15 @@ pub struct ListFileRevisionsOptions {
 /// metadata, a read view, or a fork's next merge range.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LiveReadOptions {
-    /// How recently the read confirms the live head, or `None` for the
-    /// runtime's default.
-    pub consistency: Option<Consistency>,
+    /// How recently the read confirms the live head, by default `eventual`.
+    pub consistency: Consistency,
 }
 
 /// Options for listing the namespace's trash.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListTrashOptions {
-    /// How recently each page confirms the live head, or `None` for the
-    /// runtime's default.
-    pub consistency: Option<Consistency>,
+    /// How recently each page confirms the live head, by default `eventual`.
+    pub consistency: Consistency,
 }
 
 /// The attribute writes and removals one update applies.
@@ -715,17 +678,25 @@ mod tests {
     }
 
     #[test]
-    fn read_options_leave_the_consistency_to_the_runtime() {
-        assert_eq!(StatOptions::default().at, ReadAt::Live(None));
-        assert_eq!(ListOptions::default().at, ReadAt::Live(None));
-        assert_eq!(ReadAt::from(None), ReadAt::Live(None));
-        assert_eq!(ReadFileOptions::default().at, ReadAt::Live(None));
-        assert_eq!(DownloadOptions::default().at, ReadAt::Live(None));
+    fn read_options_read_the_live_head_eventually_by_default() {
+        let eventual = ReadAt::Live(Consistency::Eventual);
+        assert_eq!(StatOptions::default().at, eventual);
+        assert_eq!(ListOptions::default().at, eventual);
+        assert_eq!(ReadAt::from(None), eventual);
+        assert_eq!(ReadFileOptions::default().at, eventual);
+        assert_eq!(DownloadOptions::default().at, eventual);
         assert_eq!(DownloadOptions::default().start_offset, 0);
-        assert_eq!(ListChangesOptions::default().at, ReadAt::Live(None));
-        assert_eq!(ListFileRevisionsOptions::default().at, ReadAt::Live(None));
-        assert_eq!(ListTrashOptions::default().consistency, None);
-        assert_eq!(LiveReadOptions::default().consistency, None);
+        assert_eq!(ListChangesOptions::default().at, eventual);
+        assert_eq!(ListFileRevisionsOptions::default().at, eventual);
+        assert_eq!(DiffOptions::default().consistency, Consistency::Eventual);
+        assert_eq!(
+            ListTrashOptions::default().consistency,
+            Consistency::Eventual
+        );
+        assert_eq!(
+            LiveReadOptions::default().consistency,
+            Consistency::Eventual
+        );
     }
 
     #[test]

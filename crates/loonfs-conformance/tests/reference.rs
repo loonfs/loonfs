@@ -854,7 +854,6 @@ struct ReadConsistencyRequest {
     actor_id: ActorId,
     content_utf8: String,
     commit_ids: ReadConsistencyCommitIds,
-    max_staleness_ms: u64,
     snapshot_name: String,
 }
 
@@ -910,25 +909,15 @@ async fn run_read_consistency(harness: &Harness, case: &Case) {
     let inode_id = client.stat(&spec).await.expect("stat file").inode_id;
     let revision_no = RevisionNo(expected.revision_no);
 
-    for consistency in [
-        Consistency::Strong,
-        Consistency::Eventual {
-            max_staleness_ms: Some(request.max_staleness_ms),
-        },
-    ] {
+    for consistency in [Consistency::Strong, Consistency::Eventual] {
         let trash = client
-            .list_trash_with_options(
-                &namespace,
-                &ListTrashOptions {
-                    consistency: Some(consistency),
-                },
-            )
+            .list_trash_with_options(&namespace, &ListTrashOptions { consistency })
             .page()
             .await
             .expect("list trash");
         assert_eq!(trash.entries.len(), expected.trash_entry_count);
         let revisions = ListFileRevisionsOptions {
-            at: ReadAt::Live(Some(consistency)),
+            at: ReadAt::Live(consistency),
         };
         for listing in [
             client.list_file_revisions_with_options(&spec, &revisions),
@@ -938,7 +927,7 @@ async fn run_read_consistency(harness: &Harness, case: &Case) {
             assert_eq!(page.revisions[0].revision_no, revision_no);
         }
         let download = DownloadOptions {
-            at: ReadAt::Live(Some(consistency)),
+            at: ReadAt::Live(consistency),
             ..DownloadOptions::default()
         };
         let path_grant = client

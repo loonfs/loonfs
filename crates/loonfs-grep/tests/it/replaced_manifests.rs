@@ -17,7 +17,7 @@ use loonfs_test_support::ids::nonzero_usize;
 use loonfs_types::{ErrorCode, GrepRequest};
 use std::sync::Arc;
 
-/// Checks that a query at the runtime's default consistency runs again from
+/// Checks that an eventual query runs again from
 /// a reloaded head and finds a file from the newest manifest. Before the
 /// query, folds and a compaction replace the manifest that the reader's
 /// cached head includes, and a collection removes that manifest's segments.
@@ -62,7 +62,7 @@ async fn a_query_at_a_collected_cached_head_reads_the_newest_manifest() {
     let (service, reader, store, namespace_id) = (&host.service, &reader, &store, &namespace_id);
     let query = |pattern: &str| {
         let request = GrepRequest {
-            consistency: None,
+            consistency: loonfs::Consistency::Eventual,
             ..request(pattern)
         };
         async move {
@@ -208,7 +208,7 @@ async fn a_query_at_a_cached_head_whose_index_segment_was_deleted_reads_the_newe
         &store,
         &namespace_id,
         &GrepRequest {
-            consistency: None,
+            consistency: loonfs::Consistency::Eventual,
             ..request("needle")
         },
         page_request(None, 10),

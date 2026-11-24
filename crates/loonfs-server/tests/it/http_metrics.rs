@@ -107,7 +107,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
         .get_namespace_with_options(
             &namespace,
             &loonfs_client::LiveReadOptions {
-                consistency: Some(loonfs_client::Consistency::Strong),
+                consistency: loonfs_client::Consistency::Strong,
             },
         )
         .await

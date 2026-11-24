@@ -5,8 +5,8 @@ use crate::read_at_fields::ReadAtFields;
 use crate::transport::QueryBuilder;
 use crate::{Client, ClientError, NamespacePath, PayloadStream, Result};
 use loonfs_types::options::{
-    CommitSplitting, DiffOptions, ListChangesOptions, ListFileRevisionsOptions, ListOptions,
-    ListTrashOptions, ReadAt, ReadConsistency, ReadFileOptions, StatOptions,
+    CommitSplitting, Consistency, DiffOptions, ListChangesOptions, ListFileRevisionsOptions,
+    ListOptions, ListTrashOptions, ReadAt, ReadFileOptions, StatOptions,
 };
 use loonfs_types::{ChangeFeedPosition, ListChangesResponse, ListDiffResponse};
 use loonfs_types::{
@@ -25,13 +25,10 @@ pub(crate) fn push_read_at(query: &mut QueryBuilder, at: &ReadAt) {
         query.push(
             "consistency",
             match consistency {
-                ReadConsistency::Eventual => "eventual",
-                ReadConsistency::Strong => "strong",
+                Consistency::Eventual => "eventual",
+                Consistency::Strong => "strong",
             },
         );
-    }
-    if let Some(max_staleness_ms) = fields.max_staleness_ms {
-        query.push("max_staleness_ms", max_staleness_ms);
     }
 }
 
@@ -696,7 +693,6 @@ impl Client {
 mod tests {
     use super::*;
     use crate::scripted_transport::{self, Outcome};
-    use loonfs_types::options::Consistency;
     use loonfs_types::FilesystemEvent;
     use loonfs_types::SnapshotId;
     use loonfs_types::{ContentId, ContentRef, EntryInodeKind, PathEntryKind};
@@ -800,10 +796,9 @@ mod tests {
         assert_eq!(trash.entries[0].inode_kind, EntryInodeKind::Unknown);
     }
 
-    /// Checks that a live read that sets no consistency sends neither
-    /// consistency parameter, so the server's default applies, that a live
-    /// read that sets one sends `consistency`, plus `max_staleness_ms` when it
-    /// sets a maximum staleness, and that a snapshot read sends only
+    /// Checks that an `eventual` live read sends no consistency parameter,
+    /// because a live read without one is `eventual`, that a `strong` live
+    /// read sends `consistency=strong`, and that a snapshot read sends only
     /// `snapshot_id`.
     #[tokio::test]
     async fn reads_send_only_the_parameters_of_what_they_read_at() {
@@ -813,19 +808,11 @@ mod tests {
             Outcome::Success(b"file".to_vec()),
             Outcome::Success(b"file".to_vec()),
             Outcome::Success(b"file".to_vec()),
-            Outcome::Success(b"file".to_vec()),
-            Outcome::Success(b"file".to_vec()),
         ]);
         let client = scripted_transport::client(&transport);
         for at in [
-            ReadAt::Live(None),
-            ReadAt::Live(Some(Consistency::Strong)),
-            ReadAt::Live(Some(Consistency::Eventual {
-                max_staleness_ms: None,
-            })),
-            ReadAt::Live(Some(Consistency::Eventual {
-                max_staleness_ms: Some(2_500),
-            })),
+            ReadAt::Live(Consistency::Eventual),
+            ReadAt::Live(Consistency::Strong),
             ReadAt::Snapshot(snapshot_id.clone()),
         ] {
             client
@@ -845,18 +832,15 @@ mod tests {
             [
                 content.to_owned(),
                 format!("{content}&consistency=strong"),
-                format!("{content}&consistency=eventual"),
-                format!("{content}&consistency=eventual&max_staleness_ms=2500"),
                 format!("{content}&snapshot_id={snapshot_id}"),
             ]
         );
     }
 
-    /// Checks that the trash and revision listings send the consistency
-    /// parameters only when they set a consistency, so the server's default
-    /// applies to a listing that sets none.
+    /// Checks that the trash and revision listings send `consistency` only
+    /// for a `strong` listing.
     #[tokio::test]
-    async fn listings_send_the_consistency_parameters_only_when_they_set_them() {
+    async fn listings_send_the_consistency_parameter_only_when_strong() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
         let trash = serde_json::json!({"namespace_id": "demo", "head_seq": 1, "entries": []});
@@ -866,13 +850,7 @@ mod tests {
             "head_seq": 1,
             "revisions": []
         });
-        let consistencies = [
-            None,
-            Some(Consistency::Strong),
-            Some(Consistency::Eventual {
-                max_staleness_ms: Some(2_500),
-            }),
-        ];
+        let consistencies = [Consistency::Eventual, Consistency::Strong];
         let transport = scripted_transport::script(consistencies.iter().flat_map(|_| {
             [
                 Outcome::Success(trash.to_string().into_bytes()),
@@ -918,14 +896,10 @@ mod tests {
                     .join("&")
             })
             .collect();
-        let expected = [
-            "",
-            "consistency=strong",
-            "consistency=eventual&max_staleness_ms=2500",
-        ]
-        .into_iter()
-        .flat_map(|query| [query; 3])
-        .collect::<Vec<_>>();
+        let expected = ["", "consistency=strong"]
+            .into_iter()
+            .flat_map(|query| [query; 3])
+            .collect::<Vec<_>>();
         assert_eq!(queries, expected);
     }
 

@@ -3,14 +3,13 @@
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, ContextHeaders};
 use super::handlers_uploads::{direct_multipart_issuer, direct_put_issuer};
-use super::query_params::{effective_page_limit, live_consistency, required_query_param};
+use super::query_params::{effective_page_limit, required_query_param};
 
 use super::{AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
 use axum::Json;
 use loonfs::{
-    CreateNamespaceOptions, DeleteNamespaceOptions, LiveReadOptions, MergeForkOptions,
-    ReadConsistency,
+    Consistency, CreateNamespaceOptions, DeleteNamespaceOptions, LiveReadOptions, MergeForkOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
@@ -62,15 +61,10 @@ pub(super) struct DeleteNamespaceQuery {
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 #[serde(deny_unknown_fields)]
 pub(super) struct GetNamespaceQuery {
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read.
+    consistency: Option<Consistency>,
 }
 
 /// The query of the next-range query.
@@ -84,14 +78,10 @@ pub(super) struct NextMergeRangeQuery {
     #[cfg_attr(feature = "openapi", param(required = true))]
     source_namespace_id: Option<NamespaceId>,
     /// How recently the read confirms the heads of the namespace and the fork. `eventual` (the
-    /// default, unless the server's `consistency` setting is `strong`) reads at the heads that the
-    /// server confirmed last while those confirmations are younger than the maximum staleness, and
-    /// `strong` confirms both heads before the read.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of a head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// default) reads at the heads that the server confirmed last while those confirmations are
+    /// younger than the server's `max_staleness_ms`, and `strong` confirms both heads before the
+    /// read.
+    consistency: Option<Consistency>,
 }
 
 /// The capability value for a transfer limit. The API lists these limits on
@@ -353,7 +343,7 @@ pub(super) async fn get_namespace(
     AppQuery(query): AppQuery<GetNamespaceQuery>,
 ) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
     let options = LiveReadOptions {
-        consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
+        consistency: query.consistency.unwrap_or_default(),
     };
     let namespace = state.runtime.namespace(&namespace_id);
     let response = namespace
@@ -628,7 +618,7 @@ pub(super) async fn get_next_merge_range(
     let source_namespace_id =
         required_query_param(query.source_namespace_id, "source_namespace_id")?;
     let options = LiveReadOptions {
-        consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
+        consistency: query.consistency.unwrap_or_default(),
     };
     let response = state
         .runtime_for(context)

@@ -815,14 +815,13 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 }
 
 type readConsistencyRequest struct {
-	NamespaceID    string                   `json:"namespace_id"`
-	Path           string                   `json:"path"`
-	DeletedPath    string                   `json:"deleted_path"`
-	ActorID        loonfs.ActorID           `json:"actor_id"`
-	ContentUTF8    string                   `json:"content_utf8"`
-	CommitIDs      readConsistencyCommitIDs `json:"commit_ids"`
-	MaxStalenessMs int64                    `json:"max_staleness_ms"`
-	SnapshotName   string                   `json:"snapshot_name"`
+	NamespaceID  string                   `json:"namespace_id"`
+	Path         string                   `json:"path"`
+	DeletedPath  string                   `json:"deleted_path"`
+	ActorID      loonfs.ActorID           `json:"actor_id"`
+	ContentUTF8  string                   `json:"content_utf8"`
+	CommitIDs    readConsistencyCommitIDs `json:"commit_ids"`
+	SnapshotName string                   `json:"snapshot_name"`
 }
 
 type readConsistencyCommitIDs struct {
@@ -835,13 +834,6 @@ type readConsistencyExpected struct {
 	RevisionNo              int64               `json:"revision_no"`
 	TrashEntryCount         int                 `json:"trash_entry_count"`
 	SnapshotWithConsistency errorStatusExpected `json:"snapshot_with_consistency"`
-}
-
-// readConsistencySetting is one consistency that the case reads with: the
-// value of `consistency`, and its maximum staleness, or nil for none.
-type readConsistencySetting struct {
-	consistency    string
-	maxStalenessMs *int64
 }
 
 func runReadConsistency(t *testing.T, h *harness, testCase conformanceCase) {
@@ -879,15 +871,12 @@ func runReadConsistency(t *testing.T, h *harness, testCase conformanceCase) {
 	inodeID := identityOf(statPath(t, h.client, request.NamespaceID, request.Path)).inodeID
 	revisionNo := loonfs.RevisionNo(expected.RevisionNo)
 
-	for _, setting := range []readConsistencySetting{
-		{consistency: "strong"},
-		{consistency: "eventual", maxStalenessMs: &request.MaxStalenessMs},
-	} {
-		label := setting.consistency
+	for _, setting := range []loonfs.Consistency{loonfs.ConsistencyStrong, loonfs.ConsistencyEventual} {
+		label := string(setting)
+		consistency := setting.Ptr()
 		trash, err := h.client.Trash.List(ctx, &loonfs.ListTrashRequest{
-			NamespaceID:    request.NamespaceID,
-			Consistency:    loonfs.ReadConsistency(setting.consistency).Ptr(),
-			MaxStalenessMs: setting.maxStalenessMs,
+			NamespaceID: request.NamespaceID,
+			Consistency: consistency,
 		})
 		if err != nil {
 			t.Fatalf("%s trash: %v", label, err)
@@ -896,19 +885,17 @@ func runReadConsistency(t *testing.T, h *harness, testCase conformanceCase) {
 			t.Errorf("%s trash entries = %d, want %d", label, len(trash.Results), expected.TrashEntryCount)
 		}
 		byPath, err := h.client.Files.ListRevisions(ctx, &loonfs.ListFileRevisionsRequest{
-			NamespaceID:    request.NamespaceID,
-			Path:           request.Path,
-			Consistency:    loonfs.ReadConsistency(setting.consistency).Ptr(),
-			MaxStalenessMs: setting.maxStalenessMs,
+			NamespaceID: request.NamespaceID,
+			Path:        request.Path,
+			Consistency: consistency,
 		})
 		if err != nil {
 			t.Fatalf("%s revisions by path: %v", label, err)
 		}
 		byInode, err := h.client.Inodes.ListRevisions(ctx, &loonfs.ListFileRevisionsByInodeRequest{
-			NamespaceID:    request.NamespaceID,
-			InodeID:        inodeID,
-			Consistency:    loonfs.ReadConsistency(setting.consistency).Ptr(),
-			MaxStalenessMs: setting.maxStalenessMs,
+			NamespaceID: request.NamespaceID,
+			InodeID:     inodeID,
+			Consistency: consistency,
 		})
 		if err != nil {
 			t.Fatalf("%s revisions by inode: %v", label, err)
@@ -918,31 +905,27 @@ func runReadConsistency(t *testing.T, h *harness, testCase conformanceCase) {
 				t.Errorf("%s revisions = %#v, want revision %d first", label, revisions, revisionNo)
 			}
 		}
-		consistency := loonfs.ReadConsistency(setting.consistency).Ptr()
 		pathGrant, err := h.client.Files.CreateDownload(ctx, &loonfs.CreateDownloadRequest{
-			NamespaceID:    request.NamespaceID,
-			Path:           loonfs.AbsolutePath(request.Path),
-			Consistency:    consistency,
-			MaxStalenessMs: setting.maxStalenessMs,
+			NamespaceID: request.NamespaceID,
+			Path:        loonfs.AbsolutePath(request.Path),
+			Consistency: consistency,
 		})
 		if err != nil {
 			t.Fatalf("%s grant by path: %v", label, err)
 		}
 		inodeGrant, err := h.client.Inodes.CreateDownload(ctx, &loonfs.CreateDownloadByInodeRequest{
-			NamespaceID:    request.NamespaceID,
-			InodeID:        inodeID,
-			Consistency:    consistency,
-			MaxStalenessMs: setting.maxStalenessMs,
+			NamespaceID: request.NamespaceID,
+			InodeID:     inodeID,
+			Consistency: consistency,
 		})
 		if err != nil {
 			t.Fatalf("%s grant by inode: %v", label, err)
 		}
 		revisionGrant, err := h.client.Inodes.CreateRevisionDownload(ctx, &loonfs.CreateRevisionDownloadByInodeRequest{
-			NamespaceID:    request.NamespaceID,
-			InodeID:        inodeID,
-			RevisionNo:     revisionNo,
-			Consistency:    consistency,
-			MaxStalenessMs: setting.maxStalenessMs,
+			NamespaceID: request.NamespaceID,
+			InodeID:     inodeID,
+			RevisionNo:  revisionNo,
+			Consistency: consistency,
 		})
 		if err != nil {
 			t.Fatalf("%s grant of a revision by inode: %v", label, err)
@@ -966,7 +949,7 @@ func runReadConsistency(t *testing.T, h *harness, testCase conformanceCase) {
 		NamespaceID: request.NamespaceID,
 		Path:        loonfs.AbsolutePath(request.Path),
 		SnapshotID:  &snapshotID,
-		Consistency: loonfs.ReadConsistencyStrong.Ptr(),
+		Consistency: loonfs.ConsistencyStrong.Ptr(),
 	})
 	assertBadRequestError(t, err, expected.SnapshotWithConsistency)
 }

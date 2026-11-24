@@ -122,7 +122,7 @@ impl GrepService {
             .map(|cursor| cursor.head_seq);
         if cursor_head_seq.is_some_and(|seq| seq > head.head_seq()) {
             head = namespace_reads
-                .read_view(Some(loonfs::Consistency::Strong))
+                .read_view(loonfs::Consistency::Strong)
                 .await?;
         }
         let snapshot = active_index(head.grep_entry().await?)?;
