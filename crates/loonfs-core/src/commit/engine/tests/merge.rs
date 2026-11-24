@@ -284,10 +284,11 @@ async fn a_repeat_merge_continues_the_previous_merge_exactly() {
 }
 
 /// Checks that each range of another fork that a merge record covers has to
-/// continue that fork's newest row in the merge index, whether a covered
-/// range or the fork's own merge wrote the row, and that a covered range of
-/// a fork with no row is admitted where it starts, because nothing in the
-/// namespace contradicts it.
+/// continue that fork's newest row in the merge index, and that a covered
+/// range of a fork with no row is admitted where it starts, because nothing
+/// in the namespace contradicts it. Once a merge of another namespace covered
+/// the fork's newest range, the fork's own merge is refused, and a later
+/// merge that covers the fork's next range is admitted.
 #[tokio::test]
 async fn a_covered_range_continues_its_forks_newest_row() {
     let (_directory, store, namespace_id, writer) = setup().await;
@@ -332,27 +333,19 @@ async fn a_covered_range_continues_its_forks_newest_row() {
         source_namespace_id: original.clone(),
         ..merge(20, 22)
     };
-    publish(
+    let error = publish(
         &store,
         &namespace_id,
         &writer,
         merge_candidate("original", "original", own),
     )
     .await
-    .expect("the fork's own merge continues the covered range");
-    let error = publish(
-        &store,
-        &namespace_id,
-        &writer,
-        merge_candidate("stale", "stale", covering(7, 9, 20, 25)),
-    )
-    .await
-    .expect_err("a covered range that the fork's own merge applied");
+    .expect_err("the fork's own merge after another merge covered it");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest, "{error:?}");
     assert_matches!(
         error,
-        CoreError::MergeRangeConflict {
-            expected_after_seq: CommitSeq(22),
-            actual_after_seq: CommitSeq(20),
+        CoreError::InvalidMerge {
+            param: "source_namespace_id",
             ..
         }
     );
@@ -360,10 +353,10 @@ async fn a_covered_range_continues_its_forks_newest_row() {
         &store,
         &namespace_id,
         &writer,
-        merge_candidate("second", "second", covering(7, 9, 22, 25)),
+        merge_candidate("second", "second", covering(7, 9, 20, 25)),
     )
     .await
-    .expect("a covered range that continues the fork's own merge");
+    .expect("a covered range that continues the other merge's row");
 }
 
 fn intent(commit_id: &str, operations: Vec<FilesystemOperation>) -> CommitIntent {

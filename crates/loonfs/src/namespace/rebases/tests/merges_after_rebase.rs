@@ -1,7 +1,7 @@
 //! Merges of a fork and of the new forks that rebases made from it: a merge
 //! of a new fork covers the range of the fork that its replay commits
-//! replayed, so a later merge of the fork starts after that range, and of
-//! two merges that cover the same range, the second to commit is refused.
+//! replayed, so the fork can't merge or rebase again, and of two merges that
+//! cover the same range, the second to commit is refused.
 
 use crate::namespace::merges::PlannedMerge;
 use crate::{
@@ -12,7 +12,7 @@ use loonfs_core::MergeRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{request_lines, KeyPredicate, RecordingStore};
-use loonfs_types::{CommitSeq, InodeId, Merge, NextMergeRangeOutcome};
+use loonfs_types::{InodeId, NextMergeRangeOutcome};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -115,22 +115,13 @@ impl Diverged {
         self.main.merge_fork(source, &actor()).await
     }
 
-    /// Returns the fork's newest range in `main`'s merge index and where the
-    /// fork's next merge starts.
-    async fn next_range(&self) -> (Option<Merge>, CommitSeq) {
-        let range = self
-            .main
+    /// Returns the outcome of the next-range query of the fork into `main`.
+    async fn outcome(&self) -> NextMergeRangeOutcome {
+        self.main
             .next_merge_range(self.fork.id())
             .await
-            .expect("the next range");
-        let NextMergeRangeOutcome::Open {
-            merge,
-            next_after_seq,
-        } = range.outcome
-        else {
-            panic!("the floors allow the merge: {:?}", range.outcome);
-        };
-        (merge, next_after_seq)
+            .expect("the next range")
+            .outcome
     }
 
     /// Checks that `main` still has `/keep.txt`, which a resolver restored
@@ -143,24 +134,27 @@ impl Diverged {
     }
 }
 
-/// The fork sequence that a replay commit replayed the fork's commits
-/// through.
-fn replayed_through(replayed: &ReplayForkResponse) -> CommitSeq {
-    replayed
-        .commit
-        .merge
-        .as_ref()
-        .expect("a replay commit's merge record")
-        .source_through_seq
+/// Returns the outcome of the next-range query of the fork after
+/// `new_fork`'s merge covered the fork's range that `replayed` applied.
+fn covered(new_fork: &NamespaceId, replayed: &ReplayForkResponse) -> NextMergeRangeOutcome {
+    NextMergeRangeOutcome::Covered {
+        merge: replayed
+            .commit
+            .merge
+            .clone()
+            .expect("a replay commit's merge record"),
+        covered_by_namespace_id: new_fork.clone(),
+    }
 }
 
-/// Checks that after a new fork merged, a merge of the fork applies only the
-/// fork's commits after the ones that the replay commit replayed. The
-/// resolver restored a file that the fork deleted, and main's row for that
-/// file is from before the fork point, so a merge of the replayed range
-/// would delete the file again without a conflict.
+/// Checks that once a new fork merged, the fork's later commit doesn't reach
+/// `main`: the next-range query reports `covered`, and a merge and a rebase
+/// of the fork return `invalid_request`, whose message identifies the new
+/// fork. The resolver restored a file that the fork deleted, and main's row
+/// for that file is from before the fork point, so a later merge of the fork
+/// could delete the file again without a conflict.
 #[tokio::test]
-async fn a_merge_of_the_fork_after_its_new_fork_merged_applies_only_its_later_commits() {
+async fn a_fork_whose_new_fork_merged_can_neither_merge_nor_rebase_again() {
     let family = diverged().await;
     let (new_fork, replayed) = family.rebase(family.fork.id(), "main-rebase").await;
     family.restore_keep(&new_fork, &replayed).await;
@@ -168,33 +162,56 @@ async fn a_merge_of_the_fork_after_its_new_fork_merged_applies_only_its_later_co
         .merge(new_fork.id())
         .await
         .expect("merge the new fork");
-    let through_seq = replayed_through(&replayed);
-    assert_eq!(family.next_range().await.1, through_seq);
-
     family
         .fork
         .put_file("/later.txt", b"later", &actor())
         .await
         .expect("a later commit in the fork");
-    let merged = family
+    assert_eq!(family.outcome().await, covered(new_fork.id(), &replayed));
+
+    let refused = namespace_id("main-rebase-2");
+    let merge_error = family
         .merge(family.fork.id())
         .await
-        .expect("merge the fork");
-
-    let merge = merged.merge.expect("a merge record");
-    assert_eq!(merge.source_after_seq, through_seq);
+        .expect_err("a merge of the fork");
+    let rebase_error = family
+        .runtime
+        .fork_namespace_for_rebase(family.main.id(), family.fork.id(), &refused, &actor())
+        .await
+        .expect_err("a rebase of the fork");
+    for error in [merge_error, rebase_error] {
+        assert_eq!(error.code(), ErrorCode::InvalidRequest, "{error:?}");
+        assert_eq!(
+            error.invalid_request_param().as_deref(),
+            Some("source_namespace_id")
+        );
+        assert!(
+            error.to_string().contains("`main-rebase`"),
+            "the message identifies the new fork: {error}"
+        );
+    }
+    family
+        .runtime
+        .open_namespace(&refused)
+        .expect("open the refused new fork")
+        .metadata()
+        .await
+        .expect_err("the refused rebase creates no new fork");
     family.assert_keep_restored().await;
-    let later = family.main.read_file("/later.txt").await.expect("later");
-    assert_eq!(later.bytes, b"later");
+    family
+        .main
+        .stat("/later.txt")
+        .await
+        .expect_err("the fork's later commit stays in the fork");
 }
 
 /// Checks that a merge of the last new fork of a chain covers the fork's
 /// replayed range too, after the first new fork was deleted, so after both
-/// new forks are deleted, main's merge index says that the fork is merged
-/// through its head, which is what a merge session's recovery reads, and a
-/// later merge of the fork applies only the fork's later commits.
+/// new forks are deleted, the next-range query of the fork reports
+/// `covered` by the last new fork, which is what a merge session's recovery
+/// reads.
 #[tokio::test]
-async fn a_merge_of_the_fork_after_a_chain_of_new_forks_merged_applies_only_its_later_commits() {
+async fn a_merge_of_the_last_new_fork_of_a_chain_covers_the_fork() {
     let family = diverged().await;
     let (first, replayed) = family.rebase(family.fork.id(), "main-rebase").await;
     family.restore_keep(&first, &replayed).await;
@@ -206,34 +223,7 @@ async fn a_merge_of_the_fork_after_a_chain_of_new_forks_merged_applies_only_its_
         .expect("merge the second new fork");
     second.delete().await.expect("delete the second new fork");
 
-    let through_seq = replayed_through(&replayed);
-    let fork_head = family
-        .main
-        .next_merge_range(family.fork.id())
-        .await
-        .expect("the next range")
-        .source_head_seq;
-    assert_eq!(fork_head, through_seq);
-    let (merge, next_after_seq) = family.next_range().await;
-    assert_eq!(next_after_seq, through_seq);
-    assert_eq!(
-        merge.map(|merge| merge.source_namespace_id),
-        Some(family.fork.id().clone())
-    );
-
-    family
-        .fork
-        .put_file("/later.txt", b"later", &actor())
-        .await
-        .expect("a later commit in the fork");
-    let merged = family
-        .merge(family.fork.id())
-        .await
-        .expect("merge the fork");
-    assert_eq!(
-        merged.merge.expect("a merge record").source_after_seq,
-        through_seq
-    );
+    assert_eq!(family.outcome().await, covered(second.id(), &replayed));
     family.assert_keep_restored().await;
 }
 
@@ -258,9 +248,11 @@ async fn a_second_new_fork_of_the_fork_is_refused_after_its_sibling_merged() {
 }
 
 /// Checks that when a merge of the fork and a merge of its new fork are
-/// both planned before either commits, the second to commit is refused with
-/// `merge_range_conflict`, in either order, and commits nothing, so it
-/// creates no inode that the first created.
+/// both planned before either commits, the second to commit is refused and
+/// commits nothing, so it creates no inode that the first created. A merge
+/// of the new fork after the fork's merge returns `merge_range_conflict`,
+/// and a merge of the fork after the new fork's merge returns
+/// `invalid_request`.
 #[tokio::test]
 async fn a_merge_of_the_fork_and_of_its_new_fork_refuse_the_second_to_commit() {
     for new_fork_first in [true, false] {
@@ -300,9 +292,16 @@ async fn a_merge_of_the_fork_and_of_its_new_fork_refuse_the_second_to_commit() {
             .submit_merge(planned.candidate, &reservation)
             .await
             .expect_err("the late merge covers the first merge's range");
+        // Once the new fork merged, the fork's own merge is refused because
+        // the new fork covered the fork.
+        let expected = if new_fork_first {
+            ErrorCode::InvalidRequest
+        } else {
+            ErrorCode::MergeRangeConflict
+        };
         assert_eq!(
             error.code(),
-            ErrorCode::MergeRangeConflict,
+            expected,
             "new fork first: {new_fork_first}: {error:?}"
         );
         let head_seq = family.main.metadata().await.expect("main").head_seq;
@@ -341,7 +340,7 @@ async fn a_retry_of_the_new_forks_merge_returns_the_first_attempts_commit() {
         .expect("the retry");
 
     assert_eq!(retried, first);
-    assert_eq!(family.next_range().await.1, replayed_through(&replayed));
+    assert_eq!(family.outcome().await, covered(new_fork.id(), &replayed));
     family
         .main
         .stat("/more.txt")

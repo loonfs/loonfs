@@ -96,25 +96,22 @@ pub struct NextMergeRangeResponse {
     pub fork_point_seq: CommitSeq,
     /// The fork's head sequence when the server read it.
     pub source_head_seq: CommitSeq,
-    /// Whether the retention floors allow the fork's next merge, and where that merge starts.
+    /// Whether the fork can merge again, and where its next merge starts.
     #[serde(flatten)]
     pub outcome: NextMergeRangeOutcome,
 }
 
-/// Whether the retention floors allow a fork's next merge into a namespace, and where that merge
-/// starts.
+/// Whether a fork can merge into a namespace again, and where its next merge starts.
 ///
 /// A newer server can return an outcome that isn't listed here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum NextMergeRangeOutcome {
-    /// The floors allow the next merge.
+    /// The fork can merge again.
     Open {
         /// The fork's newest range in the namespace's merge index, which the next merge
-        /// continues. After a merge of a rebase's new fork, it's the range of this fork that the
-        /// new fork's replay commits applied, so its source is this fork, not the new fork. It's
-        /// absent before the fork's first merge. In a rebase's new fork, it's the fork's newest
+        /// continues. It's absent before the fork's first merge. In a rebase's new fork, it's the fork's newest
         /// replay commit, never a merge that the new fork inherited.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -145,6 +142,16 @@ pub enum NextMergeRangeOutcome {
         /// The namespace's retention floor, which is above the fork point (for a rebase's new
         /// fork, above the new fork's own fork point).
         retention_floor_seq: CommitSeq,
+    },
+    /// A rebase's new fork already merged the fork's work into the namespace, so a merge or a
+    /// rebase of the fork returns `invalid_request`. To continue, a caller forks the namespace
+    /// again and copies the changes that it wants to keep.
+    Covered {
+        /// The fork's newest range in the namespace's merge index, which the new fork's replay
+        /// commits applied.
+        merge: Merge,
+        /// The rebase's new fork whose merge covered `merge`.
+        covered_by_namespace_id: NamespaceId,
     },
     /// An outcome from a newer server. This variant doesn't include the outcome's own fields.
     #[serde(other)]
@@ -306,7 +313,7 @@ mod tests {
             ),
             (
                 NextMergeRangeOutcome::RangeStartBelowFloor {
-                    merge: Some(merge),
+                    merge: Some(merge.clone()),
                     next_after_seq: CommitSeq(425),
                     retention_floor_seq: CommitSeq(430),
                 },
@@ -322,6 +329,18 @@ mod tests {
                     retention_floor_seq: CommitSeq(450),
                 },
                 serde_json::json!({"outcome": "fork_point_below_floor", "retention_floor_seq": 450}),
+            ),
+            (
+                NextMergeRangeOutcome::Covered {
+                    merge,
+                    covered_by_namespace_id: NamespaceId::parse("demo-branch-2")
+                        .expect("namespace id"),
+                },
+                serde_json::json!({
+                    "outcome": "covered",
+                    "merge": merge_json,
+                    "covered_by_namespace_id": "demo-branch-2"
+                }),
             ),
         ];
         for (outcome, mut expected) in cases {

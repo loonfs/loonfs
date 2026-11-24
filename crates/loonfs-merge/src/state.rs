@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 /// through the fork that it was rebased from, so if the state is lost after
 /// a `merged` session deleted some of its new forks, recovery can't connect
 /// the remaining new forks to the original fork, and nothing deletes them.
-/// The recovered session still merges each of the original fork's commits
-/// once, because the merge of the last new fork covered the original fork's
-/// replayed commits, so the next-range query of the original fork starts
-/// after them, and the session is `merged` when nothing comes after them.
+/// The merge of the last new fork wrote the original fork's row, so the
+/// next-range query of the original fork returns `covered`, and the
+/// recovered session is `merged` when that row reaches the original fork's
+/// head, or `failed` when the original fork has later commits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeSessionState {
@@ -228,6 +228,17 @@ pub enum MergeFailure {
     ForkPointBelowFloor {
         /// The retention floor of the namespace that the session merges into.
         retention_floor_seq: CommitSeq,
+    },
+    /// The next-range query returned `covered`: a merge of a rebase's new
+    /// fork wrote the fork's row through a sequence below the one that the
+    /// session merges through, so the fork's later commits didn't merge, and
+    /// a merge or a rebase of the fork would return `invalid_request`.
+    Covered {
+        /// The rebase's new fork whose merge wrote the fork's row.
+        covered_by_namespace_id: NamespaceId,
+        /// The fork sequence that the new fork's merge applied the fork's
+        /// commits through.
+        source_through_seq: CommitSeq,
     },
     /// The next-range query returned an outcome from a newer server, which
     /// this crate doesn't know.

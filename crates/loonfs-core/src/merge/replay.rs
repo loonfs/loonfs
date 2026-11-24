@@ -87,7 +87,8 @@ pub(super) struct HistoryPart<'v, S: ObjectStore + ?Sized> {
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Returns the fork point of `fork`, read at `fork_context`, after it
     /// checks that `fork` is a fork of this namespace, read at `context`, that
-    /// the fork point is at or above this namespace's retention floor, and
+    /// the fork point is at or above this namespace's retention floor, that
+    /// no rebase's new fork merged the fork's work (see [`merge_start`]), and
     /// that the start of the fork's unmerged range is at or above the fork's
     /// own retention floor. A rebase makes these checks before it creates its
     /// new fork.

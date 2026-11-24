@@ -411,6 +411,14 @@ fn merge_failure(failure: &MergeFailure) -> String {
              be merged (`fork_point_below_floor`)",
             retention_floor_seq.0
         ),
+        MergeFailure::Covered {
+            covered_by_namespace_id,
+            source_through_seq,
+        } => format!(
+            "`{covered_by_namespace_id}`, a rebase's new fork, merged the fork's commits through \
+             seq {}, and the fork's later commits didn't merge (`covered`)",
+            source_through_seq.0
+        ),
         MergeFailure::UnknownRangeOutcome => {
             "the server returned a next-range outcome unknown to this CLI".to_owned()
         }

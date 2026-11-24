@@ -581,7 +581,7 @@ impl HeapBytes for MergeConflictVersion {
 
 impl HeapBytes for MergeIndexRecord {
     fn heap_bytes(&self) -> usize {
-        self.source_namespace_id.heap_bytes()
+        self.source_namespace_id.heap_bytes() + self.covered_by_namespace_id.heap_bytes()
     }
 }
 

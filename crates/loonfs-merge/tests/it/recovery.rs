@@ -6,7 +6,7 @@ use crate::scripted_mechanics::{
 };
 use loonfs_merge::{DefaultResolver, MergeFailure, MergeSessionStatus};
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::{CommitSeq, NextMergeRangeOutcome};
+use loonfs_types::{CommitSeq, Merge, NextMergeRangeOutcome};
 
 #[tokio::test]
 async fn a_lost_state_recovers_the_new_fork_that_was_merging_and_merges_the_rest() {
@@ -127,18 +127,30 @@ async fn a_lost_state_fails_when_a_new_forks_next_range_is_unknown() {
     assert_eq!(session.state().new_fork_ids, [rebased]);
 }
 
+/// Returns the next-range outcome of the original fork after the merge of
+/// `new_fork` covered the fork's commits through `through_seq`.
+fn covered(new_fork: &str, through_seq: u64) -> NextMergeRangeOutcome {
+    NextMergeRangeOutcome::Covered {
+        merge: Merge {
+            source_namespace_id: sandbox(),
+            source_after_seq: CommitSeq(5),
+            source_through_seq: CommitSeq(through_seq),
+        },
+        covered_by_namespace_id: namespace_id(new_fork),
+    }
+}
+
 /// Checks that a lost state after a `merged` session deleted its new forks
-/// recovers as `merged` when the next-range query says that the namespace
-/// has the original fork's commits through its head, which a merge of the
-/// last new fork records, and sends no merge.
+/// recovers as `merged` when the next-range query says that a new fork's
+/// merge wrote the original fork's row through the fork's head, and sends no
+/// merge.
 #[tokio::test]
 async fn a_lost_state_after_the_new_forks_were_deleted_recovers_as_merged() {
     let mechanics = ScriptedMechanics::new([
         Answer::ForkSnapshots(Vec::new()),
-        Answer::Range {
-            next_after_seq: 20,
+        Answer::RangeOutcome {
             source_head_seq: 20,
-            merged: true,
+            outcome: covered("rebase-1", 20),
         },
     ]);
 
@@ -152,11 +164,42 @@ async fn a_lost_state_after_the_new_forks_were_deleted_recovers_as_merged() {
     assert!(merges(&mechanics.sent()).is_empty());
 }
 
+/// Checks that a lost state recovers as `failed` when a new fork's merge
+/// wrote the original fork's row through a sequence below the fork's head,
+/// with a failure that identifies the new fork and the end of its row, and
+/// sends no merge, because the fork's later commits can't merge.
+#[tokio::test]
+async fn a_lost_state_fails_when_the_fork_has_commits_after_a_new_forks_merge() {
+    let mechanics = ScriptedMechanics::new([
+        Answer::ForkSnapshots(Vec::new()),
+        Answer::RangeOutcome {
+            source_head_seq: 25,
+            outcome: covered("rebase-1", 20),
+        },
+    ]);
+
+    let session = recover(&mechanics, DefaultResolver).await;
+
+    mechanics.assert_script_used();
+    assert_eq!(
+        session.state().status,
+        MergeSessionStatus::Failed {
+            fork_id: sandbox(),
+            failure: MergeFailure::Covered {
+                covered_by_namespace_id: namespace_id("rebase-1"),
+                source_through_seq: CommitSeq(20),
+            },
+            reports: Vec::new(),
+        }
+    );
+    let (_, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+    assert!(merges(&mechanics.sent()).is_empty(), "{:?}", state.status);
+}
+
 /// Checks that a lost state whose new fork never merged recovers as
 /// `merged`, without another rebase, when the next-range query says that
-/// the namespace has the original fork's commits through its head, as it
-/// does after another merge covered them, and that the session lists the
-/// new fork and deletes it.
+/// another new fork's merge wrote the original fork's row through its head,
+/// and that the session lists the new fork and deletes it.
 #[tokio::test]
 async fn a_lost_state_recovers_as_merged_when_another_merge_covered_the_rebased_fork() {
     let rebased = namespace_id("rebase-1");
@@ -167,10 +210,9 @@ async fn a_lost_state_recovers_as_merged_when_another_merge_covered_the_rebased_
         },
         // The new fork never merged.
         Answer::range(10, 12),
-        Answer::Range {
-            next_after_seq: 20,
+        Answer::RangeOutcome {
             source_head_seq: 20,
-            merged: true,
+            outcome: covered("rebase-2", 20),
         },
         Answer::Deleted,
     ]);

@@ -339,9 +339,11 @@ fn next_request(
 
 /// Returns the status after the next-range query of `fork_id` returned
 /// `outcome`: `merging` through `through_seq`, `merged` when the fork's next
-/// merge starts at or after `through_seq`, or `failed` with `reports` when a
-/// retention floor refuses that merge or the outcome is one that this crate
-/// doesn't know.
+/// merge starts at or after `through_seq`, or when a merge of a rebase's new
+/// fork wrote the fork's row through `through_seq` or later, or `failed` with
+/// `reports` when a retention floor refuses that merge, when that row ends
+/// before `through_seq` (so the fork's later commits can't merge), or when
+/// the outcome is one that this crate doesn't know.
 pub(crate) fn status_after_range(
     fork_id: &NamespaceId,
     through_seq: CommitSeq,
@@ -358,6 +360,18 @@ pub(crate) fn status_after_range(
                 through_seq,
                 merge: PendingCommit::new(through_seq),
             };
+        }
+        NextMergeRangeOutcome::Covered {
+            ref merge,
+            ref covered_by_namespace_id,
+        } => {
+            if merge.source_through_seq >= through_seq {
+                return MergeSessionStatus::Merged;
+            }
+            MergeFailure::Covered {
+                covered_by_namespace_id: covered_by_namespace_id.clone(),
+                source_through_seq: merge.source_through_seq,
+            }
         }
         NextMergeRangeOutcome::RangeStartBelowFloor {
             retention_floor_seq,

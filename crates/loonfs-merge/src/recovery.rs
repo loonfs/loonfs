@@ -37,11 +37,13 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     ///
     /// The session merges the original fork through `options.through_seq`,
     /// or through its head, and a new fork through its head. When the next
-    /// merge of the fork to merge would start at or after that sequence, the
-    /// session starts `merged`. When a retention floor refuses that merge, or
-    /// the next-range query of the fork or of a new fork returns an outcome
-    /// that this crate doesn't know, the session starts `failed`. With no
-    /// new forks, the session merges the original fork.
+    /// merge of the fork to merge would start at or after that sequence, or
+    /// a merge of a rebase's new fork wrote the fork's row through that
+    /// sequence, the session starts `merged`. When a retention floor refuses
+    /// that merge, when that row ends before the sequence, or when the
+    /// next-range query of the fork or of a new fork returns an outcome that
+    /// this crate doesn't know, the session starts `failed`. With no new
+    /// forks, the session merges the original fork.
     pub async fn recover(
         mechanics: M,
         resolver: R,
@@ -77,6 +79,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
                         | NextMergeRangeOutcome::RangeStartBelowFloor { merge, .. } => {
                             merge.is_some()
                         }
+                        NextMergeRangeOutcome::Covered { .. } => true,
                         // A merge of this new fork would return
                         // `below_retention_floor`, so recovery doesn't
                         // continue with it.
@@ -110,8 +113,8 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
             };
             let status = status_after_range(&fork_id, through_seq, &range.outcome, &[]);
             // The session is `merged` when nothing of the fork is left to
-            // merge, even if the fork was rebased, and only a fork with
-            // commits left to merge is rebased again.
+            // merge, and only a fork with commits left to merge is rebased
+            // again.
             if !was_rebased || !matches!(status, MergeSessionStatus::Merging { .. }) {
                 break status;
             }

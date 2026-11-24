@@ -96,6 +96,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "content_deletion_unreadable_member",
     "content_token",
     "content_tokens",
+    "covered_by_namespace_id",
     "copy_by_inode",
     "copy_path",
     "create_directory_by_inode",

@@ -69,6 +69,7 @@ fn indexed(commit: &Commit) -> MergeIndexRecord {
         committed_seq: commit.committed_seq,
         source_after_seq: merge.source_after_seq,
         source_through_seq: merge.source_through_seq,
+        covered_by_namespace_id: merge.source_namespace_id.clone(),
     }
 }
 
@@ -115,6 +116,7 @@ async fn merges_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork(
         committed_seq: other.committed_seq,
         source_after_seq: CommitSeq(2),
         source_through_seq: CommitSeq(6),
+        covered_by_namespace_id: fork("fork-b"),
     };
     let expected = [
         indexed(&repeat),
