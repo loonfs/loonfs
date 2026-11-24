@@ -1137,6 +1137,83 @@ async fn a_listing_failure_on_a_later_page_lets_started_namespaces_finish_and_fa
     );
 }
 
+/// Checks that a sweep after the scheduler's stop lists nothing and isn't
+/// complete.
+#[tokio::test]
+async fn a_sweep_after_the_stop_is_not_complete() {
+    let directory = tempdir().expect("tempdir");
+    let store: SharedObjectStore = local_store(directory.path());
+    let (writer, now_ms) = seed_writer(&store).await;
+    seed_unfolded_tail(&writer, &namespace_id("alpha")).await;
+    writer.shutdown().await.expect("stop the writer");
+    let server =
+        SchedulerServer::start(store, &scheduler_config(None), now_ms + 20 * MINUTE_MS).await;
+    assert!(server.scheduler.run_sweep().await.complete);
+
+    server.scheduler.inner.stop.cancel();
+    assert_eq!(
+        server.scheduler.run_sweep().await,
+        SweepReport {
+            namespaces: 0,
+            pools: 0,
+            listed_bytes: 0,
+            complete: false,
+            next_reclamation_at_ms: None,
+        }
+    );
+}
+
+/// Checks that a stop between two pages of the namespace listing leaves the
+/// second page unlisted and the sweep not complete, though each namespace of
+/// the first page has a collection result. The test blocks the first
+/// namespace's collection while it lists the namespace's extensions prefix,
+/// and stops the scheduler then. The sweep's namespace listing never reads
+/// that prefix, and a running collection doesn't check the stop.
+#[tokio::test]
+async fn a_stop_between_two_pages_leaves_the_sweep_not_complete() {
+    let directory = tempdir().expect("tempdir");
+    let base: SharedObjectStore = local_store(directory.path());
+    let [parked, unlisted] = ["a-parked", "b-unlisted"].map(namespace_id);
+    let (writer, now_ms) = seed_writer(&base).await;
+    for namespace_id in [&parked, &unlisted] {
+        seed_unfolded_tail(&writer, namespace_id).await;
+    }
+    writer.shutdown().await.expect("stop the writer");
+    let store = Arc::new(BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::extensions_prefix(&parked)),
+        OperationSelector::Any,
+    ));
+    let mut config = scheduler_config(None);
+    config.max_concurrent_maintenance = const { std::num::NonZeroUsize::new(1).unwrap() };
+    let server = SchedulerServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS)
+        .await
+        .page_limit(page_limit(1));
+
+    store.block_next();
+    let sweep = tokio::spawn({
+        let scheduler = server.scheduler.clone();
+        async move { scheduler.run_sweep().await }
+    });
+    loonfs_test_support::clock::bounded(Duration::from_secs(10), store.wait_until_blocked())
+        .await
+        .expect("the first namespace's collection blocks");
+    server.scheduler.inner.stop.cancel();
+    store.release();
+    let report = sweep.await.expect("join the sweep");
+    assert_eq!(
+        (report.namespaces, report.pools, report.complete),
+        (1, 0, false),
+        "the sweep counts the namespace of the first page and lists no later page"
+    );
+    assert!(report.listed_bytes > 0, "the first namespace was collected");
+    assert_eq!(server.wal_tail_objects(&parked).await, 0);
+    assert!(
+        server.wal_tail_objects(&unlisted).await > 0,
+        "no namespace starts its steps after the stop"
+    );
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Grep {
     NotMaintained,

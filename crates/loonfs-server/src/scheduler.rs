@@ -201,10 +201,12 @@ pub struct SweepReport {
     /// The sum of `listed_bytes` over the responses of the sweep's
     /// collections (see [`GcResponse::listed_bytes`](loonfs::GcResponse::listed_bytes)).
     pub listed_bytes: u64,
-    /// Whether the sweep covered the whole store: both listings finished, and
-    /// each listed namespace and pool has a collection result. A collection
-    /// that returned a response, or that found its namespace or pool gone, is
-    /// a result. A collection that failed or didn't run isn't.
+    /// Whether the sweep covered the whole store: both listings reached their
+    /// last page, and each listed namespace and pool has a collection result.
+    /// A listing that the scheduler's stop cut short didn't reach its last
+    /// page. A collection that returned a response, or that found its
+    /// namespace or pool gone, is a result. A collection that failed or
+    /// didn't run isn't.
     pub complete: bool,
     /// The earliest `next_reclamation_at_ms` in the responses of the sweep's
     /// collections, or `None` when no response includes a reclamation time.
@@ -234,10 +236,13 @@ impl Collected {
     }
 }
 
-/// What one listing of a sweep covered: the number of IDs that it listed,
-/// how many of them have a collection result, and the sum of those results.
+/// What one listing of a sweep covered: whether the listing reached its last
+/// page, the number of IDs that it listed, how many of them have a collection
+/// result, and the sum of those results. A listing that failed or that the
+/// scheduler's stop cut short didn't reach its last page.
 #[derive(Debug, Default)]
 struct Covered {
+    finished: bool,
     listed: usize,
     collected: usize,
     sum: Collected,
@@ -337,10 +342,11 @@ impl Scheduler {
     /// collections it had started finished. A failed call on one namespace or
     /// pool doesn't stop the sweep, and a listing failure stops it from
     /// starting more namespaces or pools. The report isn't complete after a
-    /// failed listing, a failed collection, or a namespace that the sweep
-    /// left to its running steps. After the [`Scheduler`] is stopped, no
-    /// namespace starts its steps, no pool starts its collection, and a
-    /// running compaction unit stops at its next block.
+    /// failed listing, a listing that the stop cut short, a failed
+    /// collection, or a namespace that the sweep left to its running steps.
+    /// After the [`Scheduler`] is stopped, no namespace starts its steps, no
+    /// pool starts its collection, and a running compaction unit stops at its
+    /// next block.
     /// A scheduler without a maintenance handle lists nothing and returns a
     /// report of zero namespaces and pools that isn't complete.
     pub async fn run_sweep(&self) -> SweepReport {
@@ -365,9 +371,9 @@ impl Scheduler {
             namespaces: namespaces.listed,
             pools: pools.listed,
             listed_bytes: sum.listed_bytes,
-            complete: listing.is_ok()
-                && namespaces.collected == namespaces.listed
-                && pools.collected == pools.listed,
+            complete: [&namespaces, &pools]
+                .iter()
+                .all(|covered| covered.finished && covered.collected == covered.listed),
             next_reclamation_at_ms: sum.next_reclamation_at_ms,
         };
         let elapsed_ms = inner.timer.monotonic_now_ms().saturating_sub(started_at_ms);
@@ -405,7 +411,7 @@ impl Scheduler {
 
     /// Collects every pool that the store lists, with the concurrency of the
     /// namespace sweep, and returns what it covered and whether its listing
-    /// finished, once the collections it had started returned.
+    /// failed, once the collections it had started returned.
     async fn collect_every_pool(
         &self,
         maintenance: &Maintenance,
@@ -441,7 +447,7 @@ impl Scheduler {
 
     /// Runs `work` on every ID that `list_page` lists, with
     /// `max_concurrent_maintenance` at once, and returns what it covered and
-    /// whether the listing finished, once the work it had started returned.
+    /// whether the listing failed, once the work it had started returned.
     /// `work` returns the ID's collection result, or `None` when the
     /// collection failed or didn't run.
     ///
@@ -469,15 +475,17 @@ impl Scheduler {
                 return Ok(None);
             };
             let (ids, next_cursor) = list_page(start_after).await?;
-            Ok(Some((ids, next_cursor.map(Some))))
+            Ok(Some(((ids, next_cursor.is_none()), next_cursor.map(Some))))
         })
         .boxed();
+        let mut finished = false;
         let mut listed = 0;
         let mut listing = Ok(());
         let (collected, sum) = pages
             .filter_map(|page| {
                 let ids = match page {
-                    Ok(ids) => {
+                    Ok((ids, last)) => {
+                        finished = last;
                         listed += ids.len();
                         Some(futures::stream::iter(ids))
                     }
@@ -501,6 +509,7 @@ impl Scheduler {
             .await;
         (
             Covered {
+                finished,
                 listed,
                 collected,
                 sum,
