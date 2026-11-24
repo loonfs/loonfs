@@ -229,7 +229,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     held.basis.boundary().clone(),
                 )
                 .await?
-                .map(|segments| (held, segments)),
+                .map(|decoded| {
+                    let segments = VerifiedMetadataSegments::from_decoded(
+                        &self.store,
+                        Some(&self.segment_cache),
+                        decoded,
+                    );
+                    (held, segments)
+                }),
             None => None,
         };
         match held {

@@ -1631,7 +1631,7 @@ async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_
         .collect();
     let max_decoded_input_bytes = 32 * 1024 * 1024;
     refill_iterators(
-        &MetadataSegmentBlockLoader::new(&store),
+        &MetadataSegmentBlockLoader::new(&segments),
         &mut iterators,
         max_decoded_input_bytes,
     )

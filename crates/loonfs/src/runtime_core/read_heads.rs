@@ -142,8 +142,7 @@ impl RuntimeCore {
             .instrument(phase_span!(self, Phase::ValidationAnchorLoad, namespace_id))
             .await?;
         if loaded.read_state().status.is_active() {
-            let tail =
-                project_anchor_tail(self.store(), &self.inner.metadata_segment_cache, &loaded)?;
+            let tail = project_anchor_tail(&loaded)?;
             self.inner.head_and_wal_tail_cache.insert_tail(
                 WalTailCacheKey {
                     namespace_id: namespace_id.clone(),

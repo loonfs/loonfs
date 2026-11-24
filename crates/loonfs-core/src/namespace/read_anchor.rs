@@ -3,14 +3,13 @@
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result as CoreResult, WriterFence};
 use crate::limits::MAX_POSITION_MOVES;
-use crate::manifest::metadata_basis_from_manifest;
+use crate::manifest::{manifest_base_state, project_manifest_tail};
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::held::{Checked, Held};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
-use crate::segment::MetadataSegmentCache;
 use crate::time::Observation;
 use crate::wal::{discover_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail};
 use loonfs_objectstore::ObjectStore;
@@ -347,11 +346,8 @@ fn ensure_stored_writer_epoch(
     }
 }
 
-pub fn project_anchor_tail<S: ObjectStore + ?Sized>(
-    store: &S,
-    segment_cache: &MetadataSegmentCache,
-    anchor: &NamespaceReadAnchor,
-) -> CoreResult<Arc<ProjectedWalTail>> {
-    metadata_basis_from_manifest(store, Some(segment_cache), anchor.held.manifest())
-        .project_tail(anchor)
+/// Returns the projected WAL tail of `anchor` above the anchor's manifest.
+pub fn project_anchor_tail(anchor: &NamespaceReadAnchor) -> CoreResult<Arc<ProjectedWalTail>> {
+    let manifest = anchor.held.manifest().envelope();
+    project_manifest_tail(manifest, &manifest_base_state(manifest), anchor)
 }

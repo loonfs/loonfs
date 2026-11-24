@@ -7,6 +7,7 @@ use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::Result;
 use crate::metadata::MetadataView;
 use crate::namespace::store::NamespaceStore;
+use crate::segment::VerifiedMetadataSegments;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     CommitSeq, ContentRef, InodeId, InodeKind, PageRequest, PagedResponse, RevisionNo, SnapshotId,
@@ -138,8 +139,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<SnapshotFilesPage> {
         let now_ms = self.wall_clock.now_ms();
         let record = ensure_live(self.load_user_snapshot(snapshot_id).await?, now_ms)?.state;
-        let SnapshotBasis { manifest, segments } =
+        let SnapshotBasis { manifest, decoded } =
             load_snapshot_basis(&self.store, &self.segment_cache, record).await?;
+        let segments =
+            VerifiedMetadataSegments::from_decoded(&self.store, Some(&self.segment_cache), decoded);
 
         let view = MetadataView::over_manifest_segments(&segments, manifest.head_seq);
         Self::files_page(view, request, options).await

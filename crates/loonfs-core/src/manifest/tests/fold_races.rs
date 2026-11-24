@@ -479,7 +479,7 @@ async fn a_fold_from_a_fresh_position_puts_on_its_basis_with_no_request_first() 
         &*writer.store,
         &writer.namespace_id,
     );
-    crate::manifest::load_manifest_segments(
+    crate::manifest::load_referenced_manifest(
         &*writer.store,
         Some(&namespace.segment_cache),
         input.read_basis().basis.manifest(),
@@ -520,7 +520,7 @@ async fn a_fold_whose_put_lands_at_an_emptied_number_publishes_on_the_newest_man
         &*writer.store,
         &writer.namespace_id,
     );
-    crate::manifest::load_manifest_segments(
+    crate::manifest::load_referenced_manifest(
         &*writer.store,
         Some(&namespace.segment_cache),
         held.read_basis().basis.manifest(),

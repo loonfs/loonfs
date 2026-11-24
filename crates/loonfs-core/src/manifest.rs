@@ -31,6 +31,6 @@ pub use self::statistics::NamespaceStatistics;
 
 pub(crate) use self::load::{
     ensure_manifest_reference_matches, head_from_manifest, load_basis_metadata_segments,
-    load_manifest_segments, load_namespace_manifest_envelope, metadata_basis_from_manifest,
-    LoadedMetadataBasis,
+    load_namespace_manifest_envelope, load_referenced_manifest, manifest_base_state,
+    metadata_basis_from_manifest, project_manifest_tail, DecodedManifest, LoadedMetadataBasis,
 };

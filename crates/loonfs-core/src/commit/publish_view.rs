@@ -294,7 +294,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     cached.basis.boundary().clone(),
                 )
                 .await?
-                .map(|segments| ViewSource::Cached(Box::new(cached), segments)),
+                .map(|decoded| {
+                    let segments = VerifiedMetadataSegments::from_decoded(
+                        &self.store,
+                        Some(&self.segment_cache),
+                        decoded,
+                    );
+                    ViewSource::Cached(Box::new(cached), segments)
+                }),
             None => None,
         };
         let source = match (cached, acquired_anchor) {

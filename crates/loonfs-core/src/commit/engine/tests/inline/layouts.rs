@@ -111,12 +111,7 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
         .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("anchor");
-    let tail = crate::namespace::read_anchor::project_anchor_tail(
-        &store,
-        &crate::cache::MetadataSegmentCache::unshared(0),
-        &anchor,
-    )
-    .expect("tail");
+    let tail = crate::namespace::read_anchor::project_anchor_tail(&anchor).expect("tail");
     assert_eq!(tail.revisions().count(), 3);
     let rows: Vec<_> = tail.content_layouts().collect();
     assert_eq!(rows.len(), 3);
@@ -364,12 +359,7 @@ async fn an_early_write_and_the_later_fold_store_two_objects_with_the_same_bytes
         .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("anchor");
-    let tail = crate::namespace::read_anchor::project_anchor_tail(
-        &store,
-        &crate::cache::MetadataSegmentCache::unshared(0),
-        &anchor,
-    )
-    .expect("tail");
+    let tail = crate::namespace::read_anchor::project_anchor_tail(&anchor).expect("tail");
     let content = tail.content(&reference).expect("pieces");
     let pool_id = pool_id(&store).await;
     let early = write_tail_content(
@@ -437,12 +427,7 @@ async fn a_retry_after_an_append_keeps_the_first_span_object_immutable() {
         .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("anchor");
-    let tail = crate::namespace::read_anchor::project_anchor_tail(
-        &store,
-        &crate::cache::MetadataSegmentCache::unshared(0),
-        &anchor,
-    )
-    .expect("tail");
+    let tail = crate::namespace::read_anchor::project_anchor_tail(&anchor).expect("tail");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace.load_current_metadata_view().await.expect("view");
     let content = tail.content(original.content_ref()).expect("content");

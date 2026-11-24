@@ -1,13 +1,11 @@
 //! Retention floor advancement through a floor object in the WAL, and the
 //! namespace's retention window through a verified successor manifest.
 
-use super::error::ManifestLoadError;
 use super::load::metadata_basis_from_manifest;
 use super::publish::ManifestChange;
 use super::published::PublicationReport;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
-use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::{GC_GRACE_WINDOW_MS, MAX_CONTENTION_ATTEMPTS};
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
@@ -16,12 +14,9 @@ use crate::namespace::store::NamespaceStore;
 use crate::segment::cache::MetadataSegmentCache;
 use crate::time::Observation;
 use crate::wal::{prepare_floor_object, publish_wal_object, wal_no_is_unfolded, WalPublishError};
-use futures::{stream, StreamExt, TryStreamExt};
-use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{CommitSeq, RetentionWindow, SetRetentionWindowResponse};
-use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -57,37 +52,6 @@ pub enum RetentionTarget {
     /// to find the target, so a host that advances floors on a schedule
     /// needs no extra request to read each namespace's window.
     Window,
-}
-
-/// Checks that every segment that `manifest` lists exists, with one HEAD
-/// request for each segment.
-pub(crate) async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
-    store: &S,
-    manifest: &NamespaceManifestPayload,
-) -> std::result::Result<(), ManifestLoadError> {
-    let object_keys = manifest
-        .runs
-        .iter()
-        .flat_map(|run| &run.segments)
-        .map(metadata_segment_object_key)
-        .collect::<BTreeSet<_>>();
-    stream::iter(object_keys)
-        .map(|object_key| async move {
-            match store
-                .head(&object_key)
-                .await
-                .map_err(|error| ManifestLoadError::ReadSegment {
-                    object_key: object_key.clone(),
-                    message: error.public_message().into_owned(),
-                    kind: error.kind(),
-                })? {
-                Some(_) => Ok(()),
-                None => Err(ManifestLoadError::MissingSegment { object_key }),
-            }
-        })
-        .buffer_unordered(STORE_READS_IN_FLIGHT)
-        .try_collect()
-        .await
 }
 
 /// What a retention advance does, planned from one manifest and floor.
@@ -196,7 +160,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
         planned: &LoadedManifest,
         target: CommitSeq,
     ) -> Result<FloorObjectReport> {
-        verify_manifest_segments_exist(&self.store, planned.payload()).await?;
+        metadata_basis_from_manifest(&self.store, Some(&self.segment_cache), planned)
+            .segments
+            .verify_segments_exist()
+            .await?;
         self.publish_floor_object_at_tip(target).await
     }
 

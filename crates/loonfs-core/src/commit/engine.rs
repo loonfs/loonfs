@@ -6,7 +6,7 @@ use super::batch::{PublishBatchReport, PublishViewEffect};
 use super::publish_view::WriterPosition;
 use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
-use crate::manifest::retention::verify_manifest_segments_exist;
+use crate::manifest::metadata_basis_from_manifest;
 use crate::manifest::FloorObjectReport;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
@@ -394,7 +394,14 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         target: CommitSeq,
         clock: &OperationClock,
     ) -> Result<FloorObjectReport> {
-        verify_manifest_segments_exist(&self.namespace.store, planned.payload()).await?;
+        metadata_basis_from_manifest(
+            &self.namespace.store,
+            Some(&self.namespace.segment_cache),
+            planned,
+        )
+        .segments
+        .verify_segments_exist()
+        .await?;
         let acquired = matches!(
             *self.position.lock_session(),
             WriterSessionStatus::Acquired(_)

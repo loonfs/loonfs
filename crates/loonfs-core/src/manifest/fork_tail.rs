@@ -3,10 +3,9 @@
 //! ([format spec](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#92-forking-a-namespace)).
 
 use super::fold::ManifestProjection;
-use super::load::{load_basis_metadata_segments, metadata_basis_from_manifest};
+use super::load::{load_referenced_manifest, manifest_base_state, metadata_basis_from_manifest};
 use super::publish::ManifestChange;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::fork::ForkDeadline;
 use crate::namespace::held::Held;
@@ -56,17 +55,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
         fork_basis: &ForkBasis,
         epoch_bound: WriterEpoch,
     ) -> Result<ForkPointTail> {
-        let basis = load_basis_metadata_segments(
-            &self.store,
-            Some(&self.segment_cache),
-            &MetadataBasis::new(fork_basis.manifest.clone()),
-        )
-        .await?;
-        let base_head = NamespaceReadState::from(basis.segments.manifest().payload());
+        let decoded =
+            load_referenced_manifest(&self.store, Some(&self.segment_cache), &fork_basis.manifest)
+                .await?;
+        let base_head = NamespaceReadState::from(decoded.manifest.payload());
         let replayed = load_replayed_wal_tail_through_seq(
             &self.store,
             &base_head,
-            &basis.base_state,
+            &manifest_base_state(&decoded.manifest.envelope),
             fork_basis.fork_point_seq,
             epoch_bound,
         )

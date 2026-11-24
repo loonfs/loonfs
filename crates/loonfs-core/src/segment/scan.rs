@@ -3,7 +3,8 @@
 
 use super::block_memo::SessionBlockMemo;
 use super::cache::MetadataSegmentCache;
-use super::index_block_load::load_segment_filter;
+use super::data_block_load::load_segment_data_block_span;
+use super::index_block_load::{load_segment_filter, load_segment_index_for_compaction};
 use super::runs::{MetadataFamilySegments, MetadataRunManifest};
 use super::scan_load::{ScanDescriptor, ScanLoader};
 use crate::compaction::run_iterator::{refill_iterators, SegmentRowIterator};
@@ -11,15 +12,19 @@ use crate::heap_bytes::HeapBytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::MAX_SCAN_DECODED_BYTES;
 use crate::manifest::error::ManifestLoadError;
+use crate::manifest::DecodedManifest;
 #[cfg(test)]
 use crate::metadata::MetadataState;
 use crate::namespace::control::LoadedManifest;
+use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
+use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
 use loonfs_types::format::segment_blocks::{key_range_may_intersect, string_prefix_upper_bound};
+use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::CommitSeq;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -183,6 +188,77 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             #[cfg(test)]
             peak_resident_blocks: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Returns the segments of `decoded`, a manifest that a load returned,
+    /// with an empty block memo.
+    pub(crate) fn from_decoded(
+        store: &'a S,
+        segment_cache: Option<&'a MetadataSegmentCache>,
+        decoded: DecodedManifest,
+    ) -> Self {
+        let DecodedManifest {
+            manifest,
+            scan_runs,
+        } = decoded;
+        Self::new(
+            store,
+            segment_cache,
+            manifest.object_key,
+            manifest.envelope,
+            manifest.manifest_bytes,
+            scan_runs,
+        )
+    }
+
+    /// Checks that every segment that the manifest lists exists, with one
+    /// HEAD request for each segment.
+    pub(crate) async fn verify_segments_exist(&self) -> Result<(), ManifestLoadError> {
+        let object_keys = self
+            .manifest
+            .payload()
+            .runs
+            .iter()
+            .flat_map(|run| &run.segments)
+            .map(metadata_segment_object_key)
+            .collect::<std::collections::BTreeSet<_>>();
+        stream::iter(object_keys)
+            .map(|object_key| async move {
+                match self.store.head(&object_key).await.map_err(|error| {
+                    ManifestLoadError::ReadSegment {
+                        object_key: object_key.clone(),
+                        message: error.public_message().into_owned(),
+                        kind: error.kind(),
+                    }
+                })? {
+                    Some(_) => Ok(()),
+                    None => Err(ManifestLoadError::MissingSegment { object_key }),
+                }
+            })
+            .buffer_unordered(STORE_READS_IN_FLIGHT)
+            .try_collect()
+            .await
+    }
+
+    /// Loads the index of `descriptor`, a compaction input segment of this
+    /// manifest, without the memo or the block cache, with the segment's
+    /// bytes when the load fetched the whole object (see
+    /// [`load_segment_index_for_compaction`]).
+    pub(crate) async fn load_index_for_compaction(
+        &self,
+        descriptor: &MetadataSegmentRef,
+    ) -> Result<(Arc<Vec<SegmentIndexEntry>>, Option<Bytes>), ManifestLoadError> {
+        load_segment_index_for_compaction(self.store, descriptor).await
+    }
+
+    /// Loads the data blocks of `entries` in `descriptor`, a compaction input
+    /// segment of this manifest, without the memo or the block cache.
+    pub(crate) async fn load_data_blocks_for_compaction(
+        &self,
+        descriptor: &MetadataSegmentRef,
+        entries: &[SegmentIndexEntry],
+    ) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {
+        load_segment_data_block_span(self.store, None, None, descriptor, entries).await
     }
 
     /// The same segments with an empty block memo of their own, so the
