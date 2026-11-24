@@ -3459,3 +3459,49 @@ async fn layout_compactions_prune_absent_chains_only_at_the_base_even_past_the_f
         }
     }
 }
+
+/// Checks that a unit whose output has no segments, and whose manifest put
+/// is written but loses its acknowledgment, reports `Published`. The output
+/// adds no segment to the manifest, so the unit can recognize the manifest
+/// it reads back as its own only by the publication ID.
+#[tokio::test]
+async fn an_empty_output_whose_put_loses_its_acknowledgment_is_published() {
+    use loonfs_test_support::stores::{FailStore, InjectedError};
+
+    let directory = tempdir().expect("tempdir");
+    let namespace = NamespaceId::parse("demo").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    seed_bindings_workload(&store, &namespace).await;
+    let next = current_manifest_number(&store, &namespace)
+        .await
+        .successor()
+        .expect("next number");
+    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
+    let input = input_keys_now(&store, &namespace, &spec).await;
+    let mut result = run_compaction(
+        &store,
+        &namespace,
+        &spec,
+        small_segment_policy(),
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("compaction");
+    // Clear the segments to simulate an output in which every row was dropped.
+    result.output_segments.clear();
+    let store = FailStore::new(
+        store,
+        KeyPredicate::manifest(&namespace),
+        OperationSelector::Put,
+        InjectedError::Transport("lost acknowledgment".to_owned()),
+    )
+    .apply_then_fail();
+    store.fail_next(1);
+    let outcome = finalize_streaming_compaction(&store, &namespace, &spec, &input, &result).await;
+    assert_matches!(
+        outcome,
+        CompactionUnitOutcome::Published { manifest, output_segments: 0, .. }
+            if manifest.manifest().manifest().manifest_no == next
+    );
+    assert_eq!(current_manifest_number(&store, &namespace).await, next);
+}
