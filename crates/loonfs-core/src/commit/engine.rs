@@ -14,9 +14,10 @@ use crate::namespace::read_anchor::WriterAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::time::{Observation, OperationClock};
-use crate::wal::{prepare_floor_object, publish_wal_object, WalPublishError};
+use crate::wal::{prepare_wal_object, publish_wal_object, WalPublishError};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
+use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::options::DeleteNamespaceOptions;
 use loonfs_types::{Commit, CommitId, CommitSeq, DeleteNamespaceResponse, NamespaceId, WriterId};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -654,7 +655,13 @@ impl PositionState {
                 manifest_retention_floor_seq,
             });
         }
-        let floor_object = prepare_floor_object(&head, view.acquired_writer.writer_epoch, target)?;
+        let floor_object = prepare_wal_object(
+            &head,
+            view.acquired_writer.writer_epoch,
+            WalObjectBody::Floor {
+                retention_floor_seq: target,
+            },
+        )?;
         self.owe_fence();
         let published = publish_wal_object(view.store(), &floor_object).await;
         let position = view.into_position();
@@ -672,7 +679,7 @@ impl PositionState {
             &namespace.namespace_id,
             position,
             PublishViewEffect::Advanced {
-                records: Vec::new(),
+                body: floor_object.envelope().payload().body.clone(),
                 head,
                 wal_bytes: floor_object.as_bytes().len(),
             },
@@ -713,13 +720,13 @@ impl PositionState {
                 };
             }
             PublishViewEffect::Advanced {
-                records,
+                body,
                 head,
                 wal_bytes,
             } => {
                 position.basis.read_basis_mut().head = head;
                 if let Err(error) =
-                    Arc::make_mut(&mut position.tail).push_object(namespace_id, &records, wal_bytes)
+                    Arc::make_mut(&mut position.tail).push_object(namespace_id, &body, wal_bytes)
                 {
                     // The WAL is already durable. Discard the position;
                     // replay and folding will report the accounting error.

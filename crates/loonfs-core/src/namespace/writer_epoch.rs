@@ -10,10 +10,11 @@ use crate::namespace::held::Held;
 use crate::namespace::read_anchor::WriterAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
-use crate::wal::{prepare_fence, publish_wal_object, wal_no_is_unfolded};
+use crate::wal::{prepare_wal_object, publish_wal_object, wal_no_is_unfolded};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::WriterBlock;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::{WriterEpoch, WriterId};
 
 /// Captures the writer identity and fencing epoch a session must retain while publishing.
@@ -145,7 +146,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // broken store.
         for _attempt in 0..crate::limits::MAX_UNFOLDED_WAL_OBJECTS {
             let head = &anchor.read_state;
-            let fence = prepare_fence(head, acquired.writer_epoch)?;
+            let fence = prepare_wal_object(head, acquired.writer_epoch, WalObjectBody::Fence)?;
             match publish_wal_object(&self.store, &fence).await {
                 Ok(()) => {
                     let fenced_head = head.after_wal_object(fence.envelope().payload());

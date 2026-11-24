@@ -319,7 +319,7 @@ async fn commit_ids_after(
         let payload = object.payload();
         if payload.wal_no > tip {
             let commit_ids = payload
-                .records
+                .records()
                 .iter()
                 .map(|record| record.commit_id.to_string())
                 .collect();

@@ -2,6 +2,7 @@
 
 use loonfs_types::format::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::{ActorId, CommitSeq, NamespaceId, PoolId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 
@@ -35,11 +36,12 @@ impl NamespaceReadState {
         Self {
             seq: payload.head_seq,
             wal_no: payload.wal_no,
-            retention_floor_seq: payload
-                .retention_floor_seq
-                .map_or(self.retention_floor_seq, |floor| {
-                    floor.max(self.retention_floor_seq)
-                }),
+            retention_floor_seq: match payload.body {
+                WalObjectBody::Floor {
+                    retention_floor_seq,
+                } => retention_floor_seq.max(self.retention_floor_seq),
+                WalObjectBody::Commits(_) | WalObjectBody::Fence => self.retention_floor_seq,
+            },
             ..self.clone()
         }
     }

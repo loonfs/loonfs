@@ -652,8 +652,14 @@ fn data_wal_put_for(
             bytes,
             mode: PutMode::CreateIfAbsent,
         } if operation.key().starts_with(&prefix) => {
-            loonfs_types::format::wal::decode_wal_object_envelope_zstd(bytes)
-                .is_ok_and(|envelope| !envelope.payload().records.is_empty())
+            loonfs_types::format::wal::decode_wal_object_envelope_zstd(bytes).is_ok_and(
+                |envelope| {
+                    matches!(
+                        envelope.payload().body,
+                        loonfs_types::format::wal::WalObjectBody::Commits(_)
+                    )
+                },
+            )
         }
         _ => false,
     }

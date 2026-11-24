@@ -2,7 +2,7 @@
 //! replay paths.
 
 use crate::namespace::state::NamespaceReadState;
-use loonfs_types::format::wal::{WalObjectEnvelope, WalObjectPayload};
+use loonfs_types::format::wal::{WalObjectBody, WalObjectEnvelope, WalObjectPayload};
 use loonfs_types::{CommitSeq, NamespaceId, WalNo, WriterEpoch};
 use std::sync::Arc;
 use thiserror::Error;
@@ -104,8 +104,10 @@ impl ValidatedWalTail {
         self.objects
             .iter()
             .rev()
-            .find_map(|object| object.envelope().payload().records.last())
-            .map(|commit| commit.committed_at_ms)
+            .find_map(|object| match &object.envelope().payload().body {
+                WalObjectBody::Commits(commits) => Some(commits.newest().committed_at_ms),
+                WalObjectBody::Fence | WalObjectBody::Floor { .. } => None,
+            })
     }
 
     /// Returns the unfolded WAL bytes of the tail: the stored sizes of its
@@ -114,7 +116,7 @@ impl ValidatedWalTail {
     pub(crate) fn wal_bytes(&self) -> usize {
         self.objects
             .iter()
-            .filter(|object| !object.envelope().payload().records.is_empty())
+            .filter(|object| matches!(object.envelope().payload().body, WalObjectBody::Commits(_)))
             .map(ValidatedWalObject::stored_bytes)
             .sum()
     }

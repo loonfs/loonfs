@@ -4,48 +4,18 @@
 use super::PreparedWalObject;
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_types::format::wal::{
-    encode_wal_object_envelope_zstd, WalCommitPayload, WalObjectPayload,
-};
-use loonfs_types::{CommitSeq, WriterEpoch};
+use loonfs_types::format::wal::{encode_wal_object_envelope_zstd, WalObjectBody, WalObjectPayload};
+use loonfs_types::WriterEpoch;
 
-/// Builds a WAL object that holds `payload_records` after `head`.
-pub(crate) fn prepare_commits_object(
+/// Builds the next WAL object after `head`, with `body` as its contents.
+///
+/// A floor object's retention floor is at most the head's sequence (format
+/// spec, "Advancing the retention floor"), and a floor above it fails the
+/// encoder's check, so this function panics.
+pub(crate) fn prepare_wal_object(
     head: &NamespaceReadState,
     writer_epoch: WriterEpoch,
-    payload_records: Vec<WalCommitPayload>,
-) -> Result<PreparedWalObject> {
-    prepare_payload(head, writer_epoch, payload_records, None)
-}
-
-/// Builds a fence after `head`: a WAL object with no records.
-pub(crate) fn prepare_fence(
-    head: &NamespaceReadState,
-    writer_epoch: WriterEpoch,
-) -> Result<PreparedWalObject> {
-    prepare_payload(head, writer_epoch, Vec::new(), None)
-}
-
-/// Builds a floor object after `head`: a WAL object with no records that
-/// records `retention_floor_seq`, which is at most the head's sequence
-/// (format spec, "Advancing the retention floor").
-pub(crate) fn prepare_floor_object(
-    head: &NamespaceReadState,
-    writer_epoch: WriterEpoch,
-    retention_floor_seq: CommitSeq,
-) -> Result<PreparedWalObject> {
-    assert!(
-        retention_floor_seq <= head.seq,
-        "a floor object's floor should be at or below the head it follows"
-    );
-    prepare_payload(head, writer_epoch, Vec::new(), Some(retention_floor_seq))
-}
-
-fn prepare_payload(
-    head: &NamespaceReadState,
-    writer_epoch: WriterEpoch,
-    payload_records: Vec<WalCommitPayload>,
-    retention_floor_seq: Option<CommitSeq>,
+    body: WalObjectBody,
 ) -> Result<PreparedWalObject> {
     let payload = WalObjectPayload {
         namespace_id: head.namespace_id.clone(),
@@ -57,11 +27,11 @@ fn prepare_payload(
             ))
         })?,
         writer_epoch,
-        head_seq: payload_records
-            .last()
-            .map_or(head.seq, |record| record.committed_seq),
-        records: payload_records,
-        retention_floor_seq,
+        head_seq: match &body {
+            WalObjectBody::Commits(commits) => commits.newest().committed_seq,
+            WalObjectBody::Fence | WalObjectBody::Floor { .. } => head.seq,
+        },
+        body,
     };
     let object = encode_wal_object_envelope_zstd(payload)
         .expect("a WAL object this process built should encode");

@@ -118,7 +118,7 @@ async fn a_merge_is_published_alone_in_its_wal_object() {
                 .into_payload();
             objects.push(
                 payload
-                    .records
+                    .records()
                     .iter()
                     .map(|record| (record.committed_seq.0, record.merge.is_some()))
                     .collect::<Vec<_>>(),

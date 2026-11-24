@@ -66,7 +66,12 @@ fn is_data_wal_put(operation: &OperationContext<'_>, wal_prefix: &str) -> bool {
             bytes,
             mode: PutMode::CreateIfAbsent,
         } if operation.key().starts_with(wal_prefix) => decode_wal_object_envelope_zstd(bytes)
-            .is_ok_and(|envelope| !envelope.payload().records.is_empty()),
+            .is_ok_and(|envelope| {
+                matches!(
+                    envelope.payload().body,
+                    loonfs_types::format::wal::WalObjectBody::Commits(_)
+                )
+            }),
         _ => false,
     }
 }
@@ -98,12 +103,13 @@ async fn data_wal_keys<S: ObjectStore + ?Sized>(store: &S) -> Vec<String> {
             .await
             .expect("read WAL")
             .expect("WAL exists");
-        if !decode_wal_object_envelope_zstd(&bytes)
-            .expect("decode WAL")
-            .payload()
-            .records
-            .is_empty()
-        {
+        if matches!(
+            decode_wal_object_envelope_zstd(&bytes)
+                .expect("decode WAL")
+                .payload()
+                .body,
+            loonfs_types::format::wal::WalObjectBody::Commits(_)
+        ) {
             data_keys.push(key);
         }
     }
@@ -248,19 +254,22 @@ async fn batch_commit_writes_one_wal_object_and_expands_change_feed() {
         .expect("read wal")
         .expect("wal exists");
     let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
-    assert_eq!(wal_object.payload().records[0].committed_seq, CommitSeq(1));
+    assert_eq!(
+        wal_object.payload().records()[0].committed_seq,
+        CommitSeq(1)
+    );
     assert_eq!(wal_object.payload().head_seq, CommitSeq(2));
-    assert_eq!(wal_object.payload().records.len(), 2);
-    assert_eq!(wal_object.payload().records[0].deltas.len(), 2);
+    assert_eq!(wal_object.payload().records().len(), 2);
+    assert_eq!(wal_object.payload().records()[0].deltas.len(), 2);
     assert_eq!(
-        wal_object.payload().records[0].deltas[0].semantic_operation_index,
+        wal_object.payload().records()[0].deltas[0].semantic_operation_index,
         0
     );
     assert_eq!(
-        wal_object.payload().records[0].deltas[1].semantic_operation_index,
+        wal_object.payload().records()[0].deltas[1].semantic_operation_index,
         0
     );
-    match &wal_object.payload().records[0].deltas[1].delta {
+    match &wal_object.payload().records()[0].deltas[1].delta {
         WalDelta::BindDirentry {
             name_key,
             display_name,
@@ -680,7 +689,7 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
         .expect("read wal")
         .expect("wal exists");
     let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
-    assert_eq!(wal_object.payload().records.len(), 1);
+    assert_eq!(wal_object.payload().records().len(), 1);
 
     let changes = list_changes_after(&store, &namespace_id, CommitSeq(0))
         .await
@@ -1111,7 +1120,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
         .expect("read wal")
         .expect("wal exists");
     let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
-    assert_eq!(wal_object.payload().records.len(), 1);
+    assert_eq!(wal_object.payload().records().len(), 1);
 
     let changes = list_changes_after(&store, &namespace_id, CommitSeq(0))
         .await

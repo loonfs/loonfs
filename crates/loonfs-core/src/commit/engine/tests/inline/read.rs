@@ -484,7 +484,10 @@ async fn inline_checksum_failures_match_object_validation() {
     payload.head_seq = CommitSeq(input.read_basis().head.seq.0 + 1);
     let mut corrupt_ref = value.content_ref().clone();
     corrupt_ref.content_id = ContentId::generate();
-    let record = &mut payload.records[0];
+    let loonfs_types::format::wal::WalObjectBody::Commits(commits) = &mut payload.body else {
+        panic!("a data WAL object");
+    };
+    let record = &mut commits[0];
     record.committed_seq = payload.head_seq;
     record.commit_id = CommitId::parse("corrupt").expect("commit");
     record

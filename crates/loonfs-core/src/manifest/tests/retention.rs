@@ -1225,7 +1225,9 @@ async fn a_session_that_collides_with_a_floor_object_replays_it_and_isnt_fenced(
     reason = "the test writes a floor object with a lower floor, which no process creates"
 )]
 async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_floor() {
-    use loonfs_types::format::wal::{encode_wal_object_envelope_zstd, WalObjectPayload};
+    use loonfs_types::format::wal::{
+        encode_wal_object_envelope_zstd, WalObjectBody, WalObjectPayload,
+    };
 
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1278,8 +1280,9 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
         wal_no: head.wal_no.successor().expect("next WAL number"),
         writer_epoch: head.writer_epoch,
         head_seq: head.seq,
-        records: Vec::new(),
-        retention_floor_seq: Some(CommitSeq(1)),
+        body: WalObjectBody::Floor {
+            retention_floor_seq: CommitSeq(1),
+        },
     };
     let key = loonfs_objectstore::keys::wal_object(&namespace_id, &lower.wal_no);
     store

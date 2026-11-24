@@ -5,7 +5,7 @@ use super::ProjectedWalTail;
 use super::{ReplayedWalTail, ValidatedWalTail};
 use crate::error::MetadataProjectionLoadError;
 use crate::namespace::state::NamespaceReadState;
-use loonfs_types::format::wal::WalObjectEnvelope;
+use loonfs_types::format::wal::{WalObjectBody, WalObjectEnvelope};
 use loonfs_types::CommitSeq;
 
 pub(crate) fn project_validated_wal_tail(
@@ -20,12 +20,8 @@ pub(crate) fn project_validated_wal_tail(
             object_key: object.object_key().to_owned(),
             error,
         };
-        tail.push_object(
-            &payload.namespace_id,
-            &payload.records,
-            object.stored_bytes(),
-        )
-        .map_err(replay_error)?;
+        tail.push_object(&payload.namespace_id, &payload.body, object.stored_bytes())
+            .map_err(replay_error)?;
         head = head.after_wal_object(payload);
     }
     Ok(ReplayedWalTail {
@@ -38,32 +34,26 @@ pub(crate) fn validate_wal_object_for_replay(
     expected_prior_head_seq: CommitSeq,
     envelope: &WalObjectEnvelope,
 ) -> Result<(), WalObjectError> {
-    if envelope.payload().records.is_empty() {
-        if envelope.payload().head_seq != expected_prior_head_seq {
-            return Err(WalObjectError::SummaryMismatch);
+    let payload = envelope.payload();
+    let commits = match &payload.body {
+        WalObjectBody::Commits(commits) => commits,
+        WalObjectBody::Fence | WalObjectBody::Floor { .. } => {
+            if payload.head_seq != expected_prior_head_seq {
+                return Err(WalObjectError::SummaryMismatch);
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
+    };
     let expected_first_seq = expected_prior_head_seq
         .successor()
         .map_err(|_| WalObjectError::SeqOverflow)?;
 
-    if envelope
-        .payload()
-        .records
-        .first()
-        .map(|record| record.committed_seq)
-        != Some(expected_first_seq)
-        || envelope
-            .payload()
-            .records
-            .last()
-            .map(|record| record.committed_seq)
-            != Some(envelope.payload().head_seq)
+    if commits.oldest().committed_seq != expected_first_seq
+        || commits.newest().committed_seq != payload.head_seq
     {
         return Err(WalObjectError::SummaryMismatch);
     }
-    for (offset, record) in envelope.payload().records.iter().enumerate() {
+    for (offset, record) in commits.iter().enumerate() {
         let expected = expected_first_seq
             .0
             .checked_add(offset as u64)

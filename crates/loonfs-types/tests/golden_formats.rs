@@ -32,8 +32,8 @@ use loonfs_types::format::manifest::{
 };
 use loonfs_types::format::wal::{
     decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, ForkRange, MergeRecord,
-    WalCodecError, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
-    MAX_FENCE_OR_FLOOR_OBJECT_BYTES,
+    WalCodecError, WalCommitDelta, WalCommitPayload, WalCommits, WalDelta, WalInlineContent,
+    WalObjectBody, WalObjectPayload, MAX_FENCE_OR_FLOOR_OBJECT_BYTES,
 };
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
@@ -416,7 +416,8 @@ fn sample_wal_payload() -> WalObjectPayload {
         wal_no: WalNo(2),
         writer_epoch: WriterEpoch(3),
         head_seq: CommitSeq(2),
-        records: vec![WalCommitPayload {
+        body: WalObjectBody::Commits(
+            WalCommits::new(vec![WalCommitPayload {
             committed_seq: CommitSeq(2),
             commit_id: commit_id(),
             committed_by: actor(),
@@ -429,24 +430,25 @@ fn sample_wal_payload() -> WalObjectPayload {
             merge: None,
             deltas,
             inline_content: Vec::new(),
-        }],
-        retention_floor_seq: None,
+        }])
+            .expect("commits"),
+        ),
     }
 }
 
 fn sample_wal_inline_content_payload() -> WalObjectPayload {
     let mut payload = sample_wal_payload();
-    let mut without_inline_content = payload.records[0].clone();
+    let mut without_inline_content = payload.records()[0].clone();
     without_inline_content.committed_seq = CommitSeq(3);
     without_inline_content.commit_id =
         CommitId::parse("c_00000000000000000000000000000043").expect("valid commit id");
-    for delta in &mut payload.records[0].deltas {
+    for delta in &mut commits_mut(&mut payload)[0].deltas {
         if let WalDelta::AppendFileRevision { layout, .. } = &mut delta.delta {
             *layout = None;
         }
     }
     let chain_id = content_id("con_0024h36h2ncsvrh6daqf6dvvqz");
-    payload.records[0].inline_content = vec![
+    commits_mut(&mut payload)[0].inline_content = vec![
         WalInlineContent {
             content_id: sample_content_ref().content_id,
             offset: 0,
@@ -464,11 +466,13 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
         },
     ];
     let empty_content_ref = ContentRef::blob_v1(
-        payload.records[0].inline_content[1].content_id.clone(),
+        commits_mut(&mut payload)[0].inline_content[1]
+            .content_id
+            .clone(),
         b"",
         crate::ChecksumAlgorithm::Crc64nvme,
     );
-    payload.records[0].deltas.push(WalCommitDelta {
+    commits_mut(&mut payload)[0].deltas.push(WalCommitDelta {
         semantic_operation_index: 5,
         delta: WalDelta::AppendFileRevision {
             delta_index: 6,
@@ -488,7 +492,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             append_offset: None,
         },
     });
-    payload.records[0].deltas.push(WalCommitDelta {
+    commits_mut(&mut payload)[0].deltas.push(WalCommitDelta {
         semantic_operation_index: 6,
         delta: WalDelta::AppendFileRevision {
             delta_index: 7,
@@ -522,7 +526,9 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
         },
     });
     payload.head_seq = CommitSeq(3);
-    payload.records.push(without_inline_content);
+    let mut records = payload.records().to_vec();
+    records.push(without_inline_content);
+    payload.body = WalObjectBody::Commits(WalCommits::new(records).expect("commits"));
     payload
 }
 
@@ -543,7 +549,7 @@ fn sample_merge() -> MergeRecord {
 /// other merge sample doesn't pin its encoding.
 fn sample_wal_merge_covered_ranges_payload() -> WalObjectPayload {
     let mut payload = sample_wal_payload();
-    payload.records[0].merge = Some(MergeRecord {
+    commits_mut(&mut payload)[0].merge = Some(MergeRecord {
         covered_ranges: vec![ForkRange {
             source_namespace_id: NamespaceId::parse("demo-original").expect("valid namespace id"),
             source_after_seq: CommitSeq(4),
@@ -558,7 +564,7 @@ fn sample_wal_merge_covered_ranges_payload() -> WalObjectPayload {
 /// so the other WAL samples don't pin its encoding.
 fn sample_wal_merge_payload() -> WalObjectPayload {
     let mut payload = sample_wal_payload();
-    payload.records[0].merge = Some(sample_merge());
+    commits_mut(&mut payload)[0].merge = Some(sample_merge());
     payload
 }
 
@@ -567,8 +573,9 @@ fn sample_wal_merge_payload() -> WalObjectPayload {
 fn sample_wal_floor_payload() -> WalObjectPayload {
     WalObjectPayload {
         wal_no: WalNo(3),
-        records: Vec::new(),
-        retention_floor_seq: Some(CommitSeq(1)),
+        body: WalObjectBody::Floor {
+            retention_floor_seq: CommitSeq(1),
+        },
         ..sample_wal_payload()
     }
 }
@@ -578,8 +585,8 @@ fn sample_wal_floor_payload() -> WalObjectPayload {
 /// doesn't cover.
 fn sample_wal_padded_payload() -> WalObjectPayload {
     let mut payload = sample_wal_payload();
-    payload.records[0].deltas.truncate(1);
-    payload.records[0].message = None;
+    commits_mut(&mut payload)[0].deltas.truncate(1);
+    commits_mut(&mut payload)[0].message = None;
     payload
 }
 
@@ -1609,10 +1616,18 @@ fn commit_delta(payload: &mut ciborium::Value, position: usize) -> &mut ciborium
     cbor_entry(delta, "delta")
 }
 
+/// Returns the commits of a data WAL object for a test to edit.
+fn commits_mut(payload: &mut WalObjectPayload) -> &mut WalCommits {
+    match &mut payload.body {
+        WalObjectBody::Commits(commits) => commits,
+        other => panic!("expected a data WAL object, got {other:?}"),
+    }
+}
+
 /// Builds a sample WAL object payload with the supplied deltas.
 fn wal_payload_with_deltas(deltas: Vec<WalCommitDelta>) -> WalObjectPayload {
     let mut payload = sample_wal_payload();
-    payload.records[0].deltas = deltas;
+    commits_mut(&mut payload)[0].deltas = deltas;
     payload
 }
 

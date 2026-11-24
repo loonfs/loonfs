@@ -11,9 +11,10 @@ use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::time::Observation;
-use crate::wal::{prepare_floor_object, publish_wal_object, wal_no_is_unfolded, WalPublishError};
+use crate::wal::{prepare_wal_object, publish_wal_object, wal_no_is_unfolded, WalPublishError};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::{CommitSeq, RetentionWindow, SetRetentionWindowResponse};
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -176,7 +177,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     manifest_retention_floor_seq,
                 });
             }
-            let floor_object = prepare_floor_object(head, head.writer_epoch, target)?;
+            let floor_object = prepare_wal_object(
+                head,
+                head.writer_epoch,
+                WalObjectBody::Floor {
+                    retention_floor_seq: target,
+                },
+            )?;
             match publish_wal_object(&self.store, &floor_object).await {
                 Ok(()) => {
                     let floored_head = head.after_wal_object(floor_object.envelope().payload());

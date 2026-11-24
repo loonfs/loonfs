@@ -26,7 +26,7 @@ pub(crate) use self::reader::{
     load_replayed_wal_tail, load_replayed_wal_tail_through_seq, replay_discovered_tail,
 };
 pub(crate) use self::reclaim::wal_no_is_unfolded;
-pub(crate) use self::writer::{prepare_commits_object, prepare_fence, prepare_floor_object};
+pub(crate) use self::writer::prepare_wal_object;
 
 #[cfg(test)]
 pub(crate) mod tests;

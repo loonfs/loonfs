@@ -392,7 +392,7 @@ async fn inode_inline_operations_and_overflow_staging_keep_retry_identity() {
         .expect("get")
         .expect("WAL");
     let decoded = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&wal).expect("decode");
-    assert_eq!(decoded.payload().records[0].inline_content.len(), 1);
+    assert_eq!(decoded.payload().records()[0].inline_content.len(), 1);
     harness.read("/first", b"same").await;
     harness.read("/second", b"same").await;
     let (status, replay) = harness.commit(request).await;

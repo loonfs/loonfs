@@ -12,8 +12,8 @@ use crate::storage::content_admission::PreparedContent;
 use crate::wal::settle_publish_attempt;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_types::format::wal::{
-    encode_wal_object_envelope_zstd, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent,
-    WalObjectPayload,
+    encode_wal_object_envelope_zstd, WalCommitDelta, WalCommitPayload, WalCommits, WalDelta,
+    WalInlineContent, WalObjectBody, WalObjectPayload,
 };
 use loonfs_types::{
     AbsolutePath, AccessGrants, ActorId, Commit, CommitId, CommitSeq, ContentId,
@@ -343,28 +343,30 @@ impl<S: ObjectStore> NamespaceStore<S> {
             wal_no,
             writer_epoch: head.writer_epoch,
             head_seq: committed_seq,
-            records: vec![WalCommitPayload {
-                committed_seq,
-                commit_id: CommitId::generate(),
-                committed_by: test_actor(),
-                semantic_commit_fingerprint: serde_json::from_str(&format!(
-                    r#""v1:sha256:{:064x}""#,
-                    committed_seq.0
-                ))
-                .expect("fingerprint"),
-                committed_at_ms: 0,
-                message: None,
-                merge: None,
-                deltas: (0_u32..)
-                    .zip(deltas)
-                    .map(|(semantic_operation_index, delta)| WalCommitDelta {
-                        semantic_operation_index,
-                        delta,
-                    })
-                    .collect(),
-                inline_content,
-            }],
-            retention_floor_seq: None,
+            body: WalObjectBody::Commits(
+                WalCommits::new(vec![WalCommitPayload {
+                    committed_seq,
+                    commit_id: CommitId::generate(),
+                    committed_by: test_actor(),
+                    semantic_commit_fingerprint: serde_json::from_str(&format!(
+                        r#""v1:sha256:{:064x}""#,
+                        committed_seq.0
+                    ))
+                    .expect("fingerprint"),
+                    committed_at_ms: 0,
+                    message: None,
+                    merge: None,
+                    deltas: (0_u32..)
+                        .zip(deltas)
+                        .map(|(semantic_operation_index, delta)| WalCommitDelta {
+                            semantic_operation_index,
+                            delta,
+                        })
+                        .collect(),
+                    inline_content,
+                }])
+                .expect("commits"),
+            ),
         };
         let object =
             encode_wal_object_envelope_zstd(payload).expect("a test WAL object should encode");
