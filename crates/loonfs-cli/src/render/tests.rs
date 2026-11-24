@@ -585,7 +585,7 @@ fn gc_summaries_report_counts_retention_namespace_retirement_and_skipped_pool_wo
     pool.listed_bytes = 4_096;
     assert_eq!(
         super::summaries::pool_gc_summary(&pool),
-        "gc deleted 2 content objects, 0 upload sessions, 0 temporary objects (1 retained); \
+        "gc deleted 2 content objects, 0 upload sessions (1 retained); \
          mostly upload_session_window: 1\nlisted 4096 bytes under the pool"
     );
     pool.next_reclamation_at_ms = Some(1_700_000_000_000);

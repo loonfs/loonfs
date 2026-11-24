@@ -175,11 +175,7 @@ Small file bytes committed directly inside a WAL object as pieces rather than up
 
 ### Assembly
 
-An object-store operation building one new immutable content object from existing object ranges plus optional tail bytes. Folds use assemblies to write chain extents, using server-side part copies (S3, R2, Azure) or composes (GCS) where supported, or client-side read-and-write fallback otherwise. See [Immutable writes and retries](format.md#32-immutable-writes-and-retries).
-
-### Temporary object
-
-An intermediate object written during an assembly (for example, when GCS composes more than 32 sources) under `pools/{pool_id}/temporary/` and deleted when the assembly completes. Unreferenced leftovers from crashes are deleted by pool [collection](#collection) once past the [grace window](#grace-window).
+An object-store operation building one new immutable content object from existing object ranges plus optional tail bytes. Folds use assemblies to write chain extents, using server-side part copies (S3, R2, Azure) or composes (GCS) where supported, or client-side read-and-write fallback otherwise. A GCS assembly writes its intermediate objects (for example, when it composes more than 32 sources) as span objects of the destination's chain, and deletes them when it finishes. See [Immutable writes and retries](format.md#32-immutable-writes-and-retries).
 
 ### Upload session
 
@@ -287,7 +283,7 @@ The source sequence at which a fork was created (`fork_basis.fork_point_seq`), i
 
 A group of namespaces sharing one content prefix (`pools/{pool_id}/`), identified by a generated immutable `pool_id` (such as `pool_3s0drmj8em84yb4mnetqkz2j0x`) recorded in every member's manifest. A freshly created namespace generates a new pool, and every fork inherits its source's pool.
 
-All content objects, upload records, and assembly temporary objects for every pool member are stored under the pool prefix, so forks and merges share content without copying bytes. Pool [collection](#collection) finds members via [member entries](#member-entry), gathers roots from every member, and deletes unreferenced pool objects past grace. Namespace collections never delete content. See [Pools](../design/pools.md).
+All content objects and upload records for every pool member are stored under the pool prefix, so forks and merges share content without copying bytes. Pool [collection](#collection) finds members via [member entries](#member-entry), gathers roots from every member, and deletes unreferenced pool objects past grace. Namespace collections never delete content. See [Pools](../design/pools.md).
 
 ### Member entry
 
@@ -388,7 +384,7 @@ The maximum elapsed time allowed between starting a manifest publication and iss
 One complete, stateless garbage collection pass over a namespace or a [pool](#pool). It reads live roots, lists every object family in scope, and deletes unreferenced objects older than the [grace window](#grace-window) without saving progress between runs:
 
 - **Namespace collection** covers manifests, WAL commit objects (distinguishing fences and floor objects by listed size and keeping them), metadata segments, extension segments, and snapshots.
-- **Pool collection** gathers roots from every pool member and covers content objects, upload records, and temporary objects.
+- **Pool collection** gathers roots from every pool member and covers content objects and upload records.
 
 See [One complete collection](format.md#111-one-complete-collection).
 

@@ -1,5 +1,5 @@
-//! Content and temporary objects in the pool's collection: the roots that keep
-//! an object, and when an object that no root protects is old enough to delete.
+//! Content objects in the pool's collection: the roots that keep an object,
+//! and when an object that no root protects is old enough to delete.
 
 use super::*;
 
@@ -468,7 +468,7 @@ async fn an_unlisted_span_object_is_kept_while_young_and_deleted_once_old() {
 }
 
 #[tokio::test]
-async fn content_and_temporary_keys_the_layout_does_not_recognize_are_kept() {
+async fn content_keys_the_layout_does_not_recognize_are_kept() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -479,15 +479,13 @@ async fn content_and_temporary_keys_the_layout_does_not_recognize_are_kept() {
             .expect("bootstrap")
             .pool_id;
     let content = loonfs_objectstore::keys::content_prefix(&pool_id);
-    let temporary = loonfs_objectstore::keys::temporary_prefix(&pool_id);
-    let collected = [
-        loonfs_objectstore::keys::content_blob(&pool_id, &loonfs_types::ContentId::generate()),
-        format!("{temporary}piece"),
-    ];
+    let collected = [loonfs_objectstore::keys::content_blob(
+        &pool_id,
+        &loonfs_types::ContentId::generate(),
+    )];
     let kept = [
         format!("{content}not-a-content-id"),
         format!("{content}nested/object"),
-        format!("{temporary}nested/piece"),
     ];
     for key in collected.iter().chain(&kept) {
         store
@@ -499,16 +497,10 @@ async fn content_and_temporary_keys_the_layout_does_not_recognize_are_kept() {
     let aged =
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     let report = collect_pool(&store, &pool_id, &aged).await;
-    assert_eq!(
-        (
-            report.deleted.content_objects,
-            report.deleted.temporary_objects
-        ),
-        (1, 1)
-    );
-    // The collection lists the whole content prefix, so both unrecognized content
-    // keys are listed and kept, as is the nested temporary key.
-    assert_eq!(report.retained.unrecognized_key, 3);
+    assert_eq!(report.deleted.content_objects, 1);
+    // The collection lists the whole content prefix, so both unrecognized
+    // content keys are listed and kept.
+    assert_eq!(report.retained.unrecognized_key, 2);
     for key in &collected {
         assert!(store.head(key).await.expect("head").is_none(), "{key}");
     }

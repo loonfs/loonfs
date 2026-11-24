@@ -178,7 +178,6 @@ pub(super) fn pool_gc_summary(report: &PoolGcResponse) -> String {
             [
                 ("content objects", deleted.content_objects),
                 ("upload sessions", deleted.upload_sessions),
-                ("temporary objects", deleted.temporary_objects),
             ],
             report.retained.total(),
             report.retained.top_reason(),

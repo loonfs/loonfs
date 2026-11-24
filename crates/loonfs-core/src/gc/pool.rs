@@ -1,5 +1,5 @@
-//! One collection of a pool's content objects, upload records, and temporary
-//! objects, with a fixed clock and no durable progress.
+//! One collection of a pool's content objects and upload records, with a
+//! fixed clock and no durable progress.
 
 mod content;
 mod members;
@@ -14,8 +14,7 @@ use crate::limits::MAX_COLLECTION_BYTES;
 use crate::pool_store::PoolStore;
 use crate::time::OperationClock;
 use content::ContentFilters;
-use futures::{stream, StreamExt, TryStreamExt};
-use loonfs_objectstore::keys::temporary_prefix;
+use futures::{stream, StreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::PoolGcResponse;
 use members::PoolRoots;
@@ -23,9 +22,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sweep::PoolSweep;
 
 impl<S: ObjectStore> PoolStore<S> {
-    /// Collects the pool's content objects, upload records, and temporary
-    /// objects, with roots that it reads from every member of the pool, found
-    /// through the pool's member list (format spec, "Content roots").
+    /// Collects the pool's content objects and upload records, with roots
+    /// that it reads from every member of the pool, found through the pool's
+    /// member list (format spec, "Content roots").
     ///
     /// The collection lists the pool's upload sessions and member entries,
     /// reads each listed member's roots, and deletes the entry of a listed
@@ -79,14 +78,6 @@ impl<S: ObjectStore> PoolStore<S> {
                 sweep.listed_objects.fetch_add(objects, Ordering::Relaxed);
             }
         }
-        let prefix = temporary_prefix(&self.pool_id);
-        let decisions = self
-            .store
-            .list_entries_from_stream(&prefix, None)
-            .map_err(|error| CoreError::store(&prefix, &error))
-            .map_ok(|entry| sweep.temporary_candidate(entry))
-            .boxed();
-        apply_decisions(&self.store, decisions, &mut report).await?;
         // Upload sessions are swept as pairs of records, from the listing
         // that rooted their content.
         let completed = stream::iter(roots.completed_sessions.iter())

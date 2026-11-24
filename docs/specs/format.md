@@ -46,7 +46,7 @@ Lifecycle states recorded in the current manifest:
 - **`active`.** Published once initialization completes (manifest 2, or manifest 3 when a fork folds a source WAL tail).
 - **`deleted`.** Deleting a namespace publishes a final "namespace tombstone" manifest, which stays current until [retirement](#95-retirement). Retirement raises the [manifest boundary](glossary.md#manifest-boundary) to `retired`, after which garbage collection deletes every other object under the namespace prefix except `boundary.json`, fences, floor objects, and unrecognized keys. Any request to a deleted or retired namespace (including creating or forking into its ID) returns `namespace_deleted`.
 
-A "fork" is a new namespace starting from a retained view of a source namespace, sharing existing content and metadata objects while isolating later commits ([Namespace lifecycle and forks](#9-namespace-lifecycle-and-forks)). Every namespace belongs to one immutable "pool" (`pool_id`, e.g. `pool_3s0drmj8em84yb4mnetqkz2j0x`), whose prefix (`pools/{pool_id}/`) stores content objects, upload records, and assembly temporary objects for all namespaces in the fork tree. Plain creates generate a new pool ID and forks copy their source's, and each namespace maintains a [member entry](glossary.md#member-entry) in the pool until retirement ([Creating a namespace](#91-creating-a-namespace), [Content roots](#119-content-roots)).
+A "fork" is a new namespace starting from a retained view of a source namespace, sharing existing content and metadata objects while isolating later commits ([Namespace lifecycle and forks](#9-namespace-lifecycle-and-forks)). Every namespace belongs to one immutable "pool" (`pool_id`, e.g. `pool_3s0drmj8em84yb4mnetqkz2j0x`), whose prefix (`pools/{pool_id}/`) stores content objects and upload records for all namespaces in the fork tree. Plain creates generate a new pool ID and forks copy their source's, and each namespace maintains a [member entry](glossary.md#member-entry) in the pool until retirement ([Creating a namespace](#91-creating-a-namespace), [Content roots](#119-content-roots)).
 
 Across namespaces, items are identified by `(namespace_id, inode_id)` and commit positions by `(namespace_id, committed_seq)`. Every new namespace starts at sequence 0 with root inode `ino_00000000000000000000000000` (all zero bits).
 
@@ -232,7 +232,7 @@ Denormalized copies (child kind/attribution in bindings, file revision summary i
 
 ### 2.1 Storage layout
 
-Namespace-scoped objects go under `namespaces/{namespace_id}/`, while shared content, uploads, pool membership, and assembly temporary objects go under `pools/{pool_id}/` ([Object keys](#a8-object-keys)):
+Namespace-scoped objects go under `namespaces/{namespace_id}/`, while shared content, uploads, and pool membership go under `pools/{pool_id}/` ([Object keys](#a8-object-keys)):
 
 ```text
 namespaces/{namespace_id}/
@@ -247,11 +247,10 @@ pools/{pool_id}/
 |-- members/{namespace_id}.json
 |-- content/
 |-- uploads/{upload_id}.json
-|-- uploads/{upload_id}.outcome.json
-\-- temporary/{temporary_id}
+\-- uploads/{upload_id}.outcome.json
 ```
 
-Newly written metadata and extension segments (including compaction output) go under the writing namespace's prefix, while inherited segments remain under their `owner_namespace_id` (readers always use the descriptor's `owner_namespace_id`, never substituting the reading namespace). Composing providers (such as GCS) write assembly intermediates under `temporary/` and delete them on completion ([Immutable writes and retries](#32-immutable-writes-and-retries)). Other objects MUST NOT use keys in these families. Core readers ignore extension segments, and GC leaves non-segment keys under extension prefixes untouched.
+Newly written metadata and extension segments (including compaction output) go under the writing namespace's prefix, while inherited segments remain under their `owner_namespace_id` (readers always use the descriptor's `owner_namespace_id`, never substituting the reading namespace). A provider that composes objects (such as GCS) writes the intermediate objects of an [assembly](#assemblies) as span objects of the destination's chain, each with a fresh `span_object_id` that no layout lists. Other objects MUST NOT use keys in these families. Core readers ignore extension segments, and GC leaves non-segment keys under extension prefixes untouched.
 
 ### 2.2 Object roles and mutability
 
@@ -266,7 +265,8 @@ Newly written metadata and extension segments (including compaction output) go u
 | Upload session | One transfer and its verified content | Two write-once put-if-absent records (session + outcome). |
 | Member entry | Membership of one namespace in one pool | Write-once put-if-absent at create/fork, deleted at retirement. |
 | Content object (whole or span) | Chain bytes plus provider stored whole-object checksum | Immutable. |
-| Temporary object | Assembly intermediate bytes | Created, then deleted on completion (or by GC). |
+
+An assembly deletes the intermediate objects it wrote when it finishes, whether it succeeds or fails. No other writer uses an intermediate's span object ID, so no layout can list the object. Pool collection deletes an intermediate that a crash leaves, as it deletes any other unreferenced content object (see [Content roots](#119-content-roots)).
 
 Manifest publications can update layout or control state without creating a commit, and WAL publications can commit mutations without publishing a manifest.
 
@@ -276,7 +276,7 @@ Manifest numbers (`manifest_no`) and WAL numbers (`wal_no`) are separate 1-based
 
 Generated IDs use a prefix plus 26 lowercase Crockford base 32 characters (`0123456789abcdefghjkmnpqrstvwxyz`, encoding 2 leading zero bits + 128 bits, so the first character is `0`-`7`):
 
-- **Random UUIDv4 (128 bits):** content (`con_`), metadata segment (`seg_`), extension segment (`idx_`), pool (`pool_`), upload (`upl_`), span object (`span_`), manifest publication (`pub_`), and temporary object (`tmp_`).
+- **Random UUIDv4 (128 bits):** content (`con_`), metadata segment (`seg_`), extension segment (`idx_`), pool (`pool_`), upload (`upl_`), span object (`span_`), and manifest publication (`pub_`).
 - **Inode (`ino_`):** High 64 bits = low 32 bits of creating `committed_seq` + 32-bit create number, low 64 bits = random (root is all zeros, `ino_00000000000000000000000000`).
 - **Snapshot (`snp_`):** High 64 bits = pinned `manifest_no`, low 64 bits = random (e.g. `snp_000000000000nb4mnetqkz2j0x` pins manifest 42).
 
@@ -374,7 +374,7 @@ Handling occupied keys and streams:
 
 An "assembly" builds one immutable object from ordered source byte ranges (each with its checksum, plus length and version from a prior HEAD to avoid extra HEADs) followed by optional new tail bytes, checking the full expected checksum in the store's algorithm (missing or truncated sources fail with a precondition error). If the destination already exists, LoonFS checks its stored checksum via HEAD (after a conditional create below the single-PUT threshold, or before assembling at or above it so retries skip re-copying).
 
-Provider-specific assembly implementations are detailed in the [Provider matrix](object-storage-providers.md#2-provider-matrix) and [Local filesystem provider](object-storage-providers.md#5-local-filesystem-provider): S3 pads short non-final parts to 5 MiB from the next source and completes with `If-None-Match: *`. GCS checks per-source generation preconditions and deletes temporary compose objects on finish or failure (crash leftovers go to GC). R2 uses 64 MiB chunks and HEAD checksum verification. Azure uses `Put Block From URL` and combines verified block CRCs. Small control objects always use single-object conditional writes rather than multipart.
+Provider-specific assembly implementations are detailed in the [Provider matrix](object-storage-providers.md#2-provider-matrix) and [Local filesystem provider](object-storage-providers.md#5-local-filesystem-provider): S3 pads short non-final parts to 5 MiB from the next source and completes with `If-None-Match: *`. GCS checks per-source generation preconditions and deletes its intermediate span objects on finish or failure (pool collection deletes the ones a crash leaves). R2 uses 64 MiB chunks and HEAD checksum verification. Azure uses `Put Block From URL` and combines verified block CRCs. Small control objects always use single-object conditional writes rather than multipart.
 
 ### 3.3 Timing assumptions
 
@@ -1208,7 +1208,7 @@ Unreferenced objects aren't deleted immediately because an in-flight publisher m
 LoonFS splits garbage collection into two separate jobs:
 
 - **Namespace collection** deletes a namespace's unreferenced manifests, data WAL objects, metadata and extension segments, and snapshots, while keeping fences and floor objects. It retires the namespace once its tombstone is eligible (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)) and writes a tombstone for an initializing namespace whose manifest 1 is older than the grace window (see [Deleting a namespace](#94-deleting-a-namespace)). Its only request under `pools/` is deleting the namespace's [member entry](glossary.md#member-entry) during retirement.
-- **Pool collection** deletes a [pool's](glossary.md#pool) unreferenced content objects, upload records, and temporary objects using roots gathered across every member (see [Content roots](#119-content-roots)).
+- **Pool collection** deletes a [pool's](glossary.md#pool) unreferenced content objects and upload records using roots gathered across every member (see [Content roots](#119-content-roots)).
 
 A namespace collection begins by establishing roots:
 
@@ -1264,7 +1264,6 @@ Being unreferenced makes an object a candidate, not immediately deletable. Provi
 | Snapshot record in a retired namespace | Provider age at least `T`, regardless of owner. |
 | Upload session | Status-specific rules in [Upload-session cleanup](#116-upload-session-cleanup). |
 | Content object under a pool's prefix | Matched by no extent filter in any member's layout view, referenced by no tail or session root (see [Content roots](#119-content-roots)), and provider age at least `T`. |
-| Temporary object | Provider age at least `T`. |
 | Member entry | The namespace in the key is retired, has no manifest, or records another pool (see [Content roots](#119-content-roots)). |
 
 The manifest boundary and the current manifest of a non-retired namespace are never deleted. A retired namespace has no current manifest, so its tombstone is deleted by age like any other manifest. Core garbage collection leaves unrecognized keys untouched. A missing or future timestamp never satisfies an age check.
@@ -1377,7 +1376,7 @@ Because any member of a [pool](glossary.md#pool) can reference any content objec
 | A member's unfolded WAL tail (tombstones have none, since deletion folds the full WAL) | Every chain referenced by an `append_file_revision` delta and every extent in the tail's layouts. |
 | Any upload session record under the pool's prefix, regardless of status | The session's `content_id`. |
 
-Every other valid content object key under `pools/{pool_id}/content/` is deletable once its provider age is at least `T`. Keys that don't parse as content object keys are left alone. Namespace collections never list content. Pool collection collects content across active and deleted members alike (see [Retirement](#95-retirement)).
+Every other valid content object key under `pools/{pool_id}/content/` is deletable once its provider age is at least `T`. Keys that don't parse as content object keys are left alone. An assembly's intermediate object that a crash leaves follows the same rule as any other span object of its chain. So a tail or session root that refers to the chain keeps it, and a pass that skips content deletion keeps it too. Namespace collections never list content. Pool collection collects content across active and deleted members alike (see [Retirement](#95-retirement)).
 
 #### Discovering pool members
 
@@ -1392,7 +1391,7 @@ A deleted member's tombstone stays a layout view only until its retirement deadl
 
 Pool collection reads each member once and MUST finish reading all members' roots within 12 hours (`POOL_ROOTS_READ_BUDGET_MS`), measured monotonically from when it captured `now_ms`. If it exceeds that budget, it skips content deletion and reports `content_deletion_pool_budget`. If any listed member is unreadable, it skips content deletion and reports `content_deletion_unreadable_member`. A pass that stops reading members for either reason can't tell which namespaces are retired, so it keeps the upload sessions of every namespace that isn't one of the members it read (see [Upload-session cleanup](#116-upload-session-cleanup)). If the collection reads every listed member but can't load the extent filter of a segment that a member's layout view lists, it also skips content deletion and reports `content_deletion_unreadable_member`, and it cleans up upload sessions from the statuses of the members it read, as a pass that deletes content does. (A member can publish a compaction after the collection reads its roots, and the member's own collection can then delete the replaced segment before the pool's collection loads that segment's extent filter.) In each case it still lists the content prefix once to measure `listed_bytes`, finishes the rest of the collection, and leaves other pools unaffected.
 
-A pool with no member entries has no roots, so collection deletes its content and temporary objects by age and cleans up its upload records under [Upload-session cleanup](#116-upload-session-cleanup). If no objects exist under the pool's prefix at all, collection returns `pool_not_found`.
+A pool with no member entries has no roots, so collection deletes its content by age and cleans up its upload records under [Upload-session cleanup](#116-upload-session-cleanup). If no objects exist under the pool's prefix at all, collection returns `pool_not_found`.
 
 #### Collection steps
 
@@ -1404,9 +1403,9 @@ Pool collection runs in this exact order:
 4. Deduplicate the `content_layouts` segments across all members' layout views. Because forks inherit their source's segments, each distinct segment is processed once.
 5. Read each distinct segment's extent filter and charge it to the collection's memory budget.
 6. List `pools/{pool_id}/content/` once. Protect any object whose name (key minus prefix) matches an extent filter or whose chain is referenced by a tail or session root, and delete any other valid content object with provider age at least `T`.
-7. Delete temporary objects older than `T`, and run [Upload-session cleanup](#116-upload-session-cleanup) on the session records.
+7. Run [Upload-session cleanup](#116-upload-session-cleanup) on the session records.
 
-Pool collection writes one kind of object, the aborted outcome record of an expired upload session (see [Upload-session cleanup](#116-upload-session-cleanup)), and deletes only content objects, temporary objects, upload records, and stale member entries.
+Pool collection writes one kind of object, the aborted outcome record of an expired upload session (see [Upload-session cleanup](#116-upload-session-cleanup)), and deletes only content objects, upload records, and stale member entries.
 
 Storing an extent filter inside each layout segment avoids scanning every layout row across every rooted view and keeps collector memory small (around 2.5 MB for one million files at 20 bits per name), while letting the segment cache reuse filters across passes. The collector checks each segment's filter independently rather than merging views, so an object referenced only by a superseded layout row or a Bloom false positive stays until compaction drops the row and no view lists the segment.
 
@@ -2019,7 +2018,6 @@ These patterns define all core object families. [Storage layout](#21-storage-lay
 | Member entries | `pools/{pool_id}/members/{namespace_id}.json` |
 | Content objects | `pools/{pool_id}/content/{content_id}` |
 | Content span objects | `pools/{pool_id}/content/{content_id}-{span_object_id}` |
-| Temporary objects | `pools/{pool_id}/temporary/{temporary_id}` |
 
 ## Appendix B. Semantic commit fingerprints
 

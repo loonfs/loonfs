@@ -5,8 +5,8 @@ use crate::keys::{
     namespace_prefix, pool_prefix, BOUNDARY_NAME, CONTENT_DIRECTORY, EXTENSIONS_DIRECTORY,
     MANIFEST_DIRECTORY, MANIFEST_SUFFIX, MEMBERS_DIRECTORY, MEMBER_ENTRY_SUFFIX,
     NAMESPACES_DIRECTORY, POOLS_DIRECTORY, SEGMENT_DIRECTORY, SEGMENT_SUFFIX, SNAPSHOT_DIRECTORY,
-    SNAPSHOT_SUFFIX, TEMPORARY_DIRECTORY, UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX,
-    UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
+    SNAPSHOT_SUFFIX, UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY,
+    WAL_SUFFIX,
 };
 use crate::{ObjectStore, Result};
 use loonfs_types::{
@@ -58,8 +58,6 @@ pub enum DurableObjectFamily {
     PoolMember,
     /// Classifies immutable whole-file content bytes.
     ContentBlob,
-    /// Classifies a temporary object that an assembly writes and deletes.
-    TemporaryObject,
 }
 
 /// The prefix that contains a recognized key, with the unvalidated ID text
@@ -72,7 +70,7 @@ pub enum KeyPrefix<'a> {
     /// namespace owns.
     Namespace(&'a str),
     /// The prefix of a pool (`pools/{pool_id}/`), which contains the pool's
-    /// member entries, content objects, upload records, and temporary objects.
+    /// member entries, content objects, and upload records.
     Pool(&'a str),
 }
 
@@ -90,10 +88,10 @@ impl<'a> ParsedObjectKey<'a> {
         self.family
     }
 
-    /// Returns the prefix that contains the key: the pool for a member entry,
-    /// a content object, an upload record, or a temporary object, the owner
-    /// namespace for a metadata or extension segment, and the namespace
-    /// itself for every other family.
+    /// Returns the prefix that contains the key. That's the pool for a member
+    /// entry, a content object or an upload record, the owner namespace for a
+    /// metadata or extension segment, and the namespace itself for every other
+    /// family.
     pub fn prefix(&self) -> KeyPrefix<'a> {
         self.prefix
     }
@@ -210,11 +208,6 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                     }),
             }
         }
-        [POOLS_DIRECTORY, pool_id, TEMPORARY_DIRECTORY, temporary] => Some(parsed(
-            DurableObjectFamily::TemporaryObject,
-            KeyPrefix::Pool(pool_id),
-            Some(temporary),
-        )),
         _ => None,
     }
 }
@@ -438,8 +431,8 @@ mod tests {
     use super::{parse_object_key, DurableObjectFamily, KeyPrefix};
     use crate::keys::{
         boundary, content_blob, extension_segment, metadata_manifest_object, metadata_segment,
-        metadata_segment_prefix, pool_member, snapshot_record, temporary_object, upload_outcome,
-        upload_session, wal_object, wal_prefix,
+        metadata_segment_prefix, pool_member, snapshot_record, upload_outcome, upload_session,
+        wal_object, wal_prefix,
     };
     use loonfs_test_support::ids::numbered_pool_id;
     use loonfs_types::{
@@ -492,8 +485,6 @@ mod tests {
         let content_id = ContentId::parse("con_5bsqqg28t5cy4tqkff04hmasw9").expect("content id");
         let index_segment_id =
             IndexSegmentId::parse("idx_00000000000000000000000001").expect("index segment id");
-        let temporary = temporary_object(&pool_id);
-        let temporary_id = temporary.rsplit('/').next();
         let cases = [
             (
                 wal_object(&namespace_id, &wal_no),
@@ -564,12 +555,6 @@ mod tests {
                 DurableObjectFamily::ContentBlob,
                 pool,
                 Some(content_id.as_str()),
-            ),
-            (
-                temporary.clone(),
-                DurableObjectFamily::TemporaryObject,
-                pool,
-                temporary_id,
             ),
         ];
 
@@ -646,7 +631,7 @@ mod tests {
             "namespaces/ns-1/content/con_5bsqqg28t5cy4tqkff04hmasw9-00000000000000000002-00000000000000000019",
             "namespaces/ns-1/uploads/upl_00000000000000000000000001.json",
             "namespaces/ns-1/uploads/upl_00000000000000000000000001.outcome.json",
-            "namespaces/ns-1/temporary/tmp_00000000000000000000000001",
+            "pools/pool_00000000000000000000000001/temporary/tmp_00000000000000000000000001",
             "pools/pool_00000000000000000000000001/content/nested/object",
             "pools/pool_00000000000000000000000001/boundary.json",
             "pools/pool_00000000000000000000000001/wal/00000000000000000001.wal.zst",

@@ -13,8 +13,8 @@ use crate::namespace::state::NamespaceReadState;
 use crate::segment::MetadataRunPolicy;
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::{
-    content_blob, metadata_segment_object_key, pool_member, temporary_object, temporary_prefix,
-    upload_outcome, upload_session,
+    content_blob, content_prefix, metadata_segment_object_key, pool_member, upload_outcome,
+    upload_session,
 };
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::RecordedOperation;
@@ -395,8 +395,7 @@ async fn a_fork_installed_during_the_collection_is_not_read() {
 }
 
 #[tokio::test]
-async fn an_unreadable_member_skips_the_content_sweep_and_the_collection_sweeps_temporary_objects()
-{
+async fn an_unreadable_member_skips_the_content_sweep() {
     for corrupt in [0, 1, 2] {
         let directory = tempdir().expect("directory");
         let store = LocalFsStore::new(directory.path()).expect("store");
@@ -409,11 +408,6 @@ async fn an_unreadable_member_skips_the_content_sweep_and_the_collection_sweeps_
             .await
             .expect("corrupt the member's manifest");
         let unreferenced = plant(&store, &pool_id, &ContentId::generate()).await;
-        let temporary = temporary_object(&pool_id);
-        store
-            .put_if_absent(&temporary, Bytes::from_static(b"x"))
-            .await
-            .expect("temporary object");
         let aged = aged_context(&store, &members).await;
         let report = collect_pool(&store, &pool_id, &aged).await;
         assert_eq!(report.deleted.content_objects, 0, "`{}`", members[corrupt]);
@@ -422,8 +416,6 @@ async fn an_unreadable_member_skips_the_content_sweep_and_the_collection_sweeps_
             [GcSkippedWork::ContentDeletionUnreadableMember]
         );
         assert!(exists(&store, &unreferenced).await);
-        assert_eq!(report.deleted.temporary_objects, 1);
-        assert!(!exists(&store, &temporary).await);
     }
 }
 
@@ -515,8 +507,7 @@ async fn a_snapshot_whose_manifest_is_missing_makes_its_member_unreadable_unless
 }
 
 /// Checks that a layout segment whose extent filter can't be loaded makes
-/// the collection skip the content sweep, and that the collection still
-/// sweeps the temporary objects. The test deletes the segment, as the
+/// the collection skip the content sweep. The test deletes the segment, as the
 /// member's own collection would after the member publishes a compaction
 /// that replaces it. The collection read the member, so it still cleans up
 /// the member's sessions.
@@ -546,11 +537,6 @@ async fn a_layout_segment_whose_filter_cant_be_loaded_skips_the_content_sweep() 
             .expect("delete the layout segment");
     }
     let unreferenced = plant(&store, &pool_id, &numbered_content_id(2)).await;
-    let temporary = temporary_object(&pool_id);
-    store
-        .put_if_absent(&temporary, Bytes::from_static(b"x"))
-        .await
-        .expect("temporary object");
     let aborted = UploadOutcome::Aborted {
         aborted_at_ms: 1_000,
     };
@@ -564,8 +550,6 @@ async fn a_layout_segment_whose_filter_cant_be_loaded_skips_the_content_sweep() 
     assert_eq!(report.deleted.content_objects, 0);
     assert!(exists(&store, &unreferenced).await);
     assert!(exists(&store, &referenced).await);
-    assert_eq!(report.deleted.temporary_objects, 1);
-    assert!(!exists(&store, &temporary).await);
     assert_eq!(report.deleted.upload_sessions, 1);
     assert!(!session_exists(&store, &pool_id, &session).await);
 }
@@ -1000,11 +984,11 @@ async fn a_session_completed_in_a_fork_installed_during_the_collection_keeps_its
     let (pool_id, members) = pool(&inner, &["first"]).await;
     let first = &members[0];
     let fork_id = NamespaceId::parse("fork").expect("namespace");
-    // The collection lists the temporary objects after it lists the upload
-    // sessions and reads the members.
+    // The collection lists the content after it lists the upload sessions and
+    // reads the members.
     let store = BlockingStore::new(
         inner,
-        KeyPredicate::exact(temporary_prefix(&pool_id)),
+        KeyPredicate::exact(content_prefix(&pool_id)),
         OperationSelector::List,
     );
     store.block_next();

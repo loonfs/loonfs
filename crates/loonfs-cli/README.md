@@ -459,9 +459,8 @@ Maintenance
     namespace. A later collection of a retired namespace deletes every
     manifest, WAL object, segment, and snapshot under its prefix once the
     object is more than 24 hours old, and keeps the manifest boundary
-    object. The namespace's content objects, upload records,
-    and temporary objects are stored in its pool, and this command doesn't
-    delete them. `loonfs maintenance pool gc` collects them, and a
+    object. The namespace's content objects and upload records are stored
+    in its pool, and this command doesn't delete them. `loonfs maintenance pool gc` collects them, and a
     server's sweep runs a collection of each pool.
     --json includes every retention reason.
     deleted.extension_segments counts the gram content index's segments
@@ -470,16 +469,15 @@ Maintenance
 
   loonfs maintenance pool gc [<pool-id>]
     Run one collection of a pool and print its report. A pool stores the
-    content objects, upload records, and temporary objects of a namespace
-    and its forks. This command deletes the pool's unreferenced content
-    objects, upload records, and temporary objects, and
-    `loonfs maintenance gc` doesn't. Without <pool-id>, the command
+    content objects and upload records of a namespace and its forks. This
+    command deletes the pool's unreferenced content objects and upload
+    records, and `loonfs maintenance gc` doesn't. Without <pool-id>, the command
     collects the pool of the selected namespace, which
     `loonfs namespace show` prints as `pool`. With <pool-id>, the command
     doesn't read a namespace. --json includes every retention reason. For
     example:
 
-      gc for pool_3s0drmj8em84yb4mnetqkz2j0x: gc deleted 12 content objects, 1 upload sessions, 0 temporary objects (240 retained); mostly referenced: 236
+      gc for pool_3s0drmj8em84yb4mnetqkz2j0x: gc deleted 12 content objects, 1 upload sessions (240 retained); mostly referenced: 236
       listed 734003200 bytes under the pool
       next reclamation at 2026-11-11 09:30:00Z
 

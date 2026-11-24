@@ -98,8 +98,8 @@ pub enum RunMaintenanceJobRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunPoolMaintenanceJobRequest {
-    /// A garbage collection job for the pool's aged, unreferenced content objects, upload records,
-    /// and temporary objects.
+    /// A garbage collection job for the pool's aged, unreferenced content objects and upload
+    /// records.
     Gc(GcRequest),
 }
 

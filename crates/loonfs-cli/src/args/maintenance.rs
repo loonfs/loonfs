@@ -35,7 +35,7 @@ pub(crate) enum MaintenanceCommand {
     /// Collect aged, unreferenced objects, including grep index objects when the deployment
     /// maintains the index.
     Gc,
-    /// Collect a pool's content objects, upload records, and temporary objects.
+    /// Collect a pool's content objects and upload records.
     Pool {
         #[command(subcommand)]
         command: MaintenancePoolCommand,
@@ -86,8 +86,7 @@ pub(crate) enum MaintenanceRetentionCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum MaintenancePoolCommand {
-    /// Collect a pool's aged, unreferenced content objects, upload records,
-    /// and temporary objects.
+    /// Collect a pool's aged, unreferenced content objects and upload records.
     ///
     /// Without a pool ID, the command collects the pool of the selected
     /// namespace, which `loonfs namespace show` prints.

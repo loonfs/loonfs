@@ -1,12 +1,13 @@
-//! Create-only GCS media uploads, compose, and temporary object cleanup.
+//! Create-only GCS media uploads, compose, and cleanup of a compose's
+//! intermediate objects.
 
 use super::{gcs_object, GcsRequestSigner, GCS_JSON_OBJECTS};
 use crate::assembly::{
     combined_checksum, precondition_failed_when_missing, read_verified, resolve_sources,
     tail_bytes, verify_expected, ResolvedSource, READ_BYTES,
 };
-use crate::keys::temporary_object;
-use crate::layout::{parse_object_key, KeyPrefix};
+use crate::keys::content_span;
+use crate::layout::{content_id_of, parse_object_key, KeyPrefix};
 use crate::object_store::invalid_request;
 use crate::presign::percent_encode_segment;
 use crate::provider_limits::PROVIDER_MULTIPART_THRESHOLD_BYTES;
@@ -16,7 +17,7 @@ use crate::{AssemblySource, ByteRange, ObjectMetadata, ObjectStoreError, Result}
 use bytes::Bytes;
 use futures::{stream, FutureExt, StreamExt};
 use http::header::CONTENT_TYPE;
-use loonfs_types::{Checksum, ChecksumAlgorithm, PoolId};
+use loonfs_types::{Checksum, ChecksumAlgorithm, ContentId, PoolId, SpanObjectId};
 use object_store::client::HttpRequestBody;
 
 /// Most source objects one GCS compose request may list, a limit GCS sets.
@@ -24,38 +25,45 @@ use object_store::client::HttpRequestBody;
 /// `n` sources take about `n / 31` compose requests.
 const GCS_MAX_COMPOSE_SOURCES: usize = 32;
 
-/// The temporary objects that one assembly creates, each with the guard that
-/// deletes it if the assembly is abandoned.
-struct TemporaryObjects {
+/// The intermediate objects that one assembly creates, each with the guard
+/// that deletes it if the assembly is abandoned.
+///
+/// Each intermediate is a span object of the destination's chain with a fresh
+/// span object ID, which no layout lists, so pool collection deletes an
+/// intermediate that a crash leaves behind, like any other unreferenced
+/// content object.
+struct Intermediates {
     pool_id: PoolId,
+    content_id: ContentId,
     created: Vec<(String, AbortUploadOnDrop)>,
 }
 
-impl TemporaryObjects {
-    /// Starts the temporary objects of an assembly of `key`, under the prefix
-    /// of the pool whose prefix contains `key`.
+impl Intermediates {
+    /// Starts the intermediates of an assembly of the content object `key`.
     fn new(key: &str) -> Result<Self> {
-        let pool_id = parse_object_key(key)
-            .and_then(|parsed| match parsed.prefix() {
-                KeyPrefix::Pool(pool_id) => PoolId::parse(pool_id).ok(),
-                KeyPrefix::Namespace(_) => None,
-            })
-            .ok_or_else(|| ObjectStoreError::InvalidKey {
+        let pool_id = parse_object_key(key).and_then(|parsed| match parsed.prefix() {
+            KeyPrefix::Pool(pool_id) => PoolId::parse(pool_id).ok(),
+            KeyPrefix::Namespace(_) => None,
+        });
+        match (pool_id, content_id_of(key)) {
+            (Some(pool_id), Some(content_id)) => Ok(Self {
+                pool_id,
+                content_id,
+                created: Vec::new(),
+            }),
+            _ => Err(ObjectStoreError::InvalidKey {
                 object_key: key.to_owned(),
-                message: "an assembled object must belong to a pool".to_owned(),
-            })?;
-        Ok(Self {
-            pool_id,
-            created: Vec::new(),
-        })
+                message: "an assembled object must be a content object".to_owned(),
+            }),
+        }
     }
 
-    /// Returns the key of a new temporary object, and arms the guard that
-    /// deletes the object.
+    /// Returns the key of a new intermediate, and arms the guard that deletes
+    /// the object.
     fn next_name(&mut self, signer: &GcsRequestSigner) -> String {
-        let name = temporary_object(&self.pool_id);
+        let name = content_span(&self.pool_id, &self.content_id, &SpanObjectId::generate());
         self.created
-            .push((name.clone(), signer.temporary_cleanup(&name)));
+            .push((name.clone(), signer.intermediate_cleanup(&name)));
         name
     }
 }
@@ -110,10 +118,10 @@ impl GcsRequestSigner {
         Ok(response.body)
     }
 
-    /// Copies the resolved range of `source` into the new object `temporary`.
+    /// Copies the resolved range of `source` into the new object `intermediate`.
     async fn upload_range(
         &self,
-        temporary: &str,
+        intermediate: &str,
         source: &ResolvedSource<'_>,
     ) -> Result<ObjectMetadata> {
         let generation = source.etag()?;
@@ -121,33 +129,34 @@ impl GcsRequestSigner {
         let body = read_verified(source, |range| self.get_range(key, &generation, range)).boxed();
         let mut reader = PartReader::new(body, loonfs_types::usize_from_u64(READ_BYTES));
         let head = reader.next_part().await?.unwrap_or_default();
-        self.put_if_absent(temporary, head, reader, 1).await
+        self.put_if_absent(intermediate, head, reader, 1).await
     }
 
-    fn temporary_cleanup(&self, key: &str) -> AbortUploadOnDrop {
+    fn intermediate_cleanup(&self, key: &str) -> AbortUploadOnDrop {
         let signer = self.clone();
-        let temporary = key.to_owned();
+        let intermediate = key.to_owned();
         AbortUploadOnDrop::new(
             key,
             self.io_runtime.clone(),
             async move {
-                signer.delete_temporary(&temporary).await;
+                signer.delete_intermediate(&intermediate).await;
                 Ok(())
             }
             .boxed(),
         )
     }
 
-    // Failed cleanup leaves the object for a sweep of the temporary family.
-    async fn delete_temporary(&self, temporary: &str) {
+    // A failed delete leaves the intermediate for pool collection, which
+    // deletes it as an unreferenced content object.
+    async fn delete_intermediate(&self, intermediate: &str) {
         let deleted: Result<SignedResponse> = async {
             let url = format!(
                 "{GCS_JSON_OBJECTS}/{}/o/{}",
                 percent_encode_segment(&self.bucket),
-                self.object_name(temporary)?,
+                self.object_name(intermediate)?,
             );
             self.send_authorized(
-                temporary,
+                intermediate,
                 http::Request::delete(url),
                 HttpRequestBody::empty(),
             )
@@ -156,9 +165,9 @@ impl GcsRequestSigner {
         .await;
         if deleted.is_err() {
             tracing::warn!(
-                object_key = temporary,
+                object_key = intermediate,
                 operation = "delete",
-                "failed to delete an assembly temporary object; it stays until a sweep collects it",
+                "failed to delete an assembly's intermediate object; it stays until pool collection deletes it",
             );
         }
     }
@@ -170,7 +179,7 @@ impl GcsRequestSigner {
         tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
-        let mut temporaries = TemporaryObjects::new(key)?;
+        let mut intermediates = Intermediates::new(key)?;
         let resolved = resolve_sources(sources)?;
         for source in &resolved {
             let source = source.source;
@@ -203,10 +212,10 @@ impl GcsRequestSigner {
             return self.create_assembly(key, &resolved, tail, expected).await;
         }
         let result = self
-            .compose_assembly(key, &resolved, tail, expected, &mut temporaries)
+            .compose_assembly(key, &resolved, tail, expected, &mut intermediates)
             .await;
-        for (name, mut cleanup) in temporaries.created {
-            self.delete_temporary(&name).await;
+        for (name, mut cleanup) in intermediates.created {
+            self.delete_intermediate(&name).await;
             cleanup.disarm();
         }
         result.map_err(precondition_failed_when_missing)
@@ -244,12 +253,12 @@ impl GcsRequestSigner {
         sources: &[ResolvedSource<'_>],
         tail: Vec<Bytes>,
         expected: &Checksum,
-        temporaries: &mut TemporaryObjects,
+        intermediates: &mut Intermediates,
     ) -> Result<ObjectMetadata> {
         let mut composed = Vec::with_capacity(sources.len());
         for source in sources {
             if source.source.range.is_some() {
-                let name = temporaries.next_name(self);
+                let name = intermediates.next_name(self);
                 let uploaded = self.upload_range(&name, source).await?;
                 composed.push((name, uploaded));
             } else {
@@ -277,7 +286,7 @@ impl GcsRequestSigner {
             .map(|(name, metadata)| self.compose_source(name, metadata))
             .collect::<Result<Vec<_>>>()?;
         if !tail.is_empty() || objects.is_empty() {
-            let name = temporaries.next_name(self);
+            let name = intermediates.next_name(self);
             let mut reader = PartReader::new(
                 stream::iter(tail.into_iter().map(Ok)).boxed(),
                 loonfs_types::usize_from_u64(READ_BYTES),
@@ -289,7 +298,7 @@ impl GcsRequestSigner {
         while objects.len() > GCS_MAX_COMPOSE_SOURCES {
             let mut next = Vec::new();
             for group in objects.chunks(GCS_MAX_COMPOSE_SOURCES) {
-                let name = temporaries.next_name(self);
+                let name = intermediates.next_name(self);
                 let metadata = self.compose(&name, group.to_vec()).await?;
                 next.push(self.compose_source(&name, &metadata)?);
             }

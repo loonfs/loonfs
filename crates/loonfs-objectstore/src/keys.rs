@@ -28,7 +28,6 @@ pub(crate) const UPLOAD_DIRECTORY: &str = "uploads";
 pub(crate) const UPLOAD_SESSION_SUFFIX: &str = ".json";
 pub(crate) const UPLOAD_OUTCOME_SUFFIX: &str = ".outcome.json";
 pub(crate) const CONTENT_DIRECTORY: &str = "content";
-pub(crate) const TEMPORARY_DIRECTORY: &str = "temporary";
 pub(crate) const EXTENSIONS_DIRECTORY: &str = "extensions";
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
@@ -232,22 +231,6 @@ pub fn content_span_name(content_id: &ContentId, span_object_id: &SpanObjectId) 
     format!("{content_id}-{span_object_id}")
 }
 
-/// Builds a fresh key for a temporary object that an assembly of one of a
-/// pool's content objects writes and deletes.
-pub fn temporary_object(pool_id: &PoolId) -> String {
-    format!(
-        "{}{}",
-        temporary_prefix(pool_id),
-        loonfs_types::generated_id("tmp")
-    )
-}
-
-/// Builds the listing prefix for the temporary objects that assemblies of a
-/// pool's content objects write and delete.
-pub fn temporary_prefix(pool_id: &PoolId) -> String {
-    format!("{}{TEMPORARY_DIRECTORY}/", pool_prefix(pool_id))
-}
-
 /// Builds the listing prefix containing the objects of every store probe run.
 pub fn probe_runs_prefix() -> String {
     format!("{PROBE_RUN_PREFIX}/")
@@ -265,7 +248,7 @@ mod tests {
         boundary, content_blob, content_blob_name, content_prefix, content_span, content_span_name,
         extension_segment, metadata_manifest_object, metadata_segment, metadata_segment_object_key,
         pool_member, pool_members_prefix, pool_prefix, probe_run_prefix, probe_runs_prefix,
-        snapshot_record, temporary_object, upload_outcome, upload_session, wal_object, wal_prefix,
+        snapshot_record, upload_outcome, upload_session, wal_object, wal_prefix,
     };
     use loonfs_types::format::manifest::{
         MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
@@ -350,12 +333,6 @@ mod tests {
             patterns.insert(family.to_owned(), pattern.to_owned());
         }
 
-        let temporary = temporary_object(&pool_id());
-        let temporary_id = temporary
-            .rsplit('/')
-            .next()
-            .expect("a temporary key ends in its id")
-            .to_owned();
         // Each namespace placeholder has its own ID, so a builder that takes
         // the wrong one fails the comparison. An extension segment's ID has
         // its own prefix.
@@ -377,7 +354,6 @@ mod tests {
                 .replace("{upload_id}", "upl_00000000000000000000000001")
                 .replace("{span_object_id}", SPAN_OBJECT_ID)
                 .replace("{content_id}", CONTENT_ID)
-                .replace("{temporary_id}", &temporary_id)
         };
 
         let built = [
@@ -412,7 +388,6 @@ mod tests {
                 "Content span objects",
                 content_span(&pool_id(), &content_id(), &span_object_id()),
             ),
-            ("Temporary objects", temporary),
         ];
 
         let expected: std::collections::BTreeMap<String, String> = built

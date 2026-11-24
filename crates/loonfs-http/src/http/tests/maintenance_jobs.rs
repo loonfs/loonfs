@@ -240,7 +240,7 @@ async fn a_pool_run_collects_the_pool_and_rejects_a_missing_or_invalid_pool() {
     assert_eq!(body["pool_id"], pool_id.as_str());
     assert_eq!(
         body["deleted"],
-        serde_json::json!({"content_objects": 0, "upload_sessions": 0, "temporary_objects": 0})
+        serde_json::json!({"content_objects": 0, "upload_sessions": 0})
     );
 
     let missing = loonfs_types::PoolId::generate();

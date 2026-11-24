@@ -99,9 +99,6 @@ pub struct PoolDeletedObjectCounts {
     pub content_objects: u64,
     /// The upload sessions whose records the collection deleted after their grace windows passed.
     pub upload_sessions: u64,
-    /// The temporary objects that the collection deleted because they were older than the grace
-    /// window.
-    pub temporary_objects: u64,
 }
 
 impl PoolDeletedObjectCounts {
@@ -110,11 +107,9 @@ impl PoolDeletedObjectCounts {
         let Self {
             content_objects,
             upload_sessions,
-            temporary_objects,
         } = other;
         self.content_objects += content_objects;
         self.upload_sessions += upload_sessions;
-        self.temporary_objects += temporary_objects;
     }
 }
 
@@ -468,7 +463,7 @@ mod tests {
         assert!(gc_json.get("skipped").is_none());
         assert_eq!(
             gc_json["deleted"],
-            serde_json::json!({"content_objects": 0, "upload_sessions": 0, "temporary_objects": 0})
+            serde_json::json!({"content_objects": 0, "upload_sessions": 0})
         );
         let skipped = PoolGcResponse {
             listed_bytes: 4_096,

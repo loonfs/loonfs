@@ -99,11 +99,10 @@ async fn the_entry_of_a_namespace_that_isnt_a_member_is_deleted() {
 
 /// The listings of the collection in
 /// `the_entry_of_a_namespace_that_isnt_a_member_is_deleted`: the pool's
-/// upload sessions, member list, content, and temporary objects, and the
-/// manifest listings of the namespace without a manifest and of the namespace
-/// in another pool. The retired namespace's boundary ends its lookup without
-/// a listing.
-const NOT_A_MEMBER_LISTS: usize = 6;
+/// upload sessions, member list, and content, and the manifest listings of
+/// the namespace without a manifest and of the namespace in another pool. The
+/// retired namespace's boundary ends its lookup without a listing.
+const NOT_A_MEMBER_LISTS: usize = 5;
 
 /// Checks that the pool's collection keeps the member entry of an
 /// initializing member, reads nothing under the member's prefix beyond its
