@@ -6,6 +6,7 @@ use crate::scheduler::contain;
 use crate::scheduler::lock;
 use crate::scheduler::retries::CallFailure;
 use crate::scheduler::retries::MaintenanceCall;
+use crate::scheduler::Collected;
 use crate::scheduler::GrepIndexing;
 use crate::scheduler::Scheduler;
 use crate::scheduler::SchedulerInner;
@@ -27,21 +28,19 @@ use std::sync::Mutex;
 use tokio::sync::SemaphorePermit;
 
 impl Scheduler {
-    /// Runs the steps of one namespace for a sweep. A namespace whose
-    /// metadata call returns `namespace_deleted` or `namespace_not_found` gets
-    /// only its collection.
+    /// Runs the steps of one namespace for a sweep, and returns the result of
+    /// its collection, or `None` when the collection failed or didn't run. A
+    /// namespace whose metadata call returns `namespace_deleted` or
+    /// `namespace_not_found` gets only its collection.
     pub(super) async fn sweep_namespace(
         &self,
         maintenance: &Maintenance,
         namespace_id: NamespaceId,
-    ) {
+    ) -> Option<Collected> {
         let inner = &self.inner;
-        let Some((claim, _permit)) = self
+        let (claim, _permit) = self
             .claim(&namespace_id, Overlap::LeaveRetentionAdvance)
-            .await
-        else {
-            return;
-        };
+            .await?;
         let entry = inner.namespaces.entry(&namespace_id);
         let entry = entry.as_deref();
         let seq = entry.and_then(|entry| lock(entry).handle.last_published_seq());
@@ -60,8 +59,12 @@ impl Scheduler {
             self.advance_retention(maintenance, &namespace_id, entry)
                 .await;
         }
-        self.gc(maintenance, &namespace_id, entry, seq).await;
+        let collected = match self.gc(maintenance, &namespace_id, entry, seq).await {
+            Ok(collected) => Some(collected),
+            Err(code) => code.is_namespace_gone().then(Collected::default),
+        };
         self.finish_claim(claim).await;
+        collected
     }
 
     /// Makes one metadata call, and returns its outcome, or the code that it
@@ -214,18 +217,18 @@ impl Scheduler {
         }
     }
 
-    /// Makes one collection call, and returns whether it found the
-    /// namespace gone.
+    /// Makes one collection call, and returns what it listed, or the code
+    /// that it failed with.
     pub(super) async fn gc(
         &self,
         maintenance: &Maintenance,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SchedulerState>>>,
         seq: Option<CommitSeq>,
-    ) -> bool {
+    ) -> Result<Collected, ErrorCode> {
         let inner = &self.inner;
         if inner.stop.is_cancelled() {
-            return false;
+            return Err(ErrorCode::ShuttingDown);
         }
         let result = contain(
             maintenance
@@ -233,27 +236,35 @@ impl Scheduler {
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
         .await;
-        let gone = result
-            .as_ref()
-            .err()
-            .is_some_and(CallFailure::namespace_gone);
-        let collected = self.record_call(namespace_id, entry, MaintenanceCall::Gc, result, 0);
-        if let (Some(_), Some(entry)) = (collected, entry) {
+        let collected = match &result {
+            Ok(response) => Ok(Collected {
+                listed_bytes: response.listed_bytes,
+                next_reclamation_at_ms: response.next_reclamation_at_ms,
+            }),
+            Err(failure) => Err(failure.code()),
+        };
+        self.record_call(namespace_id, entry, MaintenanceCall::Gc, result, 0);
+        if let (Ok(_), Some(entry)) = (&collected, entry) {
             let mut held = lock(entry);
             held.host_state.collected_seq = seq;
             held.host_state.collected_at_ms = inner.timer.monotonic_now_ms();
         }
-        gone
+        collected
     }
 
-    /// Makes one collection call on a pool.
+    /// Makes one collection call on a pool, and returns its result, or
+    /// `None` when the collection failed or didn't run.
     ///
     /// A pool whose prefix emptied after the listing found it is skipped
     /// without a failure.
-    pub(super) async fn gc_pool(&self, maintenance: &Maintenance, pool_id: &PoolId) {
+    pub(super) async fn gc_pool(
+        &self,
+        maintenance: &Maintenance,
+        pool_id: &PoolId,
+    ) -> Option<Collected> {
         let inner = &self.inner;
         if inner.stop.is_cancelled() {
-            return;
+            return None;
         }
         let result = contain(
             maintenance
@@ -262,13 +273,16 @@ impl Scheduler {
         )
         .await;
         match result {
-            Ok(_) => {}
-            Err(failure)
-                if matches!(
-                    failure.code(),
-                    ErrorCode::PoolNotFound | ErrorCode::ShuttingDown
-                ) => {}
-            Err(failure) => self.record_pool_failure(pool_id, &failure),
+            Ok(response) => Some(Collected {
+                listed_bytes: response.listed_bytes,
+                next_reclamation_at_ms: response.next_reclamation_at_ms,
+            }),
+            Err(failure) if failure.code() == ErrorCode::PoolNotFound => Some(Collected::default()),
+            Err(failure) if failure.code() == ErrorCode::ShuttingDown => None,
+            Err(failure) => {
+                self.record_pool_failure(pool_id, &failure);
+                None
+            }
         }
     }
 

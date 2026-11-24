@@ -180,12 +180,67 @@ pub(crate) struct StepRetry {
 /// session delays no other session's steps. Sweeps and session steps share
 /// `max_concurrent_maintenance` slots, and the scheduler never runs the
 /// steps of one namespace twice at once. A listing failure stops a sweep
-/// from starting more namespaces, and the namespaces it already started
-/// finish before it returns. Hosts can call [`Self::run_sweep`] and
-/// [`Self::run_due_steps`] directly.
+/// from starting more namespaces or pools, and the namespaces and pools it
+/// already started finish before it returns a [`SweepReport`] that isn't
+/// complete. Hosts can call [`Self::run_sweep`] and [`Self::run_due_steps`]
+/// directly.
 #[derive(Clone)]
 pub struct Scheduler {
     inner: Arc<SchedulerInner>,
+}
+
+/// The result of one sweep of the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SweepReport {
+    /// The number of namespaces that the sweep listed, including those listed
+    /// before a listing failed.
+    pub namespaces: usize,
+    /// The number of pools that the sweep listed, including those listed
+    /// before a listing failed.
+    pub pools: usize,
+    /// The sum of `listed_bytes` over the responses of the sweep's
+    /// collections (see [`GcResponse::listed_bytes`](loonfs::GcResponse::listed_bytes)).
+    pub listed_bytes: u64,
+    /// Whether the sweep covered the whole store: both listings finished, and
+    /// each listed namespace and pool has a collection result. A collection
+    /// that returned a response, or that found its namespace or pool gone, is
+    /// a result. A collection that failed or didn't run isn't.
+    pub complete: bool,
+    /// The earliest `next_reclamation_at_ms` in the responses of the sweep's
+    /// collections, or `None` when no response includes a reclamation time.
+    pub next_reclamation_at_ms: Option<u64>,
+}
+
+/// The result of the collection of one namespace or pool, or the sum of
+/// several. A namespace or pool that the collection found gone adds zero
+/// bytes.
+#[derive(Debug, Clone, Copy, Default)]
+struct Collected {
+    listed_bytes: u64,
+    next_reclamation_at_ms: Option<u64>,
+}
+
+impl Collected {
+    /// Returns the sum of the listed bytes and the earlier reclamation time.
+    fn add(self, other: Self) -> Self {
+        Self {
+            listed_bytes: self.listed_bytes.saturating_add(other.listed_bytes),
+            next_reclamation_at_ms: self
+                .next_reclamation_at_ms
+                .into_iter()
+                .chain(other.next_reclamation_at_ms)
+                .min(),
+        }
+    }
+}
+
+/// What one listing of a sweep covered: the number of IDs that it listed,
+/// how many of them have a collection result, and the sum of those results.
+#[derive(Debug, Default)]
+struct Covered {
+    listed: usize,
+    collected: usize,
+    sum: Collected,
 }
 
 /// The cadence and limits of the scheduler, under the names of the server
@@ -278,38 +333,63 @@ impl Scheduler {
     /// store lists.
     /// Each namespace's retention floor is advanced under its retention window.
     ///
-    /// Returns how many namespaces the sweep listed, or the listing failure
-    /// that ended it once the namespaces or pools it had started returned. A
-    /// failed call on one namespace or pool does not fail the sweep. After the
-    /// [`Scheduler`] is stopped, no namespace starts its steps, no pool starts
-    /// its collection, and a running compaction unit stops at its next block.
-    /// A scheduler without a maintenance handle lists nothing and returns
-    /// zero.
-    pub async fn run_sweep(&self) -> Result<usize, ObjectStoreError> {
+    /// Returns what the sweep listed and collected, once the steps and
+    /// collections it had started finished. A failed call on one namespace or
+    /// pool doesn't stop the sweep, and a listing failure stops it from
+    /// starting more namespaces or pools. The report isn't complete after a
+    /// failed listing, a failed collection, or a namespace that the sweep
+    /// left to its running steps. After the [`Scheduler`] is stopped, no
+    /// namespace starts its steps, no pool starts its collection, and a
+    /// running compaction unit stops at its next block.
+    /// A scheduler without a maintenance handle lists nothing and returns a
+    /// report of zero namespaces and pools that isn't complete.
+    pub async fn run_sweep(&self) -> SweepReport {
         let inner = &self.inner;
         let Some(maintenance) = &inner.maintenance else {
-            return Ok(0);
+            return SweepReport {
+                namespaces: 0,
+                pools: 0,
+                listed_bytes: 0,
+                complete: false,
+                next_reclamation_at_ms: None,
+            };
         };
         let started_at_ms = inner.timer.monotonic_now_ms();
-        let swept = async {
-            let namespaces = self.sweep_every_namespace(maintenance).await?;
-            let pools = self.collect_every_pool(maintenance).await?;
-            Ok((namespaces, pools))
+        let (namespaces, mut listing) = self.sweep_every_namespace(maintenance).await;
+        let mut pools = Covered::default();
+        if listing.is_ok() {
+            (pools, listing) = self.collect_every_pool(maintenance).await;
         }
-        .await;
+        let sum = namespaces.sum.add(pools.sum);
+        let report = SweepReport {
+            namespaces: namespaces.listed,
+            pools: pools.listed,
+            listed_bytes: sum.listed_bytes,
+            complete: listing.is_ok()
+                && namespaces.collected == namespaces.listed
+                && pools.collected == pools.listed,
+            next_reclamation_at_ms: sum.next_reclamation_at_ms,
+        };
         let elapsed_ms = inner.timer.monotonic_now_ms().saturating_sub(started_at_ms);
         inner
             .metrics
             .sweep_seconds
             .record(Duration::from_millis(elapsed_ms).as_secs_f64());
-        match &swept {
-            Ok((namespaces, pools)) => {
+        match listing {
+            Ok(()) => {
                 inner.metrics.sweeps_ok.increment(1);
                 inner
                     .metrics
                     .namespaces
-                    .set(i64::try_from(*namespaces).unwrap_or(i64::MAX));
-                tracing::info!(namespaces, pools, elapsed_ms, "maintenance sweep finished");
+                    .set(i64::try_from(report.namespaces).unwrap_or(i64::MAX));
+                tracing::info!(
+                    namespaces = report.namespaces,
+                    pools = report.pools,
+                    listed_bytes = report.listed_bytes,
+                    complete = report.complete,
+                    elapsed_ms,
+                    "maintenance sweep finished"
+                );
             }
             Err(error) => {
                 inner.metrics.sweeps_failed.increment(1);
@@ -320,16 +400,16 @@ impl Scheduler {
                 );
             }
         }
-        swept.map(|(namespaces, _)| namespaces)
+        report
     }
 
     /// Collects every pool that the store lists, with the concurrency of the
-    /// namespace sweep, and returns how many pools it listed, or the listing
-    /// failure that ended it once the collections it had started returned.
+    /// namespace sweep, and returns what it covered and whether its listing
+    /// finished, once the collections it had started returned.
     async fn collect_every_pool(
         &self,
         maintenance: &Maintenance,
-    ) -> Result<usize, ObjectStoreError> {
+    ) -> (Covered, Result<(), ObjectStoreError>) {
         let inner = &self.inner;
         self.sweep_listed_ids(
             |start_after| async move {
@@ -345,7 +425,7 @@ impl Scheduler {
     async fn sweep_every_namespace(
         &self,
         maintenance: &Maintenance,
-    ) -> Result<usize, ObjectStoreError> {
+    ) -> (Covered, Result<(), ObjectStoreError>) {
         let inner = &self.inner;
         self.sweep_listed_ids(
             |start_after| async move {
@@ -360,9 +440,10 @@ impl Scheduler {
     }
 
     /// Runs `work` on every ID that `list_page` lists, with
-    /// `max_concurrent_maintenance` at once, and returns how many IDs it
-    /// listed, or the listing failure that ended it once the work it had
-    /// started returned.
+    /// `max_concurrent_maintenance` at once, and returns what it covered and
+    /// whether the listing finished, once the work it had started returned.
+    /// `work` returns the ID's collection result, or `None` when the
+    /// collection failed or didn't run.
     ///
     /// `list_page` lists the page after a cursor, or the first page for
     /// `None`, and returns the page's IDs and the next page's cursor. The
@@ -372,12 +453,12 @@ impl Scheduler {
         &self,
         list_page: impl Fn(Option<Cursor>) -> Page + Send + Sync,
         work: impl Fn(Id) -> Work + Send + Sync,
-    ) -> Result<usize, ObjectStoreError>
+    ) -> (Covered, Result<(), ObjectStoreError>)
     where
         Id: Send,
         Cursor: Send,
         Page: Future<Output = Result<(Vec<Id>, Option<Cursor>), ObjectStoreError>> + Send,
-        Work: Future<Output = ()> + Send,
+        Work: Future<Output = Option<Collected>> + Send,
     {
         let inner = &self.inner;
         let list_page = &list_page;
@@ -393,7 +474,7 @@ impl Scheduler {
         .boxed();
         let mut listed = 0;
         let mut listing = Ok(());
-        pages
+        let (collected, sum) = pages
             .filter_map(|page| {
                 let ids = match page {
                     Ok(ids) => {
@@ -409,13 +490,23 @@ impl Scheduler {
             })
             .flatten()
             .take_until(inner.stop.cancelled())
-            .for_each_concurrent(inner.config.max_concurrent_maintenance.get(), |id| {
-                // Boxed so the spawned scheduler's `Send` check does not
-                // recurse through every engine future that the work awaits.
-                work(id).boxed()
+            // Boxed so the spawned scheduler's `Send` check does not recurse
+            // through every engine future that the work awaits.
+            .map(|id| work(id).boxed())
+            .buffer_unordered(inner.config.max_concurrent_maintenance.get())
+            .filter_map(futures::future::ready)
+            .fold((0, Collected::default()), |(collected, sum), id_result| {
+                futures::future::ready((collected + 1, sum.add(id_result)))
             })
             .await;
-        listing.map(|()| listed)
+        (
+            Covered {
+                listed,
+                collected,
+                sum,
+            },
+            listing,
+        )
     }
 }
 

@@ -66,14 +66,19 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
                 if steps_first {
                     scheduler.run_due_steps().await;
                 } else {
-                    scheduler.run_sweep().await.expect("sweep");
+                    assert!(scheduler.run_sweep().await.complete);
                 }
             }
         });
         store.wait_until_blocked().await;
         store.inner().reset();
         if steps_first {
-            assert_eq!(server.scheduler.run_sweep().await.expect("sweep"), 1);
+            let report = server.scheduler.run_sweep().await;
+            assert_eq!(report.namespaces, 1);
+            assert!(
+                !report.complete,
+                "the session steps have claimed the namespace, so the sweep skips its collection"
+            );
             let operations = store.inner().take();
             assert_matches!(&operations[0], RecordedOperation::List { .. });
             assert_eq!(operations[0].key(), "namespaces/");
@@ -237,7 +242,7 @@ async fn session_steps_share_slots_with_a_parked_sweep_and_continue_when_a_slot_
         }
         assert!(!sweep.is_finished());
         store.release();
-        sweep.await.expect("join the sweep").expect("sweep");
+        assert!(sweep.await.expect("join the sweep").complete);
         if slots == 1 {
             steps.await;
         }

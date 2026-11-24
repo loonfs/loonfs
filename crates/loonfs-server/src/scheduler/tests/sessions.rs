@@ -2,7 +2,7 @@
 
 use super::{
     held_ids, idle_fold_after_ms, list_count, scheduler_config, seed_unfolded_tail, seed_writer,
-    SchedulerServer, DAY_MS,
+    SchedulerServer, SweepReport, DAY_MS,
 };
 use crate::scheduler::retries::MaintenanceCall;
 use loonfs::SharedObjectStore;
@@ -304,7 +304,7 @@ async fn a_sweep_folds_every_idle_tail() {
     );
     assert!(server.wal_tail_objects(&positioned).await > 0);
     server.clock.advance_ms(idle_fold_after_ms(&config));
-    server.scheduler.run_sweep().await.expect("sweep");
+    assert!(server.scheduler.run_sweep().await.complete);
     for namespace_id in [&positioned, &unpositioned, &unheld] {
         assert_eq!(
             server.wal_tail_objects(namespace_id).await,
@@ -335,7 +335,9 @@ async fn session_steps_leave_unheld_namespaces_for_the_sweep() {
     }
     assert!(store.take().is_empty());
     assert!(server.wal_tail_objects(&namespace_id).await > 0);
-    assert_eq!(server.scheduler.run_sweep().await.expect("sweep"), 1);
+    let report = server.scheduler.run_sweep().await;
+    assert_eq!(report.namespaces, 1);
+    assert!(report.complete);
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
 }
 
@@ -1064,7 +1066,16 @@ async fn a_scheduler_without_maintenance_closes_idle_and_ended_sessions_without_
         "the close doesn't fold the WAL tail (fence + commit remain)"
     );
     store.take();
-    assert_eq!(server.scheduler.run_sweep().await.expect("sweep"), 0);
+    assert_eq!(
+        server.scheduler.run_sweep().await,
+        SweepReport {
+            namespaces: 0,
+            pools: 0,
+            listed_bytes: 0,
+            complete: false,
+            next_reclamation_at_ms: None,
+        }
+    );
     assert!(
         store.take().is_empty(),
         "a sweep without maintenance lists nothing"
