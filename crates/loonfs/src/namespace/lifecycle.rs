@@ -33,11 +33,11 @@ impl<M: crate::Mode> Namespace<M> {
         {
             return Ok(administrator);
         }
-        let pinned = self
-            .core
-            .pinned_read(&self.namespace_id, crate::Consistency::Strong)
-            .await?;
-        Ok(pinned.engine.verify_administrator(&pinned.context).await?)
+        self.core
+            .read(&self.namespace_id, crate::Consistency::Strong, |pinned| async move {
+                Ok(pinned.engine.verify_administrator(&pinned.context).await?)
+            })
+            .await
     }
 
     /// Returns a pinned read of the namespace's head with the proof that
@@ -57,15 +57,19 @@ impl<M: crate::Mode> Namespace<M> {
                 administrator,
             });
         }
-        let pinned = self
-            .core
-            .pinned_read(&self.namespace_id, crate::Consistency::Strong)
-            .await?;
-        let administrator = pinned.engine.verify_administrator(&pinned.context).await?;
-        Ok(AdministratorRead {
-            pinned,
-            administrator,
-        })
+        self.core
+            .read(
+                &self.namespace_id,
+                crate::Consistency::Strong,
+                |pinned| async move {
+                    let administrator = pinned.engine.verify_administrator(&pinned.context).await?;
+                    Ok(AdministratorRead {
+                        pinned,
+                        administrator,
+                    })
+                },
+            )
+            .await
     }
 
     /// Returns the proof for a deletion as [`Self::administrator`] does, and

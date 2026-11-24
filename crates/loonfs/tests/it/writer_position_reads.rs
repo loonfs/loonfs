@@ -202,6 +202,17 @@ impl Fixture {
         loonfs::test_support::drop_namespace_view(&self.writer, &self.namespace_id).await;
     }
 
+    /// Closes the writer session, so its position becomes the namespace's
+    /// cached head.
+    async fn close_session(&self) {
+        self.writer
+            .open_namespace(&self.namespace_id)
+            .expect("a handle on the session")
+            .close()
+            .await
+            .expect("close the session");
+    }
+
     fn tail_replays(&self) -> u64 {
         counter(
             &self.recorder.snapshot(),
@@ -1195,6 +1206,16 @@ async fn position_on_a_collected_manifest(
             .await
             .expect("merge the fork");
     }
+    if let History::Administered = history {
+        let grants = loonfs_types::AccessGrants::new(std::collections::BTreeMap::from([(
+            loonfs_types::PrincipalId::parse(ADMINISTRATOR).expect("principal"),
+            loonfs_types::AccessRight::Admin.into(),
+        )]))
+        .expect("grants");
+        loonfs::test_support::set_root_access(&fixture.writer, &namespace_id, grants).await;
+        fixture.namespace.create_snapshot().await.expect("snapshot");
+        fixture.put("/after-snapshot.txt").await.expect("put");
+    }
     fixture
         .writer
         .maintenance(writer_id(name))
@@ -1251,7 +1272,7 @@ async fn position_on_a_collected_manifest(
     }
     assert!(lost > 0, "the collection deletes a segment of the position");
     let family = match history {
-        History::Files => None,
+        History::Files | History::Administered => None,
         History::AppendInTail => Some(MetadataRowFamily::ContentLayouts),
         History::Merged => Some(MetadataRowFamily::Merges),
     };
@@ -1294,7 +1315,14 @@ enum History {
     /// The writer merged a fork before its fold, so the position's manifest
     /// indexes that merge.
     Merged,
+    /// The root's access row makes [`ADMINISTRATOR`] an administrator, and
+    /// the namespace has a snapshot of a manifest before the position's.
+    Administered,
 }
+
+/// The principal that a namespace from [`History::Administered`] has as its
+/// administrator.
+const ADMINISTRATOR: &str = "prn_root";
 
 /// Checks that a retention advance from a writer position whose manifest a
 /// collection deleted plans from the newest manifest, whether or not the
@@ -1705,20 +1733,35 @@ async fn a_next_merge_range_from_a_fork_position_on_a_collected_manifest_succeed
 /// manifest was collected, the runtime's segment cache still has that
 /// manifest, and every segment of the namespace's merge index that the
 /// manifest lists is gone.
+///
+/// The rebase reads the fork point at a `strong` head. With the writer
+/// session open, the runtime checks the position first and moves it onto the
+/// newest manifest. With the session closed, the position becomes the cached
+/// head, whose manifest check isn't due, so the read finds a segment of the
+/// collected manifest missing and runs again from the newest manifest.
 #[tokio::test]
 async fn a_rebase_from_a_position_on_a_collected_manifest_succeeds() {
-    let name = "collected-rebase";
-    let (fixture, _, _) = position_on_a_collected_manifest(name, true, History::Merged).await;
-    fixture
-        .writer
-        .fork_namespace_for_rebase(
-            &fixture.namespace_id,
-            &namespace_id(&format!("{name}-fork")),
-            &namespace_id(&format!("{name}-rebase")),
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+    for session_open in [true, false] {
+        let name = if session_open {
+            "collected-rebase"
+        } else {
+            "collected-rebase-head"
+        };
+        let (fixture, _, _) = position_on_a_collected_manifest(name, true, History::Merged).await;
+        if !session_open {
+            fixture.close_session().await;
+        }
+        fixture
+            .writer
+            .fork_namespace_for_rebase(
+                &fixture.namespace_id,
+                &namespace_id(&format!("{name}-fork")),
+                &namespace_id(&format!("{name}-rebase")),
+                &loonfs_test_support::test_actor(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+    }
 }
 
 /// Checks that a retention advance from a writer position whose manifest is
@@ -1848,4 +1891,109 @@ async fn a_strong_read_from_a_collected_manifest_reads_the_newest_manifest() {
         loonfs_test_support::stores::request_lines(&fixture.recording.take()),
         expected
     );
+}
+
+/// Checks that a commit whose inline content is too large for a WAL object
+/// commits from a writer position whose manifest a collection deleted, when
+/// neither the segment cache nor the store has the manifest. The receipt
+/// check before the content is staged finds the manifest missing at or below
+/// the manifest boundary, and runs again from the newest manifest.
+#[tokio::test]
+async fn a_commit_that_stages_content_from_a_collected_position_succeeds() {
+    use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation, InlineContent};
+    let (fixture, _, _) =
+        position_on_a_collected_manifest("collected-staging", false, History::Files).await;
+    let value = InlineContent::new(
+        loonfs_types::ContentId::generate(),
+        bytes::Bytes::from(vec![
+            b'l';
+            loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES
+                + 1
+        ]),
+        ChecksumAlgorithm::Crc64nvme,
+    );
+    let intent = CommitIntent::single(
+        loonfs_types::CommitId::generate(),
+        loonfs_test_support::test_actor(),
+        None,
+        FilesystemOperation::PutFile {
+            path: loonfs_types::AbsolutePath::parse("/staged.txt").expect("path"),
+            content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
+            behavior: loonfs_types::DestinationBehavior::Replace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        },
+    );
+    fixture
+        .namespace
+        .commit_candidate(CommitCandidate::with_inline_content(
+            intent,
+            Vec::new(),
+            vec![value],
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+}
+
+/// Checks that the reads of a subject's administrator rights succeed
+/// from a cached head whose manifest a collection deleted, when neither the
+/// segment cache nor the store has the manifest: a deletion, a lookup of a
+/// snapshot, a listing of a snapshot's files, and a stat at a snapshot.
+///
+/// The writer session closes, so its position becomes the cached head. Each
+/// check reads the root's access row at a `strong` head, whose manifest check
+/// isn't due, finds the manifest missing at or below the manifest boundary,
+/// and runs again from the newest manifest.
+#[tokio::test]
+async fn administrator_checks_from_a_collected_position_succeed() {
+    let subject = loonfs_types::Subject {
+        principals: loonfs_types::PrincipalSet::new(std::collections::BTreeSet::from([
+            loonfs_types::PrincipalId::parse(ADMINISTRATOR).expect("principal"),
+        ]))
+        .expect("principals"),
+    };
+    for case in ["delete", "get-snapshot", "snapshot-files", "snapshot-stat"] {
+        let name = format!("collected-{case}");
+        let (fixture, _, _) =
+            position_on_a_collected_manifest(&name, false, History::Administered).await;
+        fixture.close_session().await;
+        let snapshot_id = fixture
+            .reader
+            .list_snapshots()
+            .page()
+            .await
+            .expect("list the snapshots")
+            .snapshots
+            .remove(0)
+            .snapshot_id;
+        let context = loonfs::Context::from(subject.clone());
+        let reader = fixture.reader.with_context(context.clone());
+        let result = match case {
+            "delete" => fixture
+                .writer
+                .with_context(context)
+                .open_namespace(&fixture.namespace_id)
+                .expect("open the namespace")
+                .delete()
+                .await
+                .map(drop),
+            "get-snapshot" => reader.get_snapshot(&snapshot_id).await.map(drop),
+            "snapshot-files" => reader
+                .list_snapshot_files(&snapshot_id)
+                .page()
+                .await
+                .map(drop),
+            _ => reader
+                .stat_with_options(
+                    "/small.txt",
+                    &StatOptions {
+                        at: ReadAt::Snapshot(snapshot_id),
+                        ..StatOptions::default()
+                    },
+                )
+                .await
+                .map(drop),
+        };
+        result.unwrap_or_else(|error| panic!("{case}: {:?} {error:?}", error.code()));
+    }
 }
