@@ -1576,6 +1576,23 @@ async fn a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_succeed(
     }
 }
 
+/// Checks that an eventual read of the next merge range succeeds when the
+/// writer position's manifest was collected, the runtime's segment
+/// cache still has that manifest, and every segment of the namespace's merge
+/// index that the manifest lists is gone. The read finds a segment of the
+/// position's manifest missing, the manifest isn't current, and the read
+/// runs again from the newest manifest.
+#[tokio::test]
+async fn a_next_merge_range_from_a_position_on_a_collected_manifest_succeeds() {
+    let name = "collected-merge-range";
+    let (fixture, _, _) = position_on_a_collected_manifest(name, true, History::Merged).await;
+    fixture
+        .namespace
+        .next_merge_range(&namespace_id(&format!("{name}-fork")))
+        .await
+        .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+}
+
 /// Checks that a rebase creates its new fork when the writer position's
 /// manifest was collected, the runtime's segment cache still has that
 /// manifest, and every segment of the namespace's merge index that the

@@ -79,7 +79,10 @@ impl<M: Mode> Namespace<M> {
     /// that doesn't exist, was deleted, or isn't a fork of this namespace
     /// returns `invalid_request`. A runtime whose merge allowance is zero
     /// returns `not_supported` for `filesystem.merges` before it reads a
-    /// namespace. Both heads are read at the runtime's default consistency.
+    /// namespace. Both heads are read at the runtime's default consistency,
+    /// and the read runs again from this namespace's newest manifest when a
+    /// newer manifest replaced the one that it read, as an ordinary read
+    /// does.
     pub async fn next_merge_range(
         &self,
         source_namespace_id: &NamespaceId,
@@ -102,26 +105,28 @@ impl<M: Mode> Namespace<M> {
             async {
                 self.core.merges_enabled()?;
                 let _permit = self.core.read_permit().await;
-                let main = self
-                    .core
-                    .pinned_read(&self.namespace_id, options.consistency)
-                    .await?;
-                let main_administrator = main.engine.verify_administrator(&main.context).await?;
-                let fork = self
-                    .core
-                    .pinned_read(source_namespace_id, options.consistency)
-                    .await?;
-                let fork_administrator = fork.engine.verify_administrator(&fork.context).await?;
-                Ok(main
-                    .engine
-                    .next_merge_range(
-                        &main_administrator,
-                        &main.context,
-                        &fork.engine,
-                        &fork_administrator,
-                        &fork.context,
-                    )
-                    .await?)
+                self.core
+                    .read(&self.namespace_id, options.consistency, |main| async move {
+                        let main_administrator =
+                            main.engine.verify_administrator(&main.context).await?;
+                        let fork = self
+                            .core
+                            .pinned_read(source_namespace_id, options.consistency)
+                            .await?;
+                        let fork_administrator =
+                            fork.engine.verify_administrator(&fork.context).await?;
+                        Ok(main
+                            .engine
+                            .next_merge_range(
+                                &main_administrator,
+                                &main.context,
+                                &fork.engine,
+                                &fork_administrator,
+                                &fork.context,
+                            )
+                            .await?)
+                    })
+                    .await
             },
         )
         .await
