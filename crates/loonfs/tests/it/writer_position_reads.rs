@@ -926,6 +926,29 @@ fn collected_position_load(
     ]
 }
 
+/// Returns the requests of a strong read's check of a writer position on
+/// `position`, a manifest at or below the manifest boundary: a HEAD of the
+/// manifest after `position`, and a read of the boundary, which drops the
+/// position. Then come the requests of the discovery that finds the newest
+/// manifest, `newest`.
+fn collected_position_check(
+    namespace_id: &NamespaceId,
+    position: ManifestNo,
+    newest: ManifestNo,
+) -> Vec<String> {
+    vec![
+        format!(
+            "head {namespace_id} MetadataManifest {:020}",
+            position.0 + 1
+        ),
+        format!("get {namespace_id} Boundary"),
+        format!("get {namespace_id} Boundary"),
+        format!("list namespaces/{namespace_id}/manifests/"),
+        format!("get {namespace_id} MetadataManifest {:020}", newest.0),
+        format!("get {namespace_id} Boundary"),
+    ]
+}
+
 /// Returns the number of the namespace's newest manifest in `fixture`'s
 /// store.
 async fn newest_manifest(fixture: &Fixture) -> ManifestNo {
@@ -984,10 +1007,10 @@ async fn a_fold_from_a_collected_position_starts_from_the_newest_manifest() {
 }
 
 /// Checks that a retention advance from a position whose manifest a
-/// collection deleted reads the manifest from the store, finds nothing,
-/// reads the manifest boundary, and plans from the newest manifest, and that
-/// the advance drops the position, so a strong read after it doesn't start
-/// from the deleted manifest.
+/// collection deleted checks the position first, as a strong read does, and
+/// that the check finds the manifest at or below the manifest boundary and
+/// drops the position. The advance then plans from the newest manifest, and
+/// a strong read after it doesn't start from the deleted manifest.
 #[tokio::test]
 async fn a_retention_advance_from_a_collected_position_drops_the_position() {
     let name = "retention-collected";
@@ -1002,7 +1025,7 @@ async fn a_retention_advance_from_a_collected_position_drops_the_position() {
         .expect("the advance plans from the newest manifest");
     assert_eq!(
         loonfs_test_support::stores::request_lines(&fixture.recording.take()),
-        collected_position_load(&fixture.namespace_id, position, newest)
+        collected_position_check(&fixture.namespace_id, position, newest)
     );
     fixture
         .reader
@@ -1301,19 +1324,17 @@ enum History {
 /// runtime's segment cache still has the deleted manifest. Every commit is
 /// younger than the grace window, so the floor stays at 0.
 ///
-/// Without the manifest in the cache, the advance reads the manifest from
-/// the store, finds nothing, and reads the manifest boundary, which is at or
-/// above the manifest, so the advance drops the position and plans from the
-/// newest manifest. With the manifest in the cache, the plan reads a segment
-/// that the collection deleted, the advance finds a newer current manifest,
-/// drops the position and the cached head, and plans from the newest
-/// manifest.
+/// The advance first checks the position as a strong read does. The check
+/// finds the position's manifest at or below the manifest boundary and drops
+/// the position, so in both cases the advance finds the newest manifest by
+/// discovery and plans from it, and no request reads the deleted manifest.
 #[tokio::test]
 async fn a_retention_advance_from_a_position_on_a_collected_manifest_succeeds() {
     for cached in [false, true] {
         let name = format!("collected-advance-{}", if cached { "hit" } else { "miss" });
         let (fixture, position, _) =
             position_on_a_collected_manifest(&name, cached, History::Files).await;
+        let newest = newest_manifest(&fixture).await;
         fixture.recording.reset();
         let advanced = fixture
             .writer
@@ -1327,42 +1348,11 @@ async fn a_retention_advance_from_a_position_on_a_collected_manifest_succeeds() 
             loonfs::CommitSeq(0),
             "cached={cached}"
         );
-        let namespace = fixture.namespace_id.to_string();
-        let line = |request: &str| request.replace("{ns}", &namespace);
-        let discovery = |newest_get: bool| {
-            let mut lines = vec![
-                line("get {ns} Boundary"),
-                line("list namespaces/{ns}/manifests/"),
-            ];
-            if newest_get {
-                lines.push(line("get {ns} MetadataManifest 00000000000000000018"));
-            }
-            lines.push(line("get {ns} Boundary"));
-            lines
-        };
-        let segments = vec![line("get {ns} MetadataSegment"); 4];
-        let expected = if cached {
-            [
-                // The plan's read of a segment that the collection deleted.
-                vec![line("get {ns} MetadataSegment")],
-                // The check that a newer manifest replaced the planned one.
-                discovery(true),
-                // The second plan, from the newest manifest.
-                discovery(false),
-                segments,
-            ]
-            .concat()
-        } else {
-            [
-                vec![
-                    line(&format!("get {{ns}} MetadataManifest {:020}", position.0)),
-                    line("get {ns} Boundary"),
-                ],
-                discovery(true),
-                segments,
-            ]
-            .concat()
-        };
+        let expected = [
+            collected_position_check(&fixture.namespace_id, position, newest),
+            vec![format!("get {} MetadataSegment", fixture.namespace_id); 4],
+        ]
+        .concat();
         assert_eq!(
             loonfs_test_support::stores::request_lines(&fixture.recording.take()),
             expected,
@@ -1727,17 +1717,17 @@ async fn a_rebase_from_a_position_on_a_collected_manifest_succeeds() {
 /// the runtime's segment cache doesn't have the manifest.
 ///
 /// The fixture's collection deletes the manifest, and the test puts the
-/// manifest back by hand. The advance reads the manifest from the store and
-/// plans from it as it would from the segment cache, the plan reads a
-/// segment that the collection deleted, and the advance finds a newer
-/// current manifest, drops the position and the cached head, and plans from
-/// the newest manifest.
+/// manifest back by hand. The advance first checks the position as a strong
+/// read does. The check finds the manifest at or below the manifest boundary
+/// and drops the position, so the advance doesn't read the stored manifest,
+/// and it plans from the newest manifest that discovery finds.
 #[tokio::test]
 async fn a_retention_advance_from_a_stored_position_manifest_below_the_boundary_succeeds() {
     use loonfs_objectstore::ObjectStore;
     let name = "stored-below-boundary";
     let (fixture, position, manifest_bytes) =
         position_on_a_collected_manifest(name, false, History::Files).await;
+    let newest = newest_manifest(&fixture).await;
     let store: SharedObjectStore = fixture.recording.clone();
     store
         .put(
@@ -1755,27 +1745,9 @@ async fn a_retention_advance_from_a_stored_position_manifest_below_the_boundary_
         .await
         .expect("the advance plans from the newest manifest");
     assert_eq!(advanced.retention_floor_seq, loonfs::CommitSeq(0));
-    let namespace = fixture.namespace_id.to_string();
-    let line = |request: &str| request.replace("{ns}", &namespace);
-    // The runtime caches no manifest, so each discovery reads the newest.
-    let discovery = vec![
-        line("get {ns} Boundary"),
-        line("list namespaces/{ns}/manifests/"),
-        line("get {ns} MetadataManifest 00000000000000000018"),
-        line("get {ns} Boundary"),
-    ];
     let expected = [
-        // The load of the position's manifest, and the plan's read of a
-        // segment that the collection deleted.
-        vec![
-            line(&format!("get {{ns}} MetadataManifest {:020}", position.0)),
-            line("get {ns} MetadataSegment"),
-        ],
-        // The check that a newer manifest replaced the planned one.
-        discovery.clone(),
-        // The second plan, from the newest manifest.
-        discovery,
-        vec![line("get {ns} MetadataSegment"); 4],
+        collected_position_check(&fixture.namespace_id, position, newest),
+        vec![format!("get {} MetadataSegment", fixture.namespace_id); 4],
     ]
     .concat();
     assert_eq!(

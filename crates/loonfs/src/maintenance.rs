@@ -539,9 +539,19 @@ impl Maintenance {
     /// [`RetentionTarget::Window`](crate::RetentionTarget::Window), so a
     /// namespace without a window keeps its whole history.
     ///
-    /// The call plans the floor from this runtime's writer position when it
-    /// has a current one, and otherwise from the current manifest's floor and
-    /// head. A floor that moves is recorded in a floor object at the next WAL
+    /// When this runtime has a writer session for the namespace, the call
+    /// first checks the session's position as a strong read does (one HEAD
+    /// of the position manifest's successor and one read of the manifest
+    /// boundary). The check moves the position onto a newer manifest of the
+    /// same writer epoch, such as a manifest that another process published
+    /// to change the retention window, and drops the position when another
+    /// writer has claimed the namespace. The call then plans the floor from
+    /// the position when one is left, and otherwise from the current
+    /// manifest's floor and head. A window that another process changes
+    /// between the check and the floor object's put takes effect at the next
+    /// advance.
+    ///
+    /// A floor that moves is recorded in a floor object at the next WAL
     /// number. The publication runs discovery before the put, and it writes
     /// nothing when the view it finds already has a floor at or above the
     /// planned floor, such as a floor object in the WAL tail ([Advancing the retention
@@ -556,11 +566,12 @@ impl Maintenance {
     /// Its next put collides with the floor object, and it plans again
     /// against the new floor.
     ///
-    /// A writer position's manifest may have been replaced, and its segments
-    /// collected, while the position went unchecked. When the advance finds a
-    /// segment of the manifest it planned from missing and that manifest
-    /// isn't the current one, the call drops the position and the cached head
-    /// and plans again from the newest manifest, up to
+    /// The manifest that the advance plans from may be replaced, and its
+    /// segments collected, after the check or the discovery that found it.
+    /// When the advance finds a segment of the manifest it planned from
+    /// missing and that manifest isn't the current one, the call drops the
+    /// position and the cached head and plans again from the newest
+    /// manifest, up to
     /// `MAX_CONTENTION_ATTEMPTS` plans, after which it returns
     /// `store_contention`. A missing segment of the current manifest returns
     /// `namespace_corrupt`.
@@ -645,14 +656,20 @@ impl Maintenance {
     }
 
     /// Returns the manifest and the retention floor that a retention advance
-    /// plans from: this runtime's writer position, or the current manifest
-    /// and its floor when the position's manifest is missing from the store
-    /// and at or below the manifest boundary (see [`Self::position_basis`]).
+    /// plans from. Those are this runtime's writer position after a strong
+    /// read's check of it (see [`RuntimeCore::checked_writer_position`]), or
+    /// the current manifest and its floor when no position is left after the
+    /// check or the position's manifest is missing from the store and at or
+    /// below the manifest boundary (see [`Self::position_basis`]).
     async fn load_retention_view(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<(LoadedManifest, CommitSeq)> {
-        if let Some(position) = self.publisher.current_position(namespace_id) {
+        if let Some(position) = self
+            .core
+            .checked_writer_position(namespace_id, None)
+            .await?
+        {
             if let Some(basis) = self.position_basis(namespace_id, &position).await? {
                 return Ok((basis.into_manifest(), position.retention_floor_seq()));
             }
