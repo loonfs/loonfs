@@ -97,6 +97,10 @@ struct PanicGate {
 #[derive(Debug)]
 struct PanicGateState {
     armed: bool,
+    /// Whether the armed put stores its object before it panics, instead of
+    /// waiting until the test opens the gate and panicking before it stores
+    /// anything.
+    after_put: bool,
     entered: bool,
     released: bool,
 }
@@ -109,6 +113,7 @@ impl PanicWalPutStore {
             gate: Arc::new(PanicGate {
                 state: Mutex::new(PanicGateState {
                     armed: false,
+                    after_put: false,
                     entered: false,
                     released: false,
                 }),
@@ -120,8 +125,17 @@ impl PanicWalPutStore {
     fn arm_blocking_panic(&self) {
         let mut state = self.gate.lock_state();
         state.armed = true;
+        state.after_put = false;
         state.entered = false;
         state.released = false;
+    }
+
+    /// Arms the next WAL publication put to store its object and then panic,
+    /// without waiting until the test opens the gate.
+    fn arm_panic_after_put(&self) {
+        let mut state = self.gate.lock_state();
+        state.armed = true;
+        state.after_put = true;
     }
 
     async fn wait_until_blocked(&self) {
@@ -166,30 +180,40 @@ impl ObjectStore for PanicWalPutStore {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key.starts_with(&self.namespace_prefix)
+        let panics_after_put = if key.starts_with(&self.namespace_prefix)
             && matches!(mode, PutMode::CreateIfAbsent)
             && is_publication(&bytes)
         {
             let gate = self.gate.clone();
             tokio::task::spawn_blocking(move || {
                 let mut state = gate.lock_state();
-                if state.armed {
-                    state.armed = false;
-                    state.entered = true;
-                    gate.cvar.notify_all();
-                    while !state.released {
-                        state = gate
-                            .cvar
-                            .wait(state)
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    }
-                    panic!("injected publish task panic");
+                if !state.armed {
+                    return false;
                 }
+                state.armed = false;
+                if state.after_put {
+                    return true;
+                }
+                state.entered = true;
+                gate.cvar.notify_all();
+                while !state.released {
+                    state = gate
+                        .cvar
+                        .wait(state)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                panic!("injected publish task panic");
             })
             .await
-            .expect("WAL put gate task");
+            .expect("WAL put gate task")
+        } else {
+            false
+        };
+        let stored = self.inner.put(key, bytes, mode).await;
+        if panics_after_put {
+            panic!("injected publish task panic after the put");
         }
-        self.inner.put(key, bytes, mode).await
+        stored
     }
 }
 
@@ -2322,6 +2346,123 @@ async fn a_contained_panic_drops_the_view_and_the_next_read_loads_the_namespace(
         .await
         .expect("a read after the panic");
     assert_eq!(loaded(), before + 1, "the read loads the namespace");
+}
+
+/// Checks that a session's first commit whose WAL put stores its object and
+/// then panics drops the cached head that the create installed, so an
+/// eventual read right after the commit's `outcome_unknown` sees the
+/// directory that the commit created.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_commit_that_panics_after_its_put_drops_the_cached_head() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(PanicWalPutStore::new(temp_dir.path(), &namespace_id));
+    let writer = test_writer_with_cache(
+        store.clone() as SharedStore,
+        MetadataCache::default(),
+        Arc::new(DefaultMetricsRecorder::new()),
+    )
+    .await;
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("bootstrap");
+    assert!(
+        writer
+            .core
+            .head_and_wal_tail_cache()
+            .get_head(&namespace_id)
+            .is_some(),
+        "the create installs the cached head"
+    );
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    store.arm_panic_after_put();
+    let error = namespace
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "first", "first",
+        )))
+        .await
+        .expect_err("the commit panicked after its put");
+    assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
+    namespace
+        .stat("/first")
+        .await
+        .expect("an eventual read sees the directory that the put stored");
+}
+
+/// Checks that a session's first commit whose WAL put stores its object and
+/// loses the store's response, and whose retries can't read the store, drops
+/// the cached head that the create installed, so an eventual read after the
+/// commit's `outcome_unknown` sees the directory that the commit created.
+#[tokio::test]
+async fn a_first_commit_with_an_unknown_outcome_drops_the_cached_head() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (put_armed, put_lost) = (Arc::clone(&armed), Arc::clone(&lost));
+    let wal = wal_prefix(&namespace_id);
+    let lost_answer = FailStore::matching(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        move |operation| {
+            if operation.key().starts_with(&wal)
+                && matches!(operation.kind(), OperationKind::Put { bytes, mode: PutMode::CreateIfAbsent } if is_publication(bytes))
+                && put_armed.swap(false, AtomicOrdering::SeqCst)
+            {
+                put_lost.store(true, AtomicOrdering::SeqCst);
+                true
+            } else {
+                false
+            }
+        },
+        InjectedError::Transport("lost WAL put answer".to_owned()),
+    )
+    .apply_then_fail();
+    lost_answer.fail_all();
+    let reads_lost = Arc::clone(&lost);
+    let store = Arc::new(FailStore::matching(
+        lost_answer,
+        move |operation| {
+            reads_lost.load(AtomicOrdering::SeqCst)
+                && matches!(
+                    operation.kind(),
+                    OperationKind::Get { .. }
+                        | OperationKind::GetWithMetadata
+                        | OperationKind::Head
+                )
+        },
+        InjectedError::Transport("reads unavailable".to_owned()),
+    ));
+    store.fail_all();
+    let writer = test_writer_with_cache(
+        store.clone() as SharedStore,
+        MetadataCache::default(),
+        Arc::new(DefaultMetricsRecorder::new()),
+    )
+    .await;
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("bootstrap");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    armed.store(true, AtomicOrdering::SeqCst);
+    let error = namespace
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "first", "first",
+        )))
+        .await
+        .expect_err("the put's answer and the retries' reads are lost");
+    assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
+    assert!(lost.load(AtomicOrdering::SeqCst));
+    lost.store(false, AtomicOrdering::SeqCst);
+    namespace
+        .stat("/first")
+        .await
+        .expect("an eventual read sees the directory that the put stored");
 }
 
 /// Checks that `loonfs.publisher.queue_depth` reports the candidates queued
