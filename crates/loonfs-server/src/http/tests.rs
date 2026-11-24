@@ -165,7 +165,7 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
         Settlement {
             requests: None,
             runtime: writer.clone(),
-            scheduler: crate::scheduler::Scheduler::new(
+            scheduler: loonfs_http::Scheduler::new(
                 test_config(temp_dir.path(), "shutdown-deadline-writer").scheduler_config(),
                 writer.object_store(),
                 None,
@@ -439,6 +439,84 @@ async fn shutdown_abandons_a_parked_sweep_at_its_deadline_and_settles_the_runtim
         .expect("an abandoned step does not fail the shutdown");
     assert!(state.http.runtime.is_shutting_down());
     store.release();
+}
+
+/// Checks that `app` builds the scheduler in the modes that don't maintain,
+/// over the table of writer sessions that the HTTP API opens sessions
+/// through, and that `AppState::run_due_steps` closes an idle session of that
+/// table without a store request.
+#[tokio::test]
+async fn app_state_run_due_steps_closes_an_idle_session_when_the_server_does_not_maintain() {
+    use crate::config::JobMode;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    for (index, mode) in [JobMode::ServeOnly, JobMode::Disabled]
+        .into_iter()
+        .enumerate()
+    {
+        let mut app_config = test_config(temp_dir.path(), "unmaintained-server");
+        app_config.grep.mode = JobMode::Disabled;
+        app_config.maintenance = mode;
+        app_config.idle_session_close_after_ms = std::num::NonZeroU64::MIN;
+        let (_, state) = app(
+            app_config.validate().expect("validate config"),
+            options_with_store(store.clone()),
+        )
+        .await
+        .expect("build app");
+        // The table's handle keeps the session open until the scheduler
+        // closes it.
+        let sessions_open = || {
+            state
+                .http
+                .metrics
+                .snapshot()
+                .by_name("loonfs.publisher.sessions_open")
+                .find_map(|entry| match entry.value {
+                    MetricValue::Gauge(value) => Some(value),
+                    _ => None,
+                })
+                .unwrap_or(0)
+        };
+
+        let embedded_ns = namespace_id(&format!("unmaintained-embedded-{index}"));
+        state
+            .http
+            .runtime
+            .create_namespace(&embedded_ns, &loonfs_test_support::test_actor())
+            .await
+            .expect("create namespace");
+        drop(
+            state
+                .http
+                .namespaces
+                .open(&embedded_ns)
+                .await
+                .expect("open session"),
+        );
+        assert_eq!(sessions_open(), 1);
+
+        store.take();
+        let opened_ms = state.http.runtime.monotonic_timer().monotonic_now_ms();
+        while state.http.runtime.monotonic_timer().monotonic_now_ms() <= opened_ms + 1 {
+            tokio::task::yield_now().await;
+        }
+        state.run_due_steps().await;
+        assert_eq!(
+            sessions_open(),
+            0,
+            "`AppState::run_due_steps` closes an idle session in {mode:?} mode"
+        );
+        assert!(
+            store.take().is_empty(),
+            "`AppState::run_due_steps` makes no store request when the server doesn't maintain"
+        );
+        state.http.runtime.shutdown().await.expect("shutdown");
+    }
 }
 
 #[tokio::test]

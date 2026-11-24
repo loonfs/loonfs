@@ -1,7 +1,7 @@
 //! Concurrent steps preserve session progress and share the host's slots.
 
 use super::{scheduler_config, with_held, SchedulerServer};
-use loonfs_http::WriterSessions as _;
+use crate::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
@@ -34,7 +34,7 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
     // which writes the folded content under the pool's prefix. A gate on the
     // namespace's prefix alone would park one of the fold's concurrent segment
     // puts and let the others through.
-    config.idle_fold_after_ms = Some(1);
+    config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -58,7 +58,7 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
         .expect("publish");
         server
             .clock
-            .advance_ms(config.maintenance_interval_ms.get());
+            .advance_ms(config.scheduler.maintenance_interval_ms);
         store.block_next();
         let parked = tokio::spawn({
             let scheduler = server.scheduler.clone();
@@ -126,7 +126,7 @@ async fn a_publish_during_a_metadata_step_is_folded_by_the_next_run() {
     let mut config = scheduler_config(None);
     // The session's metadata step folds the session's tail, so the gate
     // parks the step at the fold's first request.
-    config.idle_fold_after_ms = Some(1);
+    config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -145,7 +145,7 @@ async fn a_publish_during_a_metadata_step_is_folded_by_the_next_run() {
         .expect("publish");
     server
         .clock
-        .advance_ms(config.maintenance_interval_ms.get());
+        .advance_ms(config.scheduler.maintenance_interval_ms);
     store.block_next();
     let steps = tokio::spawn({
         let scheduler = server.scheduler.clone();
@@ -159,7 +159,7 @@ async fn a_publish_during_a_metadata_step_is_folded_by_the_next_run() {
     steps.await.expect("finish the step");
     store.inner().reset();
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     assert!(
         !store.inner().take().is_empty(),
@@ -189,11 +189,11 @@ async fn session_steps_share_slots_with_a_parked_sweep_and_continue_when_a_slot_
             OperationSelector::Any,
         ));
         let mut config = scheduler_config(None);
-        config.max_concurrent_maintenance =
+        config.scheduler.max_concurrent_maintenance =
             std::num::NonZeroUsize::new(slots).expect("a nonzero slot count");
         // The session's metadata step folds the held session's tail, so a
         // run of the session steps sends requests.
-        config.idle_fold_after_ms = Some(1);
+        config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
         let server = SchedulerServer::start(store.clone(), &config, 0).await;
         server
             .runtime
@@ -223,7 +223,7 @@ async fn session_steps_share_slots_with_a_parked_sweep_and_continue_when_a_slot_
             .expect("publish");
         server
             .clock
-            .advance_ms(config.maintenance_interval_ms.get());
+            .advance_ms(config.scheduler.maintenance_interval_ms);
         store.inner().reset();
         let mut steps = Box::pin(server.scheduler.run_due_steps());
         if slots == 1 {
@@ -321,7 +321,7 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
         OperationSelector::Any,
     ));
     let mut config = scheduler_config(None);
-    config.idle_fold_after_ms = Some(0);
+    config.runtime.idle_fold_after_ms = None;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -336,9 +336,9 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
     let seq = held.last_published_seq();
     drop(held);
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
-    server.clock.advance_ms(config.gc_interval_ms.get());
+    server.clock.advance_ms(config.scheduler.gc_interval_ms);
     store.block_next();
     let steps = tokio::spawn({
         let scheduler = server.scheduler.clone();
@@ -364,7 +364,9 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
         Some(None)
     );
     store.inner().reset();
-    server.run_steps_after(config.gc_interval_ms.get()).await;
+    server
+        .run_steps_after(config.scheduler.gc_interval_ms)
+        .await;
     assert!(
         store.inner().take().is_empty(),
         "the replacement never published and owes no collection"
@@ -385,10 +387,10 @@ async fn a_step_parked_in_one_session_does_not_stop_another_sessions_fold_on_the
     let mut config = scheduler_config(None);
     // The session's metadata step folds a session's tail once the manual
     // clock moves, so the gate parks the steps of `parked` at the fold.
-    config.idle_fold_after_ms = Some(1);
+    config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
     // The runs before the first commit make the step from the store, and
     // that step waits the retry interval, which the manual clock then passes.
-    config.metadata_retry_interval_ms = std::num::NonZeroU64::MIN;
+    config.scheduler.metadata_retry_interval_ms = 1;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -414,7 +416,7 @@ async fn a_step_parked_in_one_session_does_not_stop_another_sessions_fold_on_the
     store.block_next();
     server
         .clock
-        .advance_ms(config.maintenance_interval_ms.get());
+        .advance_ms(config.scheduler.maintenance_interval_ms);
     loonfs_test_support::clock::bounded(Duration::from_secs(60), store.wait_until_blocked())
         .await
         .expect("the session steps park at the fold of the first session");
@@ -431,7 +433,7 @@ async fn a_step_parked_in_one_session_does_not_stop_another_sessions_fold_on_the
         .expect("publish");
     server
         .clock
-        .advance_ms(config.maintenance_interval_ms.get());
+        .advance_ms(config.scheduler.maintenance_interval_ms);
     loonfs_test_support::clock::bounded(Duration::from_secs(60), async {
         while server.wal_tail_objects(&folded).await > 0 {
             tokio::time::advance(Duration::from_millis(1)).await;

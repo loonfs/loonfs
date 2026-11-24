@@ -5,9 +5,9 @@ use super::{
     SchedulerServer, SweepReport, DAY_MS,
 };
 use crate::scheduler::retries::MaintenanceCall;
+use crate::WriterSessions as _;
 use loonfs::SharedObjectStore;
 use loonfs_grep::GrepWorkerConfig;
-use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -50,7 +50,7 @@ async fn session_steps_fold_idle_tails_from_the_position_and_then_cost_nothing()
     store.reset();
     for _ in 0..100 {
         server
-            .run_steps_after(config.maintenance_interval_ms.get())
+            .run_steps_after(config.scheduler.maintenance_interval_ms)
             .await;
     }
     assert!(
@@ -79,7 +79,7 @@ async fn session_steps_fold_idle_tails_from_the_position_and_then_cost_nothing()
         };
         let first_retry_at_ms = retry_at_ms();
         server
-            .run_steps_after(config.metadata_retry_interval_ms.get() - 1)
+            .run_steps_after(config.scheduler.metadata_retry_interval_ms - 1)
             .await;
         assert_eq!(
             retry_at_ms(),
@@ -97,14 +97,16 @@ async fn session_steps_fold_idle_tails_from_the_position_and_then_cost_nothing()
         );
         assert!(server.wal_tail_objects(&namespace_id).await > 0);
         server
-            .run_steps_after(idle_fold_after_ms(&config) - config.metadata_retry_interval_ms.get())
+            .run_steps_after(
+                idle_fold_after_ms(&config) - config.scheduler.metadata_retry_interval_ms,
+            )
             .await;
         assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
         server.scheduler.run_due_steps().await;
         store.reset();
         for _ in 0..20 {
             server
-                .run_steps_after(config.maintenance_interval_ms.get())
+                .run_steps_after(config.scheduler.maintenance_interval_ms)
                 .await;
         }
         assert!(
@@ -127,7 +129,7 @@ async fn session_steps_leave_a_tail_below_the_fold_triggers_until_it_is_idle() {
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(None);
-    config.inline_content.inline_content_threshold_bytes = Some(VALUE_BYTES);
+    config.runtime.inline_content.inline_content_threshold_bytes = Some(VALUE_BYTES);
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("large-fold-trigger");
     server
@@ -162,7 +164,7 @@ async fn session_steps_leave_a_tail_below_the_fold_triggers_until_it_is_idle() {
     );
     let tail_objects = server.wal_tail_objects(&namespace_id).await;
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     assert!(
         server.metadata_left_due(&namespace_id),
@@ -199,7 +201,7 @@ async fn a_metadata_step_waits_for_the_sessions_fold_instead_of_folding_the_tail
     ));
     let store = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
     let mut config = scheduler_config(None);
-    config.inline_content.inline_content_threshold_bytes = Some(FILE_BYTES);
+    config.runtime.inline_content.inline_content_threshold_bytes = Some(FILE_BYTES);
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("held-folding");
     server
@@ -236,7 +238,7 @@ async fn a_metadata_step_waits_for_the_sessions_fold_instead_of_folding_the_tail
         blocking.release();
     };
     tokio::join!(
-        server.run_steps_after(config.maintenance_interval_ms.get()),
+        server.run_steps_after(config.scheduler.maintenance_interval_ms),
         release
     );
 
@@ -295,7 +297,7 @@ async fn a_sweep_folds_every_idle_tail() {
     drop(namespaces.open(&unpositioned).await.expect("open"));
     for _ in 0..3 {
         server
-            .run_steps_after(config.maintenance_interval_ms.get())
+            .run_steps_after(config.scheduler.maintenance_interval_ms)
             .await;
     }
     assert!(
@@ -381,7 +383,7 @@ async fn session_steps_finish_more_than_sixteen_metadata_units_without_another_p
         .current_manifest_no
         .expect("manifest");
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     let after = server
         .maintenance
@@ -398,7 +400,7 @@ async fn session_steps_finish_more_than_sixteen_metadata_units_without_another_p
     assert!(server.metadata_left_due(&namespace_id));
     store.reset();
     server
-        .run_steps_after(config.metadata_retry_interval_ms.get())
+        .run_steps_after(config.scheduler.metadata_retry_interval_ms)
         .await;
     assert!(
         !store.take().is_empty(),
@@ -406,7 +408,7 @@ async fn session_steps_finish_more_than_sixteen_metadata_units_without_another_p
     );
     for _ in 0..8 {
         server
-            .run_steps_after(config.metadata_retry_interval_ms.get())
+            .run_steps_after(config.scheduler.metadata_retry_interval_ms)
             .await;
     }
     assert!(server.metadata_caught_up(&namespace_id).await);
@@ -435,7 +437,7 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(None);
-    config.idle_fold_after_ms = Some(0);
+    config.runtime.idle_fold_after_ms = None;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("fenced-compactor");
     server
@@ -477,7 +479,7 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
         .expect("claim newer compactor");
     store.reset();
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     let operations = store.take();
     assert_eq!(
@@ -489,7 +491,7 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
     assert!(server.metadata_left_due(&namespace_id));
     for _ in 0..59 {
         server
-            .run_steps_after(config.maintenance_interval_ms.get())
+            .run_steps_after(config.scheduler.maintenance_interval_ms)
             .await;
     }
     assert!(
@@ -497,7 +499,7 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
         "a fenced compactor is not retried at every interval"
     );
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     assert!(
         !store.take().is_empty(),
@@ -515,7 +517,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(Some(GrepWorkerConfig::default()));
-    config.idle_fold_after_ms = Some(0);
+    config.runtime.idle_fold_after_ms = None;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let moved = namespace_id("moved");
     let quiet = namespace_id("quiet");
@@ -544,12 +546,14 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .await
         .expect("publish");
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     server.scheduler.run_due_steps().await;
     store.reset();
     server
-        .run_steps_after(config.gc_interval_ms.get() - config.maintenance_interval_ms.get() - 1)
+        .run_steps_after(
+            config.scheduler.gc_interval_ms - config.scheduler.maintenance_interval_ms - 1,
+        )
         .await;
     assert!(store.take().is_empty());
     server.run_steps_after(1).await;
@@ -563,7 +567,9 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
     assert!(operations.iter().all(|op| op
         .key()
         .starts_with(&loonfs_objectstore::keys::namespace_prefix(&moved))));
-    server.run_steps_after(config.gc_interval_ms.get()).await;
+    server
+        .run_steps_after(config.scheduler.gc_interval_ms)
+        .await;
     assert!(
         store.take().is_empty(),
         "an unchanged session is never collected by the session steps"
@@ -573,7 +579,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .expect("publish");
     store.reset();
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     assert_eq!(
         list_count(&store.take()),
@@ -592,7 +598,7 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(Some(GrepWorkerConfig::default()));
-    config.idle_fold_after_ms = Some(0);
+    config.runtime.idle_fold_after_ms = None;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespaces = &server.scheduler.inner.namespaces;
     let namespace_id = namespace_id("idle-close");
@@ -607,7 +613,7 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
         .expect("publish");
     server.enable_index(&namespace_id).await;
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     server.scheduler.run_due_steps().await;
     drop(held);
@@ -622,7 +628,7 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
     store.reset();
     server
         .run_steps_after(
-            config.idle_session_close_after_ms.get() - config.maintenance_interval_ms.get(),
+            config.scheduler.idle_session_close_after_ms - config.scheduler.maintenance_interval_ms,
         )
         .await;
     assert_eq!(
@@ -644,7 +650,7 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
     assert_eq!(held_ids(namespaces).len(), 1);
     assert!(store.take().is_empty());
     server
-        .run_steps_after(config.idle_session_close_after_ms.get() + 1)
+        .run_steps_after(config.scheduler.idle_session_close_after_ms + 1)
         .await;
     server.scheduler.run_due_steps().await;
     store.reset();
@@ -726,7 +732,7 @@ async fn session_steps_close_a_fenced_session_and_the_session_of_a_deleted_names
     assert_eq!(error.code(), loonfs::ErrorCode::WriterFenced, "{error:?}");
     store.reset();
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     assert_eq!(
         held_ids(namespaces),
@@ -739,7 +745,7 @@ async fn session_steps_close_a_fenced_session_and_the_session_of_a_deleted_names
     );
     drop(held);
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     assert!(held_ids(namespaces).is_empty(), "the fenced session closes");
 
@@ -747,7 +753,7 @@ async fn session_steps_close_a_fenced_session_and_the_session_of_a_deleted_names
     held.delete().await.expect("delete the namespace");
     drop(held);
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     assert!(
         held_ids(namespaces).is_empty(),
@@ -793,7 +799,7 @@ async fn a_session_closes_when_its_index_step_finds_the_namespace_deleted() {
         .await
         .expect("delete the namespace");
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     assert!(
         held_ids(namespaces).is_empty(),
@@ -812,8 +818,8 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(None);
-    config.idle_session_close_after_ms = std::num::NonZeroU64::MIN;
-    config.idle_fold_after_ms = Some(60_000);
+    config.scheduler.idle_session_close_after_ms = 1;
+    config.runtime.idle_fold_after_ms = std::num::NonZeroU64::new(60_000);
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespaces = &server.scheduler.inner.namespaces;
     let aborted = namespace_id("aborted-upload");
@@ -853,7 +859,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
         .expect("publish");
     drop(handle);
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     assert_eq!(
         held_ids(namespaces).len(),
@@ -864,7 +870,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
     assert!(server.wal_tail_objects(&unfolded).await > 0);
     store.reset();
     server
-        .run_steps_after(idle_fold_after_ms(&config) - config.maintenance_interval_ms.get() - 1)
+        .run_steps_after(idle_fold_after_ms(&config) - config.scheduler.maintenance_interval_ms - 1)
         .await;
     assert!(
         store.take().is_empty(),
@@ -908,10 +914,10 @@ async fn a_session_that_maintained_itself_leaves_the_session_steps_nothing_to_do
         .expect("publish");
     runtime.drain().await.expect("self-maintenance finishes");
     let recorder = loonfs::metrics::DefaultMetricsRecorder::new();
-    let namespaces = Arc::new(loonfs_http::Namespaces::new(runtime.clone()));
+    let namespaces = Arc::new(crate::Namespaces::new(runtime.clone()));
     namespaces.open(&namespace_id).await.expect("hold");
     let scheduler = super::Scheduler::new(
-        scheduler_config(None).scheduler_config(),
+        scheduler_config(None).scheduler,
         runtime.object_store(),
         Some(runtime.maintenance(writer_id("maintenance"))),
         namespaces,
@@ -941,7 +947,7 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(None);
-    config.idle_fold_after_ms = Some(60_000);
+    config.runtime.idle_fold_after_ms = std::num::NonZeroU64::new(60_000);
     // The runtime's timer starts a day ahead of the system timer, so a host
     // that read a second timer would disagree with it.
     let server = SchedulerServer::start(store.clone(), &config, DAY_MS).await;
@@ -960,7 +966,7 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
     drop(handle);
 
     server
-        .run_steps_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.scheduler.maintenance_interval_ms)
         .await;
     assert_eq!(
         server.idle_fold_due_at_ms(&namespace_id),
@@ -970,7 +976,7 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
     assert!(server.wal_tail_objects(&namespace_id).await > 0);
     store.reset();
     server
-        .run_steps_after(idle_fold_after_ms(&config) - config.maintenance_interval_ms.get() - 1)
+        .run_steps_after(idle_fold_after_ms(&config) - config.scheduler.maintenance_interval_ms - 1)
         .await;
     assert!(
         store.take().is_empty(),
@@ -984,7 +990,7 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
     );
 
     server
-        .run_steps_after(config.idle_session_close_after_ms.get() - idle_fold_after_ms(&config))
+        .run_steps_after(config.scheduler.idle_session_close_after_ms - idle_fold_after_ms(&config))
         .await;
     assert_eq!(
         held_ids(namespaces).len(),
@@ -1002,11 +1008,10 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
 /// Checks that the scheduler of a server whose maintenance mode is
 /// `serve_only` or `disabled` closes a session that passes
 /// `idle_session_close_after_ms` or ends early, without a store request and
-/// without folding the WAL tail, that its sweep lists nothing, and that
-/// `app` builds that scheduler and `AppState::run_due_steps` drives it.
+/// without folding the WAL tail, and that its sweep lists nothing.
 #[tokio::test]
 async fn a_scheduler_without_maintenance_closes_idle_and_ended_sessions_without_store_requests() {
-    use crate::config::JobMode;
+    use crate::JobMode;
 
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
@@ -1047,7 +1052,7 @@ async fn a_scheduler_without_maintenance_closes_idle_and_ended_sessions_without_
     );
 
     server
-        .run_steps_after(config.idle_session_close_after_ms.get() - 1)
+        .run_steps_after(config.scheduler.idle_session_close_after_ms - 1)
         .await;
     assert_eq!(held_ids(namespaces), vec![idle_ns.clone()]);
 
@@ -1081,58 +1086,4 @@ async fn a_scheduler_without_maintenance_closes_idle_and_ended_sessions_without_
         "a sweep without maintenance lists nothing"
     );
     server.runtime.shutdown().await.expect("shutdown");
-
-    // `app` builds the scheduler in the non-maintaining modes, and an
-    // embedded host drives it through `AppState::run_due_steps`.
-    for (index, mode) in [JobMode::ServeOnly, JobMode::Disabled]
-        .into_iter()
-        .enumerate()
-    {
-        let mut app_config = scheduler_config(None);
-        app_config.maintenance = mode;
-        let (_, state) = crate::app(
-            app_config.validate().expect("validate config"),
-            crate::AppConfig {
-                store: Some(store.clone()),
-                direct_transfers: None,
-            },
-        )
-        .await
-        .expect("build app");
-
-        let embedded_ns = namespace_id(&format!("unmaintained-embedded-{index}"));
-        state
-            .http
-            .runtime
-            .create_namespace(&embedded_ns, &test_actor())
-            .await
-            .expect("create namespace");
-        let handle = state
-            .http
-            .namespaces
-            .open(&embedded_ns)
-            .await
-            .expect("open session");
-        handle.close().await.expect("close session");
-        assert_eq!(
-            held_ids(&state.scheduler.inner.namespaces),
-            vec![embedded_ns.clone()]
-        );
-
-        store.take();
-        let opened_ms = state.http.runtime.monotonic_timer().monotonic_now_ms();
-        while state.http.runtime.monotonic_timer().monotonic_now_ms() == opened_ms {
-            tokio::task::yield_now().await;
-        }
-        state.run_due_steps().await;
-        assert!(
-            held_ids(&state.scheduler.inner.namespaces).is_empty(),
-            "`AppState::run_due_steps` closes an ended session in {mode:?} mode"
-        );
-        assert!(
-            store.take().is_empty(),
-            "`AppState::run_due_steps` makes no store request when the server doesn't maintain"
-        );
-        state.http.runtime.shutdown().await.expect("shutdown");
-    }
 }

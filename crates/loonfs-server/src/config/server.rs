@@ -342,27 +342,27 @@ fn default_max_concurrent_downloads() -> NonZeroUsize {
 }
 
 fn default_max_concurrent_maintenance() -> NonZeroUsize {
-    const { NonZeroUsize::new(8).unwrap() }
+    loonfs_http::DEFAULT_MAX_CONCURRENT_MAINTENANCE
 }
 
 fn default_maintenance_interval_ms() -> NonZeroU64 {
-    const { NonZeroU64::new(5_000).unwrap() }
+    const { NonZeroU64::new(loonfs_http::DEFAULT_MAINTENANCE_INTERVAL_MS).unwrap() }
 }
 
 fn default_metadata_retry_interval_ms() -> NonZeroU64 {
-    const { NonZeroU64::new(300_000).unwrap() }
+    const { NonZeroU64::new(loonfs_http::DEFAULT_METADATA_RETRY_INTERVAL_MS).unwrap() }
 }
 
 fn default_gc_interval_ms() -> NonZeroU64 {
-    const { NonZeroU64::new(3_600_000).unwrap() }
+    const { NonZeroU64::new(loonfs_http::DEFAULT_GC_INTERVAL_MS).unwrap() }
 }
 
 fn default_sweep_interval_ms() -> NonZeroU64 {
-    const { NonZeroU64::new(86_400_000).unwrap() }
+    const { NonZeroU64::new(loonfs_http::DEFAULT_SWEEP_INTERVAL_MS).unwrap() }
 }
 
 fn default_idle_session_close_after_ms() -> NonZeroU64 {
-    const { NonZeroU64::new(1_800_000).unwrap() }
+    const { NonZeroU64::new(loonfs_http::DEFAULT_IDLE_SESSION_CLOSE_AFTER_MS).unwrap() }
 }
 
 impl ServerConfig {
@@ -406,8 +406,8 @@ impl ServerConfig {
     }
 
     /// Returns the cadence and limits of the maintenance scheduler.
-    pub(crate) fn scheduler_config(&self) -> crate::scheduler::SchedulerConfig {
-        crate::scheduler::SchedulerConfig {
+    pub(crate) fn scheduler_config(&self) -> loonfs_http::SchedulerConfig {
+        loonfs_http::SchedulerConfig {
             max_concurrent_maintenance: self.max_concurrent_maintenance,
             maintenance_interval_ms: self.maintenance_interval_ms.get(),
             metadata_retry_interval_ms: self.metadata_retry_interval_ms.get(),

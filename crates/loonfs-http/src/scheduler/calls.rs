@@ -12,6 +12,7 @@ use crate::scheduler::Scheduler;
 use crate::scheduler::SchedulerInner;
 use crate::scheduler::SchedulerState;
 use crate::scheduler::MAX_GREP_STEPS_PER_INDEX_STEP;
+use crate::HeldNamespace;
 use futures::FutureExt as _;
 use loonfs::SharedObjectStore;
 use loonfs::{
@@ -21,7 +22,6 @@ use loonfs::{
 use loonfs_grep::{
     GrepBuildOutcome, GrepError, GrepProgress, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps,
 };
-use loonfs_http::HeldNamespace;
 
 use std::collections::hash_map::Entry;
 use std::sync::Mutex;

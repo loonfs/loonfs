@@ -16,7 +16,6 @@ path = "src/main.rs"
 [dependencies]
 axum.workspace = true
 clap.workspace = true
-futures.workspace = true
 http-body.workspace = true
 http.workspace = true
 hyper-util = { workspace = true, features = ["server-auto", "server-graceful", "service", "tokio"] }
@@ -36,9 +35,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 bytes.workspace = true
 form_urlencoded.workspace = true
+futures.workspace = true
 http-body-util.workspace = true
 loonfs = { workspace = true, features = ["test-support"] }
 loonfs-client.workspace = true
@@ -47,7 +46,7 @@ loonfs-test-support.workspace = true
 rcgen.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["io-util", "test-util"] }
+tokio = { workspace = true, features = ["io-util"] }
 ureq.workspace = true
 
 [lints]

@@ -7,8 +7,8 @@ use crate::scheduler::SchedulerState;
 use crate::scheduler::StepRetry;
 use crate::scheduler::MAX_STEP_BACKOFF_MS;
 
+use crate::HeldNamespace;
 use loonfs::{ErrorCode, NamespaceId, PoolId};
-use loonfs_http::HeldNamespace;
 
 use std::sync::Mutex;
 

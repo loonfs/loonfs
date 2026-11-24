@@ -4,7 +4,6 @@
 use super::host_routes::router;
 use super::tls::{self, TlsListener};
 use crate::config::{MemorySizing, ServerConfig, TransportConfig, ValidatedServerConfig};
-use crate::scheduler::{GrepIndexing, Scheduler, SchedulerState};
 use crate::{Result, ServerError};
 use axum::serve::ListenerExt as _;
 use axum::Router;
@@ -17,7 +16,10 @@ use loonfs::{
     ConfiguredObjectStoreKind, LoonFs, Maintenance, SharedObjectStore, Writable, WriterId,
 };
 use loonfs_grep::{GrepBlockCache, GrepService, GrepWorker};
-use loonfs_http::{HttpConfig, HttpHandles, HttpMetrics, HttpState, Namespaces, RequestLimit};
+use loonfs_http::{
+    GrepIndexing, HttpConfig, HttpHandles, HttpMetrics, HttpState, Namespaces, RequestLimit,
+    Scheduler, SchedulerState,
+};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use loonfs_types::config::ConfigFieldError;

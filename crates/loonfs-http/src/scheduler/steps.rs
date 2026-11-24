@@ -4,12 +4,12 @@
 use super::calls::Overlap;
 use super::retries::{CallFailure, MaintenanceCall};
 use super::{contain, lock, RunningScheduler, Scheduler, SchedulerState};
+use crate::HeldNamespace;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{
     CommitSeq, ErrorCode, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus,
 };
-use loonfs_http::HeldNamespace;
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::time::MissedTickBehavior;
@@ -245,7 +245,10 @@ impl Scheduler {
         .map(|_| ())
     }
 
-    pub(crate) fn start(&self) -> RunningScheduler {
+    /// Starts the scheduler's two loops on the current Tokio runtime: a sweep
+    /// at start and then every `sweep_interval_ms`, and the due steps of each
+    /// held session every `maintenance_interval_ms`.
+    pub fn start(&self) -> RunningScheduler {
         let inner = &self.inner;
         let config = &inner.config;
         tracing::info!(
@@ -326,7 +329,7 @@ impl Scheduler {
 
 /// Walks the IDs of the held sessions, without cloning writer handles.
 pub(super) fn held_ids(
-    namespaces: &loonfs_http::Namespaces<SchedulerState>,
+    namespaces: &crate::Namespaces<SchedulerState>,
 ) -> impl Iterator<Item = NamespaceId> + '_ {
     let mut after = None;
     std::iter::from_fn(move || {

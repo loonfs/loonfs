@@ -4,11 +4,11 @@
 use crate::scheduler::calls::Claim;
 use crate::scheduler::metrics::SchedulerMetrics;
 use crate::scheduler::retries::CallFailure;
+use crate::{HostState, Namespaces};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::metrics::MetricsRecorder;
 use loonfs::{CommitSeq, Maintenance, MaintenanceCancellation, NamespaceId, SharedObjectStore};
 use loonfs_grep::{GramIndexBuildPolicy, GrepWorker};
-use loonfs_http::{HostState, Namespaces};
 use loonfs_objectstore::layout::{list_namespace_ids, list_pool_ids, MAX_NAMESPACE_IDS_PER_PAGE};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::{panic_message, EffectiveLimit, MonotonicTimer};
@@ -37,10 +37,12 @@ const MAX_GREP_STEPS_PER_INDEX_STEP: usize = 16;
 /// interval, and each later failure in a row doubles it up to this bound.
 const MAX_STEP_BACKOFF_MS: u64 = 60 * 60 * 1000;
 
-/// The scheduler's current values for one held session: the seqs that it
-/// last indexed and collected, what the last metadata step reported about
-/// the tail, and the retry state of each step that the scheduler retries.
-pub(crate) struct SchedulerState {
+/// The scheduler's current values for one held session.
+///
+/// They are the seqs that the scheduler last indexed and collected, what the
+/// last metadata step reported about the tail, and the retry state of each
+/// step that the scheduler retries.
+pub struct SchedulerState {
     indexed_seq: Option<CommitSeq>,
     collected_seq: Option<CommitSeq>,
     collected_at_ms: u64,
@@ -248,16 +250,45 @@ struct Covered {
     sum: Collected,
 }
 
+/// The default of [`SchedulerConfig::max_concurrent_maintenance`], which the
+/// reference server's config uses.
+pub const DEFAULT_MAX_CONCURRENT_MAINTENANCE: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+/// The default of [`SchedulerConfig::maintenance_interval_ms`], which the
+/// reference server's config uses.
+pub const DEFAULT_MAINTENANCE_INTERVAL_MS: u64 = 5_000;
+/// The default of [`SchedulerConfig::metadata_retry_interval_ms`], which the
+/// reference server's config uses.
+pub const DEFAULT_METADATA_RETRY_INTERVAL_MS: u64 = 300_000;
+/// The default of [`SchedulerConfig::gc_interval_ms`], which the reference
+/// server's config uses.
+pub const DEFAULT_GC_INTERVAL_MS: u64 = 3_600_000;
+/// The default of [`SchedulerConfig::sweep_interval_ms`], which the
+/// reference server's config uses.
+pub const DEFAULT_SWEEP_INTERVAL_MS: u64 = 86_400_000;
+/// The default of [`SchedulerConfig::idle_session_close_after_ms`], which the
+/// reference server's config uses.
+pub const DEFAULT_IDLE_SESSION_CLOSE_AFTER_MS: u64 = 1_800_000;
+
 /// The cadence and limits of the scheduler, under the names of the server
 /// config settings.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SchedulerConfig {
-    pub(crate) max_concurrent_maintenance: NonZeroUsize,
-    pub(crate) maintenance_interval_ms: u64,
-    pub(crate) metadata_retry_interval_ms: u64,
-    pub(crate) gc_interval_ms: u64,
-    pub(crate) sweep_interval_ms: u64,
-    pub(crate) idle_session_close_after_ms: u64,
+pub struct SchedulerConfig {
+    /// How many namespaces the scheduler runs steps on at once, shared by
+    /// sweeps and session steps.
+    pub max_concurrent_maintenance: NonZeroUsize,
+    /// Milliseconds between the scheduler's runs of each held session's due
+    /// steps, and the backoff after a step's first failure.
+    pub maintenance_interval_ms: u64,
+    /// Milliseconds before a metadata step that left work runs again.
+    pub metadata_retry_interval_ms: u64,
+    /// Least milliseconds between two collections of a held session whose
+    /// seq moved.
+    pub gc_interval_ms: u64,
+    /// Milliseconds between sweeps, after the sweep at start.
+    pub sweep_interval_ms: u64,
+    /// Milliseconds since its last open before a held session that has
+    /// nothing due and no caller closes.
+    pub idle_session_close_after_ms: u64,
 }
 
 struct SchedulerInner {
@@ -279,14 +310,14 @@ struct SchedulerInner {
 
 /// The grep worker of a server that maintains the grep index, and the build
 /// policy of its steps.
-pub(crate) struct GrepIndexing {
+pub struct GrepIndexing {
     worker: GrepWorker<SharedObjectStore>,
     policy: GramIndexBuildPolicy,
 }
 
 impl GrepIndexing {
     /// Builds the indexing of `worker`, whose steps run under `policy`.
-    pub(crate) fn new(worker: GrepWorker<SharedObjectStore>, policy: GramIndexBuildPolicy) -> Self {
+    pub fn new(worker: GrepWorker<SharedObjectStore>, policy: GramIndexBuildPolicy) -> Self {
         Self { worker, policy }
     }
 }
@@ -297,7 +328,7 @@ impl Scheduler {
     /// maintenance handle of a server that maintains the store, and `None`
     /// for one that runs only the close step. `grep` is the indexing of a
     /// server that maintains the grep index, and `None` otherwise.
-    pub(crate) fn new(
+    pub fn new(
         config: SchedulerConfig,
         store: SharedObjectStore,
         maintenance: Option<Maintenance>,
@@ -541,7 +572,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// A started scheduler. Stop it before the runtime shuts down.
-pub(crate) struct RunningScheduler {
+pub struct RunningScheduler {
     stop: MaintenanceCancellation,
     task: JoinHandle<()>,
 }
@@ -549,7 +580,7 @@ pub(crate) struct RunningScheduler {
 impl RunningScheduler {
     /// Starts no new steps and stops a running compaction unit at its next
     /// block. Returns at once.
-    pub(crate) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.stop.cancel();
     }
 
@@ -558,7 +589,7 @@ impl RunningScheduler {
     /// scheduler, which drops the steps still running, and logs a warning. A
     /// dropped step leaves what a crash leaves. Like an expired request
     /// drain, that is not an error.
-    pub(crate) async fn stop(
+    pub async fn stop(
         self,
         deadline: Pin<&mut Sleep>,
         shutdown_deadline_ms: u64,

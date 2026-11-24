@@ -1980,7 +1980,6 @@ dependencies = [
 name = "loonfs-server"
 version = "0.6.0"
 dependencies = [
- "async-trait",
  "axum",
  "bytes",
  "clap",

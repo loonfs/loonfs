@@ -11,7 +11,6 @@
 mod config;
 mod error;
 mod http;
-mod scheduler;
 mod trace;
 
 pub use config::{
@@ -21,5 +20,5 @@ pub use config::{
 };
 pub use error::{Result, ServerError};
 pub use http::{app, check_config, probe_store, serve, serve_with_shutdown, AppConfig, AppState};
-pub use scheduler::{Scheduler, SweepReport};
+pub use loonfs_http::{Scheduler, SweepReport};
 pub use trace::init_tracing_from_env;
