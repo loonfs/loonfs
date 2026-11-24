@@ -144,11 +144,10 @@ impl PublisherRegistry {
     /// had the lock may have folded the tail. Without a position, the check
     /// loads the tail from the store, under the fold lock.
     ///
-    /// The fold waits for a fold permit, and it moves the session's position
-    /// and the cached head onto the manifest that covers the tail, whether
-    /// it published that manifest or found it current (see
-    /// [`Self::move_views`]). A fold that publishes then wakes the
-    /// commits that wait at the write stop.
+    /// The fold waits for a fold permit, and it records the manifest that
+    /// covers the tail, whether it published that manifest or found it
+    /// current (see [`Self::record_manifest_published`]). A fold that
+    /// publishes then wakes the commits that wait at the write stop.
     pub(crate) async fn fold_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -231,7 +230,8 @@ impl PublisherRegistry {
         let folded = self
             .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unchanged)
             .await?;
-        self.move_views(namespace_id, folded.current.clone()).await;
+        self.record_manifest_published(namespace_id, folded.current.clone())
+            .await;
         turns.record(round, &folded);
         if folded.response.outcome == FoldWalOutcome::Published {
             if let Some(publisher) = self.live_publisher(namespace_id) {

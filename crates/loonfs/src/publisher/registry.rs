@@ -425,33 +425,29 @@ impl PublisherRegistry {
             .map(|report| report.response)
     }
 
-    /// Moves this runtime's views of the namespace onto a manifest that this
-    /// runtime published (see [`Self::move_views`]).
+    /// Records `published`, a manifest that this runtime published or found
+    /// current. The namespace's publisher moves its position onto it, or
+    /// drops the position when it can't move there, and the runtime drops
+    /// the namespace's cached head unless the cached head is already against
+    /// that manifest or a later one (see
+    /// [`HeadAndWalTailCache::confirm_or_drop_head`](loonfs_core::cache::HeadAndWalTailCache::confirm_or_drop_head)).
     pub(crate) async fn record_manifest_published(
         &self,
         namespace_id: &NamespaceId,
         published: Held<LoadedManifest>,
     ) {
-        self.move_views(namespace_id, published).await;
-    }
-
-    /// Moves the namespace's cached head and its publisher's position onto
-    /// `published`, a manifest that this runtime published or found current,
-    /// or drops each one that can't move there (see
-    /// [`HeadAndWalTailCache::move_head`](loonfs_core::cache::HeadAndWalTailCache::move_head)),
-    /// so that later commits and reads in this runtime start from the newest
-    /// manifest.
-    pub(super) async fn move_views(
-        &self,
-        namespace_id: &NamespaceId,
-        published: Held<LoadedManifest>,
-    ) {
+        // The position moves first, so a session that closes between the
+        // two steps hands the cached head a position on `published`, which
+        // the confirmation keeps, and not a position on an older manifest,
+        // which nothing would drop.
+        self.shared
+            .move_position(namespace_id, published.clone())
+            .await;
         self.shared
             .context
             .runtime_core
             .head_and_wal_tail_cache()
-            .move_head(namespace_id, &published);
-        self.shared.move_position(namespace_id, published).await;
+            .confirm_or_drop_head(namespace_id, &published);
     }
 
     pub(super) fn live_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {
@@ -598,11 +594,10 @@ fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
 /// a namespace, as the namespace's publisher needs to record it.
 #[derive(Debug, Clone)]
 pub(crate) enum NamespaceChange {
-    /// The mutation published this manifest. The publisher's position and
-    /// the cached head move to it, or each one that can't move there is
-    /// dropped.
+    /// The mutation published this manifest, which the runtime records (see
+    /// [`PublisherRegistry::record_manifest_published`]).
     Published(Box<Held<LoadedManifest>>),
-    /// The mutation published no manifest that the views move onto, such as
+    /// The mutation published no manifest for the runtime to record, such as
     /// a garbage collection, a change to a snapshot, or a create (which
     /// installs the new namespace's cached head in core). The publisher keeps
     /// its position, and the cached head stays confirmed.

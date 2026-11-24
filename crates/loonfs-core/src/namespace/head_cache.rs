@@ -13,7 +13,6 @@ use crate::block_cache::{
 use crate::control_object::ControlObjectLoadError;
 use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
-use crate::manifest::move_read_basis;
 use crate::namespace::basis::ReadBasis;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::{Checked, Held};
@@ -378,108 +377,31 @@ impl HeadAndWalTailCache {
             .unwrap_or(next)
     }
 
-    /// Installs the head that `candidate` returns for the cached head, by the
-    /// rule of [`Self::replace_head`], and returns the head that the cache
-    /// keeps, or `None` when the namespace has no cached head.
+    /// Confirms the namespace's cached head with `manifest`'s check, or drops
+    /// the head. `manifest` is a manifest that this runtime published or
+    /// found current.
     ///
-    /// The cache reads the cached head and installs the candidate under one
-    /// lock, so a head that an invalidation dropped stays dropped: the
-    /// candidate is never installed in place of a head that isn't there.
-    fn replace_present_head(
-        &self,
-        namespace_id: &NamespaceId,
-        candidate: impl FnOnce(&CachedHead) -> CachedHead,
-    ) -> Option<Arc<CachedHead>> {
-        self.shared
-            .heads
-            .replace_present(&self.head_key(namespace_id), |cached| {
-                let next = next_head(cached, candidate(cached))?;
-                next.supersedes(cached).then(|| Arc::new(next))
-            })
-    }
-
-    /// Moves the namespace's cached head onto `manifest`, a manifest that
-    /// this runtime published or found current, by the rule a writer
-    /// position moves by (see
-    /// [`NamespaceCommitEngine::record_manifest_published`](crate::publish::NamespaceCommitEngine::record_manifest_published)),
-    /// and caches the WAL tail above the manifest under the moved head's key.
-    ///
-    /// A manifest at or below the cached head's basis leaves the head where
-    /// it is, and the head takes the manifest's check. Any other call makes
-    /// the checks of the head in flight install nothing, and then installs
-    /// the moved head, or, when no head is cached, the head can't move, or
-    /// its tail isn't cached, drops the head as [`Self::invalidate_head`]
-    /// does. A head that a check installed against an older manifest before
-    /// the checks were marked is dropped too. Either install happens only
-    /// while the namespace still has a cached head (see
-    /// [`Self::replace_present_head`]), so a head that an invalidation
-    /// dropped meanwhile stays dropped.
-    ///
-    /// The head keeps its head confirmation, and merges `manifest`'s check
-    /// (see [`Held::merge`]).
-    pub fn move_head(&self, namespace_id: &NamespaceId, manifest: &Held<LoadedManifest>) {
-        let Some(cached) = self.get_head(namespace_id) else {
-            self.invalidate_head(namespace_id);
-            return;
-        };
-        if manifest.manifest_no() <= cached.basis.manifest_no() {
-            self.replace_present_head(namespace_id, |cached| {
-                let mut checked = CachedHead::clone(cached);
-                checked.basis.merge(manifest);
-                checked
-            });
-            return;
-        }
-        if let Some(moved) = self.moved_head(namespace_id, &cached, manifest) {
-            self.install_moved_head(namespace_id, manifest, moved);
-        }
-    }
-
-    /// Returns `cached` moved onto `manifest`, a later manifest, and caches
-    /// its WAL tail, or returns `None` when [`Self::move_head`] installs
-    /// nothing.
-    fn moved_head(
-        &self,
-        namespace_id: &NamespaceId,
-        cached: &CachedHead,
-        manifest: &Held<LoadedManifest>,
-    ) -> Option<CachedHead> {
-        let tail_key = |read_basis: &ReadBasis| WalTailCacheKey {
-            namespace_id: namespace_id.clone(),
-            manifest_no: read_basis.basis.manifest_no(),
-            head_seq: read_basis.head.seq,
-            wal_no: read_basis.head.wal_no,
-        };
-        let mut basis = cached.basis.clone();
-        let Some(mut tail) = self.get_tail(&tail_key(basis.read_basis())) else {
-            self.invalidate_head(namespace_id);
-            return None;
-        };
-        if !move_read_basis(&mut basis, &mut tail, manifest) {
-            self.invalidate_head(namespace_id);
-            return None;
-        }
-        self.insert_tail(tail_key(basis.read_basis()), tail);
-        Some(CachedHead {
-            basis,
-            head_confirmed: cached.head_confirmed.clone(),
-        })
-    }
-
-    /// Marks the checks of the head in flight, installs `moved`, and drops
-    /// the cached head if the head the cache keeps is against a manifest
-    /// older than `manifest`.
-    fn install_moved_head(
+    /// A cached head against `manifest` or a later manifest stays, and takes
+    /// `manifest`'s check when that check is younger or keeps a higher
+    /// boundary (see [`Held::merge`]). Any other head is dropped as
+    /// [`Self::invalidate_head`] drops it, so the next read loads the head by
+    /// discovery. The cache compares the cached head and confirms or drops
+    /// it under one lock, so a head that a read installs on `manifest` or a
+    /// later one while the publication runs stays, and a head that an
+    /// invalidation dropped stays dropped.
+    pub fn confirm_or_drop_head(
         &self,
         namespace_id: &NamespaceId,
         manifest: &Held<LoadedManifest>,
-        moved: CachedHead,
     ) {
-        self.invalidate_head_in_flight(namespace_id);
-        let kept = self.replace_present_head(namespace_id, |_| moved);
-        if kept.is_some_and(|kept| kept.basis.manifest_no() < manifest.manifest_no()) {
-            self.invalidate_head(namespace_id);
-        }
+        self.shared.heads.replace_or_invalidate(
+            &self.head_key(namespace_id),
+            |cached| cached.basis.manifest_no() >= manifest.manifest_no(),
+            |cached| {
+                let mut checked = CachedHead::clone(cached);
+                checked.basis.merge(manifest).then(|| Arc::new(checked))
+            },
+        );
     }
 
     /// Removes the namespace's cached head, after the runtime learns of a
@@ -490,14 +412,6 @@ impl HeadAndWalTailCache {
     /// [`Self::check_or_join_head`]).
     pub fn invalidate_head(&self, namespace_id: &NamespaceId) {
         self.shared.heads.invalidate(&self.head_key(namespace_id));
-    }
-
-    /// Makes the checks of the namespace's head in flight install nothing
-    /// when they finish, and keeps the cached head.
-    fn invalidate_head_in_flight(&self, namespace_id: &NamespaceId) {
-        self.shared
-            .heads
-            .invalidate_in_flight(&self.head_key(namespace_id));
     }
 
     pub fn get_tail(&self, key: &WalTailCacheKey) -> Option<Arc<ProjectedWalTail>> {
@@ -634,9 +548,8 @@ mod tests {
         rechecked(head_at(seq, 1, checked), checked, boundary)
     }
 
-    /// Creates a publication of manifest `manifest_no` in namespace `demo`
-    /// at the head of a basis made by [`head_at`], so a head made by
-    /// [`head_at`] moves onto it and keeps its tail.
+    /// Creates a publication of manifest `manifest_no` in namespace `demo`,
+    /// checked at `started`.
     fn published_at(manifest_no: u64, started: &Observation) -> Held<LoadedManifest> {
         let payload = loonfs_types::format::manifest::NamespaceManifestPayload {
             manifest_no: ManifestNo(manifest_no),
@@ -870,7 +783,7 @@ mod tests {
             || { check_after(&released, head_at(6, 1, &now)) }
         ));
         assert!(poll!(read.as_mut()).is_pending());
-        cache.move_head(&demo, &published_at(2, &now));
+        cache.confirm_or_drop_head(&demo, &published_at(2, &now));
         release.send(true).expect("the check waits for the release");
         let read = read.await.expect("the check's head");
         assert_eq!(
@@ -884,24 +797,16 @@ mod tests {
         );
     }
 
-    /// Checks that a publication that moves the cached head drops the head
-    /// for the check in flight before it installs the moved head, so the
-    /// check's head, newer in sequence but against the older manifest, isn't
-    /// installed over the moved head, and that an older publication's moved
-    /// head arriving after a newer move doesn't replace the newer head.
+    /// Checks that a publication of a manifest later than the cached head's
+    /// drops the cached head, and that a check in flight, whose head is newer
+    /// in sequence but against the older manifest, installs nothing, so the
+    /// next read loads the head by discovery.
     #[tokio::test]
-    async fn a_publication_that_moves_the_cached_head_drops_the_head_a_check_in_flight_loads() {
+    async fn a_publication_of_a_later_manifest_drops_the_cached_head() {
         let now = crate::test_support::observed_now();
         let demo = namespace("demo");
         let cache = HeadAndWalTailCache::unshared(1 << 20);
         cache.replace_head(head_at(6, 1, &now));
-        let tail_key = WalTailCacheKey {
-            namespace_id: demo.clone(),
-            manifest_no: ManifestNo(1),
-            head_seq: CommitSeq(6),
-            wal_no: WalNo(6),
-        };
-        cache.insert_tail(tail_key, Arc::new(ProjectedWalTail::default()));
         let (release, released) = watch::channel(false);
         let mut read = pin!(cache.check_or_join_head(
             &demo,
@@ -909,9 +814,11 @@ mod tests {
             || { check_after(&released, head_at(7, 1, &now)) }
         ));
         assert!(poll!(read.as_mut()).is_pending());
-        cache.move_head(&demo, &published_at(2, &now));
-        let moved = cache.get_head(&demo).expect("the moved head");
-        assert_eq!(order(&moved), (6, 2));
+        cache.confirm_or_drop_head(&demo, &published_at(2, &now));
+        assert!(
+            cache.get_head(&demo).is_none(),
+            "the publication drops the cached head"
+        );
         release.send(true).expect("the check waits for the release");
         let read = read.await.expect("the check's head");
         assert_eq!(
@@ -919,77 +826,9 @@ mod tests {
             (7, 1),
             "the read starts from the check's head"
         );
-        let cached = cache.get_head(&demo).expect("the moved head stays");
-        assert!(Arc::ptr_eq(&cached, &moved), "the check installs nothing");
-        cache.move_head(&demo, &published_at(3, &now));
-        cache.replace_head(head_at(6, 2, &now));
-        let cached = cache.get_head(&demo).expect("the head moved again");
-        assert_eq!(
-            order(&cached),
-            (6, 3),
-            "an older publication's moved head arriving late changes nothing"
-        );
-    }
-
-    /// Checks that a head a check installs against the older manifest while
-    /// a publication moves the cached head, after the publication read the
-    /// cached head and before it marked the checks in flight, is dropped
-    /// rather than kept above the moved head.
-    #[test]
-    fn a_head_a_check_installs_while_a_publication_moves_the_cached_head_is_dropped() {
-        let now = crate::test_support::observed_now();
-        let demo = namespace("demo");
-        let cache = HeadAndWalTailCache::unshared(1 << 20);
-        cache.replace_head(head_at(6, 1, &now));
-        let tail_key = WalTailCacheKey {
-            namespace_id: demo.clone(),
-            manifest_no: ManifestNo(1),
-            head_seq: CommitSeq(6),
-            wal_no: WalNo(6),
-        };
-        cache.insert_tail(tail_key, Arc::new(ProjectedWalTail::default()));
-        let published = published_at(2, &now);
-        let cached = cache.get_head(&demo).expect("a cached head");
-        let moved = cache
-            .moved_head(&demo, &cached, &published)
-            .expect("the head moves");
-        assert_eq!(order(&moved), (6, 2));
-        cache.replace_head(head_at(7, 1, &now));
-        cache.install_moved_head(&demo, &published, moved);
         assert!(
             cache.get_head(&demo).is_none(),
-            "the head against the older manifest is dropped"
-        );
-    }
-
-    /// Checks that a head that a publication moved stays dropped when an
-    /// invalidation drops the cached head after the publication read it and
-    /// before it installs the moved head.
-    #[test]
-    fn a_moved_head_does_not_bring_back_a_head_that_an_invalidation_dropped() {
-        let now = crate::test_support::observed_now();
-        let demo = namespace("demo");
-        let cache = HeadAndWalTailCache::unshared(1 << 20);
-        cache.replace_head(head_at(6, 1, &now));
-        cache.insert_tail(
-            WalTailCacheKey {
-                namespace_id: demo.clone(),
-                manifest_no: ManifestNo(1),
-                head_seq: CommitSeq(6),
-                wal_no: WalNo(6),
-            },
-            Arc::new(ProjectedWalTail::default()),
-        );
-        let published = published_at(2, &now);
-        let cached = cache.get_head(&demo).expect("a cached head");
-        let moved = cache
-            .moved_head(&demo, &cached, &published)
-            .expect("the head moves");
-        cache.invalidate_head(&demo);
-        cache.install_moved_head(&demo, &published, moved);
-        assert!(
-            cache.get_head(&demo).is_none(),
-            "the dropped head stays dropped"
+            "the check installs nothing"
         );
     }
 
@@ -1005,7 +844,7 @@ mod tests {
         let demo = namespace("demo");
         let cache = HeadAndWalTailCache::unshared(1 << 20);
         cache.replace_head(head_at(6, 2, &early));
-        cache.move_head(&demo, &published_at(2, &late));
+        cache.confirm_or_drop_head(&demo, &published_at(2, &late));
         let cached = cache.get_head(&demo).expect("the head stays");
         assert_eq!(order(&cached), (6, 2));
         assert_eq!(cached.basis().checked(), &late);
@@ -1030,7 +869,7 @@ mod tests {
             published.checked().clone(),
             boundary.clone(),
         );
-        cache.move_head(&demo, &published);
+        cache.confirm_or_drop_head(&demo, &published);
         let cached = cache.get_head(&demo).expect("the head stays");
         assert_eq!(order(&cached), (6, 2));
         assert_eq!(cached.basis().boundary(), &boundary);
