@@ -1610,7 +1610,6 @@ async fn compactions_read_input_without_the_cache_and_insert_only_their_output()
     .engine()
     .compact_metadata_unit(
         None,
-        loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await

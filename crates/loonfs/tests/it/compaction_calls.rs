@@ -194,10 +194,6 @@ async fn two_metadata_calls_plan_their_units_from_each_others_manifests() {
         .await
         .expect("fork");
     let maintenance = backlog.maintenance();
-    maintenance
-        .compact_metadata(namespace_id, &MaintenanceCancellation::new())
-        .await
-        .expect("claim the compactor epoch");
     backlog.recording.reset();
     backlog.store.block_next();
     let cancellation = MaintenanceCancellation::new();

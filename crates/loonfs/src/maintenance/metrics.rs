@@ -15,7 +15,6 @@ pub(crate) enum CompactionOutcome {
     Failed,
     Abandoned,
     Cancelled,
-    Fenced,
 }
 
 impl MetricLabel for CompactionOutcome {
@@ -24,7 +23,6 @@ impl MetricLabel for CompactionOutcome {
         Self::Failed,
         Self::Abandoned,
         Self::Cancelled,
-        Self::Fenced,
     ];
 
     fn as_str(self) -> &'static str {
@@ -33,7 +31,6 @@ impl MetricLabel for CompactionOutcome {
             Self::Failed => "failed",
             Self::Abandoned => "abandoned",
             Self::Cancelled => "cancelled",
-            Self::Fenced => "fenced",
         }
     }
 }
@@ -184,7 +181,6 @@ impl CompactionInstruments {
             }
             Ok(CompactionUnitOutcome::Abandoned) => CompactionOutcome::Abandoned,
             Ok(CompactionUnitOutcome::Cancelled) => CompactionOutcome::Cancelled,
-            Ok(CompactionUnitOutcome::Fenced) => CompactionOutcome::Fenced,
             Err(_) => CompactionOutcome::Failed,
         };
         self.outcomes.get(outcome).increment(1);

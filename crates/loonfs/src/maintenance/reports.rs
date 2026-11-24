@@ -67,7 +67,4 @@ pub enum MetadataCompactionOutcome {
     /// The unit stopped because its inputs changed, time ran out, or every
     /// publication attempt lost.
     Abandoned,
-    /// Another process claimed the namespace's compactor epoch, so nothing
-    /// was published.
-    Fenced,
 }

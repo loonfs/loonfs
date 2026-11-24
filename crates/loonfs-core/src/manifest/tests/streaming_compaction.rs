@@ -16,7 +16,6 @@ use crate::segment::scan::VerifiedMetadataSegments;
 use crate::test_support::kept_inodes::{compact_with_seed, whole_group_spec};
 use crate::time::{OperationClock, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
-use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, Intercept, InterceptStore, Interceptor, KeyPredicate,
@@ -402,7 +401,6 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
 ) -> CompactionUnitOutcome {
     let timer = Arc::new(StdMonotonicTimer::default());
     let publication = CompactionPublication {
-        compactor_epoch: loonfs_types::CompactorEpoch(0),
         compaction: OperationClock::start(0, timer.clone()),
         publication: OperationClock::start(0, timer.clone()),
     };
@@ -2204,11 +2202,7 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             fixture
         }
         .engine()
-        .compact_metadata_unit(
-            None,
-            loonfs_types::CompactorEpoch(0),
-            &MetadataCompactionCancellation::default(),
-        )
+        .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
         .await
         .expect("run the unit");
         // The put that lost, and the retry unless the inputs moved.
@@ -2348,11 +2342,7 @@ async fn a_unit_whose_puts_lose_to_unrelated_publications_publishes_without_rewr
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        loonfs_types::CompactorEpoch(0),
-        &MetadataCompactionCancellation::default(),
-    )
+    .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
     .await
     .expect("run the unit");
 
@@ -2449,11 +2439,7 @@ async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
             fixture
         }
         .engine()
-        .compact_metadata_unit(
-            None,
-            loonfs_types::CompactorEpoch(0),
-            &MetadataCompactionCancellation::default(),
-        )
+        .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
         .await
         .expect("run a unit")
         {
@@ -2683,26 +2669,14 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
 }
 
 #[tokio::test]
-async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_publication() {
+async fn an_expired_job_and_a_deletion_each_prevent_publication() {
     use crate::limits::METADATA_COMPACTION_BUDGET_MS;
     use loonfs_test_support::stores::RecordingStore;
 
     let directory = tempdir().expect("tempdir");
     let store = LocalFsStore::new(directory.path()).expect("store");
-    let namespace = NamespaceId::parse("fencing").expect("namespace");
+    let namespace = NamespaceId::parse("abandoned-publication").expect("namespace");
     seed_bindings_workload(&store, &namespace).await;
-    let epoch = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace,
-        &crate::test_support::writer_at("test-writer", 0),
-    )
-    .engine()
-    .claim_compactor(None)
-    .await
-    .expect("claim")
-    .response
-    .manifest()
-    .compactor_epoch();
     let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let input = input_keys_now(&store, &namespace, &spec).await;
     let cancellation = MetadataCompactionCancellation::default();
@@ -2716,65 +2690,11 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     .await
     .expect("compact");
     let timer = Arc::new(ManualClock::stepping(1_000));
-    let mut publication = CompactionPublication {
-        compactor_epoch: epoch,
+    let publication = CompactionPublication {
         compaction: OperationClock::start(0, timer.clone()),
         publication: OperationClock::start(0, timer.clone()),
     };
-    let next_epoch = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace,
-        &crate::test_support::writer_at("test-writer", 0),
-    )
-    .engine()
-    .claim_compactor(None)
-    .await
-    .expect("another claim")
-    .response
-    .manifest()
-    .compactor_epoch();
-    assert_eq!(next_epoch, loonfs_types::CompactorEpoch(epoch.0 + 1));
     let store = RecordingStore::new(store, KeyPredicate::any());
-    let outcome = crate::test_support::namespace_store(&store, &namespace)
-        .finalize_metadata_compaction(
-            None,
-            &spec,
-            &input,
-            result.clone(),
-            &cancellation,
-            &publication,
-        )
-        .await
-        .expect("fenced");
-    assert_eq!(outcome, CompactionUnitOutcome::Fenced);
-    assert_eq!(store.counts().puts, 0);
-    let reads_only_manifests = |store: &RecordingStore<LocalFsStore>| {
-        store.counts().puts == 0
-            && store.take().iter().all(|operation| {
-                matches!(
-                    parse_object_key(operation.key()).map(|key| key.family()),
-                    Some(DurableObjectFamily::Boundary | DurableObjectFamily::MetadataManifest)
-                ) || operation.key() == metadata_manifest_prefix(&namespace)
-            })
-    };
-    store.reset();
-    let unit = {
-        let mut fixture = crate::test_support::NamespaceFixture::new(
-            &store,
-            &namespace,
-            &crate::test_support::writer_at("test-writer", 0),
-        );
-        fixture.namespace.run_policy = compact_everything_policy();
-        fixture
-    }
-    .engine()
-    .compact_metadata_unit(None, epoch, &cancellation)
-    .await
-    .expect("unit fence");
-    assert_eq!(unit, CompactionUnitOutcome::Fenced);
-    assert!(reads_only_manifests(&store));
-
-    publication.compactor_epoch = next_epoch;
     timer.set_ms(METADATA_COMPACTION_BUDGET_MS + 1);
     let outcome = crate::test_support::namespace_store(&store, &namespace)
         .finalize_metadata_compaction(
@@ -2826,25 +2746,13 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
 }
 
 #[tokio::test]
-async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
+async fn two_groups_publish_after_a_number_conflict() {
     use loonfs_test_support::stores::RecordingStore;
 
     let directory = tempdir().expect("tempdir");
     let namespace = NamespaceId::parse("concurrent-groups").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
     seed_bindings_workload(&store, &namespace).await;
-    let epoch = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace,
-        &crate::test_support::writer_at("test-writer", 0),
-    )
-    .engine()
-    .claim_compactor(None)
-    .await
-    .expect("claim")
-    .response
-    .manifest()
-    .compactor_epoch();
     let before = current_manifest_number(&store, &namespace).await;
     let first = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let second =
@@ -2854,7 +2762,6 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
     let cancellation = MetadataCompactionCancellation::default();
     let timer = Arc::new(StdMonotonicTimer::default());
     let publication = CompactionPublication {
-        compactor_epoch: epoch,
         compaction: OperationClock::start(0, timer.clone()),
         publication: OperationClock::start(0, timer.clone()),
     };
@@ -2934,14 +2841,6 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
     );
     assert_eq!(store.inner().counts().create_if_absent_puts, 3);
     assert!(output_keys.is_subset(&referenced_segment_keys(&store, &namespace).await));
-    assert_eq!(
-        crate::test_support::namespace_store(&store, &namespace)
-            .load_current_manifest()
-            .await
-            .expect("manifest")
-            .compactor_epoch(),
-        epoch
-    );
 }
 
 /// Checks that a finalization without a basis finds the current manifest
@@ -3037,11 +2936,7 @@ async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
             fixture
         }
         .engine()
-        .compact_metadata_unit(
-            basis,
-            loonfs_types::CompactorEpoch(0),
-            &MetadataCompactionCancellation::default(),
-        )
+        .compact_metadata_unit(basis, &MetadataCompactionCancellation::default())
         .await
         .expect("run a compaction unit");
         assert_matches!(
@@ -3059,59 +2954,6 @@ async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
             "with a basis: {with_basis}"
         );
     }
-}
-
-/// Checks that a compactor claim over a basis puts with no request first,
-/// and that a unit planned from the manifest the claim returns sends no
-/// request for the manifest or the manifest boundary before its own put.
-#[tokio::test]
-async fn a_unit_planned_from_a_claim_loads_no_manifest() {
-    use loonfs_test_support::stores::RecordingStore;
-
-    let directory = tempdir().expect("tempdir");
-    let namespace = NamespaceId::parse("claim-basis-requests").expect("namespace");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    seed_bindings_workload(&store, &namespace).await;
-    let current = current_manifest_number(&store, &namespace).await;
-    let basis = crate::test_support::namespace_store(&store, &namespace)
-        .load_current_basis(crate::test_support::observed_now())
-        .await
-        .expect("current manifest");
-    let claim = current.successor().expect("the claim's number");
-    let unit = claim.successor().expect("the unit's number");
-    let store = RecordingStore::new(store, KeyPredicate::any());
-    let engine = {
-        let mut fixture = crate::test_support::NamespaceFixture::new(
-            &store,
-            &namespace,
-            &crate::test_support::writer_at("test-writer", 0),
-        );
-        fixture.namespace.run_policy = compact_everything_policy();
-        fixture
-    }
-    .engine();
-    let claimed = engine
-        .claim_compactor(Some(basis))
-        .await
-        .expect("claim")
-        .response;
-    assert_eq!(claimed.manifest().manifest().manifest_no, claim);
-    let epoch = claimed.manifest().compactor_epoch();
-    let outcome = engine
-        .compact_metadata_unit(
-            Some(claimed),
-            epoch,
-            &MetadataCompactionCancellation::default(),
-        )
-        .await
-        .expect("run a compaction unit");
-    assert_matches!(
-        outcome,
-        CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest().manifest().manifest_no == unit
-    );
-    let mut expected = publication_requests(&namespace, claim);
-    expected.extend(publication_requests(&namespace, unit));
-    assert_eq!(control_requests(&namespace, &store.take()), expected);
 }
 
 /// Checks that a finalization whose put loses to a compaction of the same
@@ -3193,18 +3035,6 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     let namespace = NamespaceId::parse("direct-output").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
     seed_bindings_workload(&store, &namespace).await;
-    let epoch = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace,
-        &crate::test_support::writer_at("test-writer", 0),
-    )
-    .engine()
-    .claim_compactor(None)
-    .await
-    .expect("claim")
-    .response
-    .manifest()
-    .compactor_epoch();
     let before = current_manifest_number(&store, &namespace).await;
     let store = RecordingStore::new(store, KeyPredicate::any());
     let outcome = {
@@ -3217,7 +3047,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         fixture
     }
     .engine()
-    .compact_metadata_unit(None, epoch, &MetadataCompactionCancellation::default())
+    .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
     .await
     .expect("publish");
     assert_matches!(
@@ -3278,7 +3108,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         fixture
     }
     .engine()
-    .compact_metadata_unit(None, epoch, &MetadataCompactionCancellation::default())
+    .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
     .await
     .expect_err("a stopped publication should fail the compaction unit");
     assert_eq!(current_manifest_number(&failing, &namespace).await, before);

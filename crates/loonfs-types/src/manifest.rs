@@ -7,7 +7,6 @@ use crate::envelope::EnvelopeCodecError;
 use crate::metadata_rows::MetadataRowFamily;
 use crate::segment_blocks::BlockHandle;
 use crate::Checksum;
-use crate::CompactorEpoch;
 use crate::PoolId;
 use crate::{ActorId, CommitSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
 use crate::{ExtensionName, IndexSegmentId, PublicationId, WalNo, WriterEpoch};
@@ -333,11 +332,6 @@ pub struct NamespaceManifestPayload {
     /// publisher can tell its own put from another publication's (see
     /// [Conflicting and unknown installations](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#93-conflicting-and-unknown-installations)).
     pub publication_id: PublicationId,
-    /// Stops a stale streaming compactor at its next check when a newer runtime claims it.
-    /// Streaming compaction rebuilds a whole family group and publishes once at the end.
-    /// Grep publishes the steps of one maintenance interval together, so a lost race costs
-    /// that interval's steps.
-    pub compactor_epoch: CompactorEpoch,
     /// Folded head, or the final namespace sequence on deletion.
     pub head_seq: CommitSeq,
     /// Activity committed in this namespace through `head_seq`.
@@ -407,7 +401,6 @@ impl NamespaceManifestPayload {
             writer: None,
             manifest_no: ManifestNo(1),
             publication_id: PublicationId::generate(),
-            compactor_epoch: CompactorEpoch(0),
             head_seq: CommitSeq(0),
             activity: ManifestActivity::default(),
             writer_epoch: WriterEpoch(0),
@@ -499,7 +492,6 @@ impl NamespaceManifestPayload {
             folded_wal_no: self.folded_wal_no,
             manifest_no: self.manifest_no.successor()?,
             publication_id: self.publication_id.clone(),
-            compactor_epoch: self.compactor_epoch,
             head_seq: self.head_seq,
             activity: self.activity,
             writer_epoch: self.writer_epoch,
@@ -590,9 +582,6 @@ impl NamespaceManifestPayload {
         }
         if successor.writer_epoch < self.writer_epoch {
             return invalid("writer_epoch");
-        }
-        if successor.compactor_epoch < self.compactor_epoch {
-            return invalid("compactor_epoch");
         }
         if successor.head_seq < self.head_seq {
             return invalid("head_seq");

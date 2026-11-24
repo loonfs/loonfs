@@ -823,13 +823,14 @@ async fn a_position_at_the_boundary_is_dropped_by_its_check() {
         .expect("the position's manifest")
         .manifest()
         .manifest_no;
-    // Another process claims the compactor twice, and a collection one grace
-    // window later deletes the manifests below the newest claim.
+    // Another process changes the retention window twice, and a collection
+    // one grace window later deletes the manifests below the newest change.
     for _ in 0..2 {
-        loonfs_core::NamespaceEngine::writer(namespace(), writer_id("position-boundary-peer"))
-            .claim_compactor(None)
-            .await
-            .expect("another process claims the compactor");
+        loonfs_core::test_support::change_retention_window(&loonfs_core::NamespaceEngine::writer(
+            namespace(),
+            writer_id("position-boundary-peer"),
+        ))
+        .await;
     }
     loonfs::test_support::maintenance_past_the_grace_window(store.clone())
         .await
@@ -864,8 +865,8 @@ fn no_manifests() -> MetadataCache {
 }
 
 /// Creates a fixture whose runtime keeps no manifest, in which another
-/// process claims the compactor twice and a collection one grace window later
-/// deletes the manifest of the session's position. Returns the fixture and
+/// process changes the retention window twice and a collection one grace
+/// window later deletes the manifest of the session's position. Returns the fixture and
 /// the number of the deleted manifest.
 async fn collected_position(name: &str) -> (Fixture, ManifestNo) {
     use loonfs_objectstore::ObjectStore;
@@ -880,10 +881,11 @@ async fn collected_position(name: &str) -> (Fixture, ManifestNo) {
         .manifest()
         .manifest_no;
     for _ in 0..2 {
-        loonfs_core::NamespaceEngine::writer(namespace(), writer_id(&format!("{name}-peer")))
-            .claim_compactor(None)
-            .await
-            .expect("another process claims the compactor");
+        loonfs_core::test_support::change_retention_window(&loonfs_core::NamespaceEngine::writer(
+            namespace(),
+            writer_id(&format!("{name}-peer")),
+        ))
+        .await;
     }
     loonfs::test_support::maintenance_past_the_grace_window(store.clone())
         .await
@@ -1428,7 +1430,7 @@ async fn a_fold_of_an_append_from_a_position_on_a_collected_manifest_succeeds() 
         [
             "get {ns} Boundary",
             "list namespaces/{ns}/manifests/",
-            "get {ns} MetadataManifest 00000000000000000018",
+            "get {ns} MetadataManifest 00000000000000000017",
             "get {ns} Boundary",
         ]
         .map(line)
@@ -1451,7 +1453,7 @@ async fn a_fold_of_an_append_from_a_position_on_a_collected_manifest_succeeds() 
             "get {ns} WalObject 00000000000000000012",
             "get {ns} WalObject 00000000000000000013",
             "get {ns} WalObject 00000000000000000014",
-            "head {ns} MetadataManifest 00000000000000000019",
+            "head {ns} MetadataManifest 00000000000000000018",
             "get {ns} Boundary",
         ]
         .map(line)
@@ -1461,7 +1463,7 @@ async fn a_fold_of_an_append_from_a_position_on_a_collected_manifest_succeeds() 
         vec![line("assemble pool ContentBlob")],
         vec![line("put {ns} MetadataSegment"); 7],
         [
-            "put {ns} MetadataManifest 00000000000000000019",
+            "put {ns} MetadataManifest 00000000000000000018",
             "get {ns} Boundary",
         ]
         .map(line)
@@ -1842,7 +1844,7 @@ async fn a_strong_read_from_a_collected_manifest_reads_the_newest_manifest() {
         // The check that a newer manifest replaced the read's manifest.
         line("get {ns} Boundary"),
         line("list namespaces/{ns}/manifests/"),
-        line("get {ns} MetadataManifest 00000000000000000018"),
+        line("get {ns} MetadataManifest 00000000000000000017"),
         line("get {ns} Boundary"),
         // The second run's load of the head by discovery, with the WAL read
         // above the newest manifest and the check of its successor.
@@ -1850,7 +1852,7 @@ async fn a_strong_read_from_a_collected_manifest_reads_the_newest_manifest() {
         line("list namespaces/{ns}/manifests/"),
         line("get {ns} Boundary"),
         line("get {ns} WalObject 00000000000000000011"),
-        line("head {ns} MetadataManifest 00000000000000000019"),
+        line("head {ns} MetadataManifest 00000000000000000018"),
         line("get {ns} Boundary"),
         // The second run's read from the newest manifest.
         line("get {ns} MetadataSegment"),

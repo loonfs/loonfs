@@ -362,7 +362,6 @@ async fn snapshot_views_add_segment_reads_only_for_uncovered_layout_segments() {
                     .engine()
                     .compact_metadata_unit(
                         None,
-                        loonfs_types::CompactorEpoch(0),
                         &crate::compaction::MetadataCompactionCancellation::default(),
                     )
                     .await
@@ -481,7 +480,6 @@ async fn a_collection_reads_each_extent_filter_once_however_many_snapshot_views_
             .engine()
             .compact_metadata_unit(
                 None,
-                loonfs_types::CompactorEpoch(0),
                 &crate::compaction::MetadataCompactionCancellation::default()
             )
             .await

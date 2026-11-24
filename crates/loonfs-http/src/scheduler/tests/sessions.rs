@@ -392,11 +392,7 @@ async fn session_steps_finish_more_than_sixteen_metadata_units_without_another_p
         .expect("diagnostics")
         .current_manifest_no
         .expect("manifest");
-    assert_eq!(
-        after.0 - before.0,
-        17,
-        "one epoch claim and 16 compaction units"
-    );
+    assert_eq!(after.0 - before.0, 16, "16 compaction units");
     assert!(server.metadata_left_due(&namespace_id));
     store.reset();
     server
@@ -415,97 +411,6 @@ async fn session_steps_finish_more_than_sixteen_metadata_units_without_another_p
     store.reset();
     server.scheduler.run_due_steps().await;
     assert!(store.take().is_empty(), "the backlog eventually catches up");
-    server.runtime.shutdown().await.expect("shutdown");
-}
-
-/// Checks that a session whose compactor another runtime has claimed finds
-/// the claim before it plans a compaction unit. Its position doesn't show
-/// the claim, so one HEAD finds the manifests after the position's manifest,
-/// a read of the manifest boundary follows the walk over them, the position
-/// moves onto them, and the unit stops as fenced without
-/// writing a segment or a manifest. The session's own claim manifest is in
-/// the segment cache from its publication, so the metadata step doesn't read it
-/// again. The walk loads the other runtime's claim manifest into the segment
-/// cache, so the unit reads neither the manifest boundary nor that manifest
-/// again.
-/// The session waits for the metadata retry interval before it tries again.
-#[tokio::test]
-async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval() {
-    let directory = tempdir().expect("tempdir");
-    let store = Arc::new(RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    ));
-    let mut config = scheduler_config(None);
-    config.runtime.idle_fold_after_ms = None;
-    let server = SchedulerServer::start(store.clone(), &config, 0).await;
-    let namespace_id = namespace_id("fenced-compactor");
-    server
-        .runtime
-        .create_namespace(&namespace_id, &test_actor())
-        .await
-        .expect("create");
-    let held = server
-        .scheduler
-        .inner
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .expect("open");
-    for index in 0..2 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() {
-        held.put_file(&format!("/note-{index}"), b"data", &test_actor())
-            .await
-            .expect("publish");
-        server
-            .maintenance
-            .fold_wal(&namespace_id)
-            .await
-            .expect("fold");
-    }
-    server
-        .maintenance
-        .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
-        .await
-        .expect("claim compactor");
-    let other = loonfs::LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("other"))
-        .build()
-        .await
-        .expect("other runtime");
-    other
-        .maintenance(writer_id("other"))
-        .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
-        .await
-        .expect("claim newer compactor");
-    store.reset();
-    server
-        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
-        .await;
-    let operations = store.take();
-    assert_eq!(
-        write_keys(&operations, &KeyPredicate::any()),
-        Vec::<String>::new(),
-        "the session writes no segment and no manifest"
-    );
-    assert_eq!(operations.len(), 5, "{operations:#?}");
-    assert!(server.metadata_left_due(&namespace_id));
-    for _ in 0..59 {
-        server
-            .run_steps_after(config.scheduler.maintenance_interval_ms.get())
-            .await;
-    }
-    assert!(
-        store.take().is_empty(),
-        "a fenced compactor is not retried at every interval"
-    );
-    server
-        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
-        .await;
-    assert!(
-        !store.take().is_empty(),
-        "the next metadata attempt waits for its retry time"
-    );
-    other.shutdown().await.expect("shutdown other");
     server.runtime.shutdown().await.expect("shutdown");
 }
 

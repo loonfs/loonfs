@@ -311,13 +311,11 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
         .delete(&keys::metadata_segment_object_key(segment))
         .await
         .expect("delete pinned segment");
-    loonfs_core::NamespaceEngine::writer(
+    loonfs_core::test_support::change_retention_window(&loonfs_core::NamespaceEngine::writer(
         loonfs_core::test_support::namespace_store(store.clone(), &namespace_id),
         loonfs_types::WriterId::parse("manifest-advance").expect("writer id"),
-    )
-    .claim_compactor(None)
-    .await
-    .expect("advance current manifest");
+    ))
+    .await;
     let current = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
         .load_current_manifest()
         .await

@@ -812,16 +812,13 @@ pub async fn drain_compaction<S: ObjectStore + ?Sized>(
             .engine()
             .compact_metadata_unit(
                 None,
-                loonfs_types::CompactorEpoch(0),
                 &crate::compaction::MetadataCompactionCancellation::default(),
             )
             .await
             .expect("compaction step");
         match outcome {
             crate::CompactionUnitOutcome::Published { .. } => published += 1,
-            crate::CompactionUnitOutcome::Abandoned | crate::CompactionUnitOutcome::Fenced => {
-                continue
-            }
+            crate::CompactionUnitOutcome::Abandoned => continue,
             other => {
                 std::assert_matches!(
                     other,
@@ -838,6 +835,33 @@ pub async fn drain_compaction<S: ObjectStore + ?Sized>(
             }
         }
     }
+}
+
+/// Publishes a manifest through `engine` that changes nothing but the
+/// retention window, and returns it.
+///
+/// The new window is one millisecond longer than the current one, or twice
+/// the grace window when the namespace has none, so every call publishes a
+/// manifest at the same head.
+pub async fn change_retention_window<S: ObjectStore>(
+    engine: &NamespaceWriterEngine<S>,
+) -> Held<LoadedManifest> {
+    let window_ms = engine
+        .namespace
+        .load_current_manifest()
+        .await
+        .expect("current manifest")
+        .payload()
+        .retention_window_ms
+        .map_or(2 * crate::limits::GC_GRACE_WINDOW_MS, |window| {
+            window.get() + 1
+        });
+    engine
+        .set_retention_window(loonfs_types::RetentionWindow::new(window_ms).ok())
+        .await
+        .expect("change the retention window")
+        .published
+        .expect("a new window publishes a manifest")
 }
 
 /// Makes `candidate` a merge of `record` from a fork made at

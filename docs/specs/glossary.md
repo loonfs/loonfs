@@ -343,7 +343,7 @@ A monotonic counter in the manifest incremented each time a new writer session c
 
 ### Epoch claim
 
-A manifest publication incrementing the writer epoch or compactor epoch by 1. A writer claim must be followed by a fence before the previous writer is blocked.
+A manifest publication incrementing the writer epoch by 1. The claim must be followed by a fence before the previous writer is blocked.
 
 ### Fence
 
@@ -357,13 +357,9 @@ The state of a [writer session](#writer-session) from the moment it sends a WAL 
 
 A commitless WAL object recording a new `retention_floor_seq` at the next WAL number so retention advances are ordered against restores in the WAL. Any process can write one using the current manifest's writer epoch without fencing the active writer (a colliding writer simply rediscovers and re-validates against the new floor). Floor objects are never deleted, and the next fold copies the floor into a manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
-### Compactor epoch
-
-A monotonic counter in the manifest preventing an older compaction from publishing after a newer compactor has claimed the namespace.
-
 ### Maintainer
 
-The role that folds the WAL, compacts metadata, publishes extension entries, advances the [retention floor](#retention-floor), and runs garbage collection. Any process can act as maintainer without owning the writer session (compactions claim the compactor epoch, while folds, extension publications, and floor objects need no epoch claim). See [Maintenance roles](../design/maintenance-roles.md) and [Publishing a manifest](format.md#72-publishing-a-manifest).
+The role that folds the WAL, compacts metadata, publishes extension entries, advances the [retention floor](#retention-floor), and runs garbage collection. Any process can act as maintainer, including one without a writer session for the namespace, because no maintainer publication claims an epoch. See [Maintenance roles](../design/maintenance-roles.md) and [Publishing a manifest](format.md#72-publishing-a-manifest).
 
 ### Job
 

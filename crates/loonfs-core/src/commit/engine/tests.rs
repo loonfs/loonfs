@@ -952,10 +952,6 @@ async fn writer_after_own_compaction<'a>(
         engine.record_manifest_published(folded.current);
     }
     let before = engine.writer_position().expect("re-anchored tail");
-    let current = crate::test_support::namespace_store(store, namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current manifest");
     let compacted = {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             store,
@@ -969,7 +965,6 @@ async fn writer_after_own_compaction<'a>(
     .engine()
     .compact_metadata_unit(
         None,
-        current.compactor_epoch(),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
@@ -1201,31 +1196,29 @@ async fn a_manifest_published_over_another_process_fold_moves_the_position() {
     assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
     publish_one(&mut engine, &writer, "gamma").await;
     timer.advance_ms(10);
-    let claimed = {
-        let mut fixture = crate::test_support::NamespaceFixture::new(
-            &store,
-            &namespace_id,
-            &crate::test_support::writer_at("test-writer", 0),
-        );
-        fixture.namespace.timer = timer.clone();
-        fixture
-    }
-    .engine()
-    .claim_compactor(None)
-    .await
-    .expect("claim the compactor")
-    .published
-    .expect("the claim publishes a manifest");
+    let changed = crate::test_support::change_retention_window(
+        &{
+            let mut fixture = crate::test_support::NamespaceFixture::new(
+                &store,
+                &namespace_id,
+                &crate::test_support::writer_at("test-writer", 0),
+            );
+            fixture.namespace.timer = timer.clone();
+            fixture
+        }
+        .engine(),
+    )
+    .await;
     assert_eq!(
-        claimed.manifest().manifest().manifest_no.0,
+        changed.manifest().manifest().manifest_no.0,
         basis.manifest_no().0 + 2
     );
 
-    engine.record_manifest_published(claimed.clone());
+    engine.record_manifest_published(changed.clone());
     let moved = engine.writer_position().expect("the position moved");
     assert_eq!(
         moved.read_basis().basis.manifest(),
-        &claimed.manifest().manifest()
+        &changed.manifest().manifest()
     );
     assert_eq!(
         moved.read_basis().head.folded_wal_no,
@@ -1239,7 +1232,7 @@ async fn a_manifest_published_over_another_process_fold_moves_the_position() {
         engine
             .writer_position()
             .map(|position| position.basis().checked().clone()),
-        Some(claimed.checked().clone())
+        Some(changed.checked().clone())
     );
 }
 
@@ -1247,33 +1240,31 @@ async fn a_manifest_published_over_another_process_fold_moves_the_position() {
 /// the position's whole tail, including the root directory that replay adds
 /// above such a manifest, so the next commit still finds the root.
 #[tokio::test]
-async fn a_claim_over_a_manifest_without_runs_keeps_the_root_directory() {
+async fn a_window_change_over_a_manifest_without_runs_keeps_the_root_directory() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     let before = engine.writer_position().expect("position");
-    let claimed = {
-        let mut fixture = crate::test_support::NamespaceFixture::new(
-            &store,
-            &namespace_id,
-            &crate::test_support::writer_at("test-writer", 0),
-        );
-        fixture.namespace.timer = timer.clone();
-        fixture
-    }
-    .engine()
-    .claim_compactor(None)
-    .await
-    .expect("claim the compactor")
-    .published
-    .expect("the claim publishes a manifest");
+    let changed = crate::test_support::change_retention_window(
+        &{
+            let mut fixture = crate::test_support::NamespaceFixture::new(
+                &store,
+                &namespace_id,
+                &crate::test_support::writer_at("test-writer", 0),
+            );
+            fixture.namespace.timer = timer.clone();
+            fixture
+        }
+        .engine(),
+    )
+    .await;
 
-    engine.record_manifest_published(claimed.clone());
+    engine.record_manifest_published(changed.clone());
     let moved = engine.writer_position().expect("the position moved");
     assert_eq!(
         moved.read_basis().basis.manifest(),
-        &claimed.manifest().manifest()
+        &changed.manifest().manifest()
     );
     assert!(Arc::ptr_eq(&moved.tail, &before.tail));
     let published = publish_one(&mut engine, &writer, "beta").await;

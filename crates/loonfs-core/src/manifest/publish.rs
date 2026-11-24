@@ -621,8 +621,6 @@ fn classify_current(
     // Only this call's put stores the candidate's publication ID.
     let outcome = if current.manifest() == candidate.manifest() {
         ManifestPublicationOutcome::Published(basis.clone())
-    } else if current.compactor_epoch() > candidate.compactor_epoch() {
-        ManifestPublicationOutcome::PredecessorChanged(basis.clone())
     } else if current.folded_wal_no() >= candidate.folded_wal_no()
         && (current.manifest().head_seq, current.manifest().manifest_no)
             >= (

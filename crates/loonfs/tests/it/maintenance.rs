@@ -522,82 +522,128 @@ fn create_directory_request(commit_id: &str, absolute_path: &str) -> CommitInten
     )
 }
 
+/// Checks that two runtimes compacting one namespace at once both finish
+/// without an error and keep the namespace's logical state, and that the
+/// unit whose manifest put loses to the other unit's publication of the same
+/// window reports `Abandoned`. A third runtime, opened after both units end,
+/// reads the state with empty caches, so every segment it reads comes from
+/// the store.
 #[tokio::test]
-async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
+async fn two_runtimes_compacting_one_namespace_keep_its_state_and_the_loser_abandons() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
-    let first = open_compacting_runtime_with_async(store.clone(), "first", |builder| builder).await;
+    let namespace_id = namespace_id("demo");
+    let parked = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    let first =
+        open_compacting_runtime_with_async(parked.clone(), "first", |builder| builder).await;
     let second =
         open_compacting_runtime_with_async(store.clone(), "second", |builder| builder).await;
-    let namespace_id = namespace_id("demo");
-    first
+    second
         .writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
-    for index in 0..2 {
-        first
+    second
+        .namespace_writer(&namespace_id)
+        .expect("open namespace")
+        .create_directory("/dir", &loonfs_test_support::test_actor())
+        .await
+        .expect("create a directory");
+    for path in ["/file-0", "/dir/file-1", "/dir/file-2"] {
+        second
             .put_file(
                 &namespace_id,
-                &format!("/file-{index}"),
-                b"data",
+                path,
+                path.as_bytes(),
                 &loonfs_test_support::test_actor(),
             )
             .await
             .expect("put file");
-        first
+        second
             .maintenance
             .fold_wal(&namespace_id)
             .await
             .expect("fold WAL");
     }
-    for runtime in [&first, &second] {
-        assert_matches!(
-            runtime
-                .maintenance
-                .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
-                .await
-                .expect("claim and compact")
-                .compaction,
-            MetadataCompactionOutcome::Published { .. }
-        );
+    let before = walk(
+        &open_runtime_async(store.clone(), "before").await,
+        &namespace_id,
+    )
+    .await;
+
+    // The first runtime's unit parks at its manifest put. The second
+    // runtime's unit plans the same window from the same manifest and
+    // publishes it, so the first unit's put loses, and the manifest that
+    // won no longer lists the first unit's inputs.
+    parked.block_next();
+    let cancellation = loonfs::MaintenanceCancellation::new();
+    let losing = first
+        .maintenance
+        .compact_metadata(&namespace_id, &cancellation);
+    tokio::pin!(losing);
+    tokio::select! {
+        _ = &mut losing => panic!("the first unit finished before its manifest put"),
+        () = parked.wait_until_blocked() => {}
     }
-    let before = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("manifest before fencing");
-    assert_eq!(before.compactor_epoch(), loonfs_types::CompactorEpoch(2));
-
-    assert_eq!(
-        first
-            .maintenance
-            .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
-            .await
-            .expect("fenced step")
-            .compaction,
-        MetadataCompactionOutcome::Fenced
-    );
-    let fenced = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("manifest after fencing");
-    assert_eq!(fenced.manifest(), before.manifest());
-
     assert_matches!(
-        first
+        second
             .maintenance
-            .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
+            .compact_metadata(&namespace_id, &cancellation)
             .await
-            .expect("claim again and compact")
+            .expect("the second unit")
             .compaction,
         MetadataCompactionOutcome::Published { .. }
     );
-    let published = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("manifest after publication");
-    assert_eq!(published.compactor_epoch(), loonfs_types::CompactorEpoch(3));
-    assert!(published.manifest().manifest_no > before.manifest().manifest_no);
+    parked.release();
+    assert_eq!(
+        losing.await.expect("the first unit").compaction,
+        MetadataCompactionOutcome::Abandoned
+    );
+
+    let after = walk(
+        &open_runtime_async(store.clone(), "after").await,
+        &namespace_id,
+    )
+    .await;
+    assert_eq!(after, before);
+}
+
+/// Returns every path in the namespace with each file's bytes, read through
+/// `runtime`.
+async fn walk(runtime: &TestRuntime, namespace_id: &NamespaceId) -> Vec<(String, Option<Vec<u8>>)> {
+    let mut walked = Vec::new();
+    let mut directories = vec!["/".to_owned()];
+    while let Some(directory) = directories.pop() {
+        for entry in runtime
+            .list_path(namespace_id, &directory)
+            .await
+            .expect("list a directory")
+        {
+            let path = entry.path.to_string();
+            let bytes = match entry.kind {
+                loonfs::PathEntryKind::Directory {} => {
+                    directories.push(path.clone());
+                    None
+                }
+                _ => Some(
+                    runtime
+                        .reader
+                        .namespace(namespace_id)
+                        .read_file(&path)
+                        .await
+                        .expect("read a file")
+                        .bytes,
+                ),
+            };
+            walked.push((path, bytes));
+        }
+    }
+    walked.sort();
+    walked
 }
 
 #[test]

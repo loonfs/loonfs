@@ -261,26 +261,6 @@ macro_rules! numeric_id {
             }
         }
     };
-    (
-        $(#[$meta:meta])*
-        $name:ident
-    ) => {
-        $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-        pub struct $name(pub u64);
-
-        impl From<u64> for $name {
-            fn from(value: u64) -> Self {
-                Self(value)
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}", self.0)
-            }
-        }
-    };
 }
 
 pub(crate) use numeric_id;

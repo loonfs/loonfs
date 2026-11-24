@@ -181,10 +181,11 @@ async fn an_ambiguous_manifest_read_back_after_its_budget_settles_the_put() {
     }
 }
 
-/// Checks that of two compactor claims with the same content, which store
-/// different bytes, the claim whose put loses reports `CoveredByCurrent`.
+/// Checks that of two retention window changes with the same content, which
+/// store different bytes, the change whose put loses reports
+/// `CoveredByCurrent`.
 #[tokio::test]
-async fn compactor_claims_with_the_same_content_report_the_loser_as_covered() {
+async fn window_changes_with_the_same_content_report_the_loser_as_covered() {
     for race_at_put in [false, true] {
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
@@ -198,8 +199,9 @@ async fn compactor_claims_with_the_same_content_report_the_loser_as_covered() {
             .expect("current");
         let mut payload = current.payload().clone();
         payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
-        payload.compactor_epoch.0 += 1;
-        let claim = payload;
+        payload.retention_window_ms =
+            std::num::NonZeroU64::new(2 * crate::limits::GC_GRACE_WINDOW_MS);
+        let change = payload;
         let blocked = BlockingStore::new(
             store.clone(),
             KeyPredicate::manifest(&namespace_id),
@@ -207,17 +209,17 @@ async fn compactor_claims_with_the_same_content_report_the_loser_as_covered() {
         );
         let (losing, winning) = if race_at_put {
             blocked.block_next();
-            let losing = publish_once(&blocked, claim.clone());
+            let losing = publish_once(&blocked, change.clone());
             let winning = async {
                 blocked.wait_until_blocked().await;
-                let outcome = publish_once(&store, claim.clone()).await;
+                let outcome = publish_once(&store, change.clone()).await;
                 blocked.release();
                 outcome
             };
             futures::join!(losing, winning)
         } else {
-            let winning = publish_once(&store, claim.clone()).await;
-            (publish_once(&store, claim).await, winning)
+            let winning = publish_once(&store, change.clone()).await;
+            (publish_once(&store, change).await, winning)
         };
         assert_matches!(
             winning.expect("winner"),
@@ -722,16 +724,19 @@ async fn namespace_status_and_change_feed_report_the_floor_at_the_head_after_an_
     assert!(changes.changes.is_empty());
 }
 
+/// Checks that a retention window change whose put was written but lost its
+/// response finds its own publication ID at the read-back, and publishes
+/// once.
 #[tokio::test]
-async fn an_ambiguous_compactor_claim_confirms_its_own_claim() {
+async fn an_ambiguous_window_change_confirms_its_own_put() {
     use loonfs_test_support::stores::{FailStore, InjectedError};
 
     let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("claimed").expect("namespace");
-    let claim_key = metadata_manifest_object(&namespace_id, &ManifestNo(3));
+    let namespace_id = NamespaceId::parse("window-change").expect("namespace");
+    let change_key = metadata_manifest_object(&namespace_id, &ManifestNo(3));
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::new(move |key| key == claim_key),
+        KeyPredicate::new(move |key| key == change_key),
         OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("response lost".to_owned()),
     )
@@ -741,30 +746,24 @@ async fn an_ambiguous_compactor_claim_confirms_its_own_claim() {
         .create()
         .await
         .expect("create");
-    // The claim was written, and the read-back finds the claim's own
-    // publication ID, so the claimant holds the first epoch.
-    let epoch = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 0),
+    // The change was written, and the read-back finds the change's own
+    // publication ID, so the change publishes manifest 3 and no other.
+    let changed = crate::test_support::change_retention_window(
+        &crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &crate::test_support::writer_at("test-writer", 0),
+        )
+        .engine(),
     )
-    .engine()
-    .claim_compactor(None)
-    .await
-    .expect("claim")
-    .response
-    .manifest()
-    .compactor_epoch();
-    assert_eq!(epoch, loonfs_types::CompactorEpoch(1));
+    .await;
+    assert_eq!(store.remaining(), 0, "the change's put lost its response");
+    assert_eq!(changed.manifest().payload().manifest_no, ManifestNo(3));
     let current = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
         .expect("current manifest");
-    assert_eq!(current.payload().manifest_no, ManifestNo(3));
-    assert_eq!(
-        current.payload().compactor_epoch,
-        loonfs_types::CompactorEpoch(1)
-    );
+    assert_eq!(current.manifest(), changed.manifest().manifest());
 }
 
 /// Checks that two puts of one payload at one number store different bytes,
@@ -914,11 +913,10 @@ async fn a_fold_that_finds_another_fold_after_a_lost_put_keeps_its_position_chec
         .fold_wal()
         .await
         .expect("another process's fold");
-    crate::test_support::NamespaceFixture::new(&local, &namespace_id, &context)
-        .engine()
-        .claim_compactor(None)
-        .await
-        .expect("a manifest above the other fold");
+    crate::test_support::change_retention_window(
+        &crate::test_support::NamespaceFixture::new(&local, &namespace_id, &context).engine(),
+    )
+    .await;
     let other_fold = basis_no.successor().expect("next number");
     assert_eq!(
         crate::test_support::namespace_store(&local, &namespace_id)
