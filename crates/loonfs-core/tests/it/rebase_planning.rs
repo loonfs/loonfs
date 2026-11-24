@@ -180,7 +180,6 @@ impl Family {
                 &rebase_context,
                 &fork,
                 &read_context(&self.store, &self.fork).await,
-                &rebase,
                 &self.snapshot_context().await,
                 &request,
                 self.writer.now_ms,

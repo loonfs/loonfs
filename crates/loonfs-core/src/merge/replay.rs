@@ -132,14 +132,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Plans a replay commit of `fork`, read at `fork_context`, into this
-    /// namespace, a rebase's new fork read at `context`. `source`, read at
-    /// `source_context`, is this namespace read through its fork point
-    /// snapshot, which describes the namespace that the rebase forked at the
-    /// new fork's fork point. A `source_context` at another manifest, or of
-    /// another namespace than this one, returns `namespace_corrupt`
+    /// namespace, a rebase's new fork read at `context`. `snapshot_context`
+    /// reads this namespace through its fork point snapshot, which describes
+    /// the namespace that the rebase forked at the new fork's fork point. A
+    /// `snapshot_context` at another manifest returns `namespace_corrupt`
     /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
-    /// A `source_context` built for another namespace than `source` panics,
-    /// as in every read.
+    /// A `snapshot_context` of another namespace panics, as in every read.
     ///
     /// The plan takes the range's start from this namespace's own replay
     /// rows or `resume_after_seq`, and checks it against both floors, as
@@ -159,15 +157,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// rebase runs.
     #[allow(
         clippy::too_many_arguments,
-        reason = "a replay reads three namespaces, each at its own context, as a merge reads two"
+        reason = "a replay reads this namespace at two contexts and the fork at a third"
     )]
-    pub async fn plan_replay<F, P>(
+    pub async fn plan_replay<F>(
         &self,
         context: &RuntimeReadContext,
         fork: &NamespaceEngine<S, F>,
         fork_context: &RuntimeReadContext,
-        source: &NamespaceEngine<S, P>,
-        source_context: &RuntimeReadContext,
+        snapshot_context: &RuntimeReadContext,
         request: &MergeRequest,
         prepared_at_ms: u64,
         allowance: MergeAllowance,
@@ -179,17 +176,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             fork_point_seq,
             source_after_seq,
         } = replay_range_start(&new_fork, &fork_view, request).await?;
-        let snapshot = source.namespace.load_metadata_view(source_context).await?;
-        let new_fork_id = &new_fork.head().namespace_id;
+        let snapshot = self.namespace.load_metadata_view(snapshot_context).await?;
         let snapshot_manifest_no = basis.fork_point_snapshot_id.manifest_no();
-        if snapshot.head().namespace_id != *new_fork_id
-            || snapshot.anchor.manifest_no != snapshot_manifest_no
-        {
+        if snapshot.anchor.manifest_no != snapshot_manifest_no {
             return Err(CoreError::NamespaceCorrupt(format!(
-                "a replay commit reads `{new_fork_id}` at manifest `{snapshot_manifest_no}` \
-                 through its fork point snapshot, but its context is at manifest `{}` of `{}`",
-                snapshot.anchor.manifest_no,
-                snapshot.head().namespace_id
+                "a replay commit reads `{}` at manifest `{snapshot_manifest_no}` through its \
+                 fork point snapshot, but its snapshot context is at manifest `{}`",
+                new_fork.head().namespace_id,
+                snapshot.anchor.manifest_no
             )));
         }
         let planned = self
