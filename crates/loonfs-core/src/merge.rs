@@ -75,8 +75,7 @@ pub struct MergeRequest {
 /// merge's reservation to the estimate. Admission checks the merge's commit.
 #[derive(Clone)]
 pub struct MergeAllowance {
-    /// The allowance, in bytes. A host whose allowance is zero has merges
-    /// turned off and doesn't plan a merge, so the allowance can't be zero.
+    /// The allowance, in bytes, which is non-zero by type.
     pub max_bytes: NonZeroUsize,
     /// The multiple of a merge's planned WAL bytes that estimates the peak.
     pub peak_per_planned_byte: usize,

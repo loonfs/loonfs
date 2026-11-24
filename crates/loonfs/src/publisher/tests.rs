@@ -683,12 +683,7 @@ fn try_admit_merge(
     namespace_id: &NamespaceId,
     candidate: CommitCandidate,
 ) -> Result<oneshot::Receiver<crate::Result<Commit>>, CoreError> {
-    let merges = publisher
-        .context
-        .runtime_core
-        .merges_enabled()
-        .expect("merges are on");
-    let reservation = publisher.reserve_merge(merges)?;
+    let reservation = publisher.reserve_merge()?;
     let candidate = PreparedCandidate::new(candidate);
     PublicationAdmission::validate_merge(
         &candidate.candidate,

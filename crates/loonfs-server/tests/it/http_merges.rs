@@ -29,15 +29,8 @@ fn path(namespace: &NamespaceId, path: &str) -> NamespacePath {
 
 impl Family {
     async fn new(name: &str) -> Self {
-        Self::with_merge_allowance(name, None).await
-    }
-
-    /// Starts the server with `max_merge_bytes` set to `allowance`, or to
-    /// its default when `allowance` is `None`.
-    async fn with_merge_allowance(name: &str, allowance: Option<usize>) -> Self {
         let directory = tempdir().expect("tempdir");
-        let mut config = test_config(directory.path().join("store"), name, name);
-        config.max_merge_bytes = allowance;
+        let config = test_config(directory.path().join("store"), name, name);
         let harness = start_server(config).await;
         let main = namespace_id("main");
         let fork = namespace_id("fork");
@@ -152,10 +145,10 @@ fn api_error(error: ClientError) -> (String, ErrorDetails) {
     }
 }
 
-/// Checks that the default merge allowance advertises `filesystem.merges`,
-/// that a merge of creates, an edit, a move, and a delete commits them in
-/// `main` as one commit with the merge record, and that a retry with the
-/// commit ID returns the merge.
+/// Checks that the server advertises `filesystem.merges`, that a merge of
+/// creates, an edit, a move, and a delete commits them in `main` as one
+/// commit with the merge record, and that a retry with the commit ID returns
+/// the merge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_merge_commits_the_forks_change_and_a_retry_returns_it() {
     let family = Family::new("http-merge").await;
@@ -210,66 +203,6 @@ async fn a_merge_commits_the_forks_change_and_a_retry_returns_it() {
 
     let retried = family.merge("merge").await.expect("a retry");
     assert_eq!(retried, merged);
-    family.harness.server.abort();
-}
-
-/// Checks that a merge allowance of zero turns merges off. The capability
-/// document leaves out `filesystem.merges`, and the merge, rebase, replay,
-/// and next-range routes return 501 `not_supported` with that key in its
-/// `feature` field, and the rebase route creates no new fork.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_zero_allowance_turns_the_merge_routes_and_their_key_off() {
-    let family = Family::with_merge_allowance("http-merge-off", Some(0)).await;
-    let capabilities = family
-        .harness
-        .client
-        .get_capabilities()
-        .await
-        .expect("capabilities");
-    assert!(!capabilities.features.contains_key(FEATURE_MERGES));
-    let new_fork = namespace_id("rebase");
-    let refused = [
-        family
-            .merge("off")
-            .await
-            .map(drop)
-            .expect_err("merges are off"),
-        family
-            .fork_for_rebase(&new_fork)
-            .await
-            .map(drop)
-            .expect_err("rebases are off"),
-        family
-            .harness
-            .client
-            .replay_fork(&family.main, &family.fork)
-            .await
-            .map(drop)
-            .expect_err("replays are off"),
-        family
-            .harness
-            .client
-            .next_merge_range(&family.main, &family.fork)
-            .await
-            .map(drop)
-            .expect_err("the next-range query is off"),
-    ];
-    for error in refused {
-        match error {
-            ClientError::Api { status, response } => {
-                assert_eq!(status, 501);
-                assert_eq!(response.code, "not_supported");
-                assert_eq!(response.feature.as_deref(), Some(FEATURE_MERGES));
-            }
-            other => panic!("expected an API error, got {other:?}"),
-        }
-    }
-    family
-        .harness
-        .client
-        .get_namespace(&new_fork)
-        .await
-        .expect_err("the refused rebase creates no new fork");
     family.harness.server.abort();
 }
 

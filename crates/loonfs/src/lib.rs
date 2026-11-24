@@ -279,15 +279,6 @@ pub enum Error {
         /// Name of the rejected header, query parameter, or request field.
         param: &'static str,
     },
-    /// The runtime doesn't serve a feature, such as merges when its merge
-    /// allowance is zero.
-    #[error("not supported: {message}")]
-    NotSupported {
-        /// The capability-document key of the feature.
-        feature: &'static str,
-        /// Public reason the feature isn't served.
-        message: String,
-    },
     /// The runtime configuration is invalid.
     #[error("invalid runtime config: {0}")]
     Config(String),
@@ -303,10 +294,7 @@ impl Error {
             code: self.code().as_str().to_owned(),
             message: self.public_message().into_owned(),
             param: self.invalid_request_param(),
-            feature: match self {
-                Self::NotSupported { feature, .. } => Some((*feature).to_owned()),
-                _ => None,
-            },
+            feature: None,
             request_id: None,
             details: self.details().map(Box::new),
         }
@@ -317,7 +305,6 @@ impl Error {
         match self {
             Self::Core(error) => error.code(),
             Self::Config(_) | Self::InvalidRequest { .. } => ErrorCode::InvalidRequest,
-            Self::NotSupported { .. } => ErrorCode::NotSupported,
             Self::RuntimeTask(_) => ErrorCode::ServerError,
         }
     }
@@ -331,10 +318,7 @@ impl Error {
     pub fn details(&self) -> Option<loonfs_types::ErrorDetails> {
         match self {
             Self::Core(error) => error.details(),
-            Self::Config(_)
-            | Self::RuntimeTask(_)
-            | Self::InvalidRequest { .. }
-            | Self::NotSupported { .. } => None,
+            Self::Config(_) | Self::RuntimeTask(_) | Self::InvalidRequest { .. } => None,
         }
     }
 
@@ -367,10 +351,7 @@ impl Error {
     pub fn public_message(&self) -> std::borrow::Cow<'static, str> {
         let store_message = match self {
             Self::Core(error) => error.object_store_public_message(),
-            Self::Config(_)
-            | Self::RuntimeTask(_)
-            | Self::InvalidRequest { .. }
-            | Self::NotSupported { .. } => None,
+            Self::Config(_) | Self::RuntimeTask(_) | Self::InvalidRequest { .. } => None,
         };
         if let Some(message) = store_message {
             return message;
@@ -379,8 +360,7 @@ impl Error {
         match self {
             Self::Config(message)
             | Self::RuntimeTask(message)
-            | Self::InvalidRequest { message, .. }
-            | Self::NotSupported { message, .. } => std::borrow::Cow::Owned(message.clone()),
+            | Self::InvalidRequest { message, .. } => std::borrow::Cow::Owned(message.clone()),
             Self::Core(error) => std::borrow::Cow::Owned(error.to_string()),
         }
     }

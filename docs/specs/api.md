@@ -121,13 +121,13 @@ The feature registry is stable within a protocol version, and new feature keys a
 | `maintenance.grep.index` | Grep index administration: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable` and `disable` routes. | Independent of `query.grep`, because index maintenance and query serving can be deployed separately. Deployments without index maintenance return `not_supported` with this `feature` key. Every deployment's `gc` jobs still collect unreferenced grep index segments. |
 | `filesystem.changes.split_commits` | The `split_commits` and `event_index` query parameters on `GET /v0/namespaces/{ns}/changes` and `GET /v0/namespaces/{ns}/diff`, and `next_event_index` in their responses. | Lets a page stop inside a single commit that exceeds the page budget and resume at an event index (see [`GET /changes`](#611-get-changes)). Without it, both routes return every commit whole. |
 | `filesystem.commits.inline_content` | Sending file bytes inline in `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode`. | Bounded per file by `commit.max_inline_content_bytes_per_operation`. Without this feature, clients upload content before committing. |
-| `filesystem.merges` | Fork merges and rebases: `POST /v0/namespaces/{ns}/merges`, `GET /v0/namespaces/{ns}/merges`, `POST /v0/namespaces/{ns}/rebases`, and `POST /v0/namespaces/{ns}/replays`. | Plans a fork's net change since its previous merge into one commit (see [`POST /merges`](#614-post-merges)), or replays unmerged commits into a new fork while reporting conflicts (see [`POST /rebases`](#616-post-rebases) and [`POST /replays`](#617-post-replays)). Advertised only when merges are enabled (in the reference server, when `max_merge_bytes` is non-zero). Otherwise these four routes return `not_supported` with this `feature` key. |
+| `filesystem.merges` | Fork merges and rebases: `POST /v0/namespaces/{ns}/merges`, `GET /v0/namespaces/{ns}/merges`, `POST /v0/namespaces/{ns}/rebases`, and `POST /v0/namespaces/{ns}/replays`. | Plans a fork's net change since its previous merge into one commit (see [`POST /merges`](#614-post-merges)), or replays unmerged commits into a new fork while reporting conflicts (see [`POST /rebases`](#616-post-rebases) and [`POST /replays`](#617-post-replays)). Every deployment that accepts writes advertises this key. |
 | `filesystem.uploads.direct_put` | Presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | Returns a short-lived, create-only presigned PUT URL for the exact content object, and requires a provider that reports a durable whole-object checksum. Advertised only on endpoints verified by the live conformance suite. Independent of `filesystem.uploads.direct_multipart`. Never exposes raw object keys. |
 | `filesystem.uploads.direct_multipart` | Presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and part signing (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | Opens a provider multipart upload and returns short-lived, checksum-bound presigned URLs per part. Requires an S3-style multipart API, so providers without one omit this key while still advertising `direct_put` and `filesystem.downloads.direct_get`. |
 | `filesystem.downloads.direct_get` | Presigned download URLs (`POST /v0/namespaces/{ns}/filesystem/downloads`, `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads`, and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | Returns short-lived presigned GET URLs for the selected content object without exposing raw object keys. Every deployment that offers direct writes also advertises this key so large files written directly can be read back directly. |
 | `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | Data-dependent capability (see [Data-dependent features](#23-data-dependent-features)). Also requires an active grep index in the namespace's manifest, and namespaces without one return `not_supported` regardless of this key. |
 
-`maintenance.grep.index` is the only optional feature in `maintenance/v0`. In `filesystem/v0`, the only optional features are splitting commits across pages, inline commit content, merges, and the three direct-transfer features. Every other operation in both groups is required, including namespace creation, forking, deletion, and snapshot routes.
+`maintenance.grep.index` is the only optional feature in `maintenance/v0`. In `filesystem/v0`, the only optional features are splitting commits across pages, inline commit content, and the three direct-transfer features. Every deployment that accepts writes serves merges. Every other operation in both groups is required, including namespace creation, forking, deletion, and snapshot routes.
 
 Listing namespaces isn't required to discover a known namespace, and callers can always address namespaces directly by ID. (The `list_namespaces` route is described in [Listing namespaces](#listing-namespaces).)
 
@@ -2578,7 +2578,6 @@ Merge-specific errors beyond ordinary commit errors:
 | `server_busy` | 503 | Concurrent merges exhausted the server's merge memory allowance (step 2). Retry later. |
 | `namespace_not_found`, `namespace_deleted` | 404, 410 | Target or fork is missing or deleted (`details.namespace_id` identifies which). |
 | `invalid_request` | 400 | Fork wasn't created from this namespace (`param`: `/source_namespace_id`), `through_seq` is out of range, or operations couldn't be ordered (`param`: `/through_seq`). |
-| `not_supported` | 501 | Merges are disabled (`max_merge_bytes == 0` in the reference server). Sets `feature` to `filesystem.merges` without writing. |
 
 ### 6.15 `GET /merges`
 
@@ -2642,7 +2641,6 @@ Errors beyond standard read errors:
 | `namespace_not_found`, `namespace_deleted` | 404, 410 | Target or fork is missing or deleted (`details.namespace_id` identifies which). |
 | `invalid_request` | 400 | Missing `source_namespace_id` or fork doesn't match this namespace (`param`: `source_namespace_id`). |
 | `forbidden` | 403 | Subject isn't an administrator of both namespaces. |
-| `not_supported` | 501 | Merges are disabled (`max_merge_bytes == 0`). Sets `feature` to `filesystem.merges` without reading. |
 
 ### 6.16 `POST /rebases`
 
@@ -2706,7 +2704,6 @@ Errors:
 | `snapshot_not_found` | 404 | Tail-folding rebase fork exceeded its 5-minute temporary snapshot window or lost a parent tail WAL object while finishing, as in [`POST /forks`](#613-post-forks). |
 | `namespace_not_found`, `namespace_deleted` | 404, 410 | Parent namespace, source fork, or `new_namespace_id` is missing or deleted (`details.namespace_id` identifies which). |
 | `invalid_request` | 400 | Source fork wasn't created from this parent namespace (`param`: `/source_namespace_id`). |
-| `not_supported` | 501 | Merges are disabled (`max_merge_bytes == 0`). Sets `feature` to `filesystem.merges` without reading or writing. |
 
 Replay commits created by [`POST /replays`](#617-post-replays) follow the merge rules in [`POST /merges`](#614-post-merges) with four rebase-specific adaptations:
 
@@ -2806,7 +2803,6 @@ This route never returns `merge_conflict` because conflicts are returned in `con
 | `server_busy` | 503 | Concurrent merges exhausted the merge memory allowance. Retry later. |
 | `namespace_not_found`, `namespace_deleted` | 404, 410 | Rebase fork or source fork is missing or deleted (`details.namespace_id` identifies which). |
 | `invalid_request` | 400 | `rebased_from` doesn't match `source_namespace_id` (`param`: `/source_namespace_id`), `through_seq` is invalid, or operations couldn't be ordered (`param`: `/through_seq`). |
-| `not_supported` | 501 | Merges are disabled (`max_merge_bytes == 0`). Sets `feature` to `filesystem.merges` without reading or writing. |
 
 ### 6.18 `GET /grep`
 

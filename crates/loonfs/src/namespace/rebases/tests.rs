@@ -334,14 +334,7 @@ async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_change
         actor_id: actor(),
         message: None,
     };
-    let PlannedMerge::Candidate(planned) = rebase
-        .plan_replay(
-            &request,
-            rebase.core.merges_enabled().expect("merges are on"),
-            None,
-        )
-        .await
-        .expect("plan")
+    let PlannedMerge::Candidate(planned) = rebase.plan_replay(&request, None).await.expect("plan")
     else {
         panic!("expected a plan");
     };
@@ -370,11 +363,7 @@ async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_change
         ..request
     };
     let PlannedMerge::Candidate(replanned) = rebase
-        .plan_replay(
-            &replan,
-            rebase.core.merges_enabled().expect("merges are on"),
-            Some(reservation),
-        )
+        .plan_replay(&replan, Some(reservation))
         .await
         .expect("the second plan")
     else {

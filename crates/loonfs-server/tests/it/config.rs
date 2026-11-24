@@ -1180,6 +1180,25 @@ fn server_example_configs_parse_and_validate() {
     );
 }
 
+/// Checks that the server refuses a zero merge allowance, because every
+/// writable server serves merges.
+#[test]
+fn a_zero_merge_allowance_is_rejected() {
+    let path = write_config(
+        r#"
+bind = "127.0.0.1:9400"
+writer_id = "loonfs-server"
+max_merge_bytes = 0
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#,
+    );
+    let error = load_server_config(&path).expect_err("a zero merge allowance must be rejected");
+    assert_zero_rejected_on_decode(error, "max_merge_bytes", "usize");
+}
+
 fn write_config(contents: &str) -> ConfigFile {
     let contents = if contents.contains("content_token_secret") {
         contents.to_owned()
