@@ -420,9 +420,9 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
     let error: loonfs_types::ErrorResponse = serde_json::from_slice(&bytes).expect("fenced error");
     assert_eq!(error.code, ErrorCode::WriterFenced.as_str());
     let (status, bytes) = send(&router, Method::POST, &uri, body.clone()).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    let error: loonfs_types::ErrorResponse = serde_json::from_slice(&bytes).expect("closing error");
-    assert_eq!(error.code, ErrorCode::WriterSessionClosed.as_str());
+    assert_eq!(status, StatusCode::CONFLICT);
+    let error: loonfs_types::ErrorResponse = serde_json::from_slice(&bytes).expect("fenced error");
+    assert_eq!(error.code, ErrorCode::WriterFenced.as_str());
     assert!(namespaces.held_ids().is_empty());
 
     blocking.release();

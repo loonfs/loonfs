@@ -253,7 +253,7 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
             .open_namespace(old.id())
             .expect_err("queued work still belongs to old session")
             .code(),
-        ErrorCode::WriterSessionClosed
+        ErrorCode::WriterFenced
     );
     writer
         .maintenance(loonfs_test_support::ids::writer_id("maintenance"))

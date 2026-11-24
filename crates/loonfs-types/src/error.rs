@@ -29,8 +29,10 @@ pub enum ErrorKind {
     Gone,
     /// The create target already exists and requires another ID unless the request is idempotent.
     AlreadyExists,
-    /// The request conflicts with current namespace state and requires refreshed state
-    /// before retrying.
+    /// The request conflicts with the current state of the namespace, an upload, or the
+    /// writer session, so resending it unchanged fails again. The error code says what to
+    /// change first: for example, `stale_head` needs a fresh read, and `writer_fenced` needs
+    /// a new writer session.
     Conflict,
     /// An unavailable condition that may require retry or maintenance.
     Unavailable,
