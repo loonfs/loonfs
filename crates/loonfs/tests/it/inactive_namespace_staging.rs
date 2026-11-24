@@ -254,7 +254,7 @@ async fn assert_every_staging_commits(harness: &Harness, namespace_id: &Namespac
             namespace
                 .prepare_content_token(SECRET, &token)
                 .await
-                .expect("load the catalog")
+                .expect("load the namespace's head")
                 .expect("verify the token"),
         ),
         ("/inline", inline(harness)),
@@ -360,7 +360,7 @@ async fn staging_is_refused_after_a_delete() {
     let redeemed = namespace
         .prepare_content_token(SECRET, &token)
         .await
-        .expect("load the catalog")
+        .expect("load the namespace's head")
         .expect("verify the token");
     let error = namespace
         .put_file_prepared("/token", redeemed, &actor)

@@ -27,10 +27,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     )]
     #[cfg(any(test, feature = "test-support"))]
     pub async fn store_bytes_as_content(&self, bytes: &[u8]) -> Result<StoredContent> {
-        let catalog = self.load_catalog_entry().await?;
+        let current = self.load_current_manifest().await?;
         stage_bytes_under_content_id(
             &self.store,
-            catalog.pool_id(),
+            &current.payload().pool_id,
             ContentId::generate(),
             bytes,
             ContentKeyOwner::FreshIdentity,

@@ -7,7 +7,7 @@ use super::records::UploadSessionState;
 use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::limits::UPLOAD_SESSION_LEASE_MS;
-use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
+use crate::namespace::state::NamespaceReadState;
 use crate::time::OperationClock;
 use bytes::Bytes;
 use loonfs_objectstore::keys::upload_session;
@@ -65,12 +65,12 @@ impl NewUploadSession {
 
 pub(crate) async fn create_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
-    catalog: &ActiveNamespaceCatalogEntry,
+    head: &NamespaceReadState,
     actor_id: ActorId,
     session: NewUploadSession,
     clock: &OperationClock,
 ) -> Result<UploadSession> {
-    let session = create_upload_session_record(store, catalog, actor_id, session, clock).await?;
+    let session = create_upload_session_record(store, head, actor_id, session, clock).await?;
     let state = UploadSessionState {
         session,
         outcome: None,
@@ -81,14 +81,14 @@ pub(crate) async fn create_upload_session<S: ObjectStore + ?Sized>(
 /// Writes the record that starts a new upload session, with put-if-absent.
 pub(crate) async fn create_upload_session_record<S: ObjectStore + ?Sized>(
     store: &S,
-    catalog: &ActiveNamespaceCatalogEntry,
+    head: &NamespaceReadState,
     actor_id: ActorId,
     session: NewUploadSession,
     clock: &OperationClock,
 ) -> Result<UploadSessionPayload> {
     let upload_id = UploadId::generate();
     let record = UploadSessionPayload {
-        namespace_id: catalog.namespace_id().clone(),
+        namespace_id: head.namespace_id.clone(),
         upload_id: upload_id.clone(),
         content_id: session.content_id,
         actor_id,
@@ -97,14 +97,14 @@ pub(crate) async fn create_upload_session_record<S: ObjectStore + ?Sized>(
             .request_at_ms()
             .saturating_add(UPLOAD_SESSION_LEASE_MS),
     };
-    let object_key = upload_session(catalog.pool_id(), &upload_id);
+    let object_key = upload_session(&head.pool_id, &upload_id);
     let encoded = encode_control_state(ControlObjectKind::UploadSession, &record)
         .expect("an upload session record should encode");
     create_control_object_under_generated_id(
         store,
         &object_key,
         Bytes::from(encoded),
-        catalog.namespace_id(),
+        &head.namespace_id,
         clock,
     )
     .await?;

@@ -67,13 +67,13 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         .put_upload_content(&upload.upload_id, b"b", &loonfs_test_support::test_actor())
         .await
         .expect("stage second put content");
-    let catalog = loonfs_core::test_support::namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
+    let live_context = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .load_manifest_context()
         .await
-        .expect("load namespace catalog");
+        .expect("load the namespace's read context");
     let prepared = loonfs_core::content::prepare_existing_content_ref(
         &store,
-        &catalog,
+        &live_context,
         staged.content_ref().expect("staged content").clone(),
     )
     .await

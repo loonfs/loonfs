@@ -323,7 +323,6 @@ pub mod kept_inodes;
 pub mod ops;
 
 use crate::engine::NamespaceWriterEngine;
-use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
@@ -626,22 +625,32 @@ pub async fn read_context<S: ObjectStore>(
         .expect("the namespace should be active")
 }
 
-/// Loads the catalog entry of `namespace_id` from its current manifest, and
-/// panics unless the namespace is active.
-pub async fn load_catalog<S: ObjectStore>(
+/// Returns the read context of the current manifest of `namespace_id`.
+///
+/// The context has the manifest's own head and no WAL tail, so the load
+/// reads what a load of the current manifest reads. The call panics unless
+/// the namespace is active.
+pub async fn manifest_context<S: ObjectStore>(
     store: S,
     namespace_id: &NamespaceId,
-) -> ActiveNamespaceCatalogEntry {
-    let current = namespace_store(store, namespace_id)
-        .load_current_basis(observed_now())
+) -> crate::RuntimeReadContext {
+    namespace_store(store, namespace_id)
+        .load_manifest_context()
         .await
-        .expect("the namespace should have a current manifest");
-    let basis = current.with_head(crate::namespace::state::NamespaceReadState::from(
-        current.manifest().payload(),
-    ));
-    ActiveNamespaceCatalogEntry::from_context(
-        &crate::RuntimeReadContext::new(&basis, None).expect("the namespace should be active"),
-    )
+        .expect("the namespace should be active")
+}
+
+impl<S: ObjectStore> NamespaceStore<S> {
+    /// Returns the read context of the namespace's current manifest, as
+    /// [`manifest_context`] does, or the error that loading the manifest or
+    /// building the context returns.
+    pub async fn load_manifest_context(&self) -> crate::Result<crate::RuntimeReadContext> {
+        let current = self.load_current_basis(observed_now()).await?;
+        let basis = current.with_head(crate::namespace::state::NamespaceReadState::from(
+            current.manifest().payload(),
+        ));
+        crate::RuntimeReadContext::new(&basis, None)
+    }
 }
 
 /// Folds the WAL tail of `namespace`, a fork's source, and returns no writer

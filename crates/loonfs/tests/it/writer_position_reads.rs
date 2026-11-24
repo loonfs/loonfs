@@ -308,10 +308,10 @@ async fn an_eventual_read_starts_from_the_position_with_no_store_request() {
 }
 
 /// Checks that writes in the writer's runtime send no check of the
-/// position's manifest. The catalog load and the content preparation before
-/// a write read the position as it is, because the position includes every
-/// commit of the session, and another writer's takeover fences the session
-/// at the write's own publish.
+/// position's manifest. Building the read context and preparing content
+/// before a write read the position as it is, because the position includes
+/// every commit of the session, and another writer's takeover fences the
+/// session at the write's own publish.
 #[tokio::test]
 async fn writes_send_no_manifest_check() {
     let fixture = fixture("write-checks", Parked::WalPuts).await;

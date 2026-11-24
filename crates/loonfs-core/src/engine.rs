@@ -10,7 +10,6 @@ use crate::error::{CoreError, Result};
 use crate::metadata::access::is_administrator;
 use crate::namespace::basis::{ReadBasis, SnapshotReadBasis};
 use crate::namespace::boundary::KeptBoundary;
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::path::read::{
@@ -826,16 +825,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let view = self.namespace.load_metadata_view(context).await?;
         crate::diff::diff_page(&view, from_seq, options).await
     }
-
-    /// Asserts that a runtime-supplied catalog belongs to this engine's
-    /// namespace. A mismatch is a bug in the runtime.
-    pub(crate) fn assert_own_catalog(&self, catalog: &VerifiedNamespaceCatalogEntry) {
-        assert_eq!(
-            catalog.namespace_id(),
-            &self.namespace.namespace_id,
-            "a runtime should give an engine its own namespace's catalog"
-        );
-    }
 }
 
 /// The views of one per-subject read, with the authorization that the read
@@ -942,10 +931,10 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer = NamespaceFixture::new(&store, &namespace_id, &writer_at("writer-a", 1_000));
         writer.create().await.expect("bootstrap namespace");
-        let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+        let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
         let begun = writer
             .engine()
-            .begin_upload(&catalog, &loonfs_test_support::test_actor())
+            .begin_upload(&live_context, &loonfs_test_support::test_actor())
             .await
             .expect("begin upload");
 
@@ -956,7 +945,7 @@ mod tests {
             ..
         } = reader
             .get_upload(
-                &catalog,
+                &live_context,
                 &begun.upload_id,
                 &loonfs_test_support::test_actor(),
             )

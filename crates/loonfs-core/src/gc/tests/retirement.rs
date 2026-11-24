@@ -85,10 +85,10 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         .await
         .expect("fork target");
     write_test_file(&inner, &target, "/owned.txt", "target-write", &setup).await;
-    let catalog = crate::test_support::load_catalog(&inner, &target).await;
+    let live_context = crate::test_support::manifest_context(&inner, &target).await;
     let upload = crate::test_support::NamespaceFixture::new(&inner, &target, &setup)
         .engine()
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("open upload");
     crate::test_support::NamespaceFixture::new(&inner, &target, &setup)
@@ -186,11 +186,11 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         .create()
         .await
         .expect("bootstrap");
-    let catalog = crate::test_support::load_catalog(&inner, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&inner, &namespace_id).await;
     let upload = crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &setup)
         .engine()
         .begin_direct_multipart_upload_target(
-            &catalog,
+            &live_context,
             &loonfs_test_support::test_actor(),
             Default::default(),
         )
@@ -203,7 +203,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     )
     .engine()
     .direct_multipart_part_targets(
-        &catalog,
+        &live_context,
         &upload.session.upload_id,
         &[loonfs_types::UploadPartChecksumClaim {
             part_number: 1,

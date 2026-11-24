@@ -16,15 +16,15 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
         content_id: loonfs_types::ContentId,
     ) -> Result<PreparedContent> {
         parse_mutation_path(absolute_path)?;
-        let catalog = self.namespace.load_catalog_entry().await?;
+        let live_context = self.namespace.load_manifest_context().await?;
         let stored = stage_bytes_under_content_id(
             &self.namespace.store,
-            catalog.pool_id(),
+            &live_context.read_basis().head().pool_id,
             content_id,
             bytes,
             ContentKeyOwner::FreshIdentity,
         )
         .await?;
-        Ok(prepare_stored_content(&catalog, stored))
+        Ok(prepare_stored_content(&live_context, stored))
     }
 }

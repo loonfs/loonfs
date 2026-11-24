@@ -15,8 +15,7 @@ use crate::{Consistency, CoreError, NamespaceId, SnapshotId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
-    project_anchor_tail, ActiveNamespaceCatalogEntry, Held, LoadedManifest, NamespaceReadAnchor,
-    ReadBasis, SnapshotReadBasis, VerifiedNamespaceCatalogEntry,
+    project_anchor_tail, Held, LoadedManifest, NamespaceReadAnchor, ReadBasis, SnapshotReadBasis,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::time::Observation;
@@ -378,35 +377,18 @@ impl RuntimeCore {
         }
     }
 
-    /// Returns the namespace's immutable identity, read off the namespace's
-    /// current head, whatever the head's status.
-    pub(crate) async fn load_namespace_catalog_cached(
+    /// Returns the namespace's current head as [`HeadConfirmation::View`]
+    /// confirms it, whatever the head's status. An upload's abort and a
+    /// content token's check use it, because LoonFS aborts uploads in a
+    /// deleted namespace.
+    pub(crate) async fn current_head_of_any_status(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<VerifiedNamespaceCatalogEntry> {
+    ) -> Result<ReadBasis> {
         self.with_current_head(namespace_id, HeadConfirmation::View, |basis, _| {
-            Ok(VerifiedNamespaceCatalogEntry::from_head(
-                basis.read_basis().head(),
-            ))
+            Ok(basis.read_basis().clone())
         })
         .await
-    }
-
-    /// Returns the namespace's immutable identity like
-    /// [`Self::load_namespace_catalog_cached`], and refuses a namespace whose
-    /// head is initializing or deleted.
-    ///
-    /// The head is the one that [`HeadConfirmation::View`] confirms, so the
-    /// refusal follows another process's tombstone within the revalidation
-    /// bound.
-    pub(crate) async fn load_active_namespace_catalog_cached(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<ActiveNamespaceCatalogEntry> {
-        let context = self
-            .current_read_context(namespace_id, HeadConfirmation::View)
-            .await?;
-        Ok(ActiveNamespaceCatalogEntry::from_context(&context))
     }
 
     /// Drops the namespace's cached head, so the next read that doesn't start

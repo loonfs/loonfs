@@ -4,8 +4,8 @@ use super::complete::evidence_within_window;
 use super::proxied::find_proxied_content_ref;
 use super::session::{ensure_session_actor, session_response};
 use crate::engine::NamespaceEngine;
+use crate::engine::RuntimeReadContext;
 use crate::error::Result;
-use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
 use crate::storage::content_admission::CompletedUploadEvidence;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::ObjectStore;
@@ -17,15 +17,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// the caller can retry publication without uploading the content again.
     pub async fn get_upload(
         &self,
-        catalog: &ActiveNamespaceCatalogEntry,
+        context: &RuntimeReadContext,
         upload_id: &UploadId,
         actor_id: &ActorId,
     ) -> Result<UploadSessionView> {
         let now_ms = self.now_ms();
-        self.assert_own_catalog(catalog);
+        let head = context.read_basis().head();
         let loaded = self
             .namespace
-            .load_upload_session_state(catalog, upload_id)
+            .load_upload_session_state(head, upload_id)
             .await?;
         ensure_session_actor(&loaded.session, actor_id)?;
         let evidence = match &loaded.outcome {
@@ -42,13 +42,13 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         };
         let (uploaded, direct_put_object_key) = match (&loaded.outcome, &loaded.session.mode) {
             (None, UploadSessionMode::ServiceProxied {}) => (
-                find_proxied_content_ref(&self.namespace.store, catalog.pool_id(), &loaded.session)
+                find_proxied_content_ref(&self.namespace.store, &head.pool_id, &loaded.session)
                     .await?,
                 None,
             ),
             (None, UploadSessionMode::DirectPut { .. }) => (
                 None,
-                Some(content_blob(catalog.pool_id(), &loaded.session.content_id)),
+                Some(content_blob(&head.pool_id, &loaded.session.content_id)),
             ),
             _ => (None, None),
         };

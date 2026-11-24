@@ -146,11 +146,11 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
         .await
         .expect("store content");
     let content_ref = stored.content_ref().clone();
-    let catalog = crate::test_support::namespace_store(store, namespace_id)
-        .load_catalog_entry()
+    let live_context = crate::test_support::namespace_store(store, namespace_id)
+        .load_manifest_context()
         .await
-        .expect("load namespace catalog");
-    let prepared = prepare_stored_content(&catalog, stored);
+        .expect("load the namespace's read context");
+    let prepared = prepare_stored_content(&live_context, stored);
     NamespaceCommitEngine::new(
         crate::test_support::namespace_store(store, namespace_id),
         context.writer_id.clone(),

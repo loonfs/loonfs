@@ -2,6 +2,7 @@
 //! and redeeming a content token, so that a commit can reference the content.
 
 use crate::publish::PreparedContent;
+use crate::runtime_core::HeadConfirmation;
 use crate::trace::{self, operation_span};
 use crate::ByteStream;
 use crate::Result;
@@ -46,13 +47,13 @@ impl Namespace<Writable> {
                 self.core.store().checksum_algorithm(),
             ));
         }
-        let catalog = self
+        let context = self
             .core
-            .load_active_namespace_catalog_cached(&self.namespace_id)
+            .current_read_context(&self.namespace_id, HeadConfirmation::View)
             .await?;
         Ok(self
             .engine()
-            .stage_owned_bytes(&catalog, actor, bytes)
+            .stage_owned_bytes(&context, actor, bytes)
             .await?)
     }
 
@@ -109,13 +110,13 @@ impl Namespace<Writable> {
                 }
             }
         }
-        let catalog = self
+        let context = self
             .core
-            .load_active_namespace_catalog_cached(&self.namespace_id)
+            .current_read_context(&self.namespace_id, HeadConfirmation::View)
             .await?;
         Ok(self
             .engine()
-            .stage_owned_stream(&catalog, actor, body)
+            .stage_owned_stream(&context, actor, body)
             .await?)
     }
 
@@ -128,13 +129,14 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "prepare_content_token", self.namespace_id),
             async {
-                let catalog = self
-                    .core
-                    .load_namespace_catalog_cached(&self.namespace_id)
+                // A namespace's token still verifies after the namespace is
+                // deleted, and its commit is refused.
+                self.core
+                    .current_head_of_any_status(&self.namespace_id)
                     .await?;
                 Ok(loonfs_core::content::verify_content_token(
                     secret,
-                    &catalog,
+                    &self.namespace_id,
                     token,
                     self.core.now_ms(),
                 ))

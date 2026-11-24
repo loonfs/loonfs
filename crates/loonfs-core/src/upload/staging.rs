@@ -2,9 +2,10 @@
 //! in one call.
 
 use super::session::{create_upload_session_record, NewUploadSession};
+use crate::engine::RuntimeReadContext;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::Result;
-use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
+use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::content_staging::{
@@ -26,25 +27,25 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// and the outcome record after it.
     pub async fn stage_owned_bytes(
         &self,
-        catalog: &ActiveNamespaceCatalogEntry,
+        context: &RuntimeReadContext,
         actor_id: &ActorId,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
         let _permit = self.namespace.content_writes.acquire().await;
-        self.assert_own_catalog(catalog);
+        let head = context.read_basis().head();
         let clock = self.namespace.start_clock();
         let session =
-            open_owned_staging_session(&self.namespace.store, catalog, actor_id, &clock).await?;
+            open_owned_staging_session(&self.namespace.store, head, actor_id, &clock).await?;
         let stored = stage_bytes_under_content_id(
             &self.namespace.store,
-            catalog.pool_id(),
+            &head.pool_id,
             session.content_id.clone(),
             bytes,
             ContentKeyOwner::FreshIdentity,
         )
         .await?;
         self.namespace
-            .complete_owned_staging(catalog, &session, stored.content_ref, &clock)
+            .complete_owned_staging(head, &session, stored.content_ref, &clock)
             .await
     }
 
@@ -55,14 +56,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// are identical.
     pub async fn stage_owned_stream(
         &self,
-        catalog: &ActiveNamespaceCatalogEntry,
+        context: &RuntimeReadContext,
         actor_id: &ActorId,
         body: ByteStream,
     ) -> Result<PreparedContent> {
         let _permit = self.namespace.content_writes.acquire().await;
-        self.assert_own_catalog(catalog);
+        let head = context.read_basis().head();
         self.namespace
-            .stage_owned_stream(catalog, actor_id, body, &self.namespace.start_clock())
+            .stage_owned_stream(head, actor_id, body, &self.namespace.start_clock())
             .await
     }
 }
@@ -75,21 +76,21 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// is identical.
     pub(crate) async fn stage_owned_stream(
         &self,
-        catalog: &ActiveNamespaceCatalogEntry,
+        head: &NamespaceReadState,
         actor_id: &ActorId,
         body: ByteStream,
         clock: &OperationClock,
     ) -> Result<PreparedContent> {
-        let session = open_owned_staging_session(&self.store, catalog, actor_id, clock).await?;
+        let session = open_owned_staging_session(&self.store, head, actor_id, clock).await?;
         let content_ref = stage_streamed_under_content_id(
             &self.store,
-            catalog.pool_id(),
+            &head.pool_id,
             session.content_id.clone(),
             body,
             ContentKeyOwner::FreshIdentity,
         )
         .await?;
-        self.complete_owned_staging(catalog, &session, content_ref, clock)
+        self.complete_owned_staging(head, &session, content_ref, clock)
             .await
     }
 }
@@ -98,13 +99,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
 /// write.
 async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
     store: &S,
-    catalog: &ActiveNamespaceCatalogEntry,
+    head: &NamespaceReadState,
     actor_id: &ActorId,
     clock: &OperationClock,
 ) -> Result<UploadSessionPayload> {
     create_upload_session_record(
         store,
-        catalog,
+        head,
         actor_id.clone(),
         NewUploadSession::service_proxied(),
         clock,
@@ -121,13 +122,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// and garbage collection removes its object.
     async fn complete_owned_staging(
         &self,
-        catalog: &ActiveNamespaceCatalogEntry,
+        head: &NamespaceReadState,
         session: &UploadSessionPayload,
         written: ContentRef,
         clock: &OperationClock,
     ) -> Result<PreparedContent> {
         Ok(self
-            .record_completion(catalog, session, written, clock)
+            .record_completion(head, session, written, clock)
             .await?
             .prepared)
     }

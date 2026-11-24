@@ -128,11 +128,11 @@ impl VisibilityHarness {
             .await
             .expect("stage content");
         let content_ref = stored.content_ref().clone();
-        let catalog = namespace_store(&self.store, self.namespace_id())
-            .load_catalog_entry()
+        let live_context = namespace_store(&self.store, self.namespace_id())
+            .load_manifest_context()
             .await
-            .expect("load namespace catalog");
-        let prepared = prepare_stored_content(&catalog, stored);
+            .expect("load the namespace's read context");
+        let prepared = prepare_stored_content(&live_context, stored);
         self.publish(CommitCandidate::prepared(
             CommitIntent::single(
                 CommitId::generate(),

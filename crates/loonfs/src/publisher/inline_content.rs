@@ -4,6 +4,7 @@ use super::admission::AdmissionPermit;
 use super::queue::PreparedCandidate;
 use super::NamespacePublisher;
 use crate::publish::CommitCandidate;
+use crate::runtime_core::HeadConfirmation;
 use crate::{CoreError, Result};
 use loonfs_core::publish::InlineContent;
 use loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES;
@@ -143,10 +144,10 @@ impl NamespacePublisher {
             .writer
             .upgrade()
             .ok_or(CoreError::ShuttingDown)?;
-        let catalog = self
+        let live = self
             .context
             .runtime_core
-            .load_active_namespace_catalog_cached(namespace_id)
+            .current_read_context(namespace_id, HeadConfirmation::View)
             .await?;
         let engine = self
             .context
@@ -154,7 +155,7 @@ impl NamespacePublisher {
             .writer_engine(&writer.writer_id, namespace_id);
         for value in values {
             let proof = engine
-                .stage_owned_bytes(&catalog, candidate.actor_id(), value.bytes())
+                .stage_owned_bytes(&live, candidate.actor_id(), value.bytes())
                 .await?;
             candidate.stage_inline_content(&value.content_ref().content_id, proof);
         }

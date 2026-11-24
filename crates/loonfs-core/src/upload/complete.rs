@@ -5,10 +5,11 @@ use super::direct::validate_upload_checksum;
 use super::proxied::find_proxied_content_ref;
 use super::records::create_upload_outcome;
 use super::session::{ensure_session_actor, ensure_session_open, upload_mode};
+use crate::engine::RuntimeReadContext;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, COMPLETED_UPLOAD_RECEIPT_WINDOW_MS};
-use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
+use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::storage::content::{verify_durable_content_checksum, DurableContentValidationError};
 use crate::storage::content_admission::{CompletedUploadEvidence, PreparedContent};
@@ -33,17 +34,17 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// outcome is created first, the completion finds it and fails.
     pub async fn complete_upload(
         &self,
-        catalog: &ActiveNamespaceCatalogEntry,
+        context: &RuntimeReadContext,
         upload_id: &UploadId,
         completion: CompleteUploadBody,
         actor_id: &ActorId,
     ) -> Result<CompletedUpload> {
         let clock = self.namespace.start_clock();
-        self.assert_own_catalog(catalog);
+        let head = context.read_basis().head();
         let now_ms = clock.request_at_ms();
         let loaded = self
             .namespace
-            .load_upload_session_state(catalog, upload_id)
+            .load_upload_session_state(head, upload_id)
             .await?;
         ensure_session_actor(&loaded.session, actor_id)?;
         if !matches!(loaded.outcome, Some(UploadOutcome::Completed { .. })) {
@@ -62,22 +63,22 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             );
         }
 
-        let verified = verify_completion(&self.namespace.store, catalog.pool_id(), plan).await?;
+        let verified = verify_completion(&self.namespace.store, &head.pool_id, plan).await?;
         self.namespace
-            .record_completion(catalog, &loaded.session, verified, &clock)
+            .record_completion(head, &loaded.session, verified, &clock)
             .await
     }
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Records a verified content reference as the session's completed outcome,
-    /// under the prefix of the pool of `catalog`.
+    /// under the prefix of the pool of the namespace whose head is `head`.
     ///
     /// All upload modes use this transition. Completion makes the content
     /// eligible for publication and later garbage collection.
     pub(crate) async fn record_completion(
         &self,
-        catalog: &ActiveNamespaceCatalogEntry,
+        head: &NamespaceReadState,
         session: &UploadSessionPayload,
         verified: ContentRef,
         clock: &OperationClock,
@@ -87,8 +88,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             completed_at_ms: now_ms,
             content_ref: verified.clone(),
         };
-        let standing =
-            create_upload_outcome(&self.store, catalog.pool_id(), session, &outcome).await?;
+        let standing = create_upload_outcome(&self.store, &head.pool_id, session, &outcome).await?;
         replay_terminal_completion(
             &standing,
             &session.namespace_id,

@@ -53,11 +53,11 @@ async fn complete_proxied<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     now_ms: u64,
 ) -> crate::error::Result<crate::upload::complete::CompletedUpload> {
-    let catalog = crate::test_support::load_catalog(store, namespace_id).await;
+    let live_context = crate::test_support::manifest_context(store, namespace_id).await;
     crate::test_support::NamespaceFixture::new(store, namespace_id, &context(now_ms))
         .engine()
         .complete_upload(
-            &catalog,
+            &live_context,
             upload_id,
             CompleteUploadBody::ServiceProxied {},
             &loonfs_test_support::test_actor(),
@@ -71,14 +71,22 @@ async fn abort<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     now_ms: u64,
 ) -> crate::error::Result<loonfs_types::UploadSession> {
-    let catalog = crate::test_support::namespace_store(store, namespace_id)
-        .load_catalog_entry()
+    let live_context = crate::test_support::namespace_store(store, namespace_id)
+        .load_manifest_context()
         .await
-        .expect("catalog");
-    crate::test_support::NamespaceFixture::new(store, catalog.namespace_id(), &context(now_ms))
-        .engine()
-        .abort_upload(&catalog, upload_id, &loonfs_test_support::test_actor())
-        .await
+        .expect("read context");
+    crate::test_support::NamespaceFixture::new(
+        store,
+        &live_context.read_basis().head().namespace_id,
+        &context(now_ms),
+    )
+    .engine()
+    .abort_upload(
+        live_context.read_basis(),
+        upload_id,
+        &loonfs_test_support::test_actor(),
+    )
+    .await
 }
 
 async fn upload_keys<S: ObjectStore + ?Sized>(
@@ -265,7 +273,7 @@ async fn a_completion_stalled_across_a_collection_that_deleted_an_aborted_sessio
         [upload_outcome(&pool_id, &upload_id)],
         "the stalled completion's outcome is left without its session"
     );
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     for result in [
         complete_proxied(&store, &namespace_id, &upload_id, 4_000)
             .await
@@ -276,7 +284,11 @@ async fn a_completion_stalled_across_a_collection_that_deleted_an_aborted_sessio
             &crate::test_support::writer_at("test-writer", 4_000),
         )
         .engine()
-        .get_upload(&catalog, &upload_id, &loonfs_test_support::test_actor())
+        .get_upload(
+            &live_context,
+            &upload_id,
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .map(drop),
     ] {
@@ -423,11 +435,11 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     let gc = pool.gc(None, &clock);
     let complete = async {
         store.wait_until_blocked().await;
-        let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+        let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
         let result = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &inside)
             .engine()
             .complete_upload(
-                &catalog,
+                &live_context,
                 &upload_id,
                 loonfs_types::CompleteUploadBody::ServiceProxied {},
                 &loonfs_test_support::test_actor(),
@@ -512,12 +524,12 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS + 1);
     let content_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
     let store = blocking_outcome_store(store, BlockedOutcome::Completed);
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let engine =
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &inside).engine();
     let actor = loonfs_test_support::test_actor();
     let completion = engine.complete_upload(
-        &catalog,
+        &live_context,
         &upload_id,
         loonfs_types::CompleteUploadBody::ServiceProxied {},
         &actor,

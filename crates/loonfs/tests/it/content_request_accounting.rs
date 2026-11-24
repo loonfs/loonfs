@@ -171,7 +171,7 @@ async fn build_initialized_writer(
     namespace
         .create_directory("/catalog-warmup", &loonfs_test_support::test_actor())
         .await
-        .expect("warm namespace catalog");
+        .expect("warm the namespace's head");
     writer
 }
 
@@ -181,11 +181,11 @@ async fn prepare_content(
     namespace_id: &NamespaceId,
     content_ref: &loonfs::ContentRef,
 ) -> PreparedContent {
-    let catalog = loonfs_core::test_support::namespace_store(store, namespace_id)
-        .load_catalog_entry()
+    let live_context = loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_manifest_context()
         .await
-        .expect("load namespace catalog");
-    loonfs_core::content::prepare_existing_content_ref(store, &catalog, content_ref.clone())
+        .expect("load the namespace's read context");
+    loonfs_core::content::prepare_existing_content_ref(store, &live_context, content_ref.clone())
         .await
         .expect("prepare existing content")
 }
@@ -273,7 +273,7 @@ async fn independent_namespaces_sharing_a_store_reject_each_others_prepared_cont
     target_writer
         .create_directory("/catalog-warmup", &loonfs_test_support::test_actor())
         .await
-        .expect("warm shared target catalog");
+        .expect("warm the shared target's head");
     let prepared = source_writer
         .prepare_content(b"independently shared", &loonfs_test_support::test_actor())
         .await
@@ -311,7 +311,7 @@ async fn fork_and_source_reject_each_others_prepared_content() {
     fork_writer
         .create_directory("/fork-catalog-warmup", &loonfs_test_support::test_actor())
         .await
-        .expect("warm fork catalog");
+        .expect("warm the fork's head");
     recording.reset();
 
     let source_content_ref = prepared_for_fork.content_ref().clone();
@@ -407,12 +407,12 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
 }
 
 /// Checks the requests of each proxied upload call on a writer with an open
-/// session: the calls take the namespace's catalog from the writer position,
-/// so no call reads a manifest, lists the manifests, or reads the manifest
-/// boundary, and each call sends only the requests of its session records and
-/// its content.
+/// session: the calls take the namespace's read context from the writer
+/// position, so no call reads a manifest, lists the manifests, or reads the
+/// manifest boundary, and each call sends only the requests of its session
+/// records and its content.
 #[tokio::test]
-async fn proxied_upload_calls_take_the_catalog_from_the_writer_position() {
+async fn proxied_upload_calls_take_the_read_context_from_the_writer_position() {
     let harness = TestHarness::new("proxied-upload-catalog").await;
     let namespace = harness
         .writer

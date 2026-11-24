@@ -5,7 +5,7 @@ use super::records::create_upload_outcome;
 use super::session::{ensure_session_actor, upload_mode};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::basis::ReadBasis;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{
@@ -21,18 +21,21 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// idempotent: repeating it succeeds and returns the original abort
     /// timestamp, and it refuses a session that already completed, whose
     /// content may be published.
+    ///
+    /// `basis` is the namespace's head of any status, not a read context,
+    /// because LoonFS aborts the sessions of a deleted namespace too.
     pub async fn abort_upload(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        basis: &ReadBasis,
         upload_id: &UploadId,
         actor_id: &ActorId,
     ) -> Result<UploadSession> {
-        self.assert_own_catalog(catalog);
+        let head = basis.head();
         let clock = self.namespace.start_clock();
-        let namespace_id = catalog.namespace_id();
+        let namespace_id = &head.namespace_id;
         let loaded = self
             .namespace
-            .load_upload_session_state(catalog, upload_id)
+            .load_upload_session_state(head, upload_id)
             .await?;
         ensure_session_actor(&loaded.session, actor_id)?;
         let outcome = match loaded.outcome {
@@ -40,7 +43,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             None => {
                 create_upload_outcome(
                     &self.namespace.store,
-                    catalog.pool_id(),
+                    &head.pool_id,
                     &loaded.session,
                     &UploadOutcome::Aborted {
                         aborted_at_ms: clock.request_at_ms(),
@@ -51,7 +54,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         };
         let aborted_at_ms = repeated_abort(&outcome, upload_id)?;
 
-        if !AbandonedUpload::of(catalog.pool_id(), &loaded.session)
+        if !AbandonedUpload::of(&head.pool_id, &loaded.session)
             .release(&self.namespace.store)
             .await
         {

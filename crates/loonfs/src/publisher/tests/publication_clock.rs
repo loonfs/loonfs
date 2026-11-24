@@ -37,22 +37,22 @@ async fn publish_after_retry_delay(
     });
     let runtime = test_runtime(store.clone());
     create_namespace(&runtime, &namespace_id).await;
-    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = loonfs_core::test_support::manifest_context(&store, &namespace_id).await;
     let engine = runtime
         .core
         .writer_engine(&runtime.writer.writer_id, &namespace_id);
     let actor = loonfs_test_support::test_actor();
     let upload = engine
-        .begin_upload(&catalog, &actor)
+        .begin_upload(&live_context, &actor)
         .await
         .expect("begin upload");
     engine
-        .upload_content(&catalog, &upload.upload_id, b"content", &actor)
+        .upload_content(&live_context, &upload.upload_id, b"content", &actor)
         .await
         .expect("upload bytes");
     let completed = engine
         .complete_upload(
-            &catalog,
+            &live_context,
             &upload.upload_id,
             loonfs_types::CompleteUploadBody::ServiceProxied {},
             &actor,
@@ -68,8 +68,13 @@ async fn publish_after_retry_delay(
     .expect("token");
     let expires = issued + loonfs_core::limits::CONTENT_RECEIPT_TTL_MS;
     let started = expires - remaining_ms;
-    let prepared = loonfs_core::content::verify_content_token("secret", &catalog, &token, started)
-        .expect("proof valid at admission");
+    let prepared = loonfs_core::content::verify_content_token(
+        "secret",
+        &live_context.read_basis().head().namespace_id,
+        &token,
+        started,
+    )
+    .expect("proof valid at admission");
     clock.set_ms(started);
     retry_time.store(started + 10, AtomicOrdering::SeqCst);
     let publisher = standalone_publisher_with(

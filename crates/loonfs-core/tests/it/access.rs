@@ -967,21 +967,24 @@ async fn a_retry_by_another_actor_is_a_reuse_conflict() {
 #[tokio::test]
 async fn upload_sessions_belong_to_the_actor_that_opened_them() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = loonfs_core::test_support::manifest_context(&store, &namespace_id).await;
     let ada = ActorId::parse("usr_ada").expect("actor");
     let bob = ActorId::parse("usr_bob").expect("actor");
     let service = namespace_engine(&store, &namespace_id, &context);
     let with_principals =
         namespace_engine(&store, &namespace_id, &context).with_subject(subject(&["team"]));
     for engine in [&service, &with_principals] {
-        let session = engine.begin_upload(&catalog, &ada).await.expect("begin");
+        let session = engine
+            .begin_upload(&live_context, &ada)
+            .await
+            .expect("begin");
         engine
-            .get_upload(&catalog, &session.upload_id, &ada)
+            .get_upload(&live_context, &session.upload_id, &ada)
             .await
             .expect("the actor's own session");
         assert_eq!(
             engine
-                .get_upload(&catalog, &session.upload_id, &bob)
+                .get_upload(&live_context, &session.upload_id, &bob)
                 .await
                 .expect_err("another actor's session")
                 .code(),
@@ -989,7 +992,7 @@ async fn upload_sessions_belong_to_the_actor_that_opened_them() {
         );
         assert_eq!(
             engine
-                .abort_upload(&catalog, &session.upload_id, &bob)
+                .abort_upload(live_context.read_basis(), &session.upload_id, &bob)
                 .await
                 .expect_err("another actor's session")
                 .code(),

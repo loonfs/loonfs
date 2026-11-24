@@ -722,15 +722,15 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         bytes: &[u8],
         context: &WriterAt,
     ) -> loonfs_types::ContentRef {
-        let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
+        let live_context = loonfs_core::test_support::manifest_context(store, namespace_id).await;
         let engine = namespace_engine(store, namespace_id, context);
         let upload = engine
-            .begin_upload(&catalog, &loonfs_test_support::test_actor())
+            .begin_upload(&live_context, &loonfs_test_support::test_actor())
             .await
             .expect("begin upload");
         let staged = engine
             .upload_content(
-                &catalog,
+                &live_context,
                 &upload.upload_id,
                 bytes,
                 &loonfs_test_support::test_actor(),
@@ -739,7 +739,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
             .expect("upload bytes");
         let completed = engine
             .complete_upload(
-                &catalog,
+                &live_context,
                 &upload.upload_id,
                 loonfs_types::CompleteUploadBody::ServiceProxied {},
                 &loonfs_test_support::test_actor(),

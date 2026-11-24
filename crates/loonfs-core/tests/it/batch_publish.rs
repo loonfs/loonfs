@@ -706,13 +706,14 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
         .store_bytes_as_content(b"proof replay")
         .await
         .expect("store content");
-    let catalog = namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
+    let live_context = namespace_store(&store, &namespace_id)
+        .load_manifest_context()
         .await
-        .expect("load namespace catalog");
-    let prepared = prepare_existing_content_ref(&store, &catalog, stored.content_ref().clone())
-        .await
-        .expect("prepare content");
+        .expect("load the namespace's read context");
+    let prepared =
+        prepare_existing_content_ref(&store, &live_context, stored.content_ref().clone())
+            .await
+            .expect("prepare content");
     let put = commit_request(
         "over-proof-replay",
         FilesystemOperation::PutFile {
@@ -816,13 +817,14 @@ async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
         .store_bytes_as_content(b"batch proof")
         .await
         .expect("store content");
-    let catalog = namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
+    let live_context = namespace_store(&store, &namespace_id)
+        .load_manifest_context()
         .await
-        .expect("load namespace catalog");
-    let prepared = prepare_existing_content_ref(&store, &catalog, stored.content_ref().clone())
-        .await
-        .expect("prepare content");
+        .expect("load the namespace's read context");
+    let prepared =
+        prepare_existing_content_ref(&store, &live_context, stored.content_ref().clone())
+            .await
+            .expect("prepare content");
     let put = commit_request(
         "over-proof-duplicate",
         FilesystemOperation::PutFile {

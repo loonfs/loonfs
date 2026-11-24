@@ -196,10 +196,10 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &WriterAt,
 ) -> (UploadId, ContentRef) {
-    let catalog = crate::test_support::load_catalog(store, namespace_id).await;
+    let live_context = crate::test_support::manifest_context(store, namespace_id).await;
     let begin = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     let staged = crate::test_support::NamespaceFixture::new(
@@ -209,7 +209,7 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     )
     .engine()
     .upload_content(
-        &catalog,
+        &live_context,
         &begin.upload_id,
         b"racing upload\n",
         &loonfs_test_support::test_actor(),
@@ -580,11 +580,11 @@ async fn complete_staged_upload<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     context: &WriterAt,
 ) {
-    let catalog = crate::test_support::load_catalog(store, namespace_id).await;
+    let live_context = crate::test_support::manifest_context(store, namespace_id).await;
     crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
         .complete_upload(
-            &catalog,
+            &live_context,
             upload_id,
             loonfs_types::CompleteUploadBody::ServiceProxied {},
             &loonfs_test_support::test_actor(),
@@ -600,10 +600,10 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     context: &WriterAt,
 ) -> (UploadId, ContentRef) {
-    let catalog = crate::test_support::load_catalog(store, namespace_id).await;
+    let live_context = crate::test_support::manifest_context(store, namespace_id).await;
     let begin = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     let staged = crate::test_support::NamespaceFixture::new(
@@ -613,7 +613,7 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     )
     .engine()
     .upload_content(
-        &catalog,
+        &live_context,
         &begin.upload_id,
         bytes,
         &loonfs_test_support::test_actor(),
@@ -652,13 +652,13 @@ async fn put_file_content_with_id<S: ObjectStore>(
     bytes: &[u8],
     content_id: loonfs_types::ContentId,
 ) -> ContentRef {
-    let catalog = crate::test_support::namespace_store(store, namespace_id)
-        .load_catalog_entry()
+    let live_context = crate::test_support::namespace_store(store, namespace_id)
+        .load_manifest_context()
         .await
-        .expect("catalog");
+        .expect("read context");
     let stored = crate::storage::content_staging::stage_bytes_under_content_id(
         store,
-        catalog.pool_id(),
+        &live_context.read_basis().head().pool_id,
         content_id,
         bytes,
         crate::storage::content_staging::ContentKeyOwner::FreshIdentity,
@@ -685,7 +685,8 @@ async fn put_file_content_with_id<S: ObjectStore>(
                 },
             ),
             vec![crate::storage::content::prepare_stored_content(
-                &catalog, stored,
+                &live_context,
+                stored,
             )],
         )],
         &context(1_000).clock(),
