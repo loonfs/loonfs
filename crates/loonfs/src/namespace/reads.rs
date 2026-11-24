@@ -79,7 +79,9 @@ impl<M: crate::Mode> Namespace<M> {
     /// A live read reads the live head, confirmed as `at` asks, and runs
     /// again from the newest manifest each time a newer manifest replaced the
     /// read's basis, up to `MAX_CONTENTION_ATTEMPTS` runs in all.
-    /// A snapshot read reads the snapshot that `at` selects.
+    /// A snapshot read reads the snapshot that `at` selects. LoonFS checks
+    /// the read's rights at the live head, and the read runs again the same
+    /// way when a newer manifest replaced that head's manifest.
     pub(crate) async fn read_at<T, Read, ReadFuture>(&self, at: &ReadAt, read: Read) -> Result<T>
     where
         Read: Fn(PinnedRead, ReadSource) -> ReadFuture,
@@ -112,11 +114,17 @@ impl<M: crate::Mode> Namespace<M> {
                     .await
             }
             ReadAt::Snapshot(snapshot_id) => {
-                let pinned = self
-                    .core
-                    .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
-                    .await?;
-                read(pinned, ReadSource::Snapshot(snapshot_id.clone())).await
+                // Boxed for the same reason as `RuntimeCore::read_at_least`:
+                // without the box, a crate that awaits a read fails to
+                // compile with "queries overflow the depth limit!".
+                Box::pin(self.core.run_again_after_replaced_manifest(|| async {
+                    let pinned = self
+                        .core
+                        .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
+                        .await?;
+                    read(pinned, ReadSource::Snapshot(snapshot_id.clone())).await
+                }))
+                .await
             }
         }
     }

@@ -42,19 +42,19 @@ impl LoonFs<Writable> {
                 let target = self
                     .find_fork_target(namespace_id, new_namespace_id)
                     .await?;
-                let main = self
+                let fork_point_seq = self
                     .core
-                    .pinned_read(namespace_id, Consistency::Strong)
+                    .read(namespace_id, Consistency::Strong, |main| async move {
+                        let fork = self
+                            .core
+                            .pinned_read(source_namespace_id, Consistency::Strong)
+                            .await?;
+                        Ok(main
+                            .engine
+                            .fork_point_for_rebase(&main.context, &fork.engine, &fork.context)
+                            .await?)
+                    })
                     .await?;
-                let fork_point_seq = {
-                    let fork = self
-                        .core
-                        .pinned_read(source_namespace_id, Consistency::Strong)
-                        .await?;
-                    main.engine
-                        .fork_point_for_rebase(&main.context, &fork.engine, &fork.context)
-                        .await?
-                };
                 self.install_fork(namespace_id, |engine, held| {
                     let target = target.clone();
                     async move {

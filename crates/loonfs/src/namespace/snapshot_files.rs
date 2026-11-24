@@ -48,14 +48,22 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "list_snapshot_files", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                let pinned = self
-                    .core
-                    .pinned_read(&self.namespace_id, Consistency::Strong)
-                    .await?;
-                Ok(pinned
-                    .engine
-                    .list_snapshot_files_page(snapshot_id, request, options, &pinned.context)
-                    .await?)
+                self.core
+                    .read(&self.namespace_id, Consistency::Strong, |pinned| {
+                        let request = request.clone();
+                        async move {
+                            Ok(pinned
+                                .engine
+                                .list_snapshot_files_page(
+                                    snapshot_id,
+                                    request,
+                                    options,
+                                    &pinned.context,
+                                )
+                                .await?)
+                        }
+                    })
+                    .await
             },
         )
         .await

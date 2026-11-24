@@ -67,40 +67,43 @@ impl RuntimeCore {
         Fut: std::future::Future<Output = Result<T>>,
     {
         let mut confirmation = confirmation.into();
-        let mut pinned = self
-            .pinned_read(namespace_id, confirmation)
-            .instrument(phase_span!(self, Phase::PinRead, namespace_id))
-            .await?;
-        if min_head_seq.is_some_and(|seq| pinned.head_seq() < seq)
-            && self.reads_eventual(confirmation)
-        {
-            confirmation = HeadConfirmation::from(Consistency::Strong);
-            pinned = self
-                .pinned_read(namespace_id, confirmation)
-                .instrument(phase_span!(self, Phase::PinRead, namespace_id))
-                .await?;
-        }
-        // The first run reads at the head pinned above, and each later run
-        // pins the head again.
-        let mut first = Some(pinned);
-        let read = &read;
         // Boxed, because without the box, a crate that awaits a read fails to
         // compile with "queries overflow the depth limit!" while the compiler
         // computes the layout of the caller's future.
-        Box::pin(self.run_again_after_replaced_manifest(|| {
-            let first = first.take();
-            async move {
-                let pinned = match first {
-                    Some(pinned) => pinned,
-                    None => {
-                        self.pinned_read(namespace_id, confirmation)
-                            .instrument(phase_span!(self, Phase::PinRead, namespace_id))
-                            .await?
-                    }
-                };
-                read(pinned).await
+        Box::pin(async move {
+            let mut pinned = self
+                .pinned_read(namespace_id, confirmation)
+                .instrument(phase_span!(self, Phase::PinRead, namespace_id))
+                .await?;
+            if min_head_seq.is_some_and(|seq| pinned.head_seq() < seq)
+                && self.reads_eventual(confirmation)
+            {
+                confirmation = HeadConfirmation::from(Consistency::Strong);
+                pinned = self
+                    .pinned_read(namespace_id, confirmation)
+                    .instrument(phase_span!(self, Phase::PinRead, namespace_id))
+                    .await?;
             }
-        }))
+            // The first run reads at the head pinned above, and each later
+            // run pins the head again.
+            let mut first = Some(pinned);
+            let read = &read;
+            self.run_again_after_replaced_manifest(|| {
+                let first = first.take();
+                async move {
+                    let pinned = match first {
+                        Some(pinned) => pinned,
+                        None => {
+                            self.pinned_read(namespace_id, confirmation)
+                                .instrument(phase_span!(self, Phase::PinRead, namespace_id))
+                                .await?
+                        }
+                    };
+                    read(pinned).await
+                }
+            })
+            .await
+        })
         .await
     }
 

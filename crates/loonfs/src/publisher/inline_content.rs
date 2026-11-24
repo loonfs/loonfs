@@ -120,19 +120,22 @@ impl NamespacePublisher {
                 return Ok(());
             }
         }
-        let crate::pinned_read::PinnedRead {
-            engine: reader,
-            context,
-        } = self
+        let commit_id = candidate.commit_id();
+        let receipt = self
             .context
             .runtime_core
-            .pinned_read(namespace_id, crate::runtime_core::HeadConfirmation::View)
+            .read(
+                namespace_id,
+                crate::runtime_core::HeadConfirmation::View,
+                |pinned| async move {
+                    Ok(pinned
+                        .engine
+                        .find_commit_receipt(&pinned.context, commit_id)
+                        .await?)
+                },
+            )
             .await?;
-        if reader
-            .find_commit_receipt(&context, candidate.commit_id())
-            .await?
-            .is_some()
-        {
+        if receipt.is_some() {
             return Ok(());
         }
         let writer = self
