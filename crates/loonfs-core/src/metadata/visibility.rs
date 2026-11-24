@@ -80,6 +80,23 @@ pub(crate) trait MetadataVisibilityReads {
         active_child_binding(self, parent_inode_id, name_key).await
     }
 
+    /// Returns the `set` tombstone of the root's deletion when that deletion
+    /// is in the trash (above the view's retention floor)
+    /// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
+    async fn find_deletion_in_trash(
+        &mut self,
+        root_inode_id: InodeId,
+    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error>
+    where
+        Self: Sized,
+    {
+        let floor = self.retention_floor_seq();
+        Ok(self
+            .find_hiding_subtree_tombstone(root_inode_id)
+            .await?
+            .filter(|tombstone| tombstone.committed_seq > floor))
+    }
+
     /// Composite rule; see [`ancestry`].
     async fn ancestry(&mut self, inode_id: InodeId) -> Result<Ancestry, Self::Error>
     where
@@ -268,33 +285,29 @@ impl AncestorWalk {
 /// ([format section 4.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#43-visible-metadata)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Ancestry {
-    /// The walk reached the root inode without meeting a hiding tombstone,
-    /// so the inode is visible if it exists.
+    /// The walk reached the root inode without meeting a deletion in the
+    /// trash, so the inode is visible if it exists.
     Root,
-    /// The first hiding tombstone (a `set`) that the walk met, on the inode
-    /// or on one of its ancestors.
-    Hidden(SubtreeTombstoneRecord),
+    /// The walk met a deletion in the trash, on the inode or on one of its
+    /// ancestors.
+    Hidden,
     /// The walk reached an inode with no current parent binding before it
-    /// reached the root or a hiding tombstone.
+    /// reached the root or a deletion in the trash.
     Disconnected,
 }
 
 /// Walks the current bound parent bindings up from `inode_id` to the root
-/// or the first hiding tombstone, whichever comes first.
+/// or the first deletion in the trash, whichever comes first.
 ///
-/// A `revoke` hides nothing, so the walk passes it. A deletion in the trash
-/// and an expired one both hide their subtree, so the walk doesn't read the
-/// retention floor, and the walk doesn't continue above the inode that a
-/// deletion's tombstone is on.
+/// A `revoke` hides nothing, so the walk passes it, and the walk doesn't
+/// continue above the inode that a deletion in the trash is on.
 ///
-/// An inode that isn't deleted has bound edges up to the root, and a deleted
-/// inode has them up to the inode that its deletion's tombstone is on, so a
-/// chain that breaks before either occurs only below an expired deletion.
-/// Base compactions remove an expired subtree's rows a family group at a
-/// time, so the bindings that lead to the deleted directory can be gone while
-/// the inode rows and revisions below it remain. Every visibility check
-/// therefore treats an inode whose ancestry is [`Ancestry::Disconnected`] as
-/// hidden.
+/// An inode that isn't deleted has bound edges up to the root, and an inode
+/// below a deletion in the trash has them up to the deletion's root. The
+/// walk skips an expired deletion's tombstone, and the deletion's root has
+/// no bound edge, so every walk below it ends as [`Ancestry::Disconnected`],
+/// whichever of the subtree's rows base compactions have removed. Every
+/// visibility check treats such an inode as hidden.
 ///
 /// The root inode can't be deleted, so the walk stops there without reading
 /// its tombstones. A parent-binding cycle is corrupt stored metadata, and the
@@ -309,8 +322,8 @@ pub(crate) async fn ancestry<R: MetadataVisibilityReads>(
         if ancestor == ROOT_INODE_ID {
             return Ok(Ancestry::Root);
         }
-        if let Some(tombstone) = reads.find_hiding_subtree_tombstone(ancestor).await? {
-            return Ok(Ancestry::Hidden(tombstone));
+        if reads.find_deletion_in_trash(ancestor).await?.is_some() {
+            return Ok(Ancestry::Hidden);
         }
     }
     Ok(Ancestry::Disconnected)
@@ -319,21 +332,16 @@ pub(crate) async fn ancestry<R: MetadataVisibilityReads>(
 /// Whether the ancestry of `inode_id` allows a read by inode ID
 /// ([format section 4.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#44-paths-listings-and-revision-reads)).
 ///
-/// The read is refused when the walk meets a deletion at or below the view's
-/// retention floor, which has expired. The read is allowed when the walk
-/// meets a deletion above the floor, because the rights on an item under a
-/// deletion in the trash are judged on the deletion's saved ancestry. The
-/// read is allowed when the walk reaches the root, and refused when the
-/// ancestry is disconnected (see [`ancestry`]).
+/// The read is allowed when the walk reaches the root, and when it meets a
+/// deletion in the trash, because the rights on an item under a deletion in
+/// the trash are judged on the deletion's saved ancestry. The read is refused
+/// when the ancestry is disconnected, which includes every inode below an
+/// expired deletion (see [`ancestry`]).
 pub(crate) async fn ancestry_allows_read<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
 ) -> Result<bool, R::Error> {
-    Ok(match reads.ancestry(inode_id).await? {
-        Ancestry::Root => true,
-        Ancestry::Hidden(tombstone) => tombstone.committed_seq > reads.retention_floor_seq(),
-        Ancestry::Disconnected => false,
-    })
+    Ok(reads.ancestry(inode_id).await? != Ancestry::Disconnected)
 }
 
 /// Whether binding `inode_id` under `new_parent_inode_id` would make the
@@ -354,7 +362,7 @@ pub(crate) async fn would_create_directory_cycle<R: MetadataVisibilityReads>(
 }
 
 /// An inode is visible iff it exists at the read seq and its current parent
-/// bindings lead to the root without a hiding tombstone ([`Ancestry::Root`]).
+/// bindings lead to the root without a deletion ([`Ancestry::Root`]).
 pub(crate) async fn visible_inode<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,

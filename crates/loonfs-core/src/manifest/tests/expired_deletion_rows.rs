@@ -333,11 +333,12 @@ async fn rows_of<S: ObjectStore + ?Sized>(
 }
 
 /// The families that store rows by inode, and the bindings.
-const INODE_FAMILIES: [ApiMetadataRowFamily; 6] = [
+const INODE_FAMILIES: [ApiMetadataRowFamily; 7] = [
     ApiMetadataRowFamily::Inodes,
     ApiMetadataRowFamily::Revisions,
     ApiMetadataRowFamily::Attributes,
     ApiMetadataRowFamily::Access,
+    ApiMetadataRowFamily::Tombstones,
     ApiMetadataRowFamily::DirentryBinds,
     ApiMetadataRowFamily::DirentryChildBinds,
 ];
@@ -422,8 +423,8 @@ async fn visible_metadata_at_retained_sequences<S: ObjectStore + ?Sized>(
 }
 
 /// Checks that once a deletion expires, a base compaction of each group
-/// removes every row of the inodes it hides, with every binding under them
-/// and the trash entry, keeps the tombstone events, and leaves the visible
+/// removes every row of the inodes it hides, with every binding under them,
+/// the tombstone events, and the trash entry, and leaves the visible
 /// metadata at every retained sequence as it was.
 #[tokio::test]
 async fn a_base_compaction_of_each_group_removes_every_row_an_expired_deletion_hides() {
@@ -455,18 +456,6 @@ async fn a_base_compaction_of_each_group_removes_every_row_an_expired_deletion_h
         after[&ApiMetadataRowFamily::Trash],
         Vec::new(),
         "the listed row goes"
-    );
-    assert_eq!(
-        after[&ApiMetadataRowFamily::Tombstones]
-            .iter()
-            .map(|row| match row {
-                MetadataRow::Tombstone(record) =>
-                    (record.root_inode_id, record.action.hides_subtree()),
-                other => panic!("unexpected tombstone row {other:?}"),
-            })
-            .collect::<Vec<_>>(),
-        vec![(docs.docs, true)],
-        "the set event stays"
     );
     assert_eq!(
         visible_metadata_at_retained_sequences(&store, &namespace_id, &docs.every_inode()).await,
