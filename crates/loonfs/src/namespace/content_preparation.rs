@@ -120,7 +120,9 @@ impl Namespace<Writable> {
             .await?)
     }
 
-    /// Verifies an authorized content token for this namespace.
+    /// Verifies an authorized content token for this namespace. A namespace
+    /// that is initializing or deleted returns `namespace_not_found` or
+    /// `namespace_deleted`, as [`Self::prepare_content`] does.
     pub async fn prepare_content_token(
         &self,
         secret: &str,
@@ -129,14 +131,13 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "prepare_content_token", self.namespace_id),
             async {
-                // A namespace's token still verifies after the namespace is
-                // deleted, and its commit is refused.
-                self.core
-                    .current_head_of_any_status(&self.namespace_id)
+                let context = self
+                    .core
+                    .current_read_context(&self.namespace_id, HeadConfirmation::View)
                     .await?;
                 Ok(loonfs_core::content::verify_content_token(
                     secret,
-                    &self.namespace_id,
+                    &context.read_basis().head().namespace_id,
                     token,
                     self.core.now_ms(),
                 ))

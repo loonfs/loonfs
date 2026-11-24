@@ -378,9 +378,8 @@ impl RuntimeCore {
     }
 
     /// Returns the namespace's current head as [`HeadConfirmation::View`]
-    /// confirms it, whatever the head's status. An upload's abort and a
-    /// content token's check use it, because LoonFS aborts uploads in a
-    /// deleted namespace.
+    /// confirms it, whatever the head's status. An upload's abort uses it,
+    /// because LoonFS aborts uploads in a deleted namespace.
     pub(crate) async fn current_head_of_any_status(
         &self,
         namespace_id: &NamespaceId,
