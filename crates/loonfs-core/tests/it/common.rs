@@ -34,7 +34,7 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
         .load_read_anchor(loonfs_core::test_support::observed_now())
         .await
         .expect("load read anchor");
-    RuntimeReadContext::new(&anchor.held_basis(), None)
+    RuntimeReadContext::new(&anchor.held_basis(), None).expect("a live namespace")
 }
 
 /// Publishes one mutation request through the commit engine (the single

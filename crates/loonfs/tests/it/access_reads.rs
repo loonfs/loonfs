@@ -601,3 +601,127 @@ async fn publish_team_and_private_files(
         .await
         .expect("publish the files and the grant");
 }
+
+/// Checks that every read of a deleted namespace returns `namespace_deleted`
+/// before it checks the reader's rights or loads a snapshot record, for a
+/// reader without administrator rights and for the administrator, and that
+/// a snapshot's extension and a deletion with principals return the same
+/// error. The service context can still delete the snapshot.
+#[tokio::test]
+async fn every_read_of_a_deleted_namespace_returns_namespace_deleted_for_any_subject() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("deleted-reads"))
+        .build()
+        .await
+        .expect("writer");
+    let namespace_id = namespace_id("deleted-reads");
+    publish_team_and_private_files(&writer, &namespace_id, 1).await;
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let snapshot = namespace.create_snapshot().await.expect("create snapshot");
+    let deleted_snapshot = namespace
+        .create_snapshot()
+        .await
+        .expect("create a snapshot to delete");
+    namespace
+        .delete_snapshot(&deleted_snapshot.snapshot_id)
+        .await
+        .expect("delete snapshot");
+    namespace.delete().await.expect("delete namespace");
+
+    let observer = LoonFs::builder_with_store(store, loonfs::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "deleted-reads-observer",
+        ))
+        .build()
+        .await
+        .expect("observer");
+    for principal in ["viewer", "prn_root"] {
+        let reader = observer
+            .read_only()
+            .with_context(subject(principal).into())
+            .namespace(&namespace_id);
+        let writable = observer
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .with_context(subject(principal).into());
+        let ttl_ms = std::num::NonZeroU64::new(60_000).expect("ttl");
+        let errors = [
+            ("read_view", reader.read_view().await.err()),
+            (
+                "read_view_at_snapshot",
+                reader
+                    .read_view_at_snapshot(&snapshot.snapshot_id)
+                    .await
+                    .err(),
+            ),
+            (
+                "read_view_at_deleted_snapshot",
+                reader
+                    .read_view_at_snapshot(&deleted_snapshot.snapshot_id)
+                    .await
+                    .err(),
+            ),
+            (
+                "get_snapshot",
+                reader.get_snapshot(&snapshot.snapshot_id).await.err(),
+            ),
+            ("list_snapshots", reader.list_snapshots().page().await.err()),
+            (
+                "list_snapshot_files",
+                reader
+                    .list_snapshot_files(&snapshot.snapshot_id)
+                    .page()
+                    .await
+                    .err(),
+            ),
+            (
+                "list_changes",
+                reader
+                    .list_changes(loonfs_types::CommitSeq(0))
+                    .page()
+                    .await
+                    .err(),
+            ),
+            (
+                "extend_snapshot",
+                writable
+                    .extend_snapshot(&snapshot.snapshot_id, ttl_ms)
+                    .await
+                    .err(),
+            ),
+            (
+                "delete_snapshot",
+                writable.delete_snapshot(&snapshot.snapshot_id).await.err(),
+            ),
+        ];
+        for (read, error) in errors {
+            let error = error.unwrap_or_else(|| panic!("{principal}: {read} should fail"));
+            assert_eq!(
+                error.code(),
+                ErrorCode::NamespaceDeleted,
+                "{principal}: {read}: {error}"
+            );
+        }
+    }
+
+    let service = observer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let ttl_ms = std::num::NonZeroU64::new(60_000).expect("ttl");
+    assert_eq!(
+        service
+            .extend_snapshot(&snapshot.snapshot_id, ttl_ms)
+            .await
+            .expect_err("a deleted namespace's snapshot doesn't move its expiry")
+            .code(),
+        ErrorCode::NamespaceDeleted
+    );
+    service
+        .delete_snapshot(&snapshot.snapshot_id)
+        .await
+        .expect("the service context deletes a deleted namespace's snapshot");
+}

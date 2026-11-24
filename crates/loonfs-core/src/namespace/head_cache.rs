@@ -11,7 +11,6 @@ use crate::block_cache::{
     DecodedBlockKey,
 };
 use crate::control_object::ControlObjectLoadError;
-use crate::engine::RuntimeReadContext;
 use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::manifest::move_read_basis;
@@ -128,11 +127,10 @@ impl CachedHead {
         head_and_wal_tail_cache: &HeadAndWalTailCache,
         observed: Observation,
     ) -> std::result::Result<bool, ControlObjectLoadError> {
-        let mut context = RuntimeReadContext::new(&self.basis, None);
-        if !probe_namespace_wal(store, head_and_wal_tail_cache, &mut context).await? {
+        if !probe_namespace_wal(store, head_and_wal_tail_cache, self.basis.read_basis_mut()).await?
+        {
             return Ok(false);
         }
-        self.basis.read_basis_mut().head = context.into_read_basis().head;
         self.head_confirmed = observed;
         Ok(true)
     }

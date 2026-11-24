@@ -8,10 +8,9 @@ use super::create::CreatedSnapshot;
 use super::read_basis::load_snapshot_read_basis_from_record;
 use super::record::{encode_snapshot_record, LoadedSnapshotRecord};
 use crate::control_update::{retry_while_contended, CasOutcome};
-use crate::engine::{Administrator, NamespaceEngine, Writable};
+use crate::engine::{Administrator, NamespaceEngine, RuntimeReadContext, Writable};
 use crate::error::{CoreError, Result};
 use crate::namespace::basis::SnapshotReadBasis;
-use crate::namespace::control::ensure_namespace_live;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
@@ -176,18 +175,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// before the wall-clock time of the call, or the id of a fork snapshot
     /// returns `snapshot_not_found`.
     ///
-    /// `head` is the namespace's head as the caller read it. An initializing
-    /// head returns `namespace_not_found`, and a deleted head returns
-    /// `namespace_deleted`. `administrator` proves the caller administers
-    /// the namespace, because snapshots are only for the administrator.
+    /// `_live`, a read context of the namespace, proves that the namespace is
+    /// live, and `administrator` proves the caller administers the namespace,
+    /// because snapshots are only for the administrator.
     pub async fn get_snapshot(
         &self,
         administrator: &Administrator,
-        head: &NamespaceReadState,
+        _live: &RuntimeReadContext,
         snapshot_id: &SnapshotId,
     ) -> Result<Snapshot> {
         administrator.assert_for(&self.namespace.namespace_id);
-        ensure_namespace_live(&head.namespace_id, head.status)?;
         let now_ms = self.now_ms();
         let loaded = ensure_live(
             self.namespace.load_user_snapshot(snapshot_id).await?,
@@ -200,7 +197,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Moves the expiry of an unexpired snapshot that isn't deleted to
     /// `requested_expires_at_ms`, never earlier. A snapshot without an expiry is returned unchanged.
-    /// `administrator` proves the caller administers the namespace.
+    /// `_live`, a read context of the namespace, proves that the namespace is
+    /// live, and `administrator` proves the caller administers the namespace.
     ///
     /// Each compare-and-swap checks the call's publication budget first, as a
     /// snapshot record's creation does, so a call that stalled past its
@@ -209,6 +207,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn extend_snapshot(
         &self,
         administrator: &Administrator,
+        _live: &RuntimeReadContext,
         snapshot_id: &SnapshotId,
         requested_expires_at_ms: u64,
     ) -> Result<Snapshot> {

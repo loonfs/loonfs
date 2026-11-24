@@ -35,19 +35,8 @@ pub(crate) struct ReadAnchor {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Loads the view of a live namespace at `context`'s head, through this
-    /// namespace's caches.
+    /// Loads the view at `context`'s head, through this namespace's caches.
     pub(crate) async fn load_metadata_view(
-        &self,
-        context: &RuntimeReadContext,
-    ) -> Result<LoadedMetadataView<'_, S>> {
-        let head = &context.read_basis().head;
-        crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
-        self.load_metadata_view_for_authorization(context).await
-    }
-
-    /// Loads access rows from a deleted head when deletion does not determine authorization.
-    pub(crate) async fn load_metadata_view_for_authorization(
         &self,
         context: &RuntimeReadContext,
     ) -> Result<LoadedMetadataView<'_, S>> {
@@ -117,7 +106,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let loaded = self
             .load_read_anchor(crate::test_support::observed_now())
             .await?;
-        let context = RuntimeReadContext::new(&loaded.held_basis(), None);
+        let context = RuntimeReadContext::new(&loaded.held_basis(), None)?;
         self.load_metadata_view(&context).await
     }
 }
@@ -397,7 +386,8 @@ mod tests {
             .load_read_anchor(crate::test_support::observed_now())
             .await
             .expect("read anchor");
-        let context = RuntimeReadContext::new(&anchor.held_basis(), None);
+        let context =
+            RuntimeReadContext::new(&anchor.held_basis(), None).expect("a live namespace");
         // Once the first load caches the manifest, a load reads nothing from
         // the store before the WAL objects of the tail.
         let segment_cache = Arc::new(crate::cache::MetadataSegmentCache::unshared(1 << 20));

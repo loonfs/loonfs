@@ -257,15 +257,12 @@ async fn deleted_snapshots_are_absent_from_later_pages() {
         .expect("delete snapshot in filtered run");
     }
 
-    let head = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_read_state()
-        .await
-        .expect("head");
+    let live = crate::test_support::read_context(&store, &namespace_id).await;
     let first =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
             .list_snapshots_page(
                 &crate::test_support::administrator_of(&store, &namespace_id),
-                &head,
+                &live,
                 PageRequest {
                     limit: page_limit(1),
                     cursor: None,
@@ -279,7 +276,7 @@ async fn deleted_snapshots_are_absent_from_later_pages() {
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
             .list_snapshots_page(
                 &crate::test_support::administrator_of(&store, &namespace_id),
-                &head,
+                &live,
                 PageRequest {
                     limit: page_limit(1),
                     cursor: first.next_cursor,
@@ -303,7 +300,7 @@ async fn deleted_snapshots_are_absent_from_later_pages() {
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
             .list_snapshots_page(
                 &crate::test_support::administrator_of(&store, &namespace_id),
-                &head,
+                &live,
                 PageRequest {
                     limit: page_limit(1),
                     cursor: second.next_cursor,
@@ -550,10 +547,7 @@ async fn the_snapshot_listing_returns_user_snapshots_and_leaves_out_fork_snapsho
             .expect("create fork snapshot");
     }
 
-    let head = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_read_state()
-        .await
-        .expect("head");
+    let live = crate::test_support::read_context(&store, &namespace_id).await;
     let mut listed = BTreeSet::new();
     let mut cursor = None;
     loop {
@@ -563,7 +557,7 @@ async fn the_snapshot_listing_returns_user_snapshots_and_leaves_out_fork_snapsho
         ))
         .list_snapshots_page(
             &crate::test_support::administrator_of(&store, &namespace_id),
-            &head,
+            &live,
             PageRequest {
                 limit: page_limit(2),
                 cursor,
@@ -683,10 +677,7 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
         .expect("read snapshot");
         assert_eq!(&read, row);
     }
-    let head = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_read_state()
-        .await
-        .expect("head");
+    let live_context = crate::test_support::read_context(&store, &namespace_id).await;
     let reader =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
     assert_eq!(
@@ -694,7 +685,7 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
             reader
                 .get_snapshot(
                     &crate::test_support::administrator(&reader),
-                    &head,
+                    &live_context,
                     &expiring
                 )
                 .await
@@ -704,7 +695,7 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
     let live = reader
         .list_snapshots_page(
             &crate::test_support::administrator(&reader),
-            &head,
+            &live_context,
             PageRequest {
                 limit: page_limit(2),
                 cursor: None,
@@ -745,7 +736,7 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
             ))
             .get_snapshot(
                 &crate::test_support::administrator_of(&store, &namespace_id),
-                &head,
+                &live_context,
                 &fork
             )
             .await
@@ -881,6 +872,7 @@ async fn a_deleted_snapshot_is_refused_by_a_host_whose_clock_is_behind() {
         engine
             .extend_snapshot(
                 &crate::test_support::administrator(&engine),
+                &crate::test_support::read_context(&store, &namespace_id).await,
                 &snapshot,
                 behind.now_ms + 60_000
             )
@@ -945,6 +937,7 @@ async fn a_created_snapshot_is_deleted_with_the_version_its_write_stored() {
     engine
         .extend_snapshot(
             &crate::test_support::administrator(&engine),
+            &crate::test_support::read_context(&store, &namespace_id).await,
             &extended.record.snapshot_id,
             expires_at_ms + 60_000,
         )

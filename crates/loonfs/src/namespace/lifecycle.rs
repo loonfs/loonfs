@@ -87,11 +87,10 @@ impl<M: crate::Mode> Namespace<M> {
                 else {
                     return Err(error);
                 };
-                let context = self.core.read_context(&basis, None);
                 Ok(self
                     .core
                     .reader_engine(&self.namespace_id)
-                    .verify_administrator(&context)
+                    .verify_deletion_administrator(&basis)
                     .await?)
             }
             result => result,

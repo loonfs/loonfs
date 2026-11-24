@@ -3,10 +3,8 @@
 
 use super::record::load_snapshot_record_at_key;
 use crate::control_object::ControlObjectLoadError;
-use crate::engine::{Administrator, NamespaceEngine};
+use crate::engine::{Administrator, NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, Result};
-use crate::namespace::control::ensure_namespace_live;
-use crate::namespace::state::NamespaceReadState;
 use futures::StreamExt;
 use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::ObjectStore;
@@ -112,18 +110,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// A deleted snapshot and a snapshot that expired at or before the
     /// wall-clock time of the call are left out.
     ///
-    /// `head` is the namespace's head as the caller read it. An initializing
-    /// head returns `namespace_not_found`, and a deleted head returns
-    /// `namespace_deleted`. `administrator` proves the caller administers
-    /// the namespace, because snapshots are only for the administrator.
+    /// `_live`, a read context of the namespace, proves that the namespace is
+    /// live, and `administrator` proves the caller administers the namespace,
+    /// because snapshots are only for the administrator.
     pub async fn list_snapshots_page(
         &self,
         administrator: &Administrator,
-        head: &NamespaceReadState,
+        _live: &RuntimeReadContext,
         request: PageRequest<SnapshotPageCursor>,
     ) -> Result<Page<Snapshot, SnapshotPageCursor>> {
         administrator.assert_for(&self.namespace.namespace_id);
-        ensure_namespace_live(&head.namespace_id, head.status)?;
         let request = PageRequest {
             limit: request.limit,
             cursor: request.cursor.map(SnapshotRecordPageCursor::from),

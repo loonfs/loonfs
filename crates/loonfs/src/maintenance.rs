@@ -18,10 +18,10 @@ use crate::{
     SetRetentionWindowResponse, SnapshotId, SnapshotRecord, WriterState,
 };
 use crate::{Error, Result};
-use loonfs_core::control::{LoadedManifest, NamespaceReadState, NamespaceStorageDiagnostics};
+use loonfs_core::control::{LoadedManifest, NamespaceStorageDiagnostics};
 use loonfs_core::{
     ExtensionBasis, ExtensionPublication, FloorObjectReport, MetadataCompactionCancellation,
-    RetentionPlan, SnapshotRecordPageCursor,
+    RetentionPlan, RuntimeReadContext, SnapshotRecordPageCursor,
 };
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{u64_from_usize, CommitSeq, ExtensionName, PageRequest, WriterId};
@@ -107,11 +107,10 @@ impl Maintenance {
                 let anchor = self
                     .core
                     .namespace_store(namespace_id)
-                    .load_live_read_anchor(self.core.observation())
+                    .load_read_anchor(self.core.observation())
                     .await?;
-                let live_snapshots = self
-                    .count_live_snapshots(namespace_id, anchor.read_state())
-                    .await?;
+                let context = self.core.read_context(&anchor.held_basis(), None)?;
+                let live_snapshots = self.count_live_snapshots(namespace_id, &context).await?;
                 Ok(Self::namespace_diagnostics(
                     NamespaceStorageDiagnostics::from(&anchor),
                     live_snapshots,
@@ -121,11 +120,11 @@ impl Maintenance {
         .await
     }
 
-    /// Counts the live snapshots of the namespace whose head is `head`.
+    /// Counts the live snapshots of the namespace that `context` reads.
     async fn count_live_snapshots(
         &self,
         namespace_id: &NamespaceId,
-        head: &NamespaceReadState,
+        context: &RuntimeReadContext,
     ) -> Result<u64> {
         let engine = self.engine(namespace_id);
         let administrator = engine
@@ -137,7 +136,7 @@ impl Maintenance {
             let page = engine
                 .list_snapshots_page(
                     &administrator,
-                    head,
+                    context,
                     PageRequest {
                         limit: loonfs_types::EffectiveLimit::MAX,
                         cursor,

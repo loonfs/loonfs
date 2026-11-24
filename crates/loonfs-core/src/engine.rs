@@ -43,7 +43,9 @@ use tracing::Instrument;
 /// namespace's live head is built from a [`Held<ReadBasis>`], which only this
 /// crate's loaders return (a cached head, a writer position, a read anchor,
 /// or an initializing namespace's basis), so no caller can build a live
-/// context from the basis of an earlier state.
+/// context from the basis of an earlier state. [`Self::new`] refuses a head
+/// that isn't active, so every context reads a live namespace, and the reads
+/// that take one don't check the namespace's status again.
 ///
 /// A read of an earlier sequence or of a snapshot checks the subject's
 /// rights at the namespace's head when the read started
@@ -93,6 +95,9 @@ impl RuntimeReadContext {
     /// `None` for reads that look the tail up in the namespace's WAL tail
     /// cache.
     ///
+    /// Returns `namespace_not_found` when the head is initializing and
+    /// `namespace_deleted` when it's deleted.
+    ///
     /// The basis of another context, such as a snapshot's, isn't a held
     /// basis, so it can't be used to build a live context:
     ///
@@ -100,10 +105,18 @@ impl RuntimeReadContext {
     /// use loonfs_core::RuntimeReadContext;
     ///
     /// fn as_live(snapshot: &RuntimeReadContext) -> RuntimeReadContext {
-    ///     RuntimeReadContext::new(snapshot.read_basis(), None)
+    ///     RuntimeReadContext::new(snapshot.read_basis(), None).unwrap()
     /// }
     /// ```
-    pub fn new(basis: &Held<ReadBasis>, tail: Option<Arc<ProjectedWalTail>>) -> Self {
+    pub fn new(basis: &Held<ReadBasis>, tail: Option<Arc<ProjectedWalTail>>) -> Result<Self> {
+        let head = basis.read_basis().head();
+        crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
+        Ok(Self::of_any_status(basis, tail))
+    }
+
+    /// Returns a context as [`Self::new`] does, whatever the status of the
+    /// head. Only the administrator check of a deletion reads this way.
+    fn of_any_status(basis: &Held<ReadBasis>, tail: Option<Arc<ProjectedWalTail>>) -> Self {
         Self {
             read_basis: basis.read_basis().clone(),
             tail,
@@ -169,12 +182,6 @@ impl RuntimeReadContext {
     /// the live context was built from it.
     pub fn boundary(&self) -> &KeptBoundary {
         &self.boundary
-    }
-
-    /// Returns the head and metadata basis that this context reads, and
-    /// consumes the context.
-    pub(crate) fn into_read_basis(self) -> ReadBasis {
-        self.read_basis
     }
 
     /// Returns the sequence that reads of this context see.
@@ -399,10 +406,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             return Ok(self.administrator());
         };
         let context = context.separate_authorization().unwrap_or(context);
-        let view = self
-            .namespace
-            .load_metadata_view_for_authorization(context)
-            .await?;
+        let view = self.namespace.load_metadata_view(context).await?;
         if is_administrator(&mut view.metadata_view().session(), &subject.principals).await? {
             Ok(self.administrator())
         } else {
@@ -410,6 +414,18 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 inode_id: ROOT_INODE_ID,
             })
         }
+    }
+
+    /// Checks, as [`Self::verify_administrator`] does, that this engine's
+    /// reader administers the namespace at the head of `basis`, whatever the
+    /// head's status. A deletion checks an initializing namespace this way,
+    /// because a read context can't be built from a head that isn't active.
+    pub async fn verify_deletion_administrator(
+        &self,
+        basis: &Held<ReadBasis>,
+    ) -> Result<Administrator> {
+        self.verify_administrator(&RuntimeReadContext::of_any_status(basis, None))
+            .await
     }
 
     /// Returns the namespace this engine is bound to.
@@ -706,12 +722,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 }
                 error => error.into(),
             })
-    }
-
-    pub(crate) fn ensure_live_context(&self, context: &RuntimeReadContext) -> Result<()> {
-        let head = &context.read_basis().head;
-        crate::namespace::control::ensure_head_identity(head, &self.namespace.namespace_id)?;
-        crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)
     }
 
     /// Lists one revision page for an inode against the pinned runtime read context.

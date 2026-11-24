@@ -1,6 +1,6 @@
 //! Verified namespace identity and pool.
 
-use crate::namespace::control::ensure_namespace_live;
+use crate::engine::RuntimeReadContext;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::ObjectStore;
@@ -35,7 +35,8 @@ impl VerifiedNamespaceCatalogEntry {
 /// built.
 ///
 /// Staging content and each step of an upload session except its abort take
-/// this entry, and [`Self::from_head`] is the only way to build one. So a
+/// this entry, and [`Self::from_context`] is the only way to build one. A
+/// read context's head is active, so a
 /// caller that has only a [`VerifiedNamespaceCatalogEntry`] can't stage
 /// content, start an upload session, or complete one for a namespace that is
 /// initializing or deleted. LoonFS aborts the sessions of a deleted namespace
@@ -47,13 +48,11 @@ pub struct ActiveNamespaceCatalogEntry {
 }
 
 impl ActiveNamespaceCatalogEntry {
-    /// Builds the entry of `head`, or returns `namespace_not_found` when
-    /// `head` is initializing and `namespace_deleted` when `head` is deleted.
-    pub fn from_head(head: &NamespaceReadState) -> crate::error::Result<Self> {
-        ensure_namespace_live(&head.namespace_id, head.status)?;
-        Ok(Self {
-            entry: VerifiedNamespaceCatalogEntry::from_head(head),
-        })
+    /// Builds the entry of the head that `context` reads.
+    pub fn from_context(context: &RuntimeReadContext) -> Self {
+        Self {
+            entry: VerifiedNamespaceCatalogEntry::from_head(context.read_basis().head()),
+        }
     }
 }
 
