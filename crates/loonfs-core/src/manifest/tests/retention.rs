@@ -1252,7 +1252,8 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
         .expect("load the view");
     assert_eq!(anchor.retention_floor_seq(), deletion_seq);
     assert_eq!(read_floor_seq(&store, &namespace_id).await, CommitSeq(0));
-    let context = crate::RuntimeReadContext::new(&anchor.held_basis(), None);
+    let context =
+        crate::RuntimeReadContext::new(&anchor.held_basis(), None).expect("a live namespace");
     let error =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
             .list_changes_after(

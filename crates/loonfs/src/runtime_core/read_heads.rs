@@ -179,6 +179,21 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
         confirmation: impl Into<HeadConfirmation>,
     ) -> Result<RuntimeReadContext> {
+        self.with_current_head(namespace_id, confirmation, |basis, tail| {
+            self.read_context(basis, tail)
+        })
+        .await
+    }
+
+    /// Finds the namespace's current head as [`Self::current_read_context`]
+    /// does, and returns what `build` returns for the head's basis and, for a
+    /// writer session's position, the position's WAL tail.
+    async fn with_current_head<T>(
+        &self,
+        namespace_id: &NamespaceId,
+        confirmation: impl Into<HeadConfirmation>,
+        build: impl FnOnce(&Held<ReadBasis>, Option<Arc<ProjectedWalTail>>) -> Result<T>,
+    ) -> Result<T> {
         let (max_staleness_ms, position_staleness_ms) = match confirmation.into() {
             HeadConfirmation::Consistency(consistency) => {
                 let consistency = consistency.unwrap_or(self.inner.config.consistency.into());
@@ -187,12 +202,12 @@ impl RuntimeCore {
             }
             HeadConfirmation::View => (None, Some(READ_REVALIDATION_BOUND_MS)),
         };
-        let (context, source) = match self
+        let (built, source) = match self
             .checked_writer_position(namespace_id, position_staleness_ms)
             .await?
         {
             Some(position) => (
-                self.read_context(position.basis(), Some(Arc::clone(position.tail()))),
+                build(position.basis(), Some(Arc::clone(position.tail()))),
                 ReadHeadSource::Position,
             ),
             None => {
@@ -210,11 +225,11 @@ impl RuntimeCore {
                         (head, source)
                     }
                 };
-                (self.read_context(head.basis(), None), source)
+                (build(head.basis(), None), source)
             }
         };
         self.inner.instruments.read_head(source);
-        Ok(context)
+        built
     }
 
     /// Returns the namespace's cached head for an eventual read that can take
@@ -268,7 +283,8 @@ impl RuntimeCore {
     }
 
     /// Returns the read context of `basis`, which is a cached head's basis or
-    /// a writer position's basis.
+    /// a writer position's basis, or `namespace_not_found` or
+    /// `namespace_deleted` when the head isn't active.
     ///
     /// `tail` is the WAL tail of a writer session's position, which reads
     /// from the position take instead of a tail from the read cache. Every
@@ -277,8 +293,8 @@ impl RuntimeCore {
         &self,
         basis: &Held<ReadBasis>,
         tail: Option<Arc<ProjectedWalTail>>,
-    ) -> RuntimeReadContext {
-        RuntimeReadContext::new(basis, tail)
+    ) -> Result<RuntimeReadContext> {
+        RuntimeReadContext::new(basis, tail).map_err(Error::from)
     }
 
     /// The shared preamble of every pinned read: the read context of the
@@ -335,7 +351,7 @@ impl RuntimeCore {
         let live = match checked_position {
             Some(position) => {
                 self.inner.instruments.read_head(ReadHeadSource::Position);
-                self.read_context(position.basis(), Some(Arc::clone(position.tail())))
+                self.read_context(position.basis(), Some(Arc::clone(position.tail())))?
             }
             None => {
                 self.current_read_context(namespace_id, Consistency::Strong)
@@ -363,17 +379,17 @@ impl RuntimeCore {
     }
 
     /// Returns the namespace's immutable identity, read off the namespace's
-    /// current head.
+    /// current head, whatever the head's status.
     pub(crate) async fn load_namespace_catalog_cached(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<VerifiedNamespaceCatalogEntry> {
-        let context = self
-            .current_read_context(namespace_id, HeadConfirmation::View)
-            .await?;
-        Ok(VerifiedNamespaceCatalogEntry::from_head(
-            context.read_basis().head(),
-        ))
+        self.with_current_head(namespace_id, HeadConfirmation::View, |basis, _| {
+            Ok(VerifiedNamespaceCatalogEntry::from_head(
+                basis.read_basis().head(),
+            ))
+        })
+        .await
     }
 
     /// Returns the namespace's immutable identity like
@@ -390,7 +406,7 @@ impl RuntimeCore {
         let context = self
             .current_read_context(namespace_id, HeadConfirmation::View)
             .await?;
-        ActiveNamespaceCatalogEntry::from_head(context.read_basis().head()).map_err(Error::from)
+        Ok(ActiveNamespaceCatalogEntry::from_context(&context))
     }
 
     /// Drops the namespace's cached head, so the next read that doesn't start

@@ -59,7 +59,8 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
         }
         .engine();
         let administrator = crate::test_support::administrator(&namespace);
-        let renew = namespace.extend_snapshot(&administrator, &snapshot.snapshot_id, 1_002);
+        let live = crate::test_support::read_context(&inner, &namespace_id).await;
+        let renew = namespace.extend_snapshot(&administrator, &live, &snapshot.snapshot_id, 1_002);
         let expire = async {
             store.wait_until_blocked().await;
             clock.advance_ms(3);
@@ -133,8 +134,13 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
         }
         .engine();
         let administrator = crate::test_support::administrator(&namespace);
-        let renew =
-            namespace.extend_snapshot(&administrator, &snapshot.snapshot_id, requested_expiry);
+        let live = crate::test_support::read_context(&inner, &namespace_id).await;
+        let renew = namespace.extend_snapshot(
+            &administrator,
+            &live,
+            &snapshot.snapshot_id,
+            requested_expiry,
+        );
         let expire = async {
             store.wait_until_blocked().await;
             clock.advance_ms(2);
@@ -204,7 +210,8 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
     }
     .engine();
     let administrator = crate::test_support::administrator(&namespace);
-    let renew = namespace.extend_snapshot(&administrator, &snapshot.snapshot_id, 10_000);
+    let live = crate::test_support::read_context(&inner, &namespace_id).await;
+    let renew = namespace.extend_snapshot(&administrator, &live, &snapshot.snapshot_id, 10_000);
     let contender = async {
         store.wait_until_blocked().await;
         {
@@ -216,6 +223,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         .engine()
         .extend_snapshot(
             &crate::test_support::administrator_of(&inner, &namespace_id),
+            &crate::test_support::read_context(&inner, &namespace_id).await,
             &snapshot.snapshot_id,
             1_002,
         )
@@ -282,8 +290,13 @@ async fn an_extension_past_its_publication_budget_writes_nothing() {
     }
     .engine();
     let administrator = crate::test_support::administrator(&namespace);
-    let extend =
-        namespace.extend_snapshot(&administrator, &snapshot.snapshot_id, expires_at_ms + 1);
+    let live = crate::test_support::read_context(&inner, &namespace_id).await;
+    let extend = namespace.extend_snapshot(
+        &administrator,
+        &live,
+        &snapshot.snapshot_id,
+        expires_at_ms + 1,
+    );
     let stall = async {
         store.wait_until_blocked().await;
         clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);

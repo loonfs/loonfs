@@ -266,7 +266,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     let old = namespace
         .load_metadata_view(&crate::RuntimeReadContext::at_snapshot(
             snapshot_basis,
-            crate::RuntimeReadContext::new(&live.held_basis(), None),
+            crate::RuntimeReadContext::new(&live.held_basis(), None).expect("a live namespace"),
         ))
         .await
         .expect("fresh snapshot view");

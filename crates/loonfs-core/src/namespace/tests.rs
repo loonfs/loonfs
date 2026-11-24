@@ -1810,6 +1810,7 @@ async fn a_finishing_fork_of_a_tail_ends_when_its_temporary_snapshot_would_have_
             .engine()
             .extend_snapshot(
                 &crate::test_support::administrator_of(&store, &source),
+                &crate::test_support::read_context(&store, &source).await,
                 &temporary,
                 context().now_ms + 48 * 60 * 60 * 1_000,
             )
@@ -1848,6 +1849,7 @@ async fn a_finishing_fork_that_folds_no_tail_has_no_deadline() {
         .engine()
         .extend_snapshot(
             &crate::test_support::administrator_of(&store, &source),
+            &crate::test_support::read_context(&store, &source).await,
             &temporary.snapshot_id,
             context().now_ms + 48 * 60 * 60 * 1_000,
         )

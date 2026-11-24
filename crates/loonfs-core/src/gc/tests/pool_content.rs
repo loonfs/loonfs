@@ -31,7 +31,7 @@ async fn read_context<S: ObjectStore + ?Sized>(
         .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("read anchor");
-    crate::RuntimeReadContext::new(&anchor.held_basis(), None)
+    crate::RuntimeReadContext::new(&anchor.held_basis(), None).expect("a live namespace")
 }
 
 #[tokio::test]

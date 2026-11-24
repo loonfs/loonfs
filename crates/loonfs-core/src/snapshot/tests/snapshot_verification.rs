@@ -528,6 +528,7 @@ async fn a_fork_snapshot_id_is_read_like_a_user_snapshot_and_refused_by_every_ot
         .await
         .expect("read a snapshot with an expiry");
     snapshot_read(fork).await.expect("read a fork snapshot");
+    let live = crate::test_support::read_context(&store, &namespace_id).await;
     let cases = [
         (
             "retrieve of a fork snapshot",
@@ -537,7 +538,7 @@ async fn a_fork_snapshot_id_is_read_like_a_user_snapshot_and_refused_by_every_ot
             ))
             .get_snapshot(
                 &crate::test_support::administrator_of(&store, &namespace_id),
-                &head,
+                &live,
                 fork,
             )
             .await

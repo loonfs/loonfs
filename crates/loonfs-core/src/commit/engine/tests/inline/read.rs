@@ -23,7 +23,7 @@ async fn fresh_context(
         .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("read basis");
-    RuntimeReadContext::new(&loaded.held_basis(), None)
+    RuntimeReadContext::new(&loaded.held_basis(), None).expect("a live namespace")
 }
 
 /// Returns the namespace's components with caches that keep every segment
@@ -190,7 +190,8 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     let state = publisher.read_position().expect("published state");
     let basis = state.basis().clone();
     let tail = state.tail;
-    let context = RuntimeReadContext::new(&basis, Some(Arc::clone(&tail)));
+    let context =
+        RuntimeReadContext::new(&basis, Some(Arc::clone(&tail))).expect("a live namespace");
     let tail_bytes = tail.decoded_bytes();
     assert_eq!(tail.inline_bytes(), value.bytes().len());
     assert!(
@@ -316,7 +317,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     assert!(crate::wal::probe_namespace_wal(
         &store,
         &namespace.head_and_wal_tail_cache,
-        &mut context
+        &mut context.read_basis
     )
     .await
     .expect("advance"));
@@ -361,7 +362,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     assert!(crate::wal::probe_namespace_wal(
         &store,
         &namespace.head_and_wal_tail_cache,
-        &mut context
+        &mut context.read_basis
     )
     .await
     .expect("advance one object"));

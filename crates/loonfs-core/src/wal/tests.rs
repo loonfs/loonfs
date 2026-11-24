@@ -797,11 +797,12 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         )
         .await
         .expect("same-epoch WAL object");
-    let mut warm = crate::RuntimeReadContext::new(&loaded.held_basis(), None);
+    let mut warm =
+        crate::RuntimeReadContext::new(&loaded.held_basis(), None).expect("a live namespace");
     let error = super::probe_namespace_wal(
         &store,
         &crate::cache::HeadAndWalTailCache::unshared(usize::MAX),
-        &mut warm,
+        &mut warm.read_basis,
     )
     .await
     .expect_err("a same-epoch chain break is corruption, not a stale head");
@@ -837,7 +838,7 @@ async fn warm_context_behind(
             .expect("commit");
     }
     store.reset();
-    crate::RuntimeReadContext::new(&loaded.held_basis(), None)
+    crate::RuntimeReadContext::new(&loaded.held_basis(), None).expect("a live namespace")
 }
 
 /// Checks that a warm probe reads the WAL in discovery's widening windows, and
@@ -855,7 +856,7 @@ async fn a_warm_probe_reads_in_widening_windows_and_sends_one_get_at_the_tip() {
     assert!(super::probe_namespace_wal(
         &store,
         &crate::cache::HeadAndWalTailCache::unshared(usize::MAX),
-        &mut warm
+        &mut warm.read_basis
     )
     .await
     .expect("probe 40 objects behind"));
@@ -882,7 +883,7 @@ async fn a_warm_probe_reads_in_widening_windows_and_sends_one_get_at_the_tip() {
     assert!(super::probe_namespace_wal(
         &store,
         &crate::cache::HeadAndWalTailCache::unshared(usize::MAX),
-        &mut warm
+        &mut warm.read_basis
     )
     .await
     .expect("probe at the tip"));
@@ -916,7 +917,7 @@ async fn a_warm_probe_leaves_a_gap_in_the_wal_to_discovery_which_reports_corrupt
     assert!(!super::probe_namespace_wal(
         &store,
         &crate::cache::HeadAndWalTailCache::unshared(usize::MAX),
-        &mut warm
+        &mut warm.read_basis
     )
     .await
     .expect("a gap sends the read to discovery"));

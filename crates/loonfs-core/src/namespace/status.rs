@@ -83,13 +83,11 @@ fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Returns the namespace's metadata at the head that `context` reads: its
     /// access mode, creation, fork basis, head, retention floor, and the
-    /// retention window of the manifest that the head is read above. A
-    /// deleted namespace returns `namespace_deleted`, as every read does.
+    /// retention window of the manifest that the head is read above.
     pub async fn namespace_metadata(
         &self,
         context: &RuntimeReadContext,
     ) -> Result<NamespaceMetadata> {
-        self.ensure_live_context(context)?;
         let decoded = self.namespace.load_context_manifest(context).await?;
         Ok(namespace_metadata(
             context.read_basis().head.clone(),

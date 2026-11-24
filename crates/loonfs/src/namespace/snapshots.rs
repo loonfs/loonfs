@@ -34,11 +34,7 @@ impl<M: crate::Mode> Namespace<M> {
                 } = self.administrator_read().await?;
                 pinned
                     .engine
-                    .get_snapshot(
-                        &administrator,
-                        pinned.context.read_basis().head(),
-                        snapshot_id,
-                    )
+                    .get_snapshot(&administrator, &pinned.context, snapshot_id)
                     .await
                     .map_err(Error::from)
             },
@@ -70,11 +66,7 @@ impl<M: crate::Mode> Namespace<M> {
                 } = self.administrator_read().await?;
                 let page = pinned
                     .engine
-                    .list_snapshots_page(
-                        &administrator,
-                        pinned.context.read_basis().head(),
-                        request,
-                    )
+                    .list_snapshots_page(&administrator, &pinned.context, request)
                     .await
                     .map_err(Error::from)?;
                 Ok(ListSnapshotsResponse {
@@ -147,7 +139,8 @@ impl Namespace<Writable> {
     /// Moves an unexpired snapshot's expiry to `ttl_ms` from now. The expiry
     /// never moves earlier, so a snapshot without an expiry is returned
     /// unchanged. An expired or missing snapshot returns
-    /// `snapshot_not_found`.
+    /// `snapshot_not_found`, and a deleted namespace returns
+    /// `namespace_deleted`.
     pub async fn extend_snapshot(
         &self,
         snapshot_id: &SnapshotId,
@@ -155,9 +148,12 @@ impl Namespace<Writable> {
     ) -> Result<Snapshot> {
         trace::in_operation(operation_span!(self.core, "extend_snapshot", self.namespace_id, snapshot_id = %snapshot_id), async {
         let requested_expires_at_ms = expires_at_ms(self.core.now_ms(), ttl_ms);
-        let administrator = self.administrator().await?;
+        let AdministratorRead {
+            pinned,
+            administrator,
+        } = self.administrator_read().await?;
         let result = self.engine()
-            .extend_snapshot(&administrator, snapshot_id, requested_expires_at_ms)
+            .extend_snapshot(&administrator, &pinned.context, snapshot_id, requested_expires_at_ms)
             .await
             .map_err(Error::from);
         self.mode
@@ -171,8 +167,9 @@ impl Namespace<Writable> {
     /// returns the same response. The id of a fork snapshot returns
     /// `snapshot_not_found`.
     ///
-    /// Deletion works after the namespace is deleted, so a snapshot without
-    /// an expiry can still be released.
+    /// In the service context, deletion works after the namespace is deleted,
+    /// so a snapshot without an expiry can still be released. A handle with
+    /// a subject gets `namespace_deleted` on a deleted namespace.
     pub async fn delete_snapshot(
         &self,
         snapshot_id: &SnapshotId,

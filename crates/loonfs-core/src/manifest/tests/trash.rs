@@ -1216,7 +1216,7 @@ async fn fresh_read_context<S: ObjectStore + ?Sized>(
         .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("load read basis");
-    RuntimeReadContext::new(&loaded.held_basis(), None)
+    RuntimeReadContext::new(&loaded.held_basis(), None).expect("a live namespace")
 }
 
 #[tokio::test]

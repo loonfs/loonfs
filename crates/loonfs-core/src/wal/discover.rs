@@ -5,9 +5,9 @@ use super::reader::{load_wal_object, StoredWalEnvelope, WalWalk};
 use super::replay::project_validated_wal_tail;
 use crate::cache::{HeadAndWalTailCache, WalTailCacheKey};
 use crate::control_object::ControlObjectLoadError;
+use crate::namespace::basis::ReadBasis;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
-use crate::RuntimeReadContext;
 use futures::{stream, StreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{NamespaceId, WalNo, MAX_PUBLIC_INTEGER};
@@ -171,12 +171,12 @@ pub(super) fn corrupt(object_key: &str, error: impl std::fmt::Display) -> Contro
 pub(crate) async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     store: &S,
     head_and_wal_tail_cache: &HeadAndWalTailCache,
-    context: &mut RuntimeReadContext,
+    basis: &mut ReadBasis,
 ) -> Result<bool, ControlObjectLoadError> {
-    let mut state = context.read_basis.head.clone();
+    let mut state = basis.head.clone();
     let mut cache_key = WalTailCacheKey {
         namespace_id: state.namespace_id.clone(),
-        manifest_no: context.read_basis.basis.manifest_no(),
+        manifest_no: basis.basis.manifest_no(),
         head_seq: state.seq,
         wal_no: state.wal_no,
     };
@@ -193,7 +193,7 @@ pub(crate) async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
             return Ok(ControlFlow::Break(()));
         }
         let object = walk.validate(object_key, envelope).map_err(wal_error)?;
-        if state.wal_no == context.read_basis.head.wal_no {
+        if state.wal_no == basis.head.wal_no {
             tail = head_and_wal_tail_cache.get_tail(&cache_key);
         }
         let before = state.clone();
@@ -214,19 +214,13 @@ pub(crate) async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         }
         Ok(ControlFlow::Continue(()))
     };
-    let outcome =
-        load_wal_after(store, &namespace_id, context.read_basis.head.wal_no, each).await?;
+    let outcome = load_wal_after(store, &namespace_id, basis.head.wal_no, each).await?;
     if other_epoch || matches!(outcome, WalReadOutcome::Gap { .. }) {
         return Ok(false);
     }
     if let Some(tail) = tail.filter(|_| extended) {
         head_and_wal_tail_cache.insert_tail(cache_key, tail);
     }
-    if state.seq != context.read_basis.head.seq {
-        // The context's tail is the tail at the head that the probe moved
-        // past, so the context's reads look the new head's tail up instead.
-        context.tail = None;
-    }
-    context.read_basis.head = state;
+    basis.head = state;
     Ok(true)
 }

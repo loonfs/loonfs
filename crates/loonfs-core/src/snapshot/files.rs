@@ -88,12 +88,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// The method ignores the current metadata basis and WAL tail, so every page
     /// comes from the same snapshot even when new commits arrive. The listing
     /// requires namespace administrator access, as the change feed does, and
-    /// the read context is used only for that check, to validate the
-    /// namespace identity, and to confirm that the namespace has not been
-    /// deleted. An ID that doesn't identify a snapshot, or a snapshot that
-    /// expired at or before the current wall-clock time, returns
-    /// `snapshot_not_found`, and so does a snapshot whose manifest is gone,
-    /// with the cause `manifest_missing`.
+    /// the read context is used only for that check. An ID that doesn't
+    /// identify a snapshot, or a snapshot that expired at or before the
+    /// current wall-clock time, returns `snapshot_not_found`, and so does a
+    /// snapshot whose manifest is gone, with the cause `manifest_missing`.
     pub async fn list_snapshot_files_page(
         &self,
         snapshot_id: &SnapshotId,
@@ -102,9 +100,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
     ) -> Result<SnapshotFilesPage> {
         self.verify_administrator(context).await?;
-        // Rejects a mismatched or deleted namespace before reading the
-        // snapshot.
-        self.ensure_live_context(context)?;
         self.namespace
             .list_snapshot_files_page(snapshot_id, request, options)
             .await

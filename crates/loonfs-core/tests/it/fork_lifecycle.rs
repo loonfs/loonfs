@@ -1491,9 +1491,13 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
         .expect("delete namespace");
     assert_eq!(response.head_seq, CommitSeq(1));
 
-    // Reads, commits, status, repeat deletes, and forks observe the deleted head.
-    let read = resolve_path(&store, &namespace_id, "/")
+    // Reads, commits, status, repeat deletes, and forks observe the deleted
+    // head. A read context can't be built from it.
+    let anchor = namespace_store(&store, &namespace_id)
+        .load_read_anchor(observed_now())
         .await
+        .expect("load the deleted head");
+    let read = loonfs_core::RuntimeReadContext::new(&anchor.held_basis(), None)
         .expect_err("read after delete");
     assert_eq!(read.code(), ErrorCode::NamespaceDeleted);
     let commit = submit_operation(
