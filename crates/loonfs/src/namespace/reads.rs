@@ -158,11 +158,12 @@ impl<M: crate::Mode> Namespace<M> {
     /// reads through them. A read through a view returns `ManifestReplaced`
     /// when a newer manifest replaced the view's manifest and a collection
     /// removed that manifest's segments. Each time `read` returns that error,
-    /// this method drops the runtime's view of the namespace and runs `read`
-    /// again, so the next run's views load the namespace's head from the
-    /// store, up to `MAX_CONTENTION_ATTEMPTS` runs in all. An ordinary read of
-    /// the namespace runs again the same way. If every run returns `ManifestReplaced`, this method
-    /// returns `store_contention`.
+    /// this method drops the runtime's view of the namespace whose manifest
+    /// was replaced and runs `read` again, so the next run's views load that
+    /// namespace's head from the store, up to `MAX_CONTENTION_ATTEMPTS` runs
+    /// in all. An ordinary read of the namespace runs again the same way. If
+    /// every run returns `ManifestReplaced`, this method returns
+    /// `store_contention`.
     pub async fn read_through_views<T, F, Fut>(&self, read: F) -> Result<T>
     where
         F: FnMut() -> Fut,
@@ -170,8 +171,7 @@ impl<M: crate::Mode> Namespace<M> {
     {
         trace::in_operation(
             operation_span!(self.core, "read_through_views", self.namespace_id),
-            self.core
-                .run_again_after_replaced_manifest(&self.namespace_id, read),
+            self.core.run_again_after_replaced_manifest(read),
         )
         .await
     }

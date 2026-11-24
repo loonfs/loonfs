@@ -124,6 +124,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let current_manifest_no = self.load_current_manifest().await?.payload().manifest_no;
         if current_manifest_no > manifest_no {
             return Err(CoreError::ManifestReplaced {
+                namespace_id: self.namespace_id.clone(),
                 replaced_manifest_no: manifest_no,
                 current_manifest_no,
             });

@@ -581,7 +581,7 @@ impl Maintenance {
             async {
                 let report = self
                     .core
-                    .run_again_after_replaced_manifest(namespace_id, || {
+                    .run_again_after_replaced_manifest(|| {
                         self.publish_retention_floor(namespace_id, options)
                     })
                     .await?;

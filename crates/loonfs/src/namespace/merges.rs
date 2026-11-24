@@ -223,18 +223,16 @@ impl Namespace<Writable> {
         // Boxed so the merge's future stays within the compiler's layout depth.
         self.plan_commit(request, merges, reservation, |main, allowance| {
             Box::pin(async move {
-                let main = &main;
-                self.core
-                    .read(
-                        source_namespace_id,
-                        HeadConfirmation::View,
-                        |fork| async move {
-                            main.engine
-                                .check_merge(&main.context, &fork.engine, &fork.context, request)
-                                .await?;
-                            Ok(())
-                        },
-                    )
+                // The plan runs inside this namespace's read loop, which runs
+                // the plan again after a replaced manifest of either
+                // namespace, so the fork is read here without a loop of its
+                // own.
+                let fork = self
+                    .core
+                    .pinned_read(source_namespace_id, HeadConfirmation::View)
+                    .await?;
+                main.engine
+                    .check_merge(&main.context, &fork.engine, &fork.context, request)
                     .await?;
                 let prepared_at_ms = self.core.now_ms();
                 let (fork, merge_snapshot) = self

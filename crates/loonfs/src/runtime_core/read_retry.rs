@@ -87,7 +87,7 @@ impl RuntimeCore {
         // Boxed, because without the box, a crate that awaits a read fails to
         // compile with "queries overflow the depth limit!" while the compiler
         // computes the layout of the caller's future.
-        Box::pin(self.run_again_after_replaced_manifest(namespace_id, || {
+        Box::pin(self.run_again_after_replaced_manifest(|| {
             let first = first.take();
             async move {
                 let pinned = match first {
@@ -110,14 +110,15 @@ impl RuntimeCore {
     /// `store_contention`.
     ///
     /// Before each run after the first, the method drops this runtime's view
-    /// of the namespace (see [`Self::forget_namespace_view`]). `attempt` reads
-    /// at the namespace's head as the head is when the run starts, so a run
-    /// after a drop loads the head by discovery, and reads a newer manifest
-    /// than the run before it read. [`Self::read_at_least`] runs an ordinary
-    /// read through this method, with a head that it pins for each run.
+    /// of the namespace whose manifest the last run found replaced (see
+    /// [`Self::forget_namespace_view`]), which can differ from the namespace
+    /// that the read started from, such as a fork that a merge reads. `attempt` reads each namespace at its head as the head is when
+    /// the run starts, so a run after a drop loads that namespace's head by
+    /// discovery, and reads a newer manifest than the run before it read.
+    /// [`Self::read_at_least`] runs an ordinary read through this method,
+    /// with a head that it pins for each run.
     pub(crate) async fn run_again_after_replaced_manifest<T, F, Fut>(
         &self,
-        namespace_id: &NamespaceId,
         mut attempt: F,
     ) -> Result<T>
     where
@@ -126,17 +127,18 @@ impl RuntimeCore {
     {
         for _ in 1..MAX_CONTENTION_ATTEMPTS {
             match attempt().await {
-                Err(Error::Core(CoreError::ManifestReplaced { .. })) => {
-                    self.forget_namespace_view(namespace_id).await;
+                Err(Error::Core(CoreError::ManifestReplaced { namespace_id, .. })) => {
+                    self.forget_namespace_view(&namespace_id).await;
                 }
                 result => return result,
             }
         }
         match attempt().await {
             Err(Error::Core(CoreError::ManifestReplaced {
+                namespace_id,
                 current_manifest_no,
                 ..
-            })) => Err(replaced_on_every_run(namespace_id, current_manifest_no)),
+            })) => Err(replaced_on_every_run(&namespace_id, current_manifest_no)),
             result => result,
         }
     }
@@ -193,6 +195,7 @@ mod tests {
                 .read_through_views(|| async {
                     if runs.fetch_add(1, Ordering::SeqCst) < replaced_runs {
                         return Err(Error::from(CoreError::ManifestReplaced {
+                            namespace_id: namespace_id("replaced-reads"),
                             replaced_manifest_no: ManifestNo(1),
                             current_manifest_no: ManifestNo(2),
                         }));

@@ -349,17 +349,21 @@ pub enum CoreError {
         actual: CommitSeq,
     },
     /// A read or a publication on a manifest that a newer manifest replaced
-    /// found a metadata segment missing. Garbage collection keeps the
-    /// segments of the current manifest and of snapshots' manifests, so a
-    /// successor can drop the replaced manifest's. A read runs again at the
+    /// found the manifest, or a metadata segment it lists, missing. Garbage
+    /// collection keeps the current manifest and the manifests that
+    /// snapshots keep, with their segments, so it can delete a replaced
+    /// manifest and that manifest's segments. A read runs again at the
     /// current manifest, and the publisher plans the commit again on it. The
     /// code is `stale_head`, which a client sees when a publication raced the
     /// head on every attempt. A read that found its manifest replaced on every
-    /// attempt returns `store_contention` instead.
+    /// attempt returns `store_contention` instead. `namespace_id` is the
+    /// namespace whose manifest was replaced, which can differ from the
+    /// namespace that the read started from, such as a merge's fork.
     #[error(
-        "manifest `{replaced_manifest_no}` was replaced by manifest `{current_manifest_no}`, and a segment it lists is missing"
+        "manifest `{replaced_manifest_no}` was replaced by manifest `{current_manifest_no}`, and it or a segment it lists is missing"
     )]
     ManifestReplaced {
+        namespace_id: NamespaceId,
         replaced_manifest_no: ManifestNo,
         current_manifest_no: ManifestNo,
     },
