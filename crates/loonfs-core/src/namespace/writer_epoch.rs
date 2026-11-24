@@ -211,7 +211,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             if attempt > 0 {
                 clock.ensure_metadata_publication_budget(&self.namespace_id)?;
             }
-            match publish_wal_object(&self.store, &prepared).await {
+            let put_wal_no = match publish_wal_object(&self.store, &prepared).await {
                 Ok(()) => {
                     let put_head = head.after_wal_object(prepared.envelope().payload());
                     if self.check_newest(&mut anchor.held, clock.origin()).await? == Checked::Newest
@@ -222,18 +222,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
                             .push_published(prepared.envelope().clone(), prepared.as_bytes().len());
                         return Ok(anchor);
                     }
-                    anchor = self.load_next_anchor(object, clock.observe()).await?;
-                    if wal_no_is_unfolded(
-                        put_head.wal_no,
-                        anchor.current_manifest().folded_wal_no(),
-                    ) {
-                        return Ok(anchor);
-                    }
+                    Some(put_head.wal_no)
                 }
-                Err(CoreError::WalPublish(crate::wal::WalPublishError::NumberTaken)) => {
-                    anchor = self.load_next_anchor(object, clock.observe()).await?;
-                }
+                Err(CoreError::WalPublish(crate::wal::WalPublishError::NumberTaken)) => None,
                 Err(error) => return Err(error),
+            };
+            // The old anchor's decoded WAL tail is dropped before the next
+            // anchor's load, so the retry keeps one decoded tail in memory.
+            drop(anchor);
+            anchor = self.load_next_anchor(object, clock.observe()).await?;
+            if put_wal_no.is_some_and(|wal_no| {
+                wal_no_is_unfolded(wal_no, anchor.current_manifest().folded_wal_no())
+            }) {
+                return Ok(anchor);
             }
         }
         Err(CoreError::contention_exhausted(
