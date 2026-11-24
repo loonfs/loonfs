@@ -332,9 +332,9 @@ async fn staging_waits_until_an_interrupted_create_finishes() {
     }
 }
 
-/// Checks that staging content is refused in a deleted namespace, and that
-/// a token that the namespace issued before its deletion still verifies but
-/// its commit is refused.
+/// Checks that staging content and preparing a content token are refused in
+/// a deleted namespace, and that content prepared from a token before the
+/// deletion is refused at its commit.
 #[tokio::test]
 async fn staging_is_refused_after_a_delete() {
     let harness = open(KeyPredicate::new(|_| false), staging_policy()).await;
@@ -352,16 +352,21 @@ async fn staging_is_refused_after_a_delete() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let token = issue_token(&harness, &namespace).await;
-    namespace.delete().await.expect("delete namespace");
-
-    assert_every_staging_is_refused(&harness, &namespace, &pool_id, ErrorCode::NamespaceDeleted)
-        .await;
-
     let redeemed = namespace
         .prepare_content_token(SECRET, &token)
         .await
         .expect("load the namespace's head")
         .expect("verify the token");
+    namespace.delete().await.expect("delete namespace");
+
+    assert_every_staging_is_refused(&harness, &namespace, &pool_id, ErrorCode::NamespaceDeleted)
+        .await;
+
+    let error = namespace
+        .prepare_content_token(SECRET, &token)
+        .await
+        .expect_err("a deleted namespace refuses to prepare a token");
+    assert_eq!(error.code(), ErrorCode::NamespaceDeleted, "{error}");
     let error = namespace
         .put_file_prepared("/token", redeemed, &actor)
         .await
