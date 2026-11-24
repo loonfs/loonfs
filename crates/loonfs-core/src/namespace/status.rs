@@ -2,7 +2,6 @@
 
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::Result;
-use crate::manifest::load_referenced_manifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -98,12 +97,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
     ) -> Result<NamespaceMetadata> {
         self.ensure_live_context(context)?;
-        let decoded = load_referenced_manifest(
-            &self.namespace.store,
-            Some(&self.namespace.segment_cache),
-            context.read_basis().basis.manifest(),
-        )
-        .await?;
+        let decoded = self.namespace.load_context_manifest(context).await?;
         Ok(namespace_metadata(
             context.read_basis().head.clone(),
             decoded.manifest.payload(),

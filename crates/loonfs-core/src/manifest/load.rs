@@ -7,6 +7,7 @@
 use super::error::ManifestLoadError;
 use super::validate::{validate_manifest, validate_namespace_manifest};
 use crate::commit::publish_view::WriterPosition;
+use crate::engine::RuntimeReadContext;
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
@@ -169,37 +170,57 @@ impl<S: ObjectStore> NamespaceStore<S> {
         self.segments(decoded, self.keeper(KeptBy::Current))
     }
 
-    /// Loads the segments of `manifest`, which a read context reads above
-    /// with the manifest boundary `kept`, kept in the store by `kept_by`.
-    ///
-    /// A current manifest that is missing from the store and at or below the
-    /// boundary returns `manifest_replaced` (see [`Self::load_held_manifest`]).
-    /// Any other missing manifest returns the load's error.
+    /// Loads the segments of the manifest that `context` reads above (see
+    /// [`Self::load_context_manifest`]).
     pub(crate) async fn load_context_segments(
+        &self,
+        context: &RuntimeReadContext,
+    ) -> crate::error::Result<LoadedMetadataBasis<'_, S>> {
+        let decoded = self.load_context_manifest(context).await?;
+        Ok(self.segments(decoded, self.keeper(context.kept_by.clone())))
+    }
+
+    /// Loads the manifest that `context` reads above. A current manifest is
+    /// loaded with [`Self::load_live_manifest`]. When a snapshot's manifest
+    /// is missing, the call returns the load's error.
+    pub(crate) async fn load_context_manifest(
+        &self,
+        context: &RuntimeReadContext,
+    ) -> crate::error::Result<DecodedManifest> {
+        let manifest = context.read_basis().basis().manifest();
+        match &context.kept_by {
+            KeptBy::Current => {
+                self.load_live_manifest(manifest, context.boundary().clone())
+                    .await
+            }
+            KeptBy::Snapshot(_) => {
+                load_referenced_manifest(&self.store, Some(&self.segment_cache), manifest).await
+            }
+        }
+    }
+
+    /// Loads `manifest`, a manifest of this namespace that a read keeps by
+    /// reference with the manifest boundary `kept`, as
+    /// [`Self::load_held_manifest`] does. When the store doesn't have the
+    /// manifest and the manifest is at or below the boundary, the call
+    /// returns `ManifestReplaced` from [`Self::ensure_manifest_current`], so
+    /// the read runs again from the newest manifest.
+    pub(crate) async fn load_live_manifest(
         &self,
         manifest: &ManifestRef,
         kept: KeptBoundary,
-        kept_by: &KeptBy,
-    ) -> crate::error::Result<LoadedMetadataBasis<'_, S>> {
-        let decoded = match kept_by {
-            KeptBy::Current => match self.load_held_manifest(manifest, kept).await? {
-                Some(decoded) => decoded,
-                None => {
-                    self.ensure_manifest_current(manifest.manifest_no).await?;
-                    return Err(ManifestLoadError::MissingManifest {
-                        object_key: metadata_manifest_object(
-                            &manifest.owner_namespace_id,
-                            &manifest.manifest_no,
-                        ),
-                    }
-                    .into());
-                }
-            },
-            KeptBy::Snapshot(_) => {
-                load_referenced_manifest(&self.store, Some(&self.segment_cache), manifest).await?
-            }
-        };
-        Ok(self.segments(decoded, self.keeper(kept_by.clone())))
+    ) -> crate::error::Result<DecodedManifest> {
+        if let Some(decoded) = self.load_held_manifest(manifest, kept).await? {
+            return Ok(decoded);
+        }
+        self.ensure_manifest_current(manifest.manifest_no).await?;
+        Err(ManifestLoadError::MissingManifest {
+            object_key: metadata_manifest_object(
+                &manifest.owner_namespace_id,
+                &manifest.manifest_no,
+            ),
+        }
+        .into())
     }
 
     /// Loads `manifest`, which a holder keeps by reference with the manifest

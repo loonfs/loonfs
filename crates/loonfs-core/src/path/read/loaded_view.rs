@@ -55,13 +55,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         crate::namespace::control::ensure_head_identity(head, &self.namespace_id)?;
         let head = head.clone();
         let manifest_no = basis.manifest_no();
-        let loaded_basis = self
-            .load_context_segments(
-                basis.manifest(),
-                context.boundary().clone(),
-                &context.kept_by,
-            )
-            .await?;
+        let loaded_basis = self.load_context_segments(context).await?;
         let visible_seq = context.visible_seq();
         assert!(
             visible_seq <= head.seq,

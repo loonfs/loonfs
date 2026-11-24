@@ -1576,6 +1576,44 @@ async fn a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_succeed(
     }
 }
 
+/// Checks that a read of the namespace's metadata and a lookup of an
+/// extension's entry, as grep looks up its own, succeed from a writer
+/// position whose manifest a collection deleted when neither the segment
+/// cache nor the store has the manifest. Each finds the manifest missing at
+/// or below the manifest boundary, returns `ManifestReplaced`, and runs again
+/// from the newest manifest.
+#[tokio::test]
+async fn reads_of_the_manifest_alone_from_a_collected_position_succeed() {
+    for metadata in [true, false] {
+        let name = if metadata {
+            "collected-metadata"
+        } else {
+            "collected-extension-entry"
+        };
+        let (fixture, _, _) = position_on_a_collected_manifest(name, false, History::Files).await;
+        if metadata {
+            fixture
+                .reader
+                .metadata_with_options(&loonfs::LiveReadOptions::default())
+                .await
+                .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+        } else {
+            let entry = fixture
+                .reader
+                .read_through_views(|| async {
+                    let view = fixture.reader.read_view().await?;
+                    view.find_extension_entry(
+                        &loonfs_types::ExtensionName::parse("grep").expect("extension name"),
+                    )
+                    .await
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+            assert_eq!(entry, None);
+        }
+    }
+}
+
 /// Checks that an eventual read of the next merge range succeeds when the
 /// writer position's manifest was collected, the runtime's segment
 /// cache still has that manifest, and every segment of the namespace's merge
