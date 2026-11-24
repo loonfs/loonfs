@@ -143,9 +143,11 @@ impl NamespacePublisher {
     /// panics, each request in the batch receives `outcome_unknown`
     /// because the panic may have occurred before or after the WAL put. Callers
     /// can retry with the same commit ID and use the durable receipt to resolve
-    /// the outcome. The worker then continues with queued work. (A panic in
-    /// one commit's preparation doesn't reach this catch, because the core
-    /// fails only that commit, before the WAL put.)
+    /// the outcome. The engine's release drops the engine's position, so the
+    /// next unit loads the namespace from the store. The worker then
+    /// continues with queued work. (A panic in one commit's preparation
+    /// doesn't reach this catch, because the core fails only that commit,
+    /// before the WAL put.)
     pub(super) async fn publish_batch(
         &self,
         candidates: Vec<BatchCandidate>,
@@ -162,9 +164,6 @@ impl NamespacePublisher {
             Err(payload) => payload,
         };
         self.record_panic("publish", panic_message(payload.as_ref()));
-        // A panic can follow the WAL put, so the position's tail may omit
-        // committed bytes.
-        self.lock_engine().await.invalidate_projection();
         let orphaned_waiters = {
             let mut state = self.lock_state();
             taken_commit_ids

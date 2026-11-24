@@ -2465,6 +2465,87 @@ async fn a_first_commit_with_an_unknown_outcome_drops_the_cached_head() {
         .expect("an eventual read sees the directory that the put stored");
 }
 
+/// Checks that a deletion whose tombstone put stores the tombstone and then
+/// panics acknowledges no commit queued behind it. The deletion waits at the
+/// put of its fold while a commit queues, and its tombstone put panics after
+/// the store keeps the tombstone. If that commit were acknowledged, its WAL
+/// object would come after the tombstone's folded WAL number, so no read
+/// would replay it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deletion_that_panics_after_its_tombstone_put_acknowledges_no_later_commit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(BlockingStore::matching(
+        PanicWalPutStore::new(temp_dir.path(), &namespace_id),
+        is_fold,
+    ));
+    let writer = test_writer(store.clone() as SharedStore).await;
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("bootstrap");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "first", "first",
+        )))
+        .await
+        .expect("a commit before the deletion");
+    let publisher = namespace.session().publisher.clone();
+
+    store.block_next();
+    store.inner().arm_panic_after_put();
+    let delete = spawn_delete(&publisher, DeleteNamespaceOptions::default());
+    store.wait_until_blocked().await;
+    let queued = {
+        let namespace = namespace.clone();
+        tokio::spawn(async move {
+            namespace
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "queued", "queued",
+                )))
+                .await
+        })
+    };
+    wait_for_queued_candidates(&publisher, 1).await;
+    store.release();
+
+    let delete_error = settle_delete(delete, "the panicked deletion")
+        .await
+        .expect_err("the deletion panicked after its tombstone put");
+    assert_eq!(delete_error.code(), ErrorCode::ServerError);
+    let manifest = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("the current manifest");
+    assert!(
+        manifest.payload().status.is_deleted(),
+        "the tombstone is durable"
+    );
+    let queued_error = bounded(Duration::from_secs(10), queued)
+        .await
+        .expect("the queued commit settles")
+        .expect("queued submit task")
+        .expect_err("a commit queued behind the tombstone");
+    assert_eq!(queued_error.code(), ErrorCode::NamespaceDeleted);
+    let strong = namespace
+        .metadata_with_options(&crate::LiveReadOptions {
+            consistency: Some(crate::Consistency::Strong),
+        })
+        .await
+        .expect_err("a strong read after the tombstone");
+    assert_eq!(strong.code(), ErrorCode::NamespaceDeleted);
+    let retried = settle_delete(
+        spawn_delete(&publisher, DeleteNamespaceOptions::default()),
+        "the retried deletion",
+    )
+    .await
+    .expect_err("a retried deletion finds the tombstone");
+    assert_eq!(retried.code(), ErrorCode::NamespaceDeleted);
+}
+
 /// Checks that `loonfs.publisher.queue_depth` reports the candidates queued
 /// at every namespace's publisher together, and falls to zero once both
 /// queues are taken.

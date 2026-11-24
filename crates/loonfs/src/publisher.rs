@@ -424,20 +424,22 @@ impl NamespacePublisher {
     /// Stores the engine's position for reads, and releases the engine.
     pub(super) fn release_engine(
         &self,
-        engine: tokio::sync::MutexGuard<'_, NamespaceCommitEngine<SharedObjectStore>>,
+        mut engine: tokio::sync::MutexGuard<'_, NamespaceCommitEngine<SharedObjectStore>>,
     ) {
         // A panic can stop the engine partway through a unit of work, after a
-        // WAL put whose outcome the engine hasn't recorded, with or without a
-        // position. A session that owes a fence sent a WAL put whose outcome
-        // it hasn't learned. Either way the put may have committed, so the
-        // cached head may be older than a commit that this runtime made, and
-        // the release drops the head even when the slot had no position.
+        // put whose outcome the engine hasn't recorded (a commit's WAL put or
+        // a deletion's tombstone put). During a panic, the release drops the
+        // engine's position, so the session's next unit of work loads the
+        // namespace from the store. A session that owes a fence sent a WAL
+        // put whose outcome it hasn't learned, but it keeps its position. In
+        // both cases the put may have committed, so the cached head may be
+        // older than a commit that this runtime made. The release drops the
+        // head even when the slot had no position.
         let panicking = std::thread::panicking();
-        let position = if panicking {
-            None
-        } else {
-            self.read_position.prepare(engine.read_position())
-        };
+        if panicking {
+            engine.invalidate_projection();
+        }
+        let position = self.read_position.prepare(engine.read_position());
         match position {
             Some(position) => self.read_position.store(position),
             None => {
