@@ -195,7 +195,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// claimed the namespace at that head, such as the head that a create or a
     /// fork installs when it publishes the active manifest (see
     /// [`Self::publish_active_manifest`]). Returns `None` when
-    /// there's no such head, or when the manifest is at or below the boundary.
+    /// there's no such head, or when the manifest is missing from the store
+    /// and at or below the boundary.
     ///
     /// A claim builds on this manifest without a request first. If another
     /// process published past the manifest, the claim's put is lost and the

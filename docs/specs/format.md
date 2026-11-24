@@ -449,7 +449,7 @@ Every process with a manifest in memory (cold reads after WAL discovery, cached 
 
 (Manifest publications check `boundary.json` directly after their put, [Publishing a manifest](#72-publishing-a-manifest). Namespace collections skip this check after discovery because their roots form a safe lower bound and newer segments are within the grace window.)
 
-Processes keeping only a manifest reference (like a writer position) run step 2 before reloading an evicted manifest from storage. If the manifest is missing on load, they re-read `boundary.json` and run cold discovery if `n <= boundary` (reporting corruption otherwise).
+A process keeping only a manifest reference (like a writer position) reloads an evicted manifest from storage without running this check first, just as it uses a manifest in its cache without running the check. The process finds out whether the manifest was replaced when it uses the manifest: a manifest publication reads `boundary.json` after its put, a commit's WAL put is valid however old its manifest is and collides with the fence of any writer that claimed the namespace since, because GC never deletes a fence, a snapshot is verified after its record is written, and an operation that finds a segment missing checks whether the manifest is still current. If the manifest is missing on load, the process reads `boundary.json` and runs cold discovery if `n <= boundary` (reporting corruption otherwise).
 
 Replaying the WAL produces the "projected WAL tail" (metadata deltas plus inline pieces) and computes the view's effective [retention floor](glossary.md#retention-floor) as `max(manifest.retention_floor_seq, floor objects in tail)`.
 
@@ -787,7 +787,7 @@ Any process can fold as the namespace's [maintainer](glossary.md#maintainer) und
 
 #### Basis, collision, and boundary checks for every manifest publication
 
-Every manifest publication starts from a basis manifest in memory (checking `boundary.json` first if reloaded from storage, or running cold discovery if no basis exists) and puts `basis + 1` directly:
+Every manifest publication starts from a basis manifest, in memory or reloaded from storage (running cold discovery if no basis exists), and puts `basis + 1` directly:
 
 - **Lost put (collision):** Probe `basis + 1` with HEAD, then probe an initial window of `MANIFEST_PROBE_WINDOW` (8) manifests and, if all exist, gallop exponentially and narrow the bracket in parallel batches until finding the highest existing manifest, then read `boundary.json` (falling back to cold discovery if `<= boundary`).
 - **Succeeded put:** Read `boundary.json` conditionally (plain read for manifest 1). This final check catches any put that raced into a manifest number GC had already emptied:

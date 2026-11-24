@@ -146,9 +146,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// folded too, into a manifest with no new run. A writer session passes the tail
     /// it keeps as `held`, whatever its age, and every other caller passes
     /// `None`, which loads the tail from the store. A `held` tail whose
-    /// manifest is at or below the manifest boundary is discarded, and the
-    /// tail is loaded from the store too (see `load_held_manifest`). The
-    /// publication's first attempt starts
+    /// manifest is missing from the store and at or below the manifest
+    /// boundary is discarded, and the tail is loaded from the store too (see
+    /// `load_held_manifest`). The publication's first attempt starts
     /// from the manifest that the tail was read above, and each later attempt
     /// starts from the manifest that the attempt before it found (see
     /// `update_manifest`).
@@ -214,8 +214,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
     /// Returns the manifest and the WAL tail of this namespace's head:
     /// `held`, a writer session's position, whatever its age, or what a
-    /// discovery finds when `held` is `None` or its manifest is at or below
-    /// the manifest boundary (see `load_held_manifest`).
+    /// discovery finds when `held` is `None` or its manifest is missing from
+    /// the store and at or below the manifest boundary (see
+    /// `load_held_manifest`).
     pub(crate) async fn load_head_projection(
         &self,
         held: Option<WriterPosition>,

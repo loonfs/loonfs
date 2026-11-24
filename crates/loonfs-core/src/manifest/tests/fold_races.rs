@@ -632,29 +632,7 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
         );
         writer.commit("second", Vec::new(), &["/b"]).await;
         let publish = request_counts(&writer.store);
-        // The writer keeps no manifest in its segment cache, so the commit
-        // checks the position's manifest against the manifest boundary once,
-        // before the commit reads the manifest.
-        let boundary = boundary(&writer.namespace_id);
-        let operations = writer.store.take();
-        let boundary_read = operations
-            .iter()
-            .position(|operation| operation.key() == boundary)
-            .expect("one read of the manifest boundary");
-        assert!(
-            operations[boundary_read + 1..]
-                .iter()
-                .all(|operation| operation.key() != boundary),
-            "{operations:?}"
-        );
-        assert!(
-            operations[..boundary_read]
-                .iter()
-                .all(|operation| !operation
-                    .key()
-                    .starts_with(&metadata_manifest_prefix(&writer.namespace_id))),
-            "{operations:?}"
-        );
+        writer.store.reset();
         writer.fold().await;
         let fold = request_counts(&writer.store);
         let operations = writer.store.take();
@@ -662,13 +640,12 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
         costs.push((publish, fold));
     }
     assert_eq!(costs[0], costs[1]);
-    // The receipt check reads the manifest boundary and the basis manifest,
-    // and the commit is one WAL put.
+    // The writer keeps no manifest in its segment cache, so the receipt check
+    // reads the basis manifest, and the commit is one WAL put.
     assert_eq!(
         costs[1].0,
         StoreCounts {
             gets: 1,
-            gets_with_metadata: 1,
             puts: 1,
             create_if_absent_puts: 1,
             ..StoreCounts::default()

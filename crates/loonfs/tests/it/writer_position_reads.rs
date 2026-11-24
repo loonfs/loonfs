@@ -905,16 +905,53 @@ fn uses_manifest(
     })
 }
 
+/// Returns the requests that load a writer position's manifest
+/// `position`, which a collection deleted: a GET that finds nothing, a read
+/// of the manifest boundary, which is at or above `position`, and the
+/// discovery that finds the newest manifest, `newest`.
+fn collected_position_load(
+    namespace_id: &NamespaceId,
+    position: ManifestNo,
+    newest: ManifestNo,
+) -> Vec<String> {
+    let manifest =
+        |number: ManifestNo| format!("get {namespace_id} MetadataManifest {:020}", number.0);
+    vec![
+        manifest(position),
+        format!("get {namespace_id} Boundary"),
+        format!("get {namespace_id} Boundary"),
+        format!("list namespaces/{namespace_id}/manifests/"),
+        manifest(newest),
+        format!("get {namespace_id} Boundary"),
+    ]
+}
+
+/// Returns the number of the namespace's newest manifest in `fixture`'s
+/// store.
+async fn newest_manifest(fixture: &Fixture) -> ManifestNo {
+    loonfs_core::test_support::namespace_store(
+        fixture.recording.clone() as SharedObjectStore,
+        &fixture.namespace_id,
+    )
+    .load_current_manifest()
+    .await
+    .expect("the newest manifest")
+    .manifest()
+    .manifest_no
+}
+
 /// Checks that the session's fold from a position whose manifest a
 /// collection deleted folds from the newest manifest. The position's
-/// manifest isn't in the segment cache, so the fold checks the manifest
-/// against the manifest boundary and doesn't read it, and the position moves
-/// off the deleted manifest, so a strong read after the fold doesn't start
-/// from it.
+/// manifest isn't in the segment cache, so the fold reads the manifest from
+/// the store, finds nothing, reads the manifest boundary, and loads the
+/// newest manifest by discovery. No later request reads the deleted
+/// manifest, and the position moves off the deleted manifest, so a strong
+/// read after the fold doesn't start from that manifest.
 #[tokio::test]
 async fn a_fold_from_a_collected_position_starts_from_the_newest_manifest() {
     let name = "fold-collected";
     let (fixture, position) = collected_position(name).await;
+    let newest = newest_manifest(&fixture).await;
     fixture.recording.reset();
     let folded = fixture
         .writer
@@ -924,8 +961,14 @@ async fn a_fold_from_a_collected_position_starts_from_the_newest_manifest() {
         .expect("the fold starts from the newest manifest");
     assert_eq!(folded.outcome, FoldWalOutcome::Published);
     let operations = fixture.recording.take();
+    let load = collected_position_load(&fixture.namespace_id, position, newest);
+    assert_eq!(
+        loonfs_test_support::stores::request_lines(&operations[..load.len()]),
+        load,
+        "{operations:?}"
+    );
     assert!(
-        !uses_manifest(&operations, &fixture.namespace_id, position),
+        !uses_manifest(&operations[load.len()..], &fixture.namespace_id, position),
         "{operations:?}"
     );
     fixture
@@ -941,13 +984,15 @@ async fn a_fold_from_a_collected_position_starts_from_the_newest_manifest() {
 }
 
 /// Checks that a retention advance from a position whose manifest a
-/// collection deleted plans from the newest manifest, and that the advance
-/// drops the position, so a strong read after it doesn't start from the
-/// deleted manifest.
+/// collection deleted reads the manifest from the store, finds nothing,
+/// reads the manifest boundary, and plans from the newest manifest, and that
+/// the advance drops the position, so a strong read after it doesn't start
+/// from the deleted manifest.
 #[tokio::test]
 async fn a_retention_advance_from_a_collected_position_drops_the_position() {
     let name = "retention-collected";
     let (fixture, position) = collected_position(name).await;
+    let newest = newest_manifest(&fixture).await;
     fixture.recording.reset();
     fixture
         .writer
@@ -955,10 +1000,9 @@ async fn a_retention_advance_from_a_collected_position_drops_the_position() {
         .advance_retention_floor(&fixture.namespace_id)
         .await
         .expect("the advance plans from the newest manifest");
-    let operations = fixture.recording.take();
-    assert!(
-        !uses_manifest(&operations, &fixture.namespace_id, position),
-        "{operations:?}"
+    assert_eq!(
+        loonfs_test_support::stores::request_lines(&fixture.recording.take()),
+        collected_position_load(&fixture.namespace_id, position, newest)
     );
     fixture
         .reader
@@ -1102,7 +1146,8 @@ async fn a_wave_of_reads_shares_at_most_two_checks() {
 /// lists, and whose runtime caches no segment's rows, so every read of a
 /// segment goes to the store. With `cached`, the
 /// runtime's segment cache still has the deleted manifest, which the
-/// writer's own fold put there.
+/// writer's own fold put there. The fixture also returns the bytes of the
+/// deleted manifest.
 ///
 /// The writer folds, so its position is on the fold's manifest. A peer then
 /// folds the writer's next commits eight times and compacts while a unit is
@@ -1118,7 +1163,7 @@ async fn position_on_a_collected_manifest(
     name: &str,
     cached: bool,
     history: History,
-) -> (Fixture, ManifestNo) {
+) -> (Fixture, ManifestNo, bytes::Bytes) {
     use loonfs_objectstore::{ObjectStore, ObjectStoreExtension};
     let cache = MetadataCache::builder().max_segment_bytes(0);
     let cache = if cached {
@@ -1161,6 +1206,12 @@ async fn position_on_a_collected_manifest(
         .load_current_manifest()
         .await
         .expect("the position's manifest");
+    let key = metadata_manifest_object(&namespace_id, &position.manifest().manifest_no);
+    let manifest_bytes = store
+        .get(&key, None)
+        .await
+        .expect("GET")
+        .expect("the position's manifest");
     if let History::AppendInTail = history {
         fixture
             .namespace
@@ -1184,7 +1235,6 @@ async fn position_on_a_collected_manifest(
         .gc(&namespace_id)
         .await
         .expect("collect");
-    let key = metadata_manifest_object(&namespace_id, &position.manifest().manifest_no);
     assert!(
         store.head(&key).await.expect("HEAD").is_none(),
         "the collection deletes the position's manifest"
@@ -1229,7 +1279,7 @@ async fn position_on_a_collected_manifest(
             "the collection deletes the position's {family:?} segments: {needed:?}"
         );
     }
-    (fixture, position.manifest().manifest_no)
+    (fixture, position.manifest().manifest_no, manifest_bytes)
 }
 
 /// What a namespace from [`position_on_a_collected_manifest`] has besides
@@ -1251,17 +1301,19 @@ enum History {
 /// runtime's segment cache still has the deleted manifest. Every commit is
 /// younger than the grace window, so the floor stays at 0.
 ///
-/// Without the manifest in the cache, the check of the manifest boundary
-/// before the manifest's load finds the manifest collected, so the advance
-/// drops the position and plans from the newest manifest. With the manifest
-/// in the cache, the plan reads a segment that the collection deleted, the
-/// advance finds a newer current manifest, drops the position and the
-/// cached head, loads the head again, and plans from the newest manifest.
+/// Without the manifest in the cache, the advance reads the manifest from
+/// the store, finds nothing, and reads the manifest boundary, which is at or
+/// above the manifest, so the advance drops the position and plans from the
+/// newest manifest. With the manifest in the cache, the plan reads a segment
+/// that the collection deleted, the advance finds a newer current manifest,
+/// drops the position and the cached head, loads the head again, and plans
+/// from the newest manifest.
 #[tokio::test]
 async fn a_retention_advance_from_a_position_on_a_collected_manifest_succeeds() {
     for cached in [false, true] {
         let name = format!("collected-advance-{}", if cached { "hit" } else { "miss" });
-        let (fixture, _) = position_on_a_collected_manifest(&name, cached, History::Files).await;
+        let (fixture, position, _) =
+            position_on_a_collected_manifest(&name, cached, History::Files).await;
         fixture.recording.reset();
         let advanced = fixture
             .writer
@@ -1308,7 +1360,15 @@ async fn a_retention_advance_from_a_position_on_a_collected_manifest_succeeds() 
             ]
             .concat()
         } else {
-            [vec![line("get {ns} Boundary")], discovery(true), segments].concat()
+            [
+                vec![
+                    line(&format!("get {{ns}} MetadataManifest {:020}", position.0)),
+                    line("get {ns} Boundary"),
+                ],
+                discovery(true),
+                segments,
+            ]
+            .concat()
         };
         assert_eq!(
             loonfs_test_support::stores::request_lines(&fixture.recording.take()),
@@ -1335,7 +1395,7 @@ async fn a_retention_advance_from_a_position_on_a_collected_manifest_succeeds() 
 #[tokio::test]
 async fn a_fold_of_an_append_from_a_position_on_a_collected_manifest_succeeds() {
     let name = "collected-append-fold";
-    let (fixture, _) = position_on_a_collected_manifest(name, true, History::AppendInTail).await;
+    let (fixture, _, _) = position_on_a_collected_manifest(name, true, History::AppendInTail).await;
     let maintenance = fixture.writer.maintenance(writer_id(name));
     fixture
         .put("/before.txt")
@@ -1494,7 +1554,7 @@ async fn a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_succeed(
         } else {
             "collected-append-sweep"
         };
-        let (fixture, _) =
+        let (fixture, _, _) =
             position_on_a_collected_manifest(name, true, History::AppendInTail).await;
         if snapshot {
             fixture
@@ -1530,7 +1590,7 @@ async fn a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_succeed(
 #[tokio::test]
 async fn a_rebase_from_a_position_on_a_collected_manifest_succeeds() {
     let name = "collected-rebase";
-    let (fixture, _) = position_on_a_collected_manifest(name, true, History::Merged).await;
+    let (fixture, _, _) = position_on_a_collected_manifest(name, true, History::Merged).await;
     fixture
         .writer
         .fork_namespace_for_rebase(
@@ -1541,4 +1601,74 @@ async fn a_rebase_from_a_position_on_a_collected_manifest_succeeds() {
         )
         .await
         .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+}
+
+/// Checks that a retention advance from a writer position whose manifest is
+/// at or below the manifest boundary, still in the store, and missing
+/// segments that a collection deleted plans from the newest manifest when
+/// the runtime's segment cache doesn't have the manifest.
+///
+/// The fixture's collection deletes the manifest, and the test puts the
+/// manifest back by hand. The advance reads the manifest from the store and
+/// plans from it as it would from the segment cache, the plan reads a
+/// segment that the collection deleted, and the advance finds a newer
+/// current manifest, drops the position and the cached head, loads the head
+/// again, and plans from the newest manifest.
+#[tokio::test]
+async fn a_retention_advance_from_a_stored_position_manifest_below_the_boundary_succeeds() {
+    use loonfs_objectstore::ObjectStore;
+    let name = "stored-below-boundary";
+    let (fixture, position, manifest_bytes) =
+        position_on_a_collected_manifest(name, false, History::Files).await;
+    let store: SharedObjectStore = fixture.recording.clone();
+    store
+        .put(
+            &metadata_manifest_object(&fixture.namespace_id, &position),
+            manifest_bytes,
+            loonfs_objectstore::PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("put the position's manifest back");
+    fixture.recording.reset();
+    let advanced = fixture
+        .writer
+        .maintenance(writer_id(name))
+        .advance_retention_floor(&fixture.namespace_id)
+        .await
+        .expect("the advance plans from the newest manifest");
+    assert_eq!(advanced.retention_floor_seq, loonfs::CommitSeq(0));
+    let namespace = fixture.namespace_id.to_string();
+    let line = |request: &str| request.replace("{ns}", &namespace);
+    // The runtime caches no manifest, so each discovery reads the newest.
+    let discovery = vec![
+        line("get {ns} Boundary"),
+        line("list namespaces/{ns}/manifests/"),
+        line("get {ns} MetadataManifest 00000000000000000018"),
+        line("get {ns} Boundary"),
+    ];
+    let expected = [
+        // The load of the position's manifest, and the plan's read of a
+        // segment that the collection deleted.
+        vec![
+            line(&format!("get {{ns}} MetadataManifest {:020}", position.0)),
+            line("get {ns} MetadataSegment"),
+        ],
+        // The check that a newer manifest replaced the planned one.
+        discovery.clone(),
+        // The load of the head after the drop.
+        discovery.clone(),
+        vec![
+            line("get {ns} WalObject 00000000000000000011"),
+            line("head {ns} MetadataManifest 00000000000000000019"),
+            line("get {ns} Boundary"),
+        ],
+        // The second plan, from the newest manifest.
+        discovery,
+        vec![line("get {ns} MetadataSegment"); 4],
+    ]
+    .concat();
+    assert_eq!(
+        loonfs_test_support::stores::request_lines(&fixture.recording.take()),
+        expected
+    );
 }
