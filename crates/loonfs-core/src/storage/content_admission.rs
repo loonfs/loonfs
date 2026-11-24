@@ -8,7 +8,6 @@
 
 use crate::heap_bytes::HeapBytes;
 use crate::limits::{COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::ContentToken;
 use loonfs_types::{
@@ -325,7 +324,7 @@ pub fn mint_content_token(
 
 pub fn verify_content_token(
     secret: &str,
-    catalog: &VerifiedNamespaceCatalogEntry,
+    namespace_id: &NamespaceId,
     token: &ContentToken,
     now_ms: u64,
 ) -> Result<PreparedContent, ContentTokenError> {
@@ -350,7 +349,7 @@ pub fn verify_content_token(
             OpaqueTokenError::InvalidJson(message) => ContentTokenError::Codec(message),
             _ => ContentTokenError::Malformed,
         })?;
-    if payload.namespace_id != *catalog.namespace_id() {
+    if payload.namespace_id != *namespace_id {
         return Err(ContentTokenError::NamespaceMismatch);
     }
     if payload.content_ref != token.content_ref {
@@ -373,19 +372,9 @@ mod tests {
     use super::*;
 
     use super::{mint_content_token, verify_content_token, CompletedUploadEvidence};
-    use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-    use crate::namespace::state::NamespaceReadState;
     use loonfs_types::format::hex::hex_encode_bytes;
     use loonfs_types::ContentToken;
     use loonfs_types::{ContentId, ContentRef, NamespaceId};
-
-    fn catalog_entry(namespace_id: NamespaceId) -> VerifiedNamespaceCatalogEntry {
-        VerifiedNamespaceCatalogEntry::from_head(&NamespaceReadState::initial(
-            namespace_id,
-            1_000,
-            loonfs_test_support::test_actor(),
-        ))
-    }
 
     fn evidence(namespace_id: &NamespaceId, content_ref: &ContentRef) -> CompletedUploadEvidence {
         CompletedUploadEvidence::for_completed_session(
@@ -396,29 +385,22 @@ mod tests {
     }
 
     /// Checks that a token is bound to the namespace whose upload completed
-    /// the content, so another member of the same pool refuses it.
+    /// the content, so another namespace refuses it, even a member of the
+    /// same pool.
     #[test]
     fn a_token_is_refused_by_another_member_of_its_pool() {
         let root = NamespaceId::parse("root").expect("namespace");
         let content = fixed_content();
         let token = mint_content_token("secret", &evidence(&root, &content), 1_000).expect("mint");
-        let mut fork = NamespaceReadState::initial(
-            NamespaceId::parse("fork").expect("namespace"),
-            1_000,
-            loonfs_test_support::test_actor(),
-        );
-        let pool_id = loonfs_test_support::ids::numbered_pool_id(1);
-        fork.pool_id = pool_id.clone();
-        let fork = VerifiedNamespaceCatalogEntry::from_head(&fork);
-        assert_eq!(fork.pool_id(), &pool_id);
+        let fork = NamespaceId::parse("fork").expect("namespace");
         assert_eq!(
             verify_content_token("secret", &fork, &token, 1_000),
             Err(ContentTokenError::NamespaceMismatch)
         );
-        let prepared = verify_content_token("secret", &catalog_entry(root.clone()), &token, 1_000)
+        let prepared = verify_content_token("secret", &root, &token, 1_000)
             .expect("the uploading namespace verifies its token");
         assert!(prepared.admits(&root, &content, 1_000));
-        assert!(!prepared.admits(fork.namespace_id(), &content, 1_000));
+        assert!(!prepared.admits(&fork, &content, 1_000));
     }
 
     fn fixed_content() -> ContentRef {
@@ -437,8 +419,7 @@ mod tests {
             .expect("mint");
 
         crate::test_support::assert_matches_golden_token("content_token.txt", &token.token);
-        let catalog = catalog_entry(namespace);
-        let prepared = verify_content_token("golden-secret", &catalog, &token, 1_000)
+        let prepared = verify_content_token("golden-secret", &namespace, &token, 1_000)
             .expect("the golden token verifies");
         assert_eq!(prepared.content_ref(), &content);
     }
@@ -455,7 +436,6 @@ mod tests {
             payload_part.as_bytes(),
         ));
         let earlier_hex_format = "7b22666f726d61745f76657273696f6e223a312c226b696e64223a22636f6e74656e745f746f6b656e222c22636f6e74656e745f726566223a7b226b696e64223a22626c6f625f7631222c226f776e65725f6e616d6573706163655f6964223a2264656d6f222c22636f6e74656e745f6964223a22636f6e5f3031323334353637383961626364656630313233343536373839616263646566222c2273697a655f6279746573223a352c22636865636b73756d223a7b22616c676f726974686d223a2263726336346e766d65222c2276616c7565223a2233333737383537303036353234323537227d7d2c22657870697265735f61745f6d73223a333630313030307d.95f51480abef35c6b78f8c81c182206cea93a5522e3d7af584c293c4b4a301f4";
-        let catalog = catalog_entry(namespace);
 
         for token in [
             earlier_hex_format.to_owned(),
@@ -466,7 +446,7 @@ mod tests {
                 token,
             };
             assert_eq!(
-                verify_content_token("golden-secret", &catalog, &token, 1_000),
+                verify_content_token("golden-secret", &namespace, &token, 1_000),
                 Err(ContentTokenError::Malformed),
                 "{}",
                 token.token
@@ -500,9 +480,8 @@ mod tests {
             content_ref: content,
             token: format!("{payload_part}.{signature_part}"),
         };
-        let catalog = catalog_entry(namespace);
         assert_eq!(
-            verify_content_token("secret", &catalog, &token, 1_000),
+            verify_content_token("secret", &namespace, &token, 1_000),
             Err(ContentTokenError::Malformed)
         );
     }
@@ -519,14 +498,13 @@ mod tests {
         let expires_at_ms = issued_at_ms + CONTENT_RECEIPT_TTL_MS;
         let token = mint_content_token("secret", &evidence(&namespace, &content), issued_at_ms)
             .expect("mint");
-        let catalog = catalog_entry(namespace);
 
-        let prepared = verify_content_token("secret", &catalog, &token, expires_at_ms - 1)
+        let prepared = verify_content_token("secret", &namespace, &token, expires_at_ms - 1)
             .expect("the token is valid one millisecond before its expiry");
-        assert!(prepared.admits(catalog.namespace_id(), &content, expires_at_ms - 1));
-        assert!(!prepared.admits(catalog.namespace_id(), &content, expires_at_ms));
+        assert!(prepared.admits(&namespace, &content, expires_at_ms - 1));
+        assert!(!prepared.admits(&namespace, &content, expires_at_ms));
         assert_eq!(
-            verify_content_token("secret", &catalog, &token, expires_at_ms),
+            verify_content_token("secret", &namespace, &token, expires_at_ms),
             Err(ContentTokenError::Expired)
         );
     }
@@ -548,23 +526,21 @@ mod tests {
         let issued_at_ms = 1_000;
         let token = mint_content_token("secret", &evidence(&namespace, &content), issued_at_ms)
             .expect("mint");
-        let catalog = catalog_entry(namespace.clone());
-        let other_catalog = catalog_entry(other_namespace);
 
         assert_eq!(
-            verify_content_token("other", &catalog, &token, 1_000)
+            verify_content_token("other", &namespace, &token, 1_000)
                 .expect_err("a token signed with another secret should be rejected"),
             ContentTokenError::BadSignature
         );
         assert_eq!(
-            verify_content_token("secret", &other_catalog, &token, 1_000),
+            verify_content_token("secret", &other_namespace, &token, 1_000),
             Err(ContentTokenError::NamespaceMismatch),
             "evidence belongs to one namespace"
         );
         assert_eq!(
             verify_content_token(
                 "secret",
-                &catalog,
+                &namespace,
                 &ContentToken {
                     content_ref: other_content,
                     token: token.token.clone(),
@@ -577,7 +553,7 @@ mod tests {
         assert_eq!(
             verify_content_token(
                 "secret",
-                &catalog,
+                &namespace,
                 &token,
                 issued_at_ms + CONTENT_RECEIPT_TTL_MS + 1
             )

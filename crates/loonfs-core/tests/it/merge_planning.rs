@@ -735,8 +735,8 @@ async fn restore_and_write_in_the_fork(
         .await
         .expect("stage the content");
     let content_ref = stored.content_ref().clone();
-    let catalog = store.load_catalog_entry().await.expect("catalog");
-    let prepared = loonfs_core::content::prepare_stored_content(&catalog, stored);
+    let live_context = store.load_manifest_context().await.expect("read context");
+    let prepared = loonfs_core::content::prepare_stored_content(&live_context, stored);
     let write = FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
         content: loonfs_types::FileContent::Ref(content_ref),

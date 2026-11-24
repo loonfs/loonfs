@@ -100,10 +100,10 @@ async fn put<S: ObjectStore>(
         .await
         .expect("store content");
     let content_ref = stored.content_ref().clone();
-    let catalog = crate::test_support::namespace_store(store, namespace_id)
-        .load_catalog_entry()
+    let live_context = crate::test_support::namespace_store(store, namespace_id)
+        .load_manifest_context()
         .await
-        .expect("load namespace catalog");
+        .expect("load the namespace's read context");
     let operation = FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
         content: loonfs_types::FileContent::Ref(content_ref),
@@ -111,7 +111,7 @@ async fn put<S: ObjectStore>(
         expected_inode_id: None,
         expected_revision_no: None,
     };
-    let prepared = vec![prepare_stored_content(&catalog, stored)];
+    let prepared = vec![prepare_stored_content(&live_context, stored)];
     commit(store, namespace_id, operation, prepared, context)
         .await
         .expect("write the file");

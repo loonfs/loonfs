@@ -33,11 +33,11 @@ async fn put_file<S: ObjectStore + ?Sized>(
         .store_bytes_as_content(bytes)
         .await
         .expect("stage content");
-    let catalog = namespace_store(store, namespace_id)
-        .load_catalog_entry()
+    let live_context = namespace_store(store, namespace_id)
+        .load_manifest_context()
         .await
-        .expect("load namespace catalog");
-    let prepared = prepare_existing_content_ref(store, &catalog, content.into_content_ref())
+        .expect("load the namespace's read context");
+    let prepared = prepare_existing_content_ref(store, &live_context, content.into_content_ref())
         .await
         .expect("prepare existing content");
     let content_ref = prepared.content_ref().clone();
@@ -98,14 +98,14 @@ async fn reads_commits_and_change_feed_list_only_the_manifests() {
         .await
         .expect("write junk");
 
-    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = loonfs_core::test_support::manifest_context(&store, &namespace_id).await;
     let staged = engine
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     engine
         .upload_content(
-            &catalog,
+            &live_context,
             &staged.upload_id,
             b"uploaded\n",
             &loonfs_test_support::test_actor(),
@@ -114,7 +114,7 @@ async fn reads_commits_and_change_feed_list_only_the_manifests() {
         .expect("upload content");
     engine
         .complete_upload(
-            &catalog,
+            &live_context,
             &staged.upload_id,
             CompleteUploadBody::ServiceProxied {},
             &loonfs_test_support::test_actor(),
@@ -233,14 +233,14 @@ async fn maintenance_preserves_the_logical_head() {
         .gc(&context.clock())
         .await
         .expect("collection");
-    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = loonfs_core::test_support::manifest_context(&store, &namespace_id).await;
     let staged = engine
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("second upload");
     engine
         .upload_content(
-            &catalog,
+            &live_context,
             &staged.upload_id,
             b"more\n",
             &loonfs_test_support::test_actor(),
@@ -249,7 +249,7 @@ async fn maintenance_preserves_the_logical_head() {
         .expect("second upload content");
     engine
         .complete_upload(
-            &catalog,
+            &live_context,
             &staged.upload_id,
             CompleteUploadBody::ServiceProxied {},
             &loonfs_test_support::test_actor(),

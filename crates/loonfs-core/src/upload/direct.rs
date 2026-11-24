@@ -3,9 +3,9 @@
 
 use super::session::{ensure_session_actor, ensure_session_open};
 use crate::engine::NamespaceEngine;
+use crate::engine::RuntimeReadContext;
 use crate::error::{CoreError, Result};
 use crate::limits::{MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
-use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{UploadSessionMode, UploadSessionPayload};
@@ -33,13 +33,13 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Part state remains client-managed. This method writes no durable state.
     pub async fn direct_multipart_part_targets(
         &self,
-        catalog: &ActiveNamespaceCatalogEntry,
+        context: &RuntimeReadContext,
         upload_id: &UploadId,
         requested: &[UploadPartChecksumClaim],
         actor_id: &ActorId,
     ) -> Result<MultipartPartTargets> {
         let now_ms = self.now_ms();
-        self.assert_own_catalog(catalog);
+        let head = context.read_basis().head();
         if requested.is_empty() {
             return Err(CoreError::InvalidUploadContent(
                 "a part-signing request names at least one part".to_owned(),
@@ -52,7 +52,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
         let state = self
             .namespace
-            .load_upload_session_state(catalog, upload_id)
+            .load_upload_session_state(head, upload_id)
             .await?;
         ensure_session_actor(&state.session, actor_id)?;
         ensure_session_open(&state, now_ms)?;
@@ -77,7 +77,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
 
         Ok(MultipartPartTargets {
-            object_key: content_blob(catalog.pool_id(), &session.content_id),
+            object_key: content_blob(&head.pool_id, &session.content_id),
             provider_upload_id: provider_upload_id.to_owned(),
             parts,
         })

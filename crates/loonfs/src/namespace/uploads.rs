@@ -1,6 +1,7 @@
 //! Staged uploads and direct-put targets.
 
 use crate::content_tokens::CompletedUpload;
+use crate::runtime_core::HeadConfirmation;
 use crate::trace::{self, operation_span};
 use crate::uploads::{
     DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTargets, UploadSessionView,
@@ -9,18 +10,20 @@ use crate::ByteStream;
 use crate::Result;
 use crate::{CompleteUploadBody, UploadSession};
 use crate::{Namespace, Writable};
-use loonfs_core::control::ActiveNamespaceCatalogEntry;
+use loonfs_core::RuntimeReadContext;
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::u64_from_usize;
 use loonfs_types::UploadPartChecksumClaim;
 use loonfs_types::{ActorId, UploadId};
 
 impl Namespace<Writable> {
-    /// Loads the namespace's catalog entry from this runtime's head, and
-    /// refuses a namespace that isn't active.
-    async fn active_catalog(&self) -> Result<ActiveNamespaceCatalogEntry> {
+    /// Returns the read context of this runtime's head of the namespace, as
+    /// [`HeadConfirmation::View`] confirms it, and returns
+    /// `namespace_not_found` or `namespace_deleted` when the head isn't
+    /// active.
+    async fn live_context(&self) -> Result<RuntimeReadContext> {
         self.core
-            .load_active_namespace_catalog_cached(&self.namespace_id)
+            .current_read_context(&self.namespace_id, HeadConfirmation::View)
             .await
     }
 
@@ -30,8 +33,8 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "create_upload", self.namespace_id),
             async {
-                let catalog = self.active_catalog().await?;
-                Ok(self.engine().begin_upload(&catalog, actor).await?)
+                let context = self.live_context().await?;
+                Ok(self.engine().begin_upload(&context, actor).await?)
             },
         )
         .await
@@ -50,10 +53,10 @@ impl Namespace<Writable> {
                 self.namespace_id
             ),
             async {
-                let catalog = self.active_catalog().await?;
+                let context = self.live_context().await?;
                 Ok(self
                     .engine()
-                    .begin_direct_put_upload_target(&catalog, actor)
+                    .begin_direct_put_upload_target(&context, actor)
                     .await?)
             },
         )
@@ -88,10 +91,10 @@ impl Namespace<Writable> {
                 self.namespace_id
             ),
             async {
-                let catalog = self.active_catalog().await?;
+                let context = self.live_context().await?;
                 Ok(self
                     .engine()
-                    .begin_direct_multipart_upload_target(&catalog, actor, *options)
+                    .begin_direct_multipart_upload_target(&context, actor, *options)
                     .await?)
             },
         )
@@ -108,10 +111,10 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "sign_upload_parts", self.namespace_id),
             async {
-                let catalog = self.active_catalog().await?;
+                let context = self.live_context().await?;
                 Ok(self
                     .engine()
-                    .direct_multipart_part_targets(&catalog, upload_id, requested, actor)
+                    .direct_multipart_part_targets(&context, upload_id, requested, actor)
                     .await?)
             },
         )
@@ -133,10 +136,10 @@ impl Namespace<Writable> {
                 payload_class = trace::payload_class(u64_from_usize(bytes.len()))
             ),
             async {
-                let catalog = self.active_catalog().await?;
+                let context = self.live_context().await?;
                 Ok(self
                     .engine()
-                    .upload_content(&catalog, upload_id, bytes, actor)
+                    .upload_content(&context, upload_id, bytes, actor)
                     .await?)
             },
         )
@@ -165,10 +168,10 @@ impl Namespace<Writable> {
                 payload_class = "streamed"
             ),
             async {
-                let catalog = self.active_catalog().await?;
+                let context = self.live_context().await?;
                 Ok(self
                     .engine()
-                    .upload_content_stream(&catalog, upload_id, body, actor)
+                    .upload_content_stream(&context, upload_id, body, actor)
                     .await?)
             },
         )
@@ -185,10 +188,10 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "complete_upload", self.namespace_id),
             async {
-                let catalog = self.active_catalog().await?;
+                let context = self.live_context().await?;
                 Ok(self
                     .engine()
-                    .complete_upload(&catalog, upload_id, completion, actor)
+                    .complete_upload(&context, upload_id, completion, actor)
                     .await?)
             },
         )
@@ -204,17 +207,12 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "abort_upload", self.namespace_id),
             async {
-                // LoonFS still aborts the sessions of a deleted namespace, so
-                // this entry is built from the head without a check of its
-                // status.
-                let catalog = self
+                // LoonFS still aborts the sessions of a deleted namespace.
+                let head = self
                     .core
-                    .load_namespace_catalog_cached(&self.namespace_id)
+                    .current_head_of_any_status(&self.namespace_id)
                     .await?;
-                Ok(self
-                    .engine()
-                    .abort_upload(&catalog, upload_id, actor)
-                    .await?)
+                Ok(self.engine().abort_upload(&head, upload_id, actor).await?)
             },
         )
         .await
@@ -230,8 +228,8 @@ impl Namespace<Writable> {
             operation_span!(self.core, "get_upload", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                let catalog = self.active_catalog().await?;
-                Ok(self.engine().get_upload(&catalog, upload_id, actor).await?)
+                let context = self.live_context().await?;
+                Ok(self.engine().get_upload(&context, upload_id, actor).await?)
             },
         )
         .await

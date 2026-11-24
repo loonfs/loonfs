@@ -43,10 +43,10 @@ async fn a_failed_session_read_after_a_streamed_write_leaves_the_session_open() 
         .create()
         .await
         .expect("bootstrap");
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let session = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .engine()
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     let loaded = load_session_state(&store, &namespace_id, &session.upload_id)
@@ -77,7 +77,7 @@ async fn a_failed_session_read_after_a_streamed_write_leaves_the_session_open() 
 
     let error = engine_at(&recording, &namespace_id, 1_000)
         .upload_content_stream(
-            &catalog,
+            &live_context,
             &session.upload_id,
             body,
             &loonfs_test_support::test_actor(),
@@ -95,7 +95,7 @@ async fn a_failed_session_read_after_a_streamed_write_leaves_the_session_open() 
     // The session's own object stays, so a retry of the same bytes replays it.
     let retried = engine_at(&recording, &namespace_id, 1_000)
         .upload_content(
-            &catalog,
+            &live_context,
             &session.upload_id,
             BYTES,
             &loonfs_test_support::test_actor(),
@@ -128,10 +128,10 @@ async fn a_retried_upload_of_the_same_bytes_succeeds_and_other_bytes_conflict() 
         .create()
         .await
         .expect("bootstrap");
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let session = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .engine()
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
 
@@ -139,7 +139,7 @@ async fn a_retried_upload_of_the_same_bytes_succeeds_and_other_bytes_conflict() 
     store.fail_next(1);
     engine_at(&store, &namespace_id, 1_000)
         .upload_content(
-            &catalog,
+            &live_context,
             &session.upload_id,
             BYTES,
             &loonfs_test_support::test_actor(),
@@ -148,7 +148,7 @@ async fn a_retried_upload_of_the_same_bytes_succeeds_and_other_bytes_conflict() 
         .expect_err("the content write fails");
     let retry = engine_at(&store, &namespace_id, 1_000)
         .upload_content(
-            &catalog,
+            &live_context,
             &session.upload_id,
             BYTES,
             &loonfs_test_support::test_actor(),
@@ -157,7 +157,7 @@ async fn a_retried_upload_of_the_same_bytes_succeeds_and_other_bytes_conflict() 
         .expect("a retry of the same bytes finds its own object");
     let other = engine_at(&store, &namespace_id, 1_000)
         .upload_content(
-            &catalog,
+            &live_context,
             &session.upload_id,
             b"other bytes\n",
             &loonfs_test_support::test_actor(),
@@ -205,18 +205,18 @@ async fn owned_staging_over_an_occupied_key_answers_the_same_for_bytes_and_for_a
                 .create()
                 .await
                 .expect("bootstrap");
-            let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+            let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
             let engine =
                 crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
                     .engine();
             let staged = if streamed {
                 let body = futures::stream::once(async { Ok(Bytes::from_static(BYTES)) }).boxed();
                 engine
-                    .stage_owned_stream(&catalog, &loonfs_test_support::test_actor(), body)
+                    .stage_owned_stream(&live_context, &loonfs_test_support::test_actor(), body)
                     .await
             } else {
                 engine
-                    .stage_owned_bytes(&catalog, &loonfs_test_support::test_actor(), BYTES)
+                    .stage_owned_bytes(&live_context, &loonfs_test_support::test_actor(), BYTES)
                     .await
             };
 
@@ -252,17 +252,17 @@ async fn a_buffered_upload_aborted_during_its_write_is_refused_and_records_nothi
         .create()
         .await
         .expect("bootstrap");
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let session = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     store.block_next();
     let engine = engine_at(&store, &namespace_id, 1_000);
     let actor = loonfs_test_support::test_actor();
     let (result, ()) = tokio::join!(
-        engine.upload_content(&catalog, &session.upload_id, BYTES, &actor),
+        engine.upload_content(&live_context, &session.upload_id, BYTES, &actor),
         async {
             store.wait_until_blocked().await;
             abort(store.inner(), &namespace_id, &session.upload_id, &setup)
@@ -284,19 +284,19 @@ fn context(now_ms: u64) -> WriterAt {
 }
 
 /// Loads the records of an upload session of `namespace_id` through the
-/// namespace's own catalog entry.
+/// head of the namespace's current manifest.
 async fn load_session_state<S: ObjectStore>(
     store: S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
 ) -> Result<crate::upload::records::UploadSessionState> {
     let namespace = crate::test_support::namespace_store(store, namespace_id);
-    let catalog = namespace
-        .load_catalog_entry()
+    let live_context = namespace
+        .load_manifest_context()
         .await
-        .expect("the namespace's catalog entry");
+        .expect("the namespace's read context");
     namespace
-        .load_upload_session_state(&catalog, upload_id)
+        .load_upload_session_state(live_context.read_basis().head(), upload_id)
         .await
 }
 
@@ -310,15 +310,15 @@ async fn staged_session(
         .create()
         .await
         .expect("bootstrap");
-    let catalog = crate::test_support::load_catalog(store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(store, &namespace_id).await;
     let begin = crate::test_support::NamespaceFixture::new(store, &namespace_id, context)
         .engine()
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     let staged = engine_at(store, &namespace_id, context.now_ms)
         .upload_content(
-            &catalog,
+            &live_context,
             &begin.upload_id,
             BYTES,
             &loonfs_test_support::test_actor(),
@@ -370,11 +370,11 @@ async fn complete_with<S: ObjectStore + ?Sized>(
     body: CompleteUploadBody,
     context: &WriterAt,
 ) -> Result<CompletedUpload> {
-    let catalog = crate::test_support::load_catalog(store, namespace_id).await;
+    let live_context = crate::test_support::manifest_context(store, namespace_id).await;
     crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
         .complete_upload(
-            &catalog,
+            &live_context,
             upload_id,
             body,
             &loonfs_test_support::test_actor(),
@@ -388,13 +388,21 @@ async fn abort<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     context: &WriterAt,
 ) -> Result<UploadSession> {
-    let catalog = crate::test_support::namespace_store(store, namespace_id)
-        .load_catalog_entry()
+    let live_context = crate::test_support::namespace_store(store, namespace_id)
+        .load_manifest_context()
         .await?;
-    crate::test_support::NamespaceFixture::new(store, catalog.namespace_id(), context)
-        .engine()
-        .abort_upload(&catalog, upload_id, &loonfs_test_support::test_actor())
-        .await
+    crate::test_support::NamespaceFixture::new(
+        store,
+        &live_context.read_basis().head().namespace_id,
+        context,
+    )
+    .engine()
+    .abort_upload(
+        live_context.read_basis(),
+        upload_id,
+        &loonfs_test_support::test_actor(),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -512,16 +520,16 @@ async fn every_upload_writes_its_session_record_and_its_outcome_record_once() {
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::upload_records(),
     );
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
 
     let proxied = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin proxied upload");
     engine_at(&store, &namespace_id, 1_000)
         .upload_content(
-            &catalog,
+            &live_context,
             &proxied.upload_id,
             BYTES,
             &loonfs_test_support::test_actor(),
@@ -534,7 +542,7 @@ async fn every_upload_writes_its_session_record_and_its_outcome_record_once() {
 
     let direct = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
-        .begin_direct_put_upload_target(&catalog, &loonfs_test_support::test_actor())
+        .begin_direct_put_upload_target(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin direct put");
     store
@@ -560,18 +568,27 @@ async fn every_upload_writes_its_session_record_and_its_outcome_record_once() {
     .await
     .expect("complete direct put");
 
-    let prepared =
-        crate::test_support::NamespaceFixture::new(&store, catalog.namespace_id(), &setup)
-            .engine()
-            .stage_owned_bytes(&catalog, &loonfs_test_support::test_actor(), BYTES)
-            .await
-            .expect("stage owned bytes");
+    let prepared = crate::test_support::NamespaceFixture::new(
+        &store,
+        &live_context.read_basis().head().namespace_id,
+        &setup,
+    )
+    .engine()
+    .stage_owned_bytes(&live_context, &loonfs_test_support::test_actor(), BYTES)
+    .await
+    .expect("stage owned bytes");
     let owned = prepared.upload_id().expect("owned staging session").clone();
 
     let mut expected = Vec::new();
     for upload_id in [&proxied.upload_id, &direct.session.upload_id, &owned] {
-        expected.push((upload_session(catalog.pool_id(), upload_id), 1));
-        expected.push((upload_outcome(catalog.pool_id(), upload_id), 1));
+        expected.push((
+            upload_session(&live_context.read_basis().head().pool_id, upload_id),
+            1,
+        ));
+        expected.push((
+            upload_outcome(&live_context.read_basis().head().pool_id, upload_id),
+            1,
+        ));
     }
     expected.sort();
     assert_eq!(writes_per_key(&store), expected);
@@ -658,10 +675,10 @@ async fn a_direct_put_requires_the_session_algorithm_and_replays_completion() {
         .create()
         .await
         .expect("bootstrap");
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let begin = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
-        .begin_direct_put_upload_target(&catalog, &loonfs_test_support::test_actor())
+        .begin_direct_put_upload_target(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin direct put");
 
@@ -799,10 +816,10 @@ async fn a_mismatched_direct_put_claim_is_rejected_and_a_matching_one_completes(
         .create()
         .await
         .expect("bootstrap");
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let begin = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
-        .begin_direct_put_upload_target(&catalog, &loonfs_test_support::test_actor())
+        .begin_direct_put_upload_target(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin direct put");
     let written = vec![b'x'; BYTES.len()];
@@ -919,10 +936,10 @@ async fn staging_into_a_terminal_session_is_refused() {
     complete(&store, &namespace_id, &upload_id, &context(2_000))
         .await
         .expect("complete");
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let error = engine_at(&store, &namespace_id, 2_000)
         .upload_content(
-            &catalog,
+            &live_context,
             &upload_id,
             BYTES,
             &loonfs_test_support::test_actor(),
@@ -933,7 +950,7 @@ async fn staging_into_a_terminal_session_is_refused() {
 
     let aborted = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin a second upload");
     abort(&store, &namespace_id, &aborted.upload_id, &context(3_000))
@@ -941,7 +958,7 @@ async fn staging_into_a_terminal_session_is_refused() {
         .expect("abort");
     let error = engine_at(&store, &namespace_id, 3_000)
         .upload_content(
-            &catalog,
+            &live_context,
             &aborted.upload_id,
             BYTES,
             &loonfs_test_support::test_actor(),
@@ -957,16 +974,16 @@ async fn an_open_session_takes_upload_work_only_before_its_expiry() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let setup = context(1_000);
     let (namespace_id, staged_id, _, _) = staged_session(&store, &setup).await;
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let proxied_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin proxied upload")
         .upload_id;
     let multipart_id = create_upload_session(
         &store,
-        &catalog,
+        live_context.read_basis().head(),
         loonfs_test_support::test_actor(),
         NewUploadSession::direct_multipart(
             ContentId::generate(),
@@ -991,7 +1008,7 @@ async fn an_open_session_takes_upload_work_only_before_its_expiry() {
                 "staging",
                 engine_at(&store, &namespace_id, now_ms)
                     .upload_content(
-                        &catalog,
+                        &live_context,
                         &proxied_id,
                         BYTES,
                         &loonfs_test_support::test_actor(),
@@ -1003,7 +1020,7 @@ async fn an_open_session_takes_upload_work_only_before_its_expiry() {
                 "part signing",
                 engine_at(&store, &namespace_id, now_ms)
                     .direct_multipart_part_targets(
-                        &catalog,
+                        &live_context,
                         &multipart_id,
                         &part,
                         &loonfs_test_support::test_actor(),
@@ -1036,9 +1053,13 @@ async fn an_expired_open_session_still_reports_its_status_and_aborts() {
     let (namespace_id, upload_id, _, _) = staged_session(&store, &setup).await;
     let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS);
 
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let view = engine_at(&store, &namespace_id, expired.now_ms)
-        .get_upload(&catalog, &upload_id, &loonfs_test_support::test_actor())
+        .get_upload(
+            &live_context,
+            &upload_id,
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("status of an expired session");
     assert_matches!(view.session.status, UploadSessionStatus::Open { .. });
@@ -1060,13 +1081,17 @@ async fn only_a_completed_session_mints_evidence() {
     let setup = context(1_000);
     let (namespace_id, upload_id, content_ref, _content_key) = staged_session(&store, &setup).await;
 
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let crate::UploadSessionView {
         session: open,
         evidence,
         ..
     } = engine_at(&store, &namespace_id, 1_500)
-        .get_upload(&catalog, &upload_id, &loonfs_test_support::test_actor())
+        .get_upload(
+            &live_context,
+            &upload_id,
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("status of an open session");
     assert_matches!(open.status, UploadSessionStatus::Open { .. });
@@ -1083,7 +1108,11 @@ async fn only_a_completed_session_mints_evidence() {
         evidence,
         ..
     } = engine_at(&store, &namespace_id, 2_500)
-        .get_upload(&catalog, &upload_id, &loonfs_test_support::test_actor())
+        .get_upload(
+            &live_context,
+            &upload_id,
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("status of a completed session");
     assert_matches!(completed.status, UploadSessionStatus::Completed { .. });
@@ -1095,7 +1124,7 @@ async fn only_a_completed_session_mints_evidence() {
     // A second session, aborted, to check the other terminal state.
     let begin = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin second upload");
     abort(&store, &namespace_id, &begin.upload_id, &context(3_000))
@@ -1107,7 +1136,7 @@ async fn only_a_completed_session_mints_evidence() {
         ..
     } = engine_at(&store, &namespace_id, 3_500)
         .get_upload(
-            &catalog,
+            &live_context,
             &begin.upload_id,
             &loonfs_test_support::test_actor(),
         )
@@ -1134,13 +1163,17 @@ async fn a_completed_session_keeps_its_content_ref_after_token_minting_closes() 
     // Long after the first evidence would have expired, the durable
     // session still answers with usable evidence.
     let much_later = completed_at_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS - 1;
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let crate::UploadSessionView {
         session: _,
         evidence,
         ..
     } = engine_at(&store, &namespace_id, much_later)
-        .get_upload(&catalog, &upload_id, &loonfs_test_support::test_actor())
+        .get_upload(
+            &live_context,
+            &upload_id,
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("status inside the receipt window");
     assert_eq!(evidence.expect("still minting").content_ref(), &content_ref);
@@ -1151,7 +1184,11 @@ async fn a_completed_session_keeps_its_content_ref_after_token_minting_closes() 
         evidence,
         ..
     } = engine_at(&store, &namespace_id, past)
-        .get_upload(&catalog, &upload_id, &loonfs_test_support::test_actor())
+        .get_upload(
+            &live_context,
+            &upload_id,
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("status past the receipt window");
     let completed = match status.status {
@@ -1191,7 +1228,7 @@ async fn an_upload_session_past_its_publication_budget_writes_nothing() {
         .create()
         .await
         .expect("bootstrap");
-    let catalog = crate::test_support::load_catalog(&inner, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&inner, &namespace_id).await;
     let pool_id = crate::test_support::load_pool_id(&inner, &namespace_id).await;
     let store = RecordingStore::new(inner, KeyPredicate::prefix(upload_session_prefix(&pool_id)));
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
@@ -1199,7 +1236,7 @@ async fn an_upload_session_past_its_publication_budget_writes_nothing() {
     timer.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
     let error = create_upload_session(
         &store,
-        &catalog,
+        live_context.read_basis().head(),
         loonfs_test_support::test_actor(),
         NewUploadSession::service_proxied(),
         &clock,

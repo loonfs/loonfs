@@ -11,7 +11,7 @@
 use crate::control_object::{expect_identity_field, load_control_object, present};
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::{CoreError, Result};
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::{upload_outcome, upload_session};
@@ -32,8 +32,8 @@ pub(crate) struct UploadSessionState {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Loads the records of an upload session that the namespace `catalog`
-    /// describes created, from its pool's prefix.
+    /// Loads the records of an upload session that the namespace whose head
+    /// is `head` created, from its pool's prefix.
     ///
     /// The outcome record is read before the session record. Garbage collection
     /// deletes the session record first, so if the session record is still
@@ -44,14 +44,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// key doesn't identify the member.
     pub(crate) async fn load_upload_session_state(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        head: &NamespaceReadState,
         upload_id: &UploadId,
     ) -> Result<UploadSessionState> {
-        let pool_id = catalog.pool_id();
+        let pool_id = &head.pool_id;
         let outcome = load_upload_outcome(&self.store, pool_id, upload_id).await?;
         let session = load_upload_session_record(&self.store, pool_id, upload_id)
             .await?
-            .filter(|session| session.namespace_id == *catalog.namespace_id())
+            .filter(|session| session.namespace_id == head.namespace_id)
             .ok_or_else(|| CoreError::UploadNotFound {
                 upload_id: upload_id.clone(),
             })?;
@@ -304,16 +304,14 @@ mod tests {
                 completed_at_ms: 1_500,
                 content_ref,
             };
-            let catalog = VerifiedNamespaceCatalogEntry::from_head(
-                &crate::namespace::state::NamespaceReadState::initial(
-                    namespace_id.clone(),
-                    1_000,
-                    loonfs_test_support::test_actor(),
-                ),
+            let head = crate::namespace::state::NamespaceReadState::initial(
+                namespace_id.clone(),
+                1_000,
+                loonfs_test_support::test_actor(),
             );
-            write_upload_records(&store, catalog.pool_id(), &session, Some(outcome.clone())).await;
+            write_upload_records(&store, &head.pool_id, &session, Some(outcome.clone())).await;
             let loaded = crate::test_support::namespace_store(&store, &namespace_id)
-                .load_upload_session_state(&catalog, &session.upload_id)
+                .load_upload_session_state(&head, &session.upload_id)
                 .await;
             match refusal {
                 None => assert_eq!(loaded.expect("consistent records").outcome, Some(outcome)),
@@ -333,20 +331,18 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let session = proxied_upload_session(&namespace_id, 2_000);
-        let catalog = VerifiedNamespaceCatalogEntry::from_head(
-            &crate::namespace::state::NamespaceReadState::initial(
-                namespace_id.clone(),
-                1_000,
-                loonfs_test_support::test_actor(),
-            ),
+        let head = crate::namespace::state::NamespaceReadState::initial(
+            namespace_id,
+            1_000,
+            loonfs_test_support::test_actor(),
         );
         let stored = UploadOutcome::Aborted {
             aborted_at_ms: 1_500,
         };
-        write_upload_records(&store, catalog.pool_id(), &session, Some(stored.clone())).await;
+        write_upload_records(&store, &head.pool_id, &session, Some(stored.clone())).await;
         for aborted_at_ms in [1_500, 1_600] {
             let outcome = UploadOutcome::Aborted { aborted_at_ms };
-            let standing = create_upload_outcome(&store, catalog.pool_id(), &session, &outcome)
+            let standing = create_upload_outcome(&store, &head.pool_id, &session, &outcome)
                 .await
                 .expect("create");
             assert_eq!(standing, stored);

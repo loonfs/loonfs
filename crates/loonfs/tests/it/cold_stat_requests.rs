@@ -118,10 +118,10 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .fold_wal(&namespace_id)
         .await
         .expect("publish first manifest");
-    let catalog = loonfs_core::test_support::namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
+    let live_context = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .load_manifest_context()
         .await
-        .expect("load namespace catalog");
+        .expect("load the namespace's read context");
 
     // Six commit batches, each folded into one delta run, with names
     // interleaved by stride so every run's direntry key range straddles the
@@ -141,7 +141,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
                 .expect("stage content");
             let prepared = loonfs_core::content::prepare_existing_content_ref(
                 &store,
-                &catalog,
+                &live_context,
                 stored.into_content_ref(),
             )
             .await

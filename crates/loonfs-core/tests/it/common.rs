@@ -45,7 +45,7 @@ pub(crate) async fn submit_commit<S: ObjectStore + ?Sized>(
     request: CommitIntent,
     context: &WriterAt,
 ) -> Result<loonfs_types::Commit, CoreError> {
-    let candidate = prepared_candidate(store, namespace_id, request).await;
+    let candidate = try_prepared_candidate(store, namespace_id, request).await?;
     NamespaceFixture::new(store, namespace_id, context)
         .publish_candidates(vec![candidate])
         .await
@@ -73,38 +73,49 @@ pub(crate) async fn submit_commits_batch<S: ObjectStore + ?Sized>(
 
 /// Wraps a request with a preparation proof for each distinct content ref
 /// it puts, which is what publication requires of new external content.
-///
-/// The namespace catalog is loaded only when there is content to prepare,
-/// so a request that touches no content leaves the store untouched and
-/// tests that count store operations still see what they expect.
 pub(crate) async fn prepared_candidate<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     request: CommitIntent,
 ) -> CommitCandidate {
+    try_prepared_candidate(store, namespace_id, request)
+        .await
+        .expect("load the namespace's read context")
+}
+
+/// Wraps a request as [`prepared_candidate`] does, and returns the error of
+/// the namespace's read context, such as `namespace_deleted`.
+///
+/// The read context is loaded only when there is content to prepare, so a
+/// request that touches no content leaves the store untouched and tests
+/// that count store operations still see what they expect.
+async fn try_prepared_candidate<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    request: CommitIntent,
+) -> Result<CommitCandidate, CoreError> {
     let mut seen = HashSet::new();
     let mut prepared = Vec::new();
-    let mut catalog = None;
+    let mut live_context = None;
     for content_ref in request
         .operations
         .iter()
         .filter_map(FilesystemOperation::content_ref)
     {
         if seen.insert(content_ref.clone()) {
-            if catalog.is_none() {
-                catalog = Some(
+            if live_context.is_none() {
+                live_context = Some(
                     namespace_store(store, namespace_id)
-                        .load_catalog_entry()
-                        .await
-                        .expect("load namespace catalog"),
+                        .load_manifest_context()
+                        .await?,
                 );
             }
             prepared.push(
                 prepare_existing_content_ref(
                     store,
-                    catalog
+                    live_context
                         .as_ref()
-                        .expect("external content should load the namespace catalog"),
+                        .expect("external content should load the read context"),
                     content_ref.clone(),
                 )
                 .await
@@ -112,7 +123,7 @@ pub(crate) async fn prepared_candidate<S: ObjectStore + ?Sized>(
             );
         }
     }
-    CommitCandidate::prepared(request, prepared)
+    Ok(CommitCandidate::prepared(request, prepared))
 }
 
 pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(

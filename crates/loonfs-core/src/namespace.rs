@@ -8,7 +8,6 @@ pub(crate) mod activate;
 pub(crate) mod basis;
 pub(crate) mod bootstrap;
 pub(crate) mod boundary;
-pub(crate) mod catalog;
 pub(crate) mod control;
 pub(crate) mod delete;
 pub(crate) mod fork;

@@ -162,17 +162,14 @@ pub mod cache {
     pub use crate::wal::ProjectedWalTail;
 }
 
-/// Namespace control objects and verified catalog state, as the loaders of
-/// [`NamespaceStore`] return them.
+/// Namespace control objects and state, as the loaders of [`NamespaceStore`]
+/// return them.
 ///
 /// The `loonfs` read and write paths and the layout tests use this module.
 pub mod control {
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
     pub use crate::manifest::NamespaceStatistics;
     pub use crate::namespace::boundary::{KeptBoundary, LoadedBoundary};
-    pub use crate::namespace::catalog::{
-        ActiveNamespaceCatalogEntry, VerifiedNamespaceCatalogEntry,
-    };
     pub use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
     pub use crate::namespace::fork::{ForkOutcome, ForkTarget};
     pub use crate::namespace::read_anchor::{project_anchor_tail, NamespaceReadAnchor};

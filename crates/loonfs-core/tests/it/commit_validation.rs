@@ -125,25 +125,25 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .expect("bootstrap");
     // Evidence exists only for a session the store already says completed,
     // so the token this test admits has to come from a real upload.
-    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = loonfs_core::test_support::manifest_context(&store, &namespace_id).await;
     let engine = namespace_engine(&store, &namespace_id, &context);
     let upload = engine
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     engine
         .upload_content(
-            &catalog,
+            &live_context,
             &upload.upload_id,
             b"admitted",
             &loonfs_test_support::test_actor(),
         )
         .await
         .expect("stage content");
-    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = loonfs_core::test_support::manifest_context(&store, &namespace_id).await;
     let completed = engine
         .complete_upload(
-            &catalog,
+            &live_context,
             &upload.upload_id,
             CompleteUploadBody::ServiceProxied {},
             &loonfs_test_support::test_actor(),
@@ -166,7 +166,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     .expect("mint token");
     let prepared = verify_content_token(
         "test-content-token-secret",
-        &catalog,
+        &live_context.read_basis().head().namespace_id,
         &token,
         context.now_ms,
     )
@@ -203,7 +203,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     assert_eq!(
         verify_content_token(
             "test-content-token-secret",
-            &catalog,
+            &live_context.read_basis().head().namespace_id,
             &forged_token,
             context.now_ms
         ),
@@ -258,15 +258,15 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
         .create()
         .await
         .expect("bootstrap");
-    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = loonfs_core::test_support::manifest_context(&store, &namespace_id).await;
     let engine = namespace_engine(&store, &namespace_id, &context);
     let upload = engine
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     engine
         .upload_content(
-            &catalog,
+            &live_context,
             &upload.upload_id,
             b"deadline",
             &loonfs_test_support::test_actor(),
@@ -275,7 +275,7 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
         .expect("stage content");
     let completed = engine
         .complete_upload(
-            &catalog,
+            &live_context,
             &upload.upload_id,
             CompleteUploadBody::ServiceProxied {},
             &loonfs_test_support::test_actor(),
@@ -1066,25 +1066,25 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .create()
         .await
         .expect("bootstrap");
-    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = loonfs_core::test_support::manifest_context(&store, &namespace_id).await;
     let engine = namespace_engine(&store, &namespace_id, &context);
     let upload = engine
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     let staged = engine
         .upload_content(
-            &catalog,
+            &live_context,
             &upload.upload_id,
             b"re-minted",
             &loonfs_test_support::test_actor(),
         )
         .await
         .expect("stage content");
-    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = loonfs_core::test_support::manifest_context(&store, &namespace_id).await;
     let completed = engine
         .complete_upload(
-            &catalog,
+            &live_context,
             &upload.upload_id,
             CompleteUploadBody::ServiceProxied {},
             &loonfs_test_support::test_actor(),
@@ -1100,7 +1100,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
     .expect("mint");
     let refused = verify_content_token(
         "test-content-token-secret",
-        &catalog,
+        &live_context.read_basis().head().namespace_id,
         &first,
         CONTENT_RECEIPT_TTL_MS + 1,
     )
@@ -1114,7 +1114,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         ..
     } = engine
         .get_upload(
-            &catalog,
+            &live_context,
             &upload.upload_id,
             &loonfs_test_support::test_actor(),
         )
@@ -1137,7 +1137,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
     .expect("re-mint");
     let prepared = verify_content_token(
         "test-content-token-secret",
-        &catalog,
+        &live_context.read_basis().head().namespace_id,
         &re_minted,
         CONTENT_RECEIPT_TTL_MS + 2,
     )

@@ -169,7 +169,7 @@ pub mod publish {
 ///
 /// A server mints a short-lived token after durable upload completion.
 /// [`Namespace::prepare_content_token`] verifies the token against the
-/// namespace catalog and returns process-local proof that keeps the token's
+/// namespace and returns process-local proof that keeps the token's
 /// publication deadline.
 /// Most embedded applications do not need this module.
 pub mod content_tokens {
@@ -207,7 +207,7 @@ pub mod downloads {
 pub mod control {
     pub use loonfs_core::control::{
         ControlObjectLoadError, LoadedControl, LoadedManifest, NamespaceReadState,
-        NamespaceStatistics, VerifiedNamespaceCatalogEntry,
+        NamespaceStatistics,
     };
     pub use loonfs_core::NamespaceStore;
 }

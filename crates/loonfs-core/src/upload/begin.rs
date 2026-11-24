@@ -3,10 +3,10 @@
 
 use super::abort::abort_unpublished_multipart_upload;
 use super::session::{create_upload_session, NewUploadSession};
+use crate::engine::RuntimeReadContext;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::{MAX_MULTIPART_PART_BYTES, MIN_MULTIPART_PART_BYTES};
-use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ObjectStore, PROVIDER_MULTIPART_PART_BYTES};
 use loonfs_types::options::DirectMultipartUploadOptions;
@@ -38,14 +38,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// [`Self::begin_direct_put_upload_target`] or [`Self::begin_direct_multipart_upload_target`].
     pub async fn begin_upload(
         &self,
-        catalog: &ActiveNamespaceCatalogEntry,
+        context: &RuntimeReadContext,
         actor_id: &ActorId,
     ) -> Result<UploadSession> {
         let clock = self.namespace.start_clock();
-        self.assert_own_catalog(catalog);
+        let head = context.read_basis().head();
         create_upload_session(
             &self.namespace.store,
-            catalog,
+            head,
             actor_id.clone(),
             NewUploadSession::service_proxied(),
             &clock,
@@ -56,16 +56,16 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Starts a direct PUT upload and assigns its content identity.
     pub async fn begin_direct_put_upload_target(
         &self,
-        catalog: &ActiveNamespaceCatalogEntry,
+        context: &RuntimeReadContext,
         actor_id: &ActorId,
     ) -> Result<DirectPutUploadTarget> {
         let clock = self.namespace.start_clock();
-        self.assert_own_catalog(catalog);
+        let head = context.read_basis().head();
         let content_id = ContentId::generate();
-        let object_key = content_blob(catalog.pool_id(), &content_id);
+        let object_key = content_blob(&head.pool_id, &content_id);
         let session = create_upload_session(
             &self.namespace.store,
-            catalog,
+            head,
             actor_id.clone(),
             NewUploadSession::direct_put(content_id, self.namespace.store.checksum_algorithm()),
             &clock,
@@ -86,15 +86,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// record cannot be written, the provider upload is aborted.
     pub async fn begin_direct_multipart_upload_target(
         &self,
-        catalog: &ActiveNamespaceCatalogEntry,
+        context: &RuntimeReadContext,
         actor_id: &ActorId,
         options: DirectMultipartUploadOptions,
     ) -> Result<DirectMultipartUploadTarget> {
         let clock = self.namespace.start_clock();
-        self.assert_own_catalog(catalog);
+        let head = context.read_basis().head();
         let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
         let content_id = ContentId::generate();
-        let object_key = content_blob(catalog.pool_id(), &content_id);
+        let object_key = content_blob(&head.pool_id, &content_id);
         let provider_upload_id = self
             .namespace
             .store
@@ -109,7 +109,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         );
         let session = match create_upload_session(
             &self.namespace.store,
-            catalog,
+            head,
             actor_id.clone(),
             session,
             &clock,
@@ -120,7 +120,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             Err(error) => {
                 let _ = abort_unpublished_multipart_upload(
                     &self.namespace.store,
-                    catalog.pool_id(),
+                    &head.pool_id,
                     &content_id,
                     &provider_upload_id,
                 )

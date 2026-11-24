@@ -33,10 +33,10 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &WriterAt,
 ) -> CompletedUpload {
-    let catalog = crate::test_support::load_catalog(store, namespace_id).await;
+    let live_context = crate::test_support::manifest_context(store, namespace_id).await;
     let upload = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
-        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .begin_upload(&live_context, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     crate::test_support::NamespaceFixture::new(
@@ -46,7 +46,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     )
     .engine()
     .upload_content(
-        &catalog,
+        &live_context,
         &upload.upload_id,
         b"completed content",
         &loonfs_test_support::test_actor(),
@@ -56,7 +56,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     let completed = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
         .complete_upload(
-            &catalog,
+            &live_context,
             &upload.upload_id,
             CompleteUploadBody::ServiceProxied {},
             &loonfs_test_support::test_actor(),
@@ -103,7 +103,7 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
         .await
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let token = mint_content_token(
         "secret",
         completed.evidence.as_ref().expect("completed evidence"),
@@ -119,8 +119,13 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
         )
         .await
         .expect("delete");
-    let prepared = verify_content_token("secret", &catalog, &token, clock.now_ms())
-        .expect("token remains valid");
+    let prepared = verify_content_token(
+        "secret",
+        &live_context.read_basis().head().namespace_id,
+        &token,
+        clock.now_ms(),
+    )
+    .expect("token remains valid");
     let candidate =
         CommitCandidate::prepared(put_candidate(&completed).intent().clone(), vec![prepared]);
     let mut engine = NamespaceCommitEngine::new(
@@ -505,7 +510,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let unused = completed_upload(&store, &namespace_id, &setup).await;
-    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
     let mut proofs = vec![completed.prepared.clone()];
     for upload in [&completed, &unused] {
         let token = mint_content_token(
@@ -515,7 +520,13 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         )
         .expect("mint");
         proofs.push(
-            verify_content_token("secret", &catalog, &token, setup.now_ms).expect("prepare token"),
+            verify_content_token(
+                "secret",
+                &live_context.read_basis().head().namespace_id,
+                &token,
+                setup.now_ms,
+            )
+            .expect("prepare token"),
         );
     }
     let candidate =

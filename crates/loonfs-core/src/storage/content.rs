@@ -2,9 +2,9 @@
 //! the stored content objects, and each object's key. The streaming read is in
 //! [`super::content_stream`], and staging is in [`super::content_staging`].
 
-use crate::error::classify_store_failure;
 #[cfg(any(test, feature = "test-support"))]
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::engine::RuntimeReadContext;
+use crate::error::classify_store_failure;
 #[cfg(any(test, feature = "test-support"))]
 use crate::storage::content_admission::PreparedContent;
 #[cfg(any(test, feature = "test-support"))]
@@ -98,11 +98,11 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
 /// Prepares content from an acknowledged durable write.
 #[cfg(any(test, feature = "test-support"))]
 pub fn prepare_stored_content(
-    catalog: &VerifiedNamespaceCatalogEntry,
+    context: &RuntimeReadContext,
     stored_content: StoredContent,
 ) -> PreparedContent {
     PreparedContent::for_completed_upload(
-        catalog.namespace_id().clone(),
+        context.read_basis().head().namespace_id.clone(),
         stored_content.content_ref,
         u64::MAX,
         None,
@@ -116,12 +116,13 @@ pub fn prepare_stored_content(
 #[cfg(any(test, feature = "test-support"))]
 pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
-    catalog: &VerifiedNamespaceCatalogEntry,
+    context: &RuntimeReadContext,
     content_ref: ContentRef,
 ) -> std::result::Result<PreparedContent, DurableContentValidationError> {
-    validate_durable_content_reference(store, catalog.pool_id(), &content_ref).await?;
+    validate_durable_content_reference(store, &context.read_basis().head().pool_id, &content_ref)
+        .await?;
     Ok(PreparedContent::for_durable_content_write(
-        catalog.namespace_id().clone(),
+        context.read_basis().head().namespace_id.clone(),
         content_ref,
     ))
 }

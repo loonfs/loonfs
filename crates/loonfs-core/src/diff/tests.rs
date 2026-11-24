@@ -260,9 +260,13 @@ async fn administer(
                 .store_bytes_as_content(bytes)
                 .await
                 .expect("store content");
-            let catalog = namespace.load_catalog_entry().await.expect("catalog");
+            let live_context = namespace
+                .load_manifest_context()
+                .await
+                .expect("read context");
             vec![crate::storage::content::prepare_stored_content(
-                &catalog, stored,
+                &live_context,
+                stored,
             )]
         }
         None => Vec::new(),

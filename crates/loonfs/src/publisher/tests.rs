@@ -2020,13 +2020,13 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         )
         .await
         .expect("stage content");
-    let catalog = loonfs_core::test_support::namespace_store(&shared, &namespace_id)
-        .load_catalog_entry()
+    let live_context = loonfs_core::test_support::namespace_store(&shared, &namespace_id)
+        .load_manifest_context()
         .await
-        .expect("load namespace catalog");
+        .expect("load the namespace's read context");
     let prepared_content = loonfs_core::content::prepare_existing_content_ref(
         &shared,
-        &catalog,
+        &live_context,
         staged.content_ref().expect("staged content").clone(),
     )
     .await
