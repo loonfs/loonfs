@@ -1,5 +1,6 @@
 //! The LoonFS HTTP API as a library: the routes and handlers that serve a
-//! LoonFS runtime, and the OpenAPI document that describes them.
+//! LoonFS runtime, the OpenAPI document that describes them, and the
+//! maintenance [`Scheduler`] that a host builds over its [`Namespaces`] table.
 //! Hosts own configuration, listeners, shutdown, and operational routes.
 
 #![warn(missing_docs)]

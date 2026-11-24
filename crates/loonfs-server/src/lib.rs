@@ -5,8 +5,9 @@
 //! commit protocol. Embedded-mode callers skip this crate entirely and use
 //! `loonfs` directly.
 //!
-//! Route handlers don't belong here: they're in `loonfs-http`, and this crate
-//! adds configuration, TLS listeners, and the maintenance scheduler.
+//! Route handlers and the maintenance scheduler are in `loonfs-http`. This
+//! crate adds configuration and TLS listeners, and starts the scheduler's
+//! loops.
 
 mod config;
 mod error;
