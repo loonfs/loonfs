@@ -45,12 +45,13 @@ pub use reports::{
 /// call runs in the caller's task; this value starts no background work.
 /// Operations that mutate durable control state record the writer id it was
 /// created with. Every value from one runtime shares that runtime's
-/// compactor claim and execution budget with its writer sessions.
+/// execution budget with its writer sessions.
 #[derive(Clone)]
 pub struct Maintenance {
     pub(crate) core: RuntimeCore,
     pub(crate) publisher: PublisherRegistry,
-    pub(crate) writer: Arc<WriterState>,
+    /// Keeps the runtime's publication work alive while this value exists.
+    _writer: Arc<WriterState>,
     pub(crate) writer_id: WriterId,
     /// A narrowed per-segment row budget for the tests that need many
     /// compacted segments. See [`Self::narrow_segment_row_budget`].
@@ -70,7 +71,7 @@ impl Maintenance {
         Self {
             core,
             publisher,
-            writer,
+            _writer: writer,
             writer_id,
             #[cfg(test)]
             segment_row_budget: None,
@@ -259,20 +260,19 @@ impl Maintenance {
     /// session's, and each unit waits for a unit in progress, so the call
     /// never repeats that work.
     ///
-    /// Stops when nothing is due, when another process has the compactor
-    /// epoch, when `cancellation` is set, when the namespace's writer
-    /// session in this runtime is closed or its namespace deleted, after three
-    /// abandoned units in a row, or after it publishes 16 compaction units.
-    /// Work still due after the 16th unit waits for the next call. A unit
-    /// that loses its manifest put to another publication tries again over
-    /// the manifest that won, so only an abandoned unit counts as a lost
-    /// race. Setting `cancellation` ends a wait for a lock or a permit and
-    /// drops a fold in progress at once, and a running compaction unit stops
-    /// at its next block. A close or a delete of the session stops the call
-    /// before its next unit. A dropped call leaves what a crash would:
-    /// unreferenced segments, or a manifest the runtime learns of the way it
-    /// learns of another process's. Fails with the first error. Keeps no
-    /// state between calls.
+    /// Stops when nothing is due, when `cancellation` is set, when the
+    /// namespace's writer session in this runtime is closed or its namespace
+    /// deleted, after three abandoned units in a row, or after it publishes 16
+    /// compaction units. Work still due after the 16th unit waits for the next
+    /// call. A unit that loses its manifest put to another publication tries
+    /// again over the manifest that won, so only an abandoned unit counts as a
+    /// lost race. Setting `cancellation` ends a wait for a lock or a permit and
+    /// drops a fold in progress at once, and a running compaction unit stops at
+    /// its next block. A close or a delete of the session stops the call before
+    /// its next unit. A dropped call leaves what a crash would: unreferenced
+    /// segments, or a manifest the runtime learns of the way it learns of
+    /// another process's. Fails with the first error. Keeps no state between
+    /// calls.
     ///
     /// The response reports the compaction units the call published, and an
     /// outcome. The outcome is [`MetadataMaintenanceOutcome::CaughtUp`] when

@@ -14,7 +14,7 @@ use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ManifestBoundary, ManifestRef, NamespaceStatus};
 use loonfs_types::format::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
-use loonfs_types::{CompactorEpoch, ManifestNo, NamespaceId, MAX_PUBLIC_INTEGER};
+use loonfs_types::{ManifestNo, NamespaceId, MAX_PUBLIC_INTEGER};
 use std::sync::Arc;
 
 /// A namespace manifest loaded from the store, with its object key and stored
@@ -49,10 +49,6 @@ impl LoadedManifest {
 
     pub fn folded_wal_no(&self) -> loonfs_types::WalNo {
         self.payload().folded_wal_no
-    }
-
-    pub fn compactor_epoch(&self) -> CompactorEpoch {
-        self.payload().compactor_epoch
     }
 }
 

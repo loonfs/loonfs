@@ -270,10 +270,7 @@ impl LoonFsBuilder<Writable> {
             .ok_or_else(|| Error::Config("`writer_id` is required".to_owned()))?;
         let runtime = owning_runtime()?;
         let core = self.core.open()?;
-        let writer = Arc::new(WriterState {
-            writer_id,
-            compactor_epochs: Default::default(),
-        });
+        let writer = Arc::new(WriterState { writer_id });
         let publisher = PublisherRegistry::new(core.clone(), &writer, runtime);
         core.set_head_positions(publisher.head_positions());
         // The publisher keeps the core without a subject, and only the

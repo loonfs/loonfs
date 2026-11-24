@@ -182,11 +182,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     )
     .with_run_policy(crate::test_support::one_delta_run_policy())
     .engine()
-    .compact_metadata_unit(
-        None,
-        selected.compactor_epoch(),
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
+    .compact_from_current()
     .await
     .expect("compact");
     assert_matches!(report, CompactionUnitOutcome::Published { .. });

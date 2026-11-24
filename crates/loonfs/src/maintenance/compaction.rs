@@ -1,6 +1,5 @@
 //! The compaction loop that [`Maintenance`] and each writer session run over
-//! a namespace: compaction units under the namespace's compaction lock, and
-//! the runtime's compactor epochs.
+//! a namespace: compaction units under the namespace's compaction lock.
 
 use super::{Maintenance, MetadataCompactionOutcome};
 use crate::publisher::NamespaceChange;
@@ -12,7 +11,6 @@ use crate::{
 use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::WriterPosition;
 use loonfs_core::{MetadataCompactionCancellation, Phase};
-use loonfs_types::CompactorEpoch;
 use std::ops::ControlFlow;
 use tracing::Instrument;
 
@@ -51,7 +49,6 @@ fn compaction_outcome(outcome: loonfs_core::CompactionUnitOutcome) -> MetadataCo
         },
         loonfs_core::CompactionUnitOutcome::Cancelled => MetadataCompactionOutcome::Cancelled,
         loonfs_core::CompactionUnitOutcome::Abandoned => MetadataCompactionOutcome::Abandoned,
-        loonfs_core::CompactionUnitOutcome::Fenced => MetadataCompactionOutcome::Fenced,
     }
 }
 
@@ -115,18 +112,17 @@ impl Maintenance {
     /// Runs size-tiered compaction units on `namespace_id` while a unit is
     /// due, and reports how many units the call published.
     ///
-    /// This is the namespace's one compaction loop, which a writer session
-    /// runs after its folds and a host's metadata calls run after their
-    /// folds. Each unit compacts the whole size-tiered window that the
-    /// namespace's run policy selects. The first unit plans from `observed`, the current manifest
-    /// that the caller loaded from the store, when it's given. The call stops when nothing is
-    /// due, when another process has the compactor epoch, when
-    /// `cancellation` is set, when the namespace's writer session in this
-    /// runtime is closed or its namespace deleted, after
-    /// [`MAX_LOST_COMPACTION_RACES`] abandoned units in a row, or after it
-    /// publishes [`MAX_COMPACTION_UNITS_PER_CALL`] units. A close or a delete
-    /// stops the loop before its next unit, and `cancellation` also stops a
-    /// unit in progress at its next block. The response's outcome is
+    /// This is the namespace's one compaction loop, which a writer session runs
+    /// after its folds and a host's metadata calls run after their folds. Each
+    /// unit compacts the whole size-tiered window that the namespace's run
+    /// policy selects. The first unit plans from `observed`, the current
+    /// manifest that the caller loaded from the store, when it's given. The
+    /// call stops when nothing is due, when `cancellation` is set, when the
+    /// namespace's writer session in this runtime is closed or its namespace
+    /// deleted, after [`MAX_LOST_COMPACTION_RACES`] abandoned units in a row,
+    /// or after it publishes [`MAX_COMPACTION_UNITS_PER_CALL`] units. A close
+    /// or a delete stops the loop before its next unit, and `cancellation` also
+    /// stops a unit in progress at its next block. The response's outcome is
     /// [`MetadataMaintenanceOutcome::CaughtUp`] only when the call stopped
     /// because no unit was due.
     pub(crate) async fn compact_namespace(
@@ -173,9 +169,7 @@ impl Maintenance {
                     break MetadataMaintenanceOutcome::Due
                 }
                 MetadataCompactionOutcome::NotNeeded => break MetadataMaintenanceOutcome::CaughtUp,
-                MetadataCompactionOutcome::Cancelled | MetadataCompactionOutcome::Fenced => {
-                    break MetadataMaintenanceOutcome::Due
-                }
+                MetadataCompactionOutcome::Cancelled => break MetadataMaintenanceOutcome::Due,
             }
         };
         Ok(MetadataMaintenanceResponse {
@@ -186,75 +180,17 @@ impl Maintenance {
         })
     }
 
-    /// Returns this runtime's compactor epoch for `namespace_id`, and the
-    /// manifest that a unit under that epoch can plan from.
-    ///
-    /// When the runtime has no claim yet, the call claims the epoch over
-    /// `basis` (see [`NamespaceEngine::claim_compactor`]) and returns the
-    /// claim's manifest, whose compactor epoch is the claimed one. Otherwise
-    /// it returns `basis` unchanged.
-    ///
-    /// [`NamespaceEngine::claim_compactor`]: loonfs_core::NamespaceEngine::claim_compactor
-    #[cfg(test)]
-    pub(crate) async fn compactor_epoch(
-        &self,
-        namespace_id: &NamespaceId,
-        basis: Option<Held<LoadedManifest>>,
-    ) -> Result<(CompactorEpoch, Option<Held<LoadedManifest>>)> {
-        let turns = self.publisher.namespace_turns(namespace_id);
-        let turn = turns.compaction.lock().await;
-        self.compactor_epoch_with_turn(namespace_id, basis, &turn)
-            .await
-    }
-
-    async fn compactor_epoch_with_turn(
-        &self,
-        namespace_id: &NamespaceId,
-        basis: Option<Held<LoadedManifest>>,
-        _turn: &tokio::sync::MutexGuard<'_, ()>,
-    ) -> Result<(CompactorEpoch, Option<Held<LoadedManifest>>)> {
-        if let Some(epoch) = self.claimed_compactor_epoch(namespace_id) {
-            return Ok((epoch, basis));
-        }
-        let claimed = self
-            .engine(namespace_id)
-            .claim_compactor(basis)
-            .await
-            .map_err(Error::from)?;
-        if let Some(published) = claimed.published {
-            self.publisher
-                .record_manifest_published(namespace_id, published)
-                .await;
-        }
-        let epoch = claimed.response.manifest().compactor_epoch();
-        self.writer
-            .compactor_epochs
-            .lock()
-            .expect("compactor epochs lock should not be poisoned")
-            .insert(namespace_id.clone(), epoch);
-        Ok((epoch, Some(claimed.response)))
-    }
-
-    fn claimed_compactor_epoch(&self, namespace_id: &NamespaceId) -> Option<CompactorEpoch> {
-        self.writer
-            .compactor_epochs
-            .lock()
-            .expect("compactor epochs lock should not be poisoned")
-            .get(namespace_id)
-            .copied()
-    }
-
-    /// Returns the manifest that a unit plans from (`None` when the unit
-    /// loads the current manifest itself), or how the unit ends before it
-    /// runs.
+    /// Returns the manifest that a unit plans from, or how the unit ends
+    /// before it runs.
     ///
     /// The basis is `observed` when it's given. Otherwise it's this runtime's
-    /// writer position, and without a position, the current manifest when
-    /// this runtime has no claim to plan under. The caller has the
-    /// namespace's compaction lock, but `observed` and the position may have
-    /// been read before it: another unit may have published since, in this
-    /// runtime or in another process, such as another process's compactor
-    /// claim. So before a due unit plans from either, one HEAD checks the
+    /// writer position, and without a position, the current manifest. The
+    /// caller has the namespace's compaction lock, but `observed` and the
+    /// position may have been read before it: another unit may have
+    /// published since, in this runtime or in another process. A unit that
+    /// planned from the older manifest would compact runs that another
+    /// compaction already replaced, and end as abandoned after the whole
+    /// rewrite. So before a due unit plans from either, one HEAD checks the
     /// basis's manifest for a successor, and a read of the manifest boundary
     /// follows it. The unit plans from the newest manifest when the HEAD
     /// finds a successor or the basis is at or below the boundary. For a
@@ -265,26 +201,21 @@ impl Maintenance {
     async fn planning_basis(
         &self,
         namespace_id: &NamespaceId,
-        claimed: Option<CompactorEpoch>,
         observed: Option<Held<LoadedManifest>>,
-    ) -> Result<ControlFlow<MetadataCompactionOutcome, Option<Held<LoadedManifest>>>> {
+    ) -> Result<ControlFlow<MetadataCompactionOutcome, Held<LoadedManifest>>> {
         let namespace = self.core.namespace_store(namespace_id);
         let (basis, from_position) = match observed {
             Some(basis) => (basis, false),
             None => match self.load_position_basis(namespace_id).await? {
                 Some(basis) => (basis, true),
-                // With a claim, the call skips the check that a unit is due,
-                // because the unit loads the manifest itself, and checking
-                // here first would load the manifest twice.
-                None if claimed.is_some() => return Ok(ControlFlow::Continue(None)),
                 None => {
                     let current = namespace.load_live_basis(self.core.observation()).await?;
-                    return Ok(self.screen(namespace_id, claimed, current));
+                    return Ok(self.screen(namespace_id, current));
                 }
             },
         };
-        let basis = match self.screen(namespace_id, claimed, basis) {
-            ControlFlow::Continue(Some(basis)) => basis,
+        let basis = match self.screen(namespace_id, basis) {
+            ControlFlow::Continue(basis) => basis,
             screened => return Ok(screened),
         };
         let basis = if from_position {
@@ -300,51 +231,25 @@ impl Maintenance {
                 .refresh_live(basis, self.core.observation())
                 .await?
         };
-        Ok(self.screen(namespace_id, claimed, basis))
+        Ok(self.screen(namespace_id, basis))
     }
 
-    /// Returns how a unit that plans from `basis` ends before it runs, or
-    /// `basis` when the unit runs.
-    ///
-    /// The unit is fenced when `basis` has a compactor epoch other than
-    /// `claimed` (this runtime's claim), and the call then forgets that
-    /// claim. The unit isn't needed when no unit is due on `basis`.
+    /// Returns `basis` when a unit is due on it, and `NotNeeded` otherwise.
     fn screen(
         &self,
         namespace_id: &NamespaceId,
-        claimed: Option<CompactorEpoch>,
         basis: Held<LoadedManifest>,
-    ) -> ControlFlow<MetadataCompactionOutcome, Option<Held<LoadedManifest>>> {
-        if let Some(epoch) = claimed.filter(|epoch| *epoch != basis.manifest().compactor_epoch()) {
-            self.forget_fenced_compactor_epoch(namespace_id, epoch);
-            return ControlFlow::Break(MetadataCompactionOutcome::Fenced);
-        }
+    ) -> ControlFlow<MetadataCompactionOutcome, Held<LoadedManifest>> {
         if !self
             .engine(namespace_id)
             .metadata_compaction_due(basis.manifest())
         {
             return ControlFlow::Break(MetadataCompactionOutcome::NotNeeded);
         }
-        ControlFlow::Continue(Some(basis))
+        ControlFlow::Continue(basis)
     }
 
-    fn forget_fenced_compactor_epoch(
-        &self,
-        namespace_id: &NamespaceId,
-        fenced_epoch: CompactorEpoch,
-    ) {
-        let mut epochs = self
-            .writer
-            .compactor_epochs
-            .lock()
-            .expect("compactor epochs lock should not be poisoned");
-        if epochs.get(namespace_id) == Some(&fenced_epoch) {
-            epochs.remove(namespace_id);
-        }
-    }
-
-    /// Runs one compaction unit under this runtime's compactor epoch and the
-    /// namespace's compaction lock.
+    /// Runs one compaction unit under the namespace's compaction lock.
     ///
     /// The unit waits for the lock before it plans, so two units of the
     /// namespace in this runtime never plan from the same manifest, and no
@@ -364,7 +269,7 @@ impl Maintenance {
             return Ok(MetadataCompactionOutcome::Cancelled);
         }
         let turns = self.publisher.namespace_turns(namespace_id);
-        let turn = tokio::select! {
+        let _turn = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Ok(MetadataCompactionOutcome::Cancelled),
             turn = turns.compaction.lock().instrument(phase_span!(
@@ -373,8 +278,7 @@ impl Maintenance {
                 namespace_id
             )) => turn,
         };
-        let claimed = self.claimed_compactor_epoch(namespace_id);
-        let basis = match self.planning_basis(namespace_id, claimed, observed).await? {
+        let basis = match self.planning_basis(namespace_id, observed).await? {
             ControlFlow::Continue(basis) => basis,
             ControlFlow::Break(outcome) => return Ok(outcome),
         };
@@ -387,27 +291,10 @@ impl Maintenance {
                 namespace_id
             )) => permit,
         };
-        let (compactor_epoch, basis) = self
-            .compactor_epoch_with_turn(namespace_id, basis, &turn)
-            .await?;
-        // A claim that this call made returns its own manifest, which the
-        // unit plans from. A claim that another call made while this call
-        // waited for its permit is newer than the manifest the call planned
-        // from. The writer position moves onto that claim, so the unit plans
-        // from the position, or loads the current manifest itself.
-        let in_epoch =
-            |basis: &Held<LoadedManifest>| basis.manifest().compactor_epoch() == compactor_epoch;
-        let basis = match basis.filter(in_epoch) {
-            Some(basis) => Some(basis),
-            None => self
-                .load_position_basis(namespace_id)
-                .await?
-                .filter(in_epoch),
-        };
         let started_at_ms = self.core.timer().monotonic_now_ms();
         let outcome = self
             .engine(namespace_id)
-            .compact_metadata_unit(basis, compactor_epoch, cancellation)
+            .compact_metadata_unit(basis, cancellation)
             .await
             .map_err(Error::from);
         let elapsed_ms = self
@@ -419,19 +306,13 @@ impl Maintenance {
             .instruments()
             .compactions
             .finished(&outcome, elapsed_ms);
-        match &outcome {
-            Ok(loonfs_core::CompactionUnitOutcome::Published { manifest, .. }) => {
-                self.publisher
-                    .invalidate_namespace(
-                        namespace_id,
-                        NamespaceChange::Published(Box::new(manifest.clone())),
-                    )
-                    .await;
-            }
-            Ok(loonfs_core::CompactionUnitOutcome::Fenced) => {
-                self.forget_fenced_compactor_epoch(namespace_id, compactor_epoch);
-            }
-            Ok(_) | Err(_) => {}
+        if let Ok(loonfs_core::CompactionUnitOutcome::Published { manifest, .. }) = &outcome {
+            self.publisher
+                .invalidate_namespace(
+                    namespace_id,
+                    NamespaceChange::Published(Box::new(manifest.clone())),
+                )
+                .await;
         }
         outcome.map(compaction_outcome)
     }

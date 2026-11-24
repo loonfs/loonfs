@@ -9,7 +9,7 @@ use crate::test_support::{writer_at, NamespaceFixture};
 use crate::DeleteNamespaceOptions;
 use loonfs_types::format::manifest::{ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef};
 use loonfs_types::format::segment_blocks::BlockHandle;
-use loonfs_types::{CompactorEpoch, ExtensionName, IndexSegmentId};
+use loonfs_types::{ExtensionName, IndexSegmentId};
 
 fn grep() -> ExtensionName {
     ExtensionName::parse("grep").expect("extension name")
@@ -106,9 +106,9 @@ async fn current_entry(store: &LocalFsStore, namespace_id: &NamespaceId) -> Exte
         .clone()
 }
 
-/// Checks that a fold, a compaction, a compactor claim, a retention advance,
-/// a retention window change, and another writer's claim each copy the
-/// entry, and that the tombstone copies it with its runs emptied.
+/// Checks that a fold, a compaction, a retention advance, a retention window
+/// change, and another writer's claim each copy the entry, and that the
+/// tombstone copies it with its runs emptied.
 #[tokio::test]
 async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
     let directory = tempdir().expect("directory");
@@ -141,11 +141,7 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
         .clone()
         .with_run_policy(crate::test_support::one_delta_run_policy())
         .engine()
-        .compact_metadata_unit(
-            None,
-            CompactorEpoch(0),
-            &MetadataCompactionCancellation::default(),
-        )
+        .compact_from_current()
         .await
         .expect("compact");
     assert!(matches!(compacted, CompactionUnitOutcome::Published { .. }));
@@ -153,12 +149,6 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
         current_entry(&store, &namespace_id).await,
         entry,
         "the entry after a compaction"
-    );
-    fixture.engine().claim_compactor(None).await.expect("claim");
-    assert_eq!(
-        current_entry(&store, &namespace_id).await,
-        entry,
-        "the entry after a compactor claim"
     );
     NamespaceFixture::new(
         &store,
@@ -226,7 +216,7 @@ enum EntryCopy {
     Fold,
     Compaction,
     RetentionAdvance,
-    CompactorClaim,
+    RetentionWindow,
 }
 
 impl EntryCopy {
@@ -245,11 +235,7 @@ impl EntryCopy {
                     .clone()
                     .with_run_policy(crate::test_support::one_delta_run_policy())
                     .engine()
-                    .compact_metadata_unit(
-                        None,
-                        CompactorEpoch(0),
-                        &MetadataCompactionCancellation::default(),
-                    )
+                    .compact_from_current()
                     .await
                     .expect("compact");
                 assert!(matches!(compacted, CompactionUnitOutcome::Published { .. }));
@@ -268,23 +254,30 @@ impl EntryCopy {
                 .await
                 .expect("advance");
             }
-            Self::CompactorClaim => {
-                fixture.engine().claim_compactor(None).await.expect("claim");
+            Self::RetentionWindow => {
+                fixture
+                    .engine()
+                    .set_retention_window(
+                        loonfs_types::RetentionWindow::new(2 * crate::limits::GC_GRACE_WINDOW_MS)
+                            .ok(),
+                    )
+                    .await
+                    .expect("window");
             }
         }
     }
 }
 
 /// Checks that an extension's publication that loses its put to a fold, a
-/// compaction, a retention advance, or a compactor claim is published over
-/// the manifest that won, which copied the entry.
+/// compaction, a retention advance, or a retention window change is
+/// published over the manifest that won, which copied the entry.
 #[tokio::test]
 async fn an_extension_publication_that_loses_to_a_copy_of_its_entry_is_rebuilt_over_it() {
     for copy in [
         EntryCopy::Fold,
         EntryCopy::Compaction,
         EntryCopy::RetentionAdvance,
-        EntryCopy::CompactorClaim,
+        EntryCopy::RetentionWindow,
     ] {
         let directory = tempdir().expect("directory");
         let store = LocalFsStore::new(directory.path()).expect("store");

@@ -80,12 +80,9 @@ struct Fixture {
 
 /// Creates a namespace with folded WAL data and a reader on the writer's runtime.
 ///
-/// The first compaction also publishes a compactor claim. When
-/// `claim_compactor` is true, the fixture runs that first compaction during
-/// setup, so a test's compaction publishes one manifest. Either way, the
-/// publisher's cached position moves to each manifest this runtime
+/// The publisher's cached position moves to each manifest this runtime
 /// publishes.
-async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
+async fn fixture(name: &str) -> Fixture {
     let namespace_id = namespace_id(name);
     let recording = Arc::new(RecordingStore::new(
         BlockingStore::new(
@@ -160,11 +157,6 @@ async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
             .fold_wal(&fixture.namespace_id)
             .await
             .expect("fold");
-        // The folds after this compaction write the runs that a test's
-        // compaction rewrites.
-        if claim_compactor && index == 4 {
-            fixture.compact().await;
-        }
     }
     // Each fold moves the publisher's cached position to the fold's
     // manifest, so the next commit starts from that position.
@@ -306,31 +298,6 @@ fn strong() -> StatOptions {
     }
 }
 
-/// Checks that after a compaction that also claims the compactor epoch on
-/// the same runtime, commits and the reads after them reload nothing.
-///
-/// The compaction publishes two manifests, and the writer's position moves
-/// to each. Every read is strong, so it waits for the session's check of the
-/// position's manifest for a successor.
-#[tokio::test]
-async fn reads_reload_nothing_after_a_compaction_that_claims_the_compactor() {
-    let fixture = fixture("own-compaction-claim", false).await;
-    fixture.compact().await;
-    fixture.commit("put_file", 0).await;
-    fixture
-        .user
-        .stat_with_options("/m/doc", &strong())
-        .await
-        .expect("reload");
-    for (round, kind) in COMMIT_KINDS.into_iter().enumerate() {
-        let user_granted = fixture.commit(kind, round + 1).await;
-        fixture.recording.reset();
-        let read = fixture.user.stat_with_options("/m/doc", &strong()).await;
-        assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
-        fixture.assert_no_reload(&format!("user after {kind}"));
-    }
-}
-
 /// Checks that reads after a compaction on the same runtime don't reload
 /// metadata.
 ///
@@ -338,7 +305,7 @@ async fn reads_reload_nothing_after_a_compaction_that_claims_the_compactor() {
 /// manifest.
 #[tokio::test]
 async fn first_reads_after_commits_reload_nothing_after_a_compaction() {
-    let fixture = fixture("own-compaction-every-read", true).await;
+    let fixture = fixture("own-compaction-every-read").await;
     fixture.compact().await;
     for round in 0..2 {
         for kind in COMMIT_KINDS {
@@ -360,7 +327,7 @@ async fn first_reads_after_commits_reload_nothing_after_a_compaction() {
 /// the clock past the staleness before some commits.
 #[tokio::test]
 async fn eventual_reads_past_the_staleness_reload_nothing_after_a_compaction() {
-    let fixture = fixture("own-compaction-staleness", true).await;
+    let fixture = fixture("own-compaction-staleness").await;
     fixture.compact().await;
     for (round, advance_ms) in [0, 1_100, 0, 1_100, 30_000].into_iter().enumerate() {
         fixture.clock.advance_ms(advance_ms);
@@ -382,7 +349,7 @@ async fn eventual_reads_past_the_staleness_reload_nothing_after_a_compaction() {
 /// namespace from the store.
 #[tokio::test]
 async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
-    let fixture = fixture("other-compaction", false).await;
+    let fixture = fixture("other-compaction").await;
     let other_store: SharedObjectStore = fixture.recording.clone();
     let other = LoonFs::builder_with_store(other_store, loonfs::Context::Service)
         .writer_id(writer_id("other-compaction-maintenance"))
@@ -440,7 +407,7 @@ const MAINTENANCE_CALLS: [&str; 5] = [
 /// fold.
 #[tokio::test]
 async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
-    let fixture = fixture("own-maintenance", false).await;
+    let fixture = fixture("own-maintenance").await;
     let (maintenance, namespace_id) = (&fixture.maintenance, &fixture.namespace_id);
     let mut snapshot = None;
     for (round, call) in MAINTENANCE_CALLS.into_iter().enumerate() {
@@ -491,7 +458,7 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
 /// write replays no WAL tail.
 #[tokio::test]
 async fn a_publish_in_flight_while_a_snapshot_publishes_ends_on_its_manifest() {
-    let fixture = fixture("snapshot-during-publish", false).await;
+    let fixture = fixture("snapshot-during-publish").await;
     fixture.commit("put_file", 0).await;
     let gate = fixture.recording.inner();
     let options = CreateSnapshotOptions {

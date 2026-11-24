@@ -313,119 +313,6 @@ async fn the_compaction_loop_compacts_a_tier_of_deltas_without_reading_a_larger_
     writer.shutdown().await.expect("shutdown");
 }
 
-#[tokio::test]
-async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
-    use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
-    let directory = tempdir().expect("tempdir");
-    let namespace = namespace_id("shared-claim");
-    let store = Arc::new(RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
-            &namespace,
-        )),
-    ));
-    let shared: SharedObjectStore = store.clone();
-    let writer = LoonFs::builder_with_store(shared.clone(), crate::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("writer"))
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("namespace");
-    let maintenance_runtime = LoonFs::builder_with_store(shared.clone(), crate::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
-        .build()
-        .await
-        .expect("maintenance");
-    let maintenance =
-        maintenance_runtime.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-    maintenance_runtime
-        .open_namespace(&namespace)
-        .expect("open namespace")
-        .create_snapshot_with_options(&crate::CreateSnapshotOptions {
-            name: Some("basis".to_owned()),
-            ..crate::CreateSnapshotOptions::default()
-        })
-        .await
-        .expect("snapshot");
-    let before = current_manifest_payload(store.as_ref(), &namespace).await;
-    store.reset();
-    assert_eq!(
-        maintenance
-            .compact_once(
-                &namespace,
-                None,
-                &loonfs_core::MetadataCompactionCancellation::default(),
-            )
-            .await
-            .expect("no work"),
-        MetadataCompactionOutcome::NotNeeded
-    );
-    assert_eq!(store.counts().puts, 0);
-    let cloned = maintenance.clone();
-    let (first, second) = tokio::join!(
-        maintenance.compactor_epoch(&namespace, None),
-        cloned.compactor_epoch(&namespace, None)
-    );
-    let epoch = first.expect("first claim").0;
-    assert_eq!(second.expect("shared claim").0, epoch);
-    assert_eq!(store.counts().create_if_absent_puts, 1);
-    let mut expected = before.clone();
-    expected.manifest_no = before.manifest_no.successor().expect("next manifest");
-    expected.compactor_epoch = loonfs_types::CompactorEpoch(before.compactor_epoch.0 + 1);
-    let claimed = current_manifest_payload(store.as_ref(), &namespace).await;
-    expected.publication_id = claimed.publication_id.clone();
-    assert_eq!(claimed, expected);
-    let other = LoonFs::builder_with_store(shared, crate::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("other"))
-        .build()
-        .await
-        .expect("other process")
-        .maintenance(loonfs_test_support::ids::writer_id("other"));
-    assert_eq!(
-        other
-            .compactor_epoch(&namespace, None)
-            .await
-            .expect("new claim")
-            .0,
-        loonfs_types::CompactorEpoch(epoch.0 + 1)
-    );
-    store.reset();
-    assert_eq!(
-        maintenance
-            .compactor_epoch(&namespace, None)
-            .await
-            .expect("remembered claim")
-            .0,
-        epoch
-    );
-    assert_eq!(
-        maintenance
-            .compact_once(
-                &namespace,
-                None,
-                &loonfs_core::MetadataCompactionCancellation::default(),
-            )
-            .await
-            .expect("fenced compaction"),
-        MetadataCompactionOutcome::Fenced
-    );
-    assert_eq!(store.counts().puts, 0);
-    let missing = NamespaceId::parse("missing-compactor-claim").expect("namespace id");
-    assert!(maintenance.compactor_epoch(&missing, None).await.is_err());
-    assert!(
-        !maintenance
-            .writer
-            .compactor_epochs
-            .lock()
-            .expect("compactor epochs lock")
-            .contains_key(&missing),
-        "failed claim must not leave a namespace entry behind"
-    );
-}
-
 /// Lets a rival write one commit and fold it before each manifest write it
 /// sees while it has races left, so the compaction unit that reaches its
 /// publication loses that race.
@@ -478,9 +365,8 @@ impl Interceptor for RivalFold {
 }
 
 /// Checks that a unit whose put loses to a fold publishes its output over the
-/// fold's manifest, that the metadata loop counts only abandoned units as
-/// lost races and stops after three, and that a fenced loop stops without
-/// claiming the namespace back.
+/// fold's manifest, and that the metadata loop counts only abandoned units as
+/// lost races and stops after three.
 #[tokio::test]
 async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_units() {
     use std::sync::atomic::Ordering::SeqCst;
@@ -508,11 +394,6 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
     for index in 0..loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() + 2 {
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
-    maintenance
-        .compactor_epoch(&namespace, None)
-        .await
-        .expect("claim the namespace before the races start");
-
     // One race: the unit's put loses to the rival's fold, and the next
     // attempt publishes over the fold's manifest.
     let before = current_manifest_payload(store.as_ref(), &namespace)
@@ -557,35 +438,6 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
         3 * loonfs_core::limits::MAX_CONTENTION_ATTEMPTS,
         "the loop stops after three abandoned units"
     );
-
-    store.interceptor().races_left.store(0, SeqCst);
-    LoonFs::builder_with_store(
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")),
-        crate::Context::Service,
-    )
-    .writer_id(loonfs_test_support::ids::writer_id("other"))
-    .build()
-    .await
-    .expect("another process")
-    .maintenance(loonfs_test_support::ids::writer_id("other"))
-    .compactor_epoch(&namespace, None)
-    .await
-    .expect("another process claims the namespace");
-    let fenced = current_manifest_payload(store.as_ref(), &namespace).await;
-    assert_eq!(
-        maintenance
-            .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
-            .await
-            .expect("a fenced unit is an outcome, not an error")
-            .response
-            .outcome,
-        crate::MetadataMaintenanceOutcome::Due
-    );
-    assert_eq!(
-        current_manifest_payload(store.as_ref(), &namespace).await,
-        fenced,
-        "a fenced loop stops instead of claiming the namespace back"
-    );
 }
 
 /// Returns the kind and key of each request for `namespace_id`'s manifest
@@ -613,8 +465,7 @@ fn control_requests(
 }
 
 /// Checks that the first compaction of a runtime without a writer session
-/// finds the newest manifest once, claims over it, and plans from the
-/// claim's manifest with no request first.
+/// finds the newest manifest once, and plans from it with no request first.
 #[tokio::test]
 async fn a_compaction_without_a_session_finds_the_newest_manifest_once() {
     use loonfs_objectstore::keys::{boundary, metadata_manifest_object, metadata_manifest_prefix};
@@ -643,13 +494,11 @@ async fn a_compaction_without_a_session_finds_the_newest_manifest_once() {
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("maintenance"));
 
-    // The find, the claim's put and boundary read, then the unit's put and
-    // boundary read.
+    // The find, then the unit's put and boundary read.
     let current = current_manifest_payload(store.as_ref(), &namespace)
         .await
         .manifest_no;
-    let claim = current.successor().expect("the claim's number");
-    let unit = claim.successor().expect("the unit's number");
+    let unit = current.successor().expect("the unit's number");
     store.reset();
     let report = maintenance
         .compact_metadata(&namespace, &crate::MaintenanceCancellation::new())
@@ -666,8 +515,6 @@ async fn a_compaction_without_a_session_finds_the_newest_manifest_once() {
             ("get", boundary_key.clone()),
             ("list", metadata_manifest_prefix(&namespace)),
             ("get", metadata_manifest_object(&namespace, &current)),
-            ("get", boundary_key.clone()),
-            ("write", metadata_manifest_object(&namespace, &claim)),
             ("get", boundary_key.clone()),
             ("write", metadata_manifest_object(&namespace, &unit)),
             ("get", boundary_key),
@@ -692,11 +539,6 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
     for index in 0..4 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() {
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
-    maintenance
-        .compactor_epoch(&namespace, None)
-        .await
-        .expect("claim the namespace first, so each later manifest is one unit");
-
     let mut published = Vec::new();
     for _ in 0..2 {
         let before = current_manifest_payload(store.as_ref(), &namespace)
@@ -756,14 +598,13 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         KeyPredicate::any(),
     ));
     let actor = loonfs_test_support::test_actor();
-    let [idle, claimed, retired, missing] =
-        ["idle", "claimed", "retired", "missing"].map(namespace_id);
+    let [idle, retired, missing] = ["idle", "retired", "missing"].map(namespace_id);
     let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
         .expect("writer");
-    for namespace in [&idle, &claimed, &retired] {
+    for namespace in [&idle, &retired] {
         writer
             .create_namespace(namespace, &actor)
             .await
@@ -794,19 +635,10 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .await
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-    for namespace in [&idle, &claimed] {
-        maintenance
-            .fold_wal(namespace)
-            .await
-            .expect("fold the tail");
-    }
-    maintenance
-        .compactor_epoch(&claimed, None)
-        .await
-        .expect("claim the namespace");
+    maintenance.fold_wal(&idle).await.expect("fold the tail");
     // The first collection of `retired` retires the deleted namespace, and
     // the second deletes what is left under its prefix.
-    for namespace in [&idle, &claimed, &retired, &retired] {
+    for namespace in [&idle, &retired, &retired] {
         maintenance
             .gc(namespace)
             .await
@@ -842,7 +674,6 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     let heads = 1;
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
         (&idle, [4, heads, 1, 0], None, [2, 0, 6, 0], None),
-        (&claimed, [4, heads, 1, 0], None, [2, 0, 6, 0], None),
         (
             &retired,
             [1, 0, 0, 0],
@@ -890,28 +721,6 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
             assert_eq!(report.deleted, loonfs_types::DeletedObjectCounts::default());
         }
     }
-
-    let other = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("other"))
-        .build()
-        .await
-        .expect("another process");
-    other
-        .maintenance(loonfs_test_support::ids::writer_id("other"))
-        .compactor_epoch(&claimed, None)
-        .await
-        .expect("another process claims the namespace");
-    store.reset();
-    let fenced = maintenance
-        .maintain_metadata(&claimed)
-        .await
-        .expect("a fenced step is an outcome, not an error");
-    assert_eq!(fenced.compaction, MetadataCompactionOutcome::Fenced);
-    assert_eq!(
-        requests(store.counts()),
-        [5, heads, 1, 0],
-        "the observed anchor already reports the fence"
-    );
 }
 
 #[tokio::test]

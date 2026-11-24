@@ -28,8 +28,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub(crate) enum ManifestPublicationOutcome {
     Published(Held<LoadedManifest>),
-    CoveredByCurrent(Held<LoadedManifest>),
-    PredecessorChanged(Held<LoadedManifest>),
+    /// Another publication's manifest is current, so the put was lost.
+    Lost(Held<LoadedManifest>),
 }
 
 enum ManifestKind {
@@ -153,22 +153,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     let outcome = self
                         .publish_manifest_from(payload, clock, Some(&current))
                         .await?;
-                    let (lost_to, winner) = match outcome {
+                    let winner = match outcome {
                         ManifestPublicationOutcome::Published(published) => {
                             return Ok(update(result, published, true));
                         }
-                        ManifestPublicationOutcome::CoveredByCurrent(winner) => {
-                            ("covered_by_current", winner)
-                        }
-                        ManifestPublicationOutcome::PredecessorChanged(winner) => {
-                            ("predecessor_changed", winner)
-                        }
+                        ManifestPublicationOutcome::Lost(winner) => winner,
                     };
                     tracing::debug!(
                         namespace_id = self.namespace_id.as_str(),
                         attempt,
                         attempts = MAX_CONTENTION_ATTEMPTS,
-                        lost_to,
                         "a manifest publication lost its put"
                     );
                     // The lost put checked the winner against the manifest
@@ -279,8 +273,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<Held<LoadedManifest>> {
         match self.publish_manifest_from(payload, clock, None).await? {
             ManifestPublicationOutcome::Published(basis) => Ok(basis),
-            ManifestPublicationOutcome::CoveredByCurrent(current)
-            | ManifestPublicationOutcome::PredecessorChanged(current) => Err(existing_namespace(
+            ManifestPublicationOutcome::Lost(current) => Err(existing_namespace(
                 self.namespace_id.clone(),
                 current.manifest(),
             )),
@@ -357,9 +350,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             }
             if manifest.envelope().payload().writer_epoch < current_manifest.payload().writer_epoch
             {
-                return Ok(ManifestPublicationOutcome::PredecessorChanged(
-                    current.clone(),
-                ));
+                return Ok(ManifestPublicationOutcome::Lost(current.clone()));
             }
             match classify_current(current, &candidate, expected_predecessor) {
                 ManifestKind::Installable => {}
@@ -621,20 +612,10 @@ fn classify_current(
     // Only this call's put stores the candidate's publication ID.
     let outcome = if current.manifest() == candidate.manifest() {
         ManifestPublicationOutcome::Published(basis.clone())
-    } else if current.compactor_epoch() > candidate.compactor_epoch() {
-        ManifestPublicationOutcome::PredecessorChanged(basis.clone())
-    } else if current.folded_wal_no() >= candidate.folded_wal_no()
-        && (current.manifest().head_seq, current.manifest().manifest_no)
-            >= (
-                candidate.manifest().head_seq,
-                candidate.manifest().manifest_no,
-            )
-    {
-        ManifestPublicationOutcome::CoveredByCurrent(basis.clone())
     } else if Some(current.manifest().manifest_no) == expected_predecessor {
         return ManifestKind::Installable;
     } else {
-        ManifestPublicationOutcome::PredecessorChanged(basis.clone())
+        ManifestPublicationOutcome::Lost(basis.clone())
     };
     ManifestKind::Settled(outcome)
 }

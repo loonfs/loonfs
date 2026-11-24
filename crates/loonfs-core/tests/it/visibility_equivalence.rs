@@ -986,11 +986,7 @@ async fn drain_compaction(
     for _ in 0..16 {
         let report = harness
             .engine
-            .compact_metadata_unit(
-                None,
-                loonfs_types::CompactorEpoch(0),
-                &loonfs_core::MetadataCompactionCancellation::default(),
-            )
+            .compact_from_current()
             .await
             .expect("compact metadata");
         match report {

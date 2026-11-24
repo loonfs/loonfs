@@ -779,7 +779,7 @@ A `metadata` job [folds](glossary.md#fold) the WAL tail when due and then [compa
 
 - Each unit compacts a window of up to 8 runs in one [family group](glossary.md#family-group) selected by size tier ([Compaction windows](format.md#102-compaction-windows)) and publishes the next manifest. If the manifest put loses a race and the unit's input runs are unchanged, the unit retries over the winning manifest.
 - A unit is abandoned if an input run changed, its elapsed-time bound expired, or all publication attempts lost (leaving any newly written segments unreferenced for later GC).
-- The job stops early after publishing 16 units, after 3 consecutive abandoned units, or if another runtime claims the namespace's [compactor epoch](glossary.md#compactor-epoch).
+- The job stops early after publishing 16 units, or after 3 consecutive abandoned units.
 - The server runs at most one fold and at most one compaction unit per namespace at a time. If one is already running (for example, started by the writer session), the job waits for it instead of duplicating work.
 
 The `metadata` response reports `compaction_units` (units published by this call) and `outcome`:

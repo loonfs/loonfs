@@ -1012,11 +1012,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     for _ in 0..16 {
         let report = every_group_due
             .engine()
-            .compact_metadata_unit(
-                None,
-                loonfs_types::CompactorEpoch(0),
-                &loonfs_core::MetadataCompactionCancellation::default(),
-            )
+            .compact_from_current()
             .await
             .expect("compact clone");
         match report {

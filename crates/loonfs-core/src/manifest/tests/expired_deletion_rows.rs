@@ -6,8 +6,9 @@ use super::*;
 use crate::compaction::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
 use crate::storage::content_admission::PreparedContent;
 use crate::test_support::kept_inodes::{
-    compact_groups_without_false_positives, compact_with_seed, seeded_kept_inode_filter,
-    seeded_manifest, whole_group_spec,
+    compact_groups_without_false_positives, compact_with_seed, publish_rewritten,
+    rewrite_with_seed, seed_keeping_none_of, seeded_kept_inode_filter, seeded_manifest,
+    whole_group_spec,
 };
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, DeleteDirectoryBehavior,
@@ -1170,11 +1171,7 @@ async fn a_compaction_unit_reads_each_slot_index_segment_at_most_twice() {
         store.reset();
         let outcome = fixture
             .engine()
-            .compact_metadata_unit(
-                None,
-                current.payload().compactor_epoch,
-                &MetadataCompactionCancellation::default(),
-            )
+            .compact_from_current()
             .await
             .expect("run a compaction unit");
         let slot_index_reads = reads_of(&store.take_gets(), &slot_index);
@@ -1714,5 +1711,200 @@ async fn a_group_compacted_after_the_trash_still_removes_an_expired_deletions_ro
     ] {
         assert!(!before[&family].is_empty(), "{family:?} had hidden rows");
         assert_eq!(after[&family], Vec::new(), "{family:?} keeps no hidden row");
+    }
+}
+
+/// Every visible path under the root with each file's bytes, read through a
+/// view with empty caches the way a caller lists and reads.
+async fn walk<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Vec<(String, Option<Vec<u8>>)> {
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
+        .await
+        .expect("load the current view");
+    let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service);
+    let mut walked = Vec::new();
+    let mut directories = vec!["/".to_owned()];
+    while let Some(directory) = directories.pop() {
+        let page = view
+            .list_path_page(
+                &directory,
+                loonfs_types::PageRequest::<loonfs_types::ListPageCursor> {
+                    cursor: None,
+                    limit: loonfs_types::EffectiveLimit::new(
+                        NonZeroU32::new(64).expect("nonzero limit"),
+                    ),
+                },
+                &loonfs_types::options::ListOptions::default(),
+                &mut crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
+            )
+            .await
+            .expect("list a directory");
+        assert_eq!(page.next_cursor, None, "one page lists {directory}");
+        for entry in page.items {
+            let path = entry.path.as_str().to_owned();
+            let bytes = match entry.kind {
+                loonfs_types::PathEntryKind::Directory {} => {
+                    directories.push(path.clone());
+                    None
+                }
+                _ => Some(
+                    view.read_file_bytes(&path, None, &access)
+                        .await
+                        .expect("read a listed file")
+                        .bytes,
+                ),
+            };
+            walked.push((path, bytes));
+        }
+    }
+    walked.sort();
+    walked
+}
+
+/// Checks two base compactions of different groups that two processes run
+/// around the floor advance that expires a deletion. One process plans its
+/// unit while the deletion of `/d` is in the trash, so its unit keeps the
+/// rows under `/d`. The other plans its unit after the advance, so its unit
+/// removes them, and publishes first. The first unit then publishes over it.
+/// With either group stale (the revisions of `/d/x.txt`, or the bindings
+/// under `/d`), a reader with empty caches sees `/s.txt` and the file
+/// recreated at `/d` with their bytes and nothing under the deleted `/d`, the
+/// trash doesn't list the deletion, a restore of it is refused as for any
+/// expired deletion, and a read of `/d/x.txt` by inode returns
+/// `inode_not_found`, not a corruption error.
+#[tokio::test]
+async fn base_compactions_of_two_groups_around_an_expiry_leave_the_reads_unchanged() {
+    for (stale, fresh) in [
+        (
+            MetadataFamilyGroup::Revisions,
+            MetadataFamilyGroup::Bindings,
+        ),
+        (
+            MetadataFamilyGroup::Bindings,
+            MetadataFamilyGroup::Revisions,
+        ),
+    ] {
+        let temp = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp.path()).expect("store");
+        let namespace_id = NamespaceId::parse("cross-group-expiry").expect("namespace id");
+        let context = writer_at("writer-1", 5_000);
+        bootstrap_restricted_namespace(&store, &namespace_id, &context).await;
+        put(&store, &namespace_id, "/d/x.txt", b"deleted", &context).await;
+        put(&store, &namespace_id, "/s.txt", b"sibling", &context).await;
+        let d = inode_id_of(&store, &namespace_id, "/d").await;
+        let x = inode_id_of(&store, &namespace_id, "/d/x.txt").await;
+        let deletion_seq = delete_recursively(&store, &namespace_id, "/d", &context).await;
+        put(&store, &namespace_id, "/d", b"recreated", &context).await;
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold the commits");
+
+        // The stale unit plans and rewrites while the deletion is in the
+        // trash, so its kept inode filter reaches `/d` and `/d/x.txt`.
+        let planned = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
+            .await
+            .expect("load the current manifest");
+        assert!(planned.retention_floor_seq() < deletion_seq);
+        let stale_spec = whole_group_spec(&planned, stale);
+        let stale_unit = rewrite_with_seed(
+            &store,
+            &namespace_id,
+            &stale_spec,
+            planned.payload().next_run_no,
+        )
+        .await;
+
+        // The floor passes the deletion, and the fresh unit plans after it
+        // with a kept inode filter that keeps neither inode.
+        advance_floor_through(&store, &namespace_id, deletion_seq, &context).await;
+        let advanced = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
+            .await
+            .expect("load the current manifest");
+        let fresh_spec = whole_group_spec(&advanced, fresh);
+        let seed = seed_keeping_none_of(
+            &store,
+            &namespace_id,
+            advanced.payload().next_run_no,
+            &[d, x],
+        )
+        .await;
+        let fresh_unit = rewrite_with_seed(&store, &namespace_id, &fresh_spec, seed).await;
+        for (spec, unit) in [(&fresh_spec, fresh_unit), (&stale_spec, stale_unit)] {
+            assert_matches!(
+                publish_rewritten(&store, &namespace_id, spec, unit).await,
+                CompactionUnitOutcome::Published { .. },
+                "{stale:?} stale, {fresh:?} fresh"
+            );
+        }
+
+        // The stale group kept its rows of `/d/x.txt`, and the fresh one
+        // removed them.
+        let rows = rows_of(&store, &namespace_id, &[x]).await;
+        let (stale_family, fresh_family) = match stale {
+            MetadataFamilyGroup::Revisions => (
+                ApiMetadataRowFamily::Revisions,
+                ApiMetadataRowFamily::DirentryBinds,
+            ),
+            _ => (
+                ApiMetadataRowFamily::DirentryBinds,
+                ApiMetadataRowFamily::Revisions,
+            ),
+        };
+        assert!(!rows[&stale_family].is_empty(), "{stale:?} keeps its rows");
+        assert!(rows[&fresh_family].is_empty(), "{fresh:?} removes its rows");
+
+        assert_eq!(
+            walk(&store, &namespace_id).await,
+            vec![
+                ("/d".to_owned(), Some(b"recreated".to_vec())),
+                ("/s.txt".to_owned(), Some(b"sibling".to_vec())),
+            ],
+            "{stale:?} stale"
+        );
+        assert!(
+            super::trash::trash_entries(&store, &namespace_id, 16)
+                .await
+                .iter()
+                .all(|entry| entry.inode_id != d),
+            "{stale:?} stale: the trash doesn't list the deletion"
+        );
+        let restore = commit(
+            &store,
+            &namespace_id,
+            FilesystemOperation::restore_deleted(
+                d,
+                deletion_seq,
+                &loonfs_types::options::RestoreDeletedDestination::Recorded,
+            ),
+            Vec::new(),
+            &context,
+        )
+        .await
+        .expect_err("an expired deletion can't be restored");
+        assert_eq!(restore.code(), ErrorCode::NotDeleted, "{stale:?} stale");
+        let cold = crate::test_support::namespace_store(&store, &namespace_id);
+        let read = cold
+            .load_current_metadata_view()
+            .await
+            .expect("load the current view")
+            .read_file_bytes_by_inode(
+                x,
+                None,
+                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
+            )
+            .await
+            .expect_err("a read of the expired file by inode is refused");
+        assert_eq!(
+            read.code(),
+            ErrorCode::InodeNotFound,
+            "{stale:?} stale: {read:?}"
+        );
     }
 }

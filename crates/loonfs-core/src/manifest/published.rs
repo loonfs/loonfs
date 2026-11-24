@@ -13,11 +13,11 @@ use std::sync::Arc;
 /// the same number, to the same commit. `head` is a head above `basis`, so
 /// it has the basis's folded WAL number and writer epoch.
 ///
-/// Such a manifest is a compaction, a compactor claim, a retention window
-/// change, or an extension's publication over `basis`, or several of them,
-/// because another writer's claim changes the writer epoch, a fold changes
-/// the folded WAL number, and a tombstone changes the status. Those four
-/// publications copy every field of their predecessor
+/// Such a manifest is a compaction, a retention window change, or an
+/// extension's publication over `basis`, or several of them, because another
+/// writer's claim changes the writer epoch, a fold changes the folded WAL
+/// number, and a tombstone changes the status. Those three publications copy
+/// every field of their predecessor
 /// that replay reads (`head_seq` and `folded_wal_no`), and they keep
 /// whether the manifest lists runs. Replay adds the root directory above a
 /// manifest that lists no runs. So the WAL tail projected above `basis` is

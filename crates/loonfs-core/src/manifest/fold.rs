@@ -139,7 +139,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
     /// Folds the WAL tail and publishes the next manifest as the maintainer.
     ///
-    /// The manifest copies both epochs from its predecessor, and its
+    /// The manifest copies the writer epoch from its predecessor, and its
     /// retention floor is the higher of its predecessor's floor and the
     /// floors of the floor objects that the fold covers (format spec,
     /// "Publishing a manifest"). A tail of floor objects and no commits is

@@ -117,29 +117,33 @@ async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest(
     gate.block_next();
     let other = LocalFsStore::new(directory.path()).expect("store");
     let deadline = OperationClock::start(0, crate::test_support::std_timer());
-    let (published, ()) = tokio::join!(
+    let (published, newest) = tokio::join!(
         republish(&gate, &namespace_id, Some(basis), &deadline),
         async {
             gate.wait_until_blocked().await;
+            let mut newest = None;
             for _ in 0..2 {
-                crate::test_support::NamespaceFixture::new(
-                    &other,
-                    &namespace_id,
-                    &crate::test_support::writer_at("test-writer", 0),
-                )
-                .engine()
-                .claim_compactor(None)
-                .await
-                .expect("another process claims the compactor");
+                newest = Some(
+                    crate::test_support::change_retention_window(
+                        &crate::test_support::NamespaceFixture::new(
+                            &other,
+                            &namespace_id,
+                            &crate::test_support::writer_at("test-writer", 0),
+                        )
+                        .engine(),
+                    )
+                    .await,
+                );
             }
             gate.release();
+            newest.expect("two window changes")
         }
     );
     assert_eq!(published.manifest().manifest_no, ManifestNo(5));
     assert_eq!(
-        published.compactor_epoch(),
-        loonfs_types::CompactorEpoch(2),
-        "the publication builds on the newest claim"
+        published.payload().retention_window_ms,
+        newest.manifest().payload().retention_window_ms,
+        "the publication builds on the newest window change"
     );
     let mut expected = vec![("put", manifest(3))];
     // The put lost, so the attempt probes the numbers above its basis, loads

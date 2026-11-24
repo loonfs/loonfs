@@ -17,7 +17,6 @@ use loonfs_types::{ContentId, DeleteDirectoryBehavior, WalNo, WriterEpoch};
 /// manifest put.
 #[derive(Clone)]
 enum Rival {
-    CompactorClaim,
     Compaction,
     RetentionWindow,
     ExtensionPublication,
@@ -27,36 +26,21 @@ enum Rival {
 impl Rival {
     async fn publish(&self, store: &LocalFsStore, namespace_id: &NamespaceId) {
         match self {
-            Self::CompactorClaim => {
-                crate::test_support::NamespaceFixture::new(
-                    store,
-                    namespace_id,
-                    &crate::test_support::writer_at("test-writer", 0),
-                )
-                .engine()
-                .claim_compactor(None)
-                .await
-                .expect("claim the compactor");
-            }
             Self::Compaction => {
                 let (_, compactions) =
                     crate::test_support::compact_every_group(store, namespace_id).await;
                 assert!(compactions > 0, "the compaction rival should publish");
             }
             Self::RetentionWindow => {
-                // A window change, which changes nothing but the window.
-                let published = crate::test_support::NamespaceFixture::new(
-                    store,
-                    namespace_id,
-                    &crate::test_support::writer_at("test-writer", 0),
+                crate::test_support::change_retention_window(
+                    &crate::test_support::NamespaceFixture::new(
+                        store,
+                        namespace_id,
+                        &crate::test_support::writer_at("test-writer", 0),
+                    )
+                    .engine(),
                 )
-                .engine()
-                .set_retention_window(
-                    loonfs_types::RetentionWindow::new(2 * crate::limits::GC_GRACE_WINDOW_MS).ok(),
-                )
-                .await
-                .expect("set the retention window");
-                assert!(published.published.is_some(), "the window changes");
+                .await;
             }
             Self::ExtensionPublication => {
                 let fixture = crate::test_support::NamespaceFixture::new(
@@ -275,7 +259,6 @@ fn request_counts(store: &RecordingStore<LocalFsStore>) -> StoreCounts {
 async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
     for rival in [
         Rival::Compaction,
-        Rival::CompactorClaim,
         Rival::RetentionWindow,
         Rival::ExtensionPublication,
     ] {
@@ -531,7 +514,7 @@ async fn a_fold_whose_put_lands_at_an_emptied_number_publishes_on_the_newest_man
     // first of them, the only manifest old enough.
     let other = writer.other_process();
     for _ in 0..2 {
-        Rival::CompactorClaim
+        Rival::RetentionWindow
             .publish(&other, &writer.namespace_id)
             .await;
     }
@@ -563,12 +546,12 @@ async fn a_fold_whose_put_lands_at_an_emptied_number_publishes_on_the_newest_man
         .is_some());
 }
 
-/// Checks that a fold keeps the tail it read through a claim at each
-/// attempt, and that a fold whose every attempt loses stops at the
-/// contention limit and leaves the session's position where it was.
+/// Checks that a fold keeps the tail it read when each attempt loses to a
+/// retention window change, and that a fold whose every attempt loses stops
+/// at the contention limit and leaves the session's position where it was.
 #[tokio::test]
-async fn a_fold_survives_repeated_compaction_publications() {
-    // Each attempt loses to one claim.
+async fn a_fold_survives_repeated_window_changes() {
+    // Each attempt loses to one retention window change.
     for rivals in [MAX_CONTENTION_ATTEMPTS - 1, MAX_CONTENTION_ATTEMPTS] {
         let mut writer = Writer::open().await;
         writer.commit("first", Vec::new(), &["/a"]).await;
@@ -580,7 +563,7 @@ async fn a_fold_survives_repeated_compaction_publications() {
             .basis
             .clone();
         let folded = writer
-            .fold_against(&vec![Rival::CompactorClaim; rivals])
+            .fold_against(&vec![Rival::RetentionWindow; rivals])
             .await;
         let after_park = writer.store.take();
         assert!(writer.wal_reads(&after_park).is_empty(), "{after_park:?}");
@@ -612,7 +595,7 @@ async fn a_fold_survives_repeated_compaction_publications() {
 #[tokio::test]
 async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
     let mut costs = Vec::new();
-    for rivals in [Vec::new(), vec![Rival::CompactorClaim]] {
+    for rivals in [Vec::new(), vec![Rival::RetentionWindow]] {
         let mut writer = Writer::open().await;
         writer.commit("first", Vec::new(), &["/a"]).await;
         writer.store.reset();
@@ -654,7 +637,7 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
 }
 
 #[tokio::test]
-async fn a_snapshot_that_loses_its_fold_to_a_compaction_reads_no_wal_object() {
+async fn a_snapshot_that_loses_its_fold_to_a_window_change_reads_no_wal_object() {
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let basis = writer
@@ -675,7 +658,7 @@ async fn a_snapshot_that_loses_its_fold_to_a_compaction_reads_no_wal_object() {
         create_snapshot(&gate, &writer.namespace_id, &writer.context),
         async {
             gate.wait_until_blocked().await;
-            Rival::CompactorClaim
+            Rival::RetentionWindow
                 .publish(&other, &writer.namespace_id)
                 .await;
             writer.store.reset();

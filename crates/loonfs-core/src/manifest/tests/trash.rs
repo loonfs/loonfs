@@ -374,7 +374,7 @@ pub(super) async fn inode_id_of<S: ObjectStore + ?Sized>(
 }
 
 /// Every trash entry, paged to exhaustion.
-async fn trash_entries<S: ObjectStore + ?Sized>(
+pub(super) async fn trash_entries<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     limit: u32,

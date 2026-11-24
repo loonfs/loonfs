@@ -605,7 +605,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
             acquired_at_ms: 2_000,
         }),
         folded_wal_no: WalNo(2),
-        compactor_epoch: loonfs_types::CompactorEpoch(0),
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
         publication_id: loonfs_types::PublicationId::parse("pub_5b7tx2k9wq0mhd4yzc8vn3jr6e")

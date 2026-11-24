@@ -40,8 +40,7 @@ mod writes_by_inode;
 /// namespace's writer session: one publication queue, one WAL-tail fold, one
 /// metadata compaction that each published fold starts, and the writer epoch
 /// that the session's first publish acquires. It shares the runtime's store
-/// client, caches, admission limits, execution budget, compactor claim, and
-/// shutdown.
+/// client, caches, admission limits, execution budget, and shutdown.
 ///
 /// The host that keeps a writable handle owns the session. Clones share it,
 /// and the session stays open while any clone exists. [`Namespace::close`] ends
