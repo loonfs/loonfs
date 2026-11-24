@@ -52,13 +52,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             anchor.held.manifest().payload(),
         ))
     }
-
-    pub async fn load_diagnostics(&self) -> Result<NamespaceStorageDiagnostics> {
-        let anchor = self
-            .load_live_read_anchor(Observation::now(Arc::clone(&self.timer)))
-            .await?;
-        Ok(NamespaceStorageDiagnostics::from(&anchor))
-    }
 }
 
 /// Namespace storage diagnostics that do not require snapshot enumeration.

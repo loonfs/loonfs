@@ -586,7 +586,11 @@ async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() 
         for (index, value) in values.iter().enumerate() {
             let path = format!("/fold-{index}");
             let location = engine
-                .resolve_content_location(value.content_ref(), &context)
+                .namespace
+                .load_metadata_view(&context)
+                .await
+                .expect("view")
+                .resolve_content_location(value.content_ref())
                 .await
                 .expect("location");
             assert!(!location.has_pieces());

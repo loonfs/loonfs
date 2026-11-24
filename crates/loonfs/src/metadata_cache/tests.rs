@@ -68,7 +68,7 @@ async fn snapshot_fold_reads(creation: SnapshotCreation, max_segment_bytes: usiz
     }
     assert!(
         loonfs_core::test_support::namespace_store(store.as_ref(), &demo())
-            .load_diagnostics()
+            .load_wal_tail_usage()
             .await
             .expect("diagnostics before creation")
             .wal_tail_objects
@@ -106,7 +106,7 @@ async fn snapshot_fold_reads(creation: SnapshotCreation, max_segment_bytes: usiz
     operation.await;
     let reads = store.count(OperationSelector::Read);
     let tail_objects = loonfs_core::test_support::namespace_store(store.as_ref(), &demo())
-        .load_diagnostics()
+        .load_wal_tail_usage()
         .await
         .expect("diagnostics after creation")
         .wal_tail_objects;

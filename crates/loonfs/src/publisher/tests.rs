@@ -1613,7 +1613,7 @@ async fn deletion_folds_the_tail_with_the_configured_run_policy() {
         recv_commit(receiver, name).await;
     }
     let diagnostics = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
-        .load_diagnostics()
+        .load_wal_tail_usage()
         .await
         .expect("load namespace diagnostics");
     assert!(diagnostics.wal_tail_objects > 0, "the tail is unfolded");

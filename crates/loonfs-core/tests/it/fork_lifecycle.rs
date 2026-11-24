@@ -8,7 +8,7 @@ use bytes::Bytes;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::test_support::WriterAt;
 use loonfs_core::test_support::{
-    compact_every_group, namespace_store, pool_store, NamespaceFixture,
+    compact_every_group, namespace_store, observed_now, pool_store, NamespaceFixture,
 };
 use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::keys::{
@@ -579,12 +579,15 @@ async fn a_created_namespace_reads_manifest_two_before_its_first_fold() {
         root_entry.inode_kind(),
         loonfs_types::EntryInodeKind::Directory
     );
-    let status = namespace_store(&store, &namespace_id)
-        .load_diagnostics()
+    let anchor = namespace_store(&store, &namespace_id)
+        .load_live_read_anchor(observed_now())
         .await
-        .expect("status");
-    assert_eq!(status.current_manifest_no, ManifestNo(2));
-    assert_eq!(status.retention_floor_seq, CommitSeq(0));
+        .expect("anchor");
+    assert_eq!(
+        anchor.current_manifest().payload().manifest_no,
+        ManifestNo(2)
+    );
+    assert_eq!(anchor.retention_floor_seq(), CommitSeq(0));
 
     NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/first.txt", b"hello", Some(&commit_id("first-write")))
@@ -623,11 +626,14 @@ async fn a_created_namespace_reads_manifest_two_before_its_first_fold() {
             .bytes,
         b"hello"
     );
-    let status = namespace_store(&store, &namespace_id)
-        .load_diagnostics()
+    let anchor = namespace_store(&store, &namespace_id)
+        .load_live_read_anchor(observed_now())
         .await
-        .expect("status after fold");
-    assert_eq!(status.current_manifest_no, ManifestNo(4));
+        .expect("anchor after fold");
+    assert_eq!(
+        anchor.current_manifest().payload().manifest_no,
+        ManifestNo(4)
+    );
 }
 
 /// Checks that two forks with the same request into one target both succeed
@@ -817,12 +823,12 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     );
 
     assert_eq!(clone_head.seq, CommitSeq(1));
-    let clone_status = namespace_store(&store, &clone_namespace_id)
-        .load_diagnostics()
+    let clone_anchor = namespace_store(&store, &clone_namespace_id)
+        .load_live_read_anchor(observed_now())
         .await
-        .expect("clone status");
+        .expect("clone anchor");
     assert_eq!(
-        clone_status.retention_floor_seq,
+        clone_anchor.retention_floor_seq(),
         CommitSeq(1),
         "a fork's active manifest starts its retention floor at the fork point"
     );
