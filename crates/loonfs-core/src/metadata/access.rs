@@ -41,13 +41,11 @@ where
         let Some(current) = walk.next(reads).await? else {
             // The root of a deletion in the trash has no current binding, and its
             // `set` event's saved parent repairs that one edge.
-            let floor = reads.retention_floor_seq();
             let Some(TombstoneRowAction::Set {
                 deleted_binding, ..
             }) = reads
-                .find_hiding_subtree_tombstone(last)
+                .find_deletion_in_trash(last)
                 .await?
-                .filter(|tombstone| tombstone.committed_seq > floor)
                 .map(|tombstone| tombstone.action)
             else {
                 break;

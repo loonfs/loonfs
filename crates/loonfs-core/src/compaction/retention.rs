@@ -3,7 +3,9 @@
 use super::run_iterator::LocalityGrouping;
 use crate::error::{CoreError, Result};
 use crate::metadata::DirentryBindingRecord;
-use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, TrashRowAction};
+use loonfs_types::format::manifest::{
+    DeltaPosition, MetadataRow, MetadataRowFamily, TrashRowAction,
+};
 use loonfs_types::MetadataFamilyGroup;
 use loonfs_types::{CommitSeq, InodeId, NameKey};
 
@@ -24,10 +26,10 @@ pub(crate) enum RetentionRule {
     /// sequence above the fork point, so this rule keeps every merge index row
     /// that a merge's range check can read.
     CommitHistory,
-    /// Every revision above the floor, plus the newest at or below it, per
-    /// inode. The writer refuses a restore of a revision at or below its
-    /// basis's retention floor unless the revision is the newest at or below
-    /// that floor.
+    /// Every revision or tombstone event above the floor, plus the newest at
+    /// or below it, per inode. The writer refuses a restore of a revision at
+    /// or below its basis's retention floor unless the revision is the newest
+    /// at or below that floor.
     WholeState,
     /// Remove cancelled deletion pairs and the listed rows of expired
     /// deletions.
@@ -108,10 +110,11 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: CommitSeq) -> Option<Met
     }
 }
 
-/// Retains every file, attribute, and access revision above the retention
-/// floor and the newest revision at or below it for each inode.
+/// Keeps every file, attribute, and access revision and every tombstone
+/// event above the retention floor, and the newest at or below it, for each
+/// inode.
 ///
-/// Whole-state row keys sort each inode's revisions newest first. The first row
+/// Whole-state row keys sort each inode's rows newest first. The first row
 /// at or below the floor is the inode's state at that floor, including a
 /// cleared state, and the floor keeps no older history. The operator keeps the
 /// rows of an inode in the trash like any other inode's, so a restore
@@ -127,11 +130,19 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: CommitSeq) -> Option<Met
 /// ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
 #[derive(Debug)]
 pub(crate) struct WholeStateRetention {
-    /// The revision of the previous row at or below the floor. The inode has
+    /// The version of the previous row at or below the floor. The inode has
     /// kept its newest row at or below the floor once this is set. It also
     /// catches two rows sharing one revision number: descending revision
     /// order puts any such pair next to each other, so one field sees them.
-    previous_at_floor: Option<u64>,
+    previous_at_floor: Option<StateVersion>,
+}
+
+/// What orders one inode's whole-state rows newest first: a revision
+/// number, or a tombstone event's position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateVersion {
+    Revision(u64),
+    Event(DeltaPosition),
 }
 
 impl WholeStateRetention {
@@ -141,7 +152,7 @@ impl WholeStateRetention {
         row: MetadataRow,
         floor_seq: CommitSeq,
     ) -> Result<Option<MetadataRow>> {
-        let Some((inode_id, revision, committed_seq)) = whole_state_revision(&row) else {
+        let Some((inode_id, version, committed_seq)) = whole_state_version(&row) else {
             return Ok(Some(row));
         };
         if committed_seq > floor_seq {
@@ -151,15 +162,19 @@ impl WholeStateRetention {
         // without gaps or repeats, so "the newest at or below the floor"
         // names exactly one row. Two rows sharing a number would make the
         // choice arbitrary and the drop unsafe; refuse to compact state that
-        // violates it.
-        if self.previous_at_floor == Some(revision) {
+        // violates it. A tombstone event's position is in its row key, so no
+        // two events have the same position.
+        if let Some(StateVersion::Revision(revision)) = self
+            .previous_at_floor
+            .filter(|previous| *previous == version)
+        {
             let family = family.as_str();
             return Err(CoreError::NamespaceCorrupt(format!(
                 "inode `{inode_id}` has two {family} rows at revision \
                  `{revision}` at or below the retention floor; refusing to drop rows"
             )));
         }
-        if self.previous_at_floor.replace(revision).is_some() {
+        if self.previous_at_floor.replace(version).is_some() {
             return Ok(None);
         }
         Ok(Some(row))
@@ -170,19 +185,26 @@ impl WholeStateRetention {
     }
 }
 
-fn whole_state_revision(row: &MetadataRow) -> Option<(InodeId, u64, CommitSeq)> {
+fn whole_state_version(row: &MetadataRow) -> Option<(InodeId, StateVersion, CommitSeq)> {
     match row {
-        MetadataRow::FileRevision(record) => {
-            Some((record.inode_id, record.revision_no.0, record.committed_seq))
-        }
+        MetadataRow::FileRevision(record) => Some((
+            record.inode_id,
+            StateVersion::Revision(record.revision_no.0),
+            record.committed_seq,
+        )),
         MetadataRow::AttributesRevision(record) => Some((
             record.inode_id,
-            record.attributes_revision_no.0,
+            StateVersion::Revision(record.attributes_revision_no.0),
             record.committed_seq,
         )),
         MetadataRow::AccessRevision(record) => Some((
             record.inode_id,
-            record.access_revision_no.0,
+            StateVersion::Revision(record.access_revision_no.0),
+            record.committed_seq,
+        )),
+        MetadataRow::Tombstone(record) => Some((
+            record.root_inode_id,
+            StateVersion::Event(record.position()),
             record.committed_seq,
         )),
         _ => None,
@@ -382,7 +404,11 @@ const LAYOUT_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
     rule: RetentionRule::FirstPerGroup,
 }];
 const INODE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Inodes])];
-const TOMBSTONE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Tombstones])];
+const TOMBSTONE_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
+    families: &[MetadataRowFamily::Tombstones],
+    locality: LocalityGrouping::LeadingKeyComponents(1),
+    rule: RetentionRule::WholeState,
+}];
 const COMMIT_CLUSTERS: [RetentionCluster; 3] = [
     RetentionCluster {
         families: &[MetadataRowFamily::Commits],
@@ -753,7 +779,7 @@ mod tests {
 
     /// Checks that both binding indexes keep an edge's rows above the floor
     /// and its newest bound row at or below it, reading the edge newest
-    /// first, and that the tombstone family keeps every event.
+    /// first, and that a root's tombstone events follow the same rule.
     #[test]
     fn binding_and_tombstone_histories_keep_their_floor_rows_newest_first() {
         // An edge bound at 50, unbound at 60, bound again at 70 and 120.
@@ -778,11 +804,11 @@ mod tests {
                 "{family:?}"
             );
         }
-        let tombstone = |seq: u64, set: bool| {
+        let event = |seq: u64, delta_index: u32, set: bool| {
             MetadataRow::Tombstone(crate::metadata::SubtreeTombstoneRecord {
                 root_inode_id: InodeId(42),
                 committed_seq: CommitSeq(seq),
-                delta_index: 0,
+                delta_index,
                 commit_id: crate::test_support::binding_commit_id(),
                 action: if set {
                     crate::metadata::TombstoneRowAction::Set {
@@ -805,6 +831,7 @@ mod tests {
                 committed_at_ms: 0,
             })
         };
+        let tombstone = |seq: u64, set: bool| event(seq, 0, set);
         let events = vec![
             tombstone(40, true),
             tombstone(41, false),
@@ -812,15 +839,23 @@ mod tests {
             tombstone(91, false),
             tombstone(130, true),
         ];
-        let mut newest_first = events.clone();
-        newest_first.reverse();
         assert_eq!(
             retained(
                 MetadataFamilyGroup::Tombstones,
                 MetadataRowFamily::Tombstones,
                 events
             ),
-            newest_first
+            vec![tombstone(130, true), tombstone(91, false)]
+        );
+        // If a restore and a new deletion of the root are in one commit at or
+        // below the floor, the later event is the root's state at the floor.
+        assert_eq!(
+            retained(
+                MetadataFamilyGroup::Tombstones,
+                MetadataRowFamily::Tombstones,
+                vec![event(50, 0, false), event(50, 2, true)]
+            ),
+            vec![event(50, 2, true)]
         );
     }
 

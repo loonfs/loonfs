@@ -3,7 +3,7 @@
 //!
 //! A deletion has expired in a compaction's basis when its latest tombstone
 //! event is a `set` and its deletion sequence is at or below the basis
-//! manifest's retention floor. Its tombstone hides its subtree at every
+//! manifest's retention floor. The deletion hides its subtree at every
 //! sequence that a compaction preserves, and no restore of it can be
 //! committed, so a base compaction of a group that stores rows by inode
 //! removes every row of the inodes that an expired deletion hides
@@ -61,12 +61,12 @@ impl KeptInodeFilter {
             MetadataRow::FileRevision(record) => record.inode_id,
             MetadataRow::AttributesRevision(record) => record.inode_id,
             MetadataRow::AccessRevision(record) => record.inode_id,
+            MetadataRow::Tombstone(record) => record.root_inode_id,
             // A hidden directory's edges are hidden with it. Both binding
             // indexes test an edge by its parent, so they keep or remove each
             // binding event together.
             MetadataRow::DirentryBinding(record) => record.parent_inode_id,
-            MetadataRow::Tombstone(_)
-            | MetadataRow::Trash(_)
+            MetadataRow::Trash(_)
             | MetadataRow::CommitReceipt(_)
             | MetadataRow::Commit(_)
             | MetadataRow::Merge(_)
@@ -87,9 +87,9 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
         | MetadataFamilyGroup::Revisions
         | MetadataFamilyGroup::Attributes
         | MetadataFamilyGroup::Access
+        | MetadataFamilyGroup::Tombstones
         | MetadataFamilyGroup::Bindings => true,
-        MetadataFamilyGroup::Tombstones
-        | MetadataFamilyGroup::Trash
+        MetadataFamilyGroup::Trash
         | MetadataFamilyGroup::Commits
         | MetadataFamilyGroup::ContentLayouts => false,
     }

@@ -114,7 +114,7 @@ The current-revision metadata copied into a file's directory binding rows: revis
 
 ### Tombstone
 
-A committed deletion record. Deleting an item removes its binding from its parent directory and writes a tombstone, leaving the item's revisions and descendants in place while hiding them like a filter. A [restore](#restore) revokes the tombstone and rebinds the root so the subtree reappears intact. Once the [retention floor](#retention-floor) reaches the deletion sequence, the deletion expires: it can no longer be restored, the tombstone keeps hiding the subtree, and base compaction removes the hidden rows. See [File and subtree deletion](format.md#16-file-and-subtree-deletion). (A deleted namespace's final manifest is a separate record, the [namespace tombstone](#namespace-tombstone).)
+A committed deletion record. Deleting an item removes its binding from its parent directory and writes a tombstone, leaving the item's revisions and descendants in place while hiding them like a filter. A [restore](#restore) revokes the tombstone and rebinds the root so the subtree reappears intact. Once the [retention floor](#retention-floor) reaches the deletion sequence, the deletion expires: it can no longer be restored, and base compactions remove the subtree's rows, the tombstone included. See [File and subtree deletion](format.md#16-file-and-subtree-deletion). (A deleted namespace's final manifest is a separate record, the [namespace tombstone](#namespace-tombstone).)
 
 ### Restore
 

@@ -427,7 +427,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             &mut metadata_state.reads_at_seq(metadata_state.indexed_seq()),
             InodeId(3),
         )),
-        Ok(super::visibility::Ancestry::Hidden(tombstone)) if tombstone.root_inode_id == InodeId(2)
+        Ok(super::visibility::Ancestry::Hidden)
     );
 }
 
