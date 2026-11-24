@@ -708,9 +708,10 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
         maintains_grep_index(&server),
         "a serve-only deployment still serves the index routes"
     );
+    let report = server.scheduler.run_sweep().await;
     assert_eq!(
-        server.scheduler.run_sweep().await.expect("sweep"),
-        0,
+        (report.namespaces, report.complete),
+        (0, false),
         "serve-only mode sweeps nothing"
     );
 
@@ -798,11 +799,7 @@ fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
 /// Runs one maintenance sweep, so the durable state read next is the state
 /// that the sweep left.
 async fn sweep(server: &loonfs_server::AppState) {
-    server
-        .scheduler
-        .run_sweep()
-        .await
-        .expect("list the namespaces");
+    assert!(server.scheduler.run_sweep().await.complete);
 }
 
 /// Whether this deployment serves the index-maintenance routes.

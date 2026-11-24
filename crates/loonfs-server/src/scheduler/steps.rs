@@ -6,7 +6,9 @@ use super::retries::{CallFailure, MaintenanceCall};
 use super::{contain, lock, RunningScheduler, Scheduler, SchedulerState};
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
-use loonfs::{CommitSeq, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus};
+use loonfs::{
+    CommitSeq, ErrorCode, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus,
+};
 use loonfs_http::HeldNamespace;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -139,6 +141,7 @@ impl Scheduler {
                 Some(maintenance) => self
                     .gc(maintenance, namespace_id, Some(&entry), seq)
                     .await
+                    .is_err_and(ErrorCode::is_namespace_gone)
                     .then_some(Close::Ended),
                 None => None,
             },
@@ -279,7 +282,7 @@ impl Scheduler {
                 () = inner.stop.cancelled() => return,
                 _ = interval.tick() => {}
             }
-            let _ = self.run_sweep().await;
+            self.run_sweep().await;
         }
     }
 

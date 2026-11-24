@@ -165,7 +165,7 @@ async fn a_sweep_advances_each_floor_to_the_last_commit_before_the_window() {
         assert!(aged.retention_floor_seq < history.aged_cutoff_seq);
         assert!(history.aged_cutoff_seq < aged.head_seq);
 
-        server.scheduler.run_sweep().await.expect("list namespaces");
+        assert!(server.scheduler.run_sweep().await.complete);
         let expected_floor = match window_ms {
             Some(_) => history.aged_cutoff_seq,
             None => aged.retention_floor_seq,
@@ -235,7 +235,7 @@ async fn a_sweep_advances_a_namespace_by_its_own_window_and_a_sibling_by_the_ser
         server.create_with_window(&sibling, None).await;
         let seqs = seed_two_commits(&server, &[&windowed, &sibling]).await;
 
-        server.scheduler.run_sweep().await.expect("list namespaces");
+        assert!(server.scheduler.run_sweep().await.complete);
         assert_eq!(
             server.retention_floor(&windowed).await,
             seqs[0][1],
@@ -281,7 +281,7 @@ async fn each_sweep_uses_the_window_that_the_namespace_has_when_the_sweep_runs()
             .set_retention_window(&namespace_id, window_ms.map(window))
             .await
             .expect("set the namespace's window");
-        server.scheduler.run_sweep().await.expect("list namespaces");
+        assert!(server.scheduler.run_sweep().await.complete);
         assert_eq!(
             server.retention_floor(&namespace_id).await,
             expected_floor,
@@ -344,7 +344,7 @@ async fn session_steps_never_advance_the_floor_and_the_next_sweep_does() {
         "no session step advances the floor"
     );
 
-    server.scheduler.run_sweep().await.expect("list namespaces");
+    assert!(server.scheduler.run_sweep().await.complete);
     assert_eq!(
         server.diagnostics(&namespace_id).await.retention_floor_seq,
         seq,
@@ -400,10 +400,14 @@ async fn a_sweep_that_finds_session_steps_running_leaves_its_advance_to_those_st
             server.retention_failures(),
         )
     };
+    let report = server.scheduler.run_sweep().await;
     assert_eq!(
-        server.scheduler.run_sweep().await.expect("list namespaces"),
-        1,
+        report.namespaces, 1,
         "the sweep lists the namespace that the session steps have"
+    );
+    assert!(
+        !report.complete,
+        "the sweep leaves the namespace to the steps"
     );
     assert_eq!(sweep_counts(), (1, 0));
     assert_eq!(
@@ -532,12 +536,12 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
         // what the seed left behind. Each sweep collects the manifests that
         // the previous sweep replaced.
         for _ in 0..3 {
-            server.scheduler.run_sweep().await.expect("list namespaces");
+            assert!(server.scheduler.run_sweep().await.complete);
         }
         let windows = format!("server {server_window_ms:?}, namespace {namespace_window_ms:?}");
 
         store.reset();
-        server.scheduler.run_sweep().await.expect("list namespaces");
+        assert!(server.scheduler.run_sweep().await.complete);
         let sweep: Vec<_> = store
             .take()
             .into_iter()
@@ -676,7 +680,7 @@ async fn a_sweeps_advance_creates_a_floor_object_with_or_without_a_session() {
     server.wait_for_open_sessions(1).await;
 
     store.reset();
-    server.scheduler.run_sweep().await.expect("list namespaces");
+    assert!(server.scheduler.run_sweep().await.complete);
     let operations = store.take();
 
     assert_eq!(server.retention_floor(&held_id).await, held_seq);
