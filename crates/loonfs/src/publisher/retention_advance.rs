@@ -28,11 +28,9 @@ impl NamespacePublisher {
         {
             Ok(outcome) => outcome,
             Err(payload) => {
-                // A panic can follow the floor object's put, so the position
-                // may omit the floor object. The callers get the error, and
-                // the next sweep tries the advance again.
+                // The callers get the error, and the next sweep tries the
+                // advance again.
                 self.record_panic("retention_advance", panic_message(payload.as_ref()));
-                self.lock_engine().await.invalidate_projection();
                 Err(Error::RuntimeTask(
                     "retention advance task aborted mid-advance".to_owned(),
                 ))
