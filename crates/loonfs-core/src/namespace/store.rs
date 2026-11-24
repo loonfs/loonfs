@@ -2,6 +2,8 @@
 //! content write permits, and run policy that its operations use. Each
 //! operation is a method in the module that implements it.
 
+use crate::engine::RuntimeReadContext;
+use crate::namespace::basis::ReadBasis;
 use crate::namespace::head_cache::HeadAndWalTailCache;
 use crate::object_cache::ObjectCache;
 use crate::permits::Permits;
@@ -88,5 +90,19 @@ impl<S> NamespaceStore<S> {
     /// Returns the namespace these components belong to.
     pub fn namespace_id(&self) -> &NamespaceId {
         &self.namespace_id
+    }
+
+    /// Returns the head and metadata basis that `context` reads.
+    ///
+    /// Panics when `context` was built for another namespace. That's a bug in
+    /// the caller, and without the panic this store would read or write the
+    /// other namespace's objects through this namespace's caches and permits.
+    pub(crate) fn context_read_basis<'a>(&self, context: &'a RuntimeReadContext) -> &'a ReadBasis {
+        let read_basis = context.read_basis();
+        assert_eq!(
+            read_basis.head.namespace_id, self.namespace_id,
+            "a namespace store should read only contexts built for its own namespace"
+        );
+        read_basis
     }
 }

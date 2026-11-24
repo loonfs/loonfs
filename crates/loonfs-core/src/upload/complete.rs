@@ -40,7 +40,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         actor_id: &ActorId,
     ) -> Result<CompletedUpload> {
         let clock = self.namespace.start_clock();
-        let head = context.read_basis().head();
+        let head = self.namespace.context_read_basis(context).head();
         let now_ms = clock.request_at_ms();
         let loaded = self
             .namespace

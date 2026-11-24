@@ -140,7 +140,13 @@ impl RuntimeReadContext {
     /// Returns a context that reads the state that a snapshot kept, from
     /// `basis`, with its reads authorized at the same head as the reads of
     /// `live`, the context of the namespace's head when the read started.
+    /// Panics when `basis` and `live` are of different namespaces, which is a
+    /// bug in the caller.
     pub fn at_snapshot(basis: SnapshotReadBasis, live: RuntimeReadContext) -> Self {
+        assert_eq!(
+            basis.basis.head.namespace_id, live.read_basis.head.namespace_id,
+            "a snapshot read context should be built with a live context of the same namespace"
+        );
         let boundary = live.boundary.clone();
         let authorization = match live.authorization {
             Some(authorization) => authorization,
@@ -401,6 +407,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         context: &RuntimeReadContext,
     ) -> Result<Administrator> {
+        self.namespace.context_read_basis(context);
         let Some(subject) = self.subject_to_check() else {
             return Ok(self.administrator());
         };

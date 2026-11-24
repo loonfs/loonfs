@@ -90,7 +90,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<NamespaceMetadata> {
         let decoded = self.namespace.load_context_manifest(context).await?;
         Ok(namespace_metadata(
-            context.read_basis().head.clone(),
+            self.namespace.context_read_basis(context).head.clone(),
             decoded.manifest.payload(),
         ))
     }

@@ -31,7 +31,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         actor_id: &ActorId,
     ) -> Result<UploadSession> {
         let _permit = self.namespace.content_writes.acquire().await;
-        let head = context.read_basis().head();
+        let head = self.namespace.context_read_basis(context).head();
         self.namespace
             .upload_proxied_content(
                 head,
@@ -53,7 +53,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         actor_id: &ActorId,
     ) -> Result<UploadSession> {
         let _permit = self.namespace.content_writes.acquire().await;
-        let head = context.read_basis().head();
+        let head = self.namespace.context_read_basis(context).head();
         self.namespace
             .upload_proxied_content(
                 head,

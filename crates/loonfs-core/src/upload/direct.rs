@@ -39,7 +39,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         actor_id: &ActorId,
     ) -> Result<MultipartPartTargets> {
         let now_ms = self.now_ms();
-        let head = context.read_basis().head();
+        let head = self.namespace.context_read_basis(context).head();
         if requested.is_empty() {
             return Err(CoreError::InvalidUploadContent(
                 "a part-signing request names at least one part".to_owned(),

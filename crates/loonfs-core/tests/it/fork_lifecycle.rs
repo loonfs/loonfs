@@ -529,6 +529,88 @@ async fn a_fork_keeps_inherited_inode_ids_and_generates_its_own() {
     assert_eq!(created[0].0 >> 64, created[1].0 >> 64);
 }
 
+/// Creates a source namespace and a fork of it in a new local store, and
+/// returns the store's temporary directory, the store, the source's ID, and a
+/// read context of the fork.
+async fn source_and_fork_context() -> (
+    tempfile::TempDir,
+    LocalFsStore,
+    NamespaceId,
+    loonfs_core::RuntimeReadContext,
+) {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = default_writer();
+    let source_namespace_id = namespace_id("demo");
+    let fork_namespace_id = namespace_id("fork");
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
+    fork_namespace(&store, &source_namespace_id, &fork_namespace_id, &context)
+        .await
+        .expect("fork namespace");
+    let fork_context = read_context(&store, &fork_namespace_id).await;
+    (temp_dir, store, source_namespace_id, fork_context)
+}
+
+/// Checks that reading a file through the source namespace's engine with a
+/// read context of the fork panics.
+#[tokio::test]
+#[should_panic(
+    expected = "a namespace store should read only contexts built for its own namespace"
+)]
+async fn a_read_with_another_namespaces_context_panics() {
+    let (_temp_dir, store, source_namespace_id, fork_context) = source_and_fork_context().await;
+    let _ = namespace_engine(&store, &source_namespace_id, &default_writer())
+        .read_file("/docs/shared.txt", &fork_context, None)
+        .await;
+}
+
+/// Checks that reading the namespace metadata through the source namespace's
+/// engine with a read context of the fork panics.
+#[tokio::test]
+#[should_panic(
+    expected = "a namespace store should read only contexts built for its own namespace"
+)]
+async fn namespace_metadata_with_another_namespaces_context_panics() {
+    let (_temp_dir, store, source_namespace_id, fork_context) = source_and_fork_context().await;
+    let _ = namespace_engine(&store, &source_namespace_id, &default_writer())
+        .namespace_metadata(&fork_context)
+        .await;
+}
+
+/// Checks that beginning an upload through the source namespace's engine with
+/// a read context of the fork panics.
+#[tokio::test]
+#[should_panic(
+    expected = "a namespace store should read only contexts built for its own namespace"
+)]
+async fn an_upload_with_another_namespaces_context_panics() {
+    let (_temp_dir, store, source_namespace_id, fork_context) = source_and_fork_context().await;
+    let _ = namespace_engine(&store, &source_namespace_id, &default_writer())
+        .begin_upload(&fork_context, &loonfs_test_support::test_actor())
+        .await;
+}
+
+/// Checks that listing snapshots through the source namespace's engine with
+/// a read context of the fork panics.
+#[tokio::test]
+#[should_panic(
+    expected = "a namespace store should read only contexts built for its own namespace"
+)]
+async fn a_snapshot_listing_with_another_namespaces_context_panics() {
+    let (_temp_dir, store, source_namespace_id, fork_context) = source_and_fork_context().await;
+    let engine = namespace_engine(&store, &source_namespace_id, &default_writer());
+    let _ = engine
+        .list_snapshots_page(
+            &loonfs_core::test_support::administrator(&engine),
+            &fork_context,
+            loonfs_types::PageRequest {
+                limit: loonfs_test_support::ids::page_limit(1),
+                cursor: None,
+            },
+        )
+        .await;
+}
+
 async fn head_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

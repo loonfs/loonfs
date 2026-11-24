@@ -95,7 +95,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let decoded = self
             .namespace
             .load_held_manifest(
-                context.read_basis().basis.manifest(),
+                self.namespace.context_read_basis(context).basis.manifest(),
                 context.boundary().clone(),
             )
             .await?

@@ -175,15 +175,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// before the wall-clock time of the call, or the id of a fork snapshot
     /// returns `snapshot_not_found`.
     ///
-    /// `_live`, a read context of the namespace, proves that the namespace is
+    /// `live`, a read context of the namespace, proves that the namespace is
     /// live, and `administrator` proves the caller administers the namespace,
     /// because snapshots are only for the administrator.
     pub async fn get_snapshot(
         &self,
         administrator: &Administrator,
-        _live: &RuntimeReadContext,
+        live: &RuntimeReadContext,
         snapshot_id: &SnapshotId,
     ) -> Result<Snapshot> {
+        self.namespace.context_read_basis(live);
         administrator.assert_for(&self.namespace.namespace_id);
         let now_ms = self.now_ms();
         let loaded = ensure_live(
@@ -197,7 +198,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Moves the expiry of an unexpired snapshot that isn't deleted to
     /// `requested_expires_at_ms`, never earlier. A snapshot without an expiry is returned unchanged.
-    /// `_live`, a read context of the namespace, proves that the namespace is
+    /// `live`, a read context of the namespace, proves that the namespace is
     /// live, and `administrator` proves the caller administers the namespace.
     ///
     /// Each compare-and-swap checks the call's publication budget first, as a
@@ -207,10 +208,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn extend_snapshot(
         &self,
         administrator: &Administrator,
-        _live: &RuntimeReadContext,
+        live: &RuntimeReadContext,
         snapshot_id: &SnapshotId,
         requested_expires_at_ms: u64,
     ) -> Result<Snapshot> {
+        self.namespace.context_read_basis(live);
         administrator.assert_for(&self.namespace.namespace_id);
         let clock = self.namespace.start_clock();
         let object_key = snapshot_record(&self.namespace.namespace_id, snapshot_id);
