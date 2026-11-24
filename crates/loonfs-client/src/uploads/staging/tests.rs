@@ -778,9 +778,12 @@ async fn a_file_backed_direct_put_reads_the_file_once_without_spooling_it() {
     assert!(object_write.largest_body_chunk() <= crate::payload::SOURCE_CHUNK_BYTES);
 }
 
-/// Sends one streamed body to a socket that only reads and reports the
-/// request head, so the framing the client chose is observable.
-async fn request_head_for(source: PayloadSource) -> String {
+/// Sends one request to a socket that only reads and reports the request
+/// head, so the framing the client chose is observable.
+async fn request_head_for<Sent>(send: impl FnOnce(Client) -> Sent) -> String
+where
+    Sent: std::future::Future,
+{
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind a probe socket");
@@ -812,10 +815,17 @@ async fn request_head_for(source: PayloadSource) -> String {
     )
     .expect("valid client config");
     // The response is not the point; the request head is.
-    let _ = client
-        .put_upload_content_stream(&namespace_id(), &upload_id(), source)
-        .await;
+    let _ = send(client).await;
     served.await.expect("probe task")
+}
+
+async fn streamed_request_head(source: PayloadSource) -> String {
+    request_head_for(|client| async move {
+        client
+            .put_upload_content_stream(&namespace_id(), &upload_id(), source)
+            .await
+    })
+    .await
 }
 
 #[tokio::test]
@@ -824,7 +834,7 @@ async fn a_sized_source_frames_its_body_with_a_content_length() {
     let path = directory.path().join("payload.bin");
     std::fs::write(&path, b"0123456789").expect("write payload");
     let source = PayloadSource::open_file(path).await.expect("open payload");
-    let head = request_head_for(source).await;
+    let head = streamed_request_head(source).await;
 
     assert!(head.contains("content-length: 10"), "{head}");
     assert!(
@@ -836,13 +846,36 @@ async fn a_sized_source_frames_its_body_with_a_content_length() {
 #[tokio::test]
 async fn an_unsized_source_frames_its_body_chunked() {
     let stream = futures::stream::iter(vec![Ok(Bytes::from_static(b"0123456789"))]).boxed();
-    let head = request_head_for(PayloadSource::stream(stream)).await;
+    let head = streamed_request_head(PayloadSource::stream(stream)).await;
 
     assert!(head.contains("transfer-encoding: chunked"), "{head}");
     assert!(
         !head.contains("content-length"),
         "a body of unknown length cannot declare one: {head}"
     );
+}
+
+#[tokio::test]
+async fn a_post_without_a_body_sends_content_length_zero() {
+    let head = request_head_for(|client| async move {
+        client.abort_upload(&namespace_id(), &upload_id()).await
+    })
+    .await;
+
+    assert!(head.starts_with("post "), "{head}");
+    assert!(head.contains("content-length: 0\r\n"), "{head}");
+}
+
+#[tokio::test]
+async fn a_get_sends_no_content_length() {
+    let head =
+        request_head_for(
+            |client| async move { client.get_upload(&namespace_id(), &upload_id()).await },
+        )
+        .await;
+
+    assert!(head.starts_with("get "), "{head}");
+    assert!(!head.contains("content-length"), "{head}");
 }
 
 struct FailingJournal {

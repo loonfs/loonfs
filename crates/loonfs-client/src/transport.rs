@@ -135,8 +135,8 @@ impl Client {
     /// Sends a streaming request body exactly once.
     ///
     /// A stream cannot be replayed after an attempt consumes it, so failures are
-    /// returned to the caller without retry. `size_bytes` sets `Content-Length`;
-    /// when absent, the request uses chunked transfer encoding.
+    /// returned to the caller without retry. A stream without `size_bytes` is
+    /// sent with chunked transfer encoding.
     pub(crate) async fn call_streamed_once(
         &self,
         request: &WireRequest,
@@ -155,12 +155,7 @@ impl Client {
                 }
             })
             .boxed();
-        let mut request_body = self.build(request, Body::from_stream(body))?;
-        if let Some(size_bytes) = size_bytes {
-            request_body
-                .headers_mut()
-                .append(http::header::CONTENT_LENGTH, size_bytes.into());
-        }
+        let request_body = self.build(request, Body::from_stream(body), size_bytes)?;
         let sent = match self.send(request_body, None).await {
             Ok(response) => response.collect(&request.url).await,
             Err(attempt) => Err(attempt),
@@ -194,7 +189,7 @@ impl Client {
         attempt_timeout: Option<Duration>,
     ) -> std::result::Result<StreamedResponse, FailedAttempt> {
         let built = self
-            .build(request, Body::empty())
+            .build(request, Body::empty(), Some(0))
             .map_err(|error| FailedAttempt {
                 error,
                 retry_after_ms: None,
@@ -307,22 +302,29 @@ impl Client {
         request: &WireRequest,
         attempt_timeout: Option<Duration>,
     ) -> std::result::Result<BufferedResponse, FailedAttempt> {
-        let body = request
-            .body
-            .clone()
-            .map(Body::from)
-            .unwrap_or_else(Body::empty);
-        let built = self.build(request, body).map_err(|error| FailedAttempt {
-            error,
-            retry_after_ms: None,
-        })?;
+        let body = request.body.clone().unwrap_or_default();
+        let length = body.len() as u64;
+        let built = self
+            .build(request, Body::from(body), Some(length))
+            .map_err(|error| FailedAttempt {
+                error,
+                retry_after_ms: None,
+            })?;
         self.send(built, attempt_timeout)
             .await?
             .collect(&request.url)
             .await
     }
 
-    fn build(&self, request: &WireRequest, body: Body) -> Result<Request<Body>> {
+    /// Builds an HTTP request from `request` and `body`. `length` is the
+    /// body's size in bytes, or `None` for a stream of unknown size, which is
+    /// sent chunked.
+    fn build(
+        &self,
+        request: &WireRequest,
+        body: Body,
+        length: Option<u64>,
+    ) -> Result<Request<Body>> {
         let mut builder = Request::builder()
             .method(request.method.clone())
             .uri(&request.url);
@@ -349,11 +351,22 @@ impl Client {
                 request.url
             ))
         };
-        let built = builder.body(body).map_err(|error| cant_be_built(&error))?;
+        let mut built = builder.body(body).map_err(|error| cant_be_built(&error))?;
         if !crate::config::is_sendable_url(built.uri()) {
             return Err(cant_be_built(
                 &"the URL isn't an absolute http or https URL with a host",
             ));
+        }
+        // HTTP asks a request whose method defines a body to send the body's
+        // length, even when the body is empty (RFC 9110 section 8.6). The
+        // HTTP library leaves the header off an empty body, and some load
+        // balancers refuse that request with `411 Length Required`.
+        if let Some(length) = length {
+            if [Method::POST, Method::PUT, Method::PATCH].contains(&request.method) {
+                built
+                    .headers_mut()
+                    .insert(http::header::CONTENT_LENGTH, length.into());
+            }
         }
         Ok(built)
     }
