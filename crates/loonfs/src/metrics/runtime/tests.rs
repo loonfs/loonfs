@@ -402,7 +402,6 @@ fn a_collection_counts_what_it_reclaimed_and_retained() {
     let pool_gc = crate::PoolGcResponse {
         deleted: loonfs_types::PoolDeletedObjectCounts {
             content_objects: 5,
-            temporary_objects: 11,
             upload_sessions: 13,
         },
         skipped: vec![crate::GcSkippedWork::ContentDeletionPoolBudget],
@@ -435,11 +434,10 @@ fn a_collection_counts_what_it_reclaimed_and_retained() {
     assert_eq!(counter(&snapshot, "loonfs.gc.retained", &[]), 4);
     // Every family registers at construction, so a scrape names the
     // whole reclaimable vocabulary rather than only what has happened.
-    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 9);
+    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 8);
     for (category, expected) in [
         ("deleted_fork_snapshots", 4),
         ("deleted_expired_snapshots", 6),
-        ("deleted_temporary_objects", 22),
         ("deleted_upload_sessions", 26),
     ] {
         assert_eq!(

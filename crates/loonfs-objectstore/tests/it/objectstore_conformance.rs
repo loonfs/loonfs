@@ -9,7 +9,7 @@ use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use loonfs_objectstore::azure_blob::AzureBlobStoreConfig;
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
-use loonfs_objectstore::keys::{content_blob, content_span, temporary_prefix};
+use loonfs_objectstore::keys::{content_blob, content_span};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::presign::{DirectMultipartIssuer, PresignedPartRequest};
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeReport};
@@ -935,11 +935,8 @@ async fn assert_assembly<S: ObjectStore>(
                 checksum: Checksum::compute(crc, &bytes),
             });
         }
-        let key = content_span(
-            &pool_id,
-            &ContentId::generate(),
-            &loonfs_types::SpanObjectId::generate(),
-        );
+        let chain = ContentId::generate();
+        let key = content_span(&pool_id, &chain, &loonfs_types::SpanObjectId::generate());
         let expected = Checksum::compute(crc, &payload);
         let written = store
             .assemble(
@@ -950,6 +947,7 @@ async fn assert_assembly<S: ObjectStore>(
             )
             .await
             .expect("assembly");
+        assert_chain_lists_only(store, &content_blob(&pool_id, &chain), &key).await;
         assert_eq!(
             store.get(&key, None).await.expect("get").expect("object"),
             payload
@@ -1021,6 +1019,7 @@ async fn assert_assembly<S: ObjectStore>(
             )
             .await
             .expect("ranged assembly");
+        assert_chain_lists_only(store, &ranged, &ranged).await;
         assert_eq!(
             store
                 .get(&ranged, None)
@@ -1062,11 +1061,17 @@ async fn assert_assembly<S: ObjectStore>(
         }
         store.delete(&key).await.expect("delete assembly");
     }
-    assert!(store
-        .list_prefix(&temporary_prefix(&pool_id))
-        .await
-        .expect("temporaries")
-        .is_empty());
+}
+
+/// Checks that the only object under the chain whose whole-object key is
+/// `chain` is `key`, so an assembly of `key` left no unlisted span object of
+/// the chain behind.
+async fn assert_chain_lists_only<S: ObjectStore>(store: &S, chain: &str, key: &str) {
+    assert_eq!(
+        store.list_prefix(chain).await.expect("list the chain"),
+        vec![key.to_owned()],
+        "an assembly deletes the intermediates it wrote"
+    );
 }
 
 async fn assert_put_and_assembly_share_identity<S: ObjectStore>(
@@ -1139,11 +1144,7 @@ async fn assert_chained_compose<S: ObjectStore>(store: &S) {
         store.get(&key, None).await.expect("get").expect("object"),
         bytes
     );
-    assert!(store
-        .list_prefix(&temporary_prefix(&pool_id))
-        .await
-        .expect("temporaries")
-        .is_empty());
+    assert_chain_lists_only(store, &key, &key).await;
     store.delete(&key).await.expect("delete result");
     for source in sources {
         store.delete(&source.key).await.expect("delete source");

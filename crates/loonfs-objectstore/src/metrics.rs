@@ -735,9 +735,7 @@ fn classify_key(key: &str) -> ObjectKeyKind {
     };
 
     match parsed.family() {
-        DurableObjectFamily::ContentBlob | DurableObjectFamily::TemporaryObject => {
-            ObjectKeyKind::Content
-        }
+        DurableObjectFamily::ContentBlob => ObjectKeyKind::Content,
         DurableObjectFamily::WalObject => ObjectKeyKind::WalObject,
         DurableObjectFamily::MetadataManifest | DurableObjectFamily::Boundary => {
             ObjectKeyKind::NamespaceManifest

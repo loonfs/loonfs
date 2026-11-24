@@ -134,8 +134,7 @@ fn maintenance_pool_gc_collects_a_given_pool_or_the_selected_namespace_pool() {
     let first = lines.next().expect("summary line");
     assert!(
         first.starts_with(&format!(
-            "gc for {pool_id}: gc deleted 0 content objects, 0 upload sessions, \
-             0 temporary objects ("
+            "gc for {pool_id}: gc deleted 0 content objects, 0 upload sessions ("
         )),
         "{human}"
     );
@@ -158,7 +157,7 @@ fn maintenance_pool_gc_collects_a_given_pool_or_the_selected_namespace_pool() {
     assert_eq!(data["pool_id"], pool_id.as_str());
     assert_eq!(
         data["deleted"],
-        serde_json::json!({"content_objects": 0, "upload_sessions": 0, "temporary_objects": 0})
+        serde_json::json!({"content_objects": 0, "upload_sessions": 0})
     );
     assert!(data["listed_bytes"].as_u64().is_some(), "{data}");
     assert!(data.get("skipped").is_none(), "{data}");

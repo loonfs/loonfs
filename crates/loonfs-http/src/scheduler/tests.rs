@@ -1238,15 +1238,15 @@ enum Grep {
 /// namespace's collection takes its roots from the manifest that its find
 /// returns, so it sends the 3 requests of the find and then 5 listings. The
 /// pool's collection lists the upload sessions and the member entries before
-/// it reads the member, and then lists the member's snapshots, the content,
-/// and the temporary objects, so the four calls cost 6, 3, 8, and 11. A
+/// it reads the member, and then lists the member's snapshots and the
+/// content, so the four calls cost 6, 3, 8, and 10. A
 /// maintained grep index adds a call that finds the newest manifest (3), and
 /// an enabled one also reads the WAL number after it (4). The docs quote
 /// these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize); 3] = [
-    (Grep::NotMaintained, 28, 14),
-    (Grep::Maintained, 31, 15),
-    (Grep::Enabled, 32, 15),
+    (Grep::NotMaintained, 27, 13),
+    (Grep::Maintained, 30, 14),
+    (Grep::Enabled, 31, 14),
 ];
 
 #[tokio::test(start_paused = true)]

@@ -130,9 +130,9 @@ A collection of a pool:
    - **Initializing.** The namespace has no roots.
    - **Retired, no namespace, or a manifest that records another pool.** The namespace has no roots, and the collection deletes the member entry.
    - **Unreadable.** The collection deletes no content objects in this pass.
-4. Reads the extent filters, lists the content prefix once, and deletes unreferenced content objects, temporary objects, and upload records under the rules in [Content roots](../specs/format.md#119-content-roots).
+4. Reads the extent filters, lists the content prefix once, and deletes unreferenced content objects and upload records under the rules in [Content roots](../specs/format.md#119-content-roots).
 
-The collection still has to read every member's roots within `POOL_ROOTS_READ_BUDGET_MS`, or it deletes no content objects. It writes no object. A pool that has no member entries has no roots, so the age rules delete its content, temporary objects, and upload records. A collection of a pool ID with no object under the pool's prefix returns `pool_not_found`.
+The collection still has to read every member's roots within `POOL_ROOTS_READ_BUDGET_MS`, or it deletes no content objects. It writes no object. A pool that has no member entries has no roots, so the age rules delete its content and upload records. A collection of a pool ID with no object under the pool's prefix returns `pool_not_found`.
 
 Why does a namespace that's initializing have no roots? LoonFS refuses commits to it, so a namespace without a source refers to no content. A fork refers only to two kinds of content: the content of the source manifest that the snapshot of step 2 or the fork snapshot keeps, which is in one of the source's roots while the snapshot exists, and the content of the source's WAL tail that the fork's manifest 2 folds, which is in a root of the source while no commit in the tail is older than `MAX_TAIL_COMMIT_AGE_MS`.
 

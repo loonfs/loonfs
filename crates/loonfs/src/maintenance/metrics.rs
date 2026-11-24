@@ -85,12 +85,9 @@ const GC_CATEGORIES: [GcKind<GcResponse>; 6] = [
 ];
 
 /// Counts each deletion of a pool's collection once.
-const POOL_GC_CATEGORIES: [GcKind<PoolGcResponse>; 3] = [
+const POOL_GC_CATEGORIES: [GcKind<PoolGcResponse>; 2] = [
     ("deleted_upload_sessions", |gc| gc.deleted.upload_sessions),
     ("deleted_content_objects", |gc| gc.deleted.content_objects),
-    ("deleted_temporary_objects", |gc| {
-        gc.deleted.temporary_objects
-    }),
 ];
 
 /// The gauges and durable totals for this process's compaction units.

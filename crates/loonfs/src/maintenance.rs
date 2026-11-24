@@ -394,9 +394,9 @@ impl Maintenance {
         .await
     }
 
-    /// Runs one complete garbage collection of one pool: its content objects,
-    /// upload records, and temporary objects, with roots that it reads from
-    /// every member of the pool.
+    /// Runs one complete garbage collection of one pool: its content objects
+    /// and upload records, with roots that it reads from every member of the
+    /// pool.
     ///
     /// Every call rebuilds the members' roots and keeps no cursor. A pool
     /// with nothing under its prefix returns `pool_not_found`. The call waits

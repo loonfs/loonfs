@@ -4,7 +4,7 @@ LoonFS stores a filesystem directly in object storage, with no external metadata
 
 LoonFS relies on seven object-store operations ([Required operations](format.md#31-required-operations)): put-if-absent, compare-and-swap on small objects, full and ranged reads, version-conditional reads, deletes, prefix listings, and child-prefix listings. Because object storage offers no multi-object transactions, every durable state change commits through a single object write.
 
-Each "namespace" is one directory tree with its own history under `namespaces/{namespace_id}/`. Its content objects, upload records, and assembly temporary objects are stored under its [pool](glossary.md#pool) prefix (`pools/{pool_id}/`), which it shares with all of its forks.
+Each "namespace" is one directory tree with its own history under `namespaces/{namespace_id}/`. Its content objects and upload records are stored under its [pool](glossary.md#pool) prefix (`pools/{pool_id}/`), which it shares with all of its forks.
 
 Applications can embed LoonFS as a Rust library (`loonfs`) or talk to it over HTTP (`loonfs-http`, hosted by the standalone `loonfs-server` binary). Because writer handoff goes through object storage and takes around 200 ms, most deployments run one long-lived writer session per namespace inside a shared server.
 
@@ -119,7 +119,7 @@ An expired snapshot continues protecting its manifest until garbage collection r
 | Fold | Moves committed WAL tail records into new metadata segments and publishes the next manifest. |
 | Compaction | Rewrites metadata runs into fewer runs and drops obsolete rows without altering any retained view. |
 | Retention advance | Verifies the current manifest's segments and writes a [floor object](glossary.md#floor-object) to the WAL. The next fold copies the new floor into a manifest, allowing compaction to remove older history. |
-| Garbage collection | Deletes unreferenced objects past the grace window from a fresh root scan. Namespace collections clean manifests, WAL commit objects, segments, and snapshots, while pool collections clean content objects, upload records, and temporary objects across all pool members. |
+| Garbage collection | Deletes unreferenced objects past the grace window from a fresh root scan. Namespace collections clean manifests, WAL commit objects, segments, and snapshots, while pool collections clean content objects and upload records across all pool members. |
 
 Deleting a file records a reversible subtree tombstone, and deleting a namespace publishes a final manifest with status `deleted`. Neither reclaims content immediately.
 

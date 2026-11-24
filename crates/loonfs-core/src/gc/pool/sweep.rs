@@ -1,5 +1,5 @@
-//! The decisions of a pool's collection about the content objects, upload
-//! records, and temporary objects under the pool's prefix.
+//! The decisions of a pool's collection about the content objects and upload
+//! records under the pool's prefix.
 
 use super::members::PoolRoots;
 use super::uploads::{
@@ -12,7 +12,7 @@ use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::pool_store::PoolStore;
 use crate::time::OperationClock;
 use crate::upload::records::upload_session_record_keys;
-use loonfs_objectstore::layout::{content_id_of, parse_object_key, DurableObjectFamily};
+use loonfs_objectstore::layout::content_id_of;
 use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::{PoolGcResponse, PoolRetainedReason, UploadId};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,8 +32,7 @@ pub(super) struct PoolSweep<'a, S: ObjectStore> {
     /// The bytes of the listed objects that reached this sweep, as the
     /// listings reported them.
     pub(super) listed_bytes: AtomicU64,
-    /// The content objects and temporary objects that the sweep's listings
-    /// returned.
+    /// The content objects that the sweep's listings returned.
     pub(super) listed_objects: AtomicU64,
 }
 
@@ -53,15 +52,6 @@ impl<S: ObjectStore> PoolSweep<'_, S> {
                 self.aged(entry, |report| &mut report.deleted.content_objects)
             }
         }
-    }
-
-    pub(super) fn temporary_candidate(&self, entry: ListedObject) -> Decision<PoolGcResponse> {
-        self.add_listed_object(entry.size_bytes);
-        let family = parse_object_key(&entry.key).map(|parsed| parsed.family());
-        if family != Some(DurableObjectFamily::TemporaryObject) {
-            return self.retain(PoolRetainedReason::UnrecognizedKey, None);
-        }
-        self.aged(entry, |report| &mut report.deleted.temporary_objects)
     }
 
     /// Determines what to do with the records of one entry of the uploads
@@ -195,8 +185,7 @@ impl<S: ObjectStore> PoolSweep<'_, S> {
         self.listed_bytes.fetch_add(size_bytes, Ordering::Relaxed);
     }
 
-    /// Adds one object that a listing of the content or temporary prefix
-    /// returned.
+    /// Adds one object that the content listing returned.
     fn add_listed_object(&self, size_bytes: u64) {
         self.add_listed_bytes(size_bytes);
         self.listed_objects.fetch_add(1, Ordering::Relaxed);
