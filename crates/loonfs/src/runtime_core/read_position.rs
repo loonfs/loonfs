@@ -251,9 +251,10 @@ impl RuntimeCore {
     /// what the check found: it records a check that found the position's
     /// manifest the newest, moves the position onto the newest manifest of
     /// its writer epoch, as it moves onto the manifests this runtime
-    /// publishes (see [`HeadPositions::move_position`]), or drops the
-    /// position. A move or a drop waits for a publish that has the engine
-    /// locked.
+    /// publishes (see [`HeadPositions::move_position`]), or drops this
+    /// runtime's view of the namespace (see
+    /// [`RuntimeCore::forget_namespace_view`]). A move or a drop waits for a
+    /// publish that has the engine locked.
     async fn check_writer_position(
         &self,
         namespace_id: &NamespaceId,
@@ -271,13 +272,7 @@ impl RuntimeCore {
                 positions.move_position(namespace_id, newest.clone()).await;
                 slot.record_check(&newest);
             }
-            PositionCheck::Drop => {
-                // The position becomes the cached head, which the check found
-                // out of date, so the head is dropped after it, and the next
-                // read loads the namespace by discovery.
-                positions.drop_position(namespace_id).await;
-                self.invalidate_namespace_read_cache(namespace_id);
-            }
+            PositionCheck::Drop => self.forget_namespace_view(namespace_id).await,
         }
         Ok(())
     }

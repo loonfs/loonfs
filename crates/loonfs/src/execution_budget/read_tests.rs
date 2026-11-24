@@ -89,7 +89,7 @@ impl Fixture {
     }
 
     /// Creates the fixture with a cache that keeps no heads or WAL tails, and
-    /// drops the writer session's position, so every read in the writer's
+    /// drops the runtime's view of the namespace, so every read in the writer's
     /// runtime loads the namespace from the store, and a test can park a read
     /// there.
     async fn without_heads_or_wal_tails() -> Self {
@@ -104,7 +104,7 @@ impl Fixture {
         fixture
             .runtime
             .core
-            .drop_writer_position(fixture.namespace.id())
+            .forget_namespace_view(fixture.namespace.id())
             .await;
         fixture
     }

@@ -250,10 +250,24 @@ impl RuntimeCore {
             .current()
     }
 
-    /// Drops the position of the namespace's writer session in this runtime,
-    /// if there is one, so reads start from the read cache until the
-    /// session's next publish loads the namespace.
-    pub(crate) async fn drop_writer_position(&self, namespace_id: &NamespaceId) {
+    /// Drops this runtime's view of the namespace: the namespace's cached
+    /// head, and the position of the namespace's writer session in this
+    /// runtime. A caller outside the session's engine calls this method when
+    /// the caller finds the view out of date and can't move the view forward,
+    /// such as after a newer manifest replaced the view's manifest, or when a
+    /// check finds the position's manifest at or below the manifest boundary.
+    ///
+    /// The cached head is dropped first, so a refresh of the head in flight
+    /// installs nothing when it finishes. The position is dropped once no
+    /// other task has the session's engine locked, and until then, reads keep
+    /// starting from the position. When the engine is released, the
+    /// position's WAL tail goes into the read cache, and the head that the
+    /// position becomes is dropped too (see
+    /// `NamespacePublisher::release_engine`). So when this method returns,
+    /// the next read loads the namespace by discovery, and the session's next
+    /// publish loads it from the store.
+    pub(crate) async fn forget_namespace_view(&self, namespace_id: &NamespaceId) {
+        self.invalidate_namespace_read_cache(namespace_id);
         if let Some(positions) = self.inner.head_positions.get().and_then(Weak::upgrade) {
             positions.drop_position(namespace_id).await;
         }

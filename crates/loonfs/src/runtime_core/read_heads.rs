@@ -98,30 +98,6 @@ impl RuntimeCore {
             .await
     }
 
-    /// Loads the namespace's head from the store, without starting from the
-    /// cached head, and installs it through
-    /// [`HeadAndWalTailCache::replace_head`](loonfs_core::cache::HeadAndWalTailCache::replace_head).
-    ///
-    /// A read that finds a segment of its basis missing reloads this way,
-    /// after it drops the cached head, because the newer manifest that
-    /// replaced its basis is what it needs, and a refresh from the cached
-    /// head would read the same basis again. The reload shares the refresh
-    /// of the head in flight the way a strong read does, because a refresh
-    /// that starts after the drop finds that newer manifest too.
-    pub(crate) async fn reload_namespace_head(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> std::result::Result<Arc<CachedHead>, CoreError> {
-        self.inner
-            .head_and_wal_tail_cache
-            .check_or_join_head(
-                namespace_id,
-                || None,
-                || self.refresh_namespace_head(namespace_id, None),
-            )
-            .await
-    }
-
     async fn refresh_namespace_head(
         &self,
         namespace_id: &NamespaceId,
@@ -418,12 +394,15 @@ impl RuntimeCore {
         ActiveNamespaceCatalogEntry::from_head(context.read_basis().head()).map_err(Error::from)
     }
 
-    /// Drops the namespace's cached head, after this runtime learns of a
-    /// change whose effect on the head it can't identify, so the next read
-    /// loads the namespace by discovery, whatever its consistency (see
+    /// Drops the namespace's cached head, so the next read that doesn't start
+    /// from a writer position loads the namespace by discovery, whatever its
+    /// consistency (see
     /// [`HeadAndWalTailCache::invalidate_head`](loonfs_core::cache::HeadAndWalTailCache::invalidate_head)).
-    /// A writer runtime calls `PublisherRegistry::invalidate_namespace`
-    /// instead, which also tells the namespace's publisher what changed.
+    /// A caller that finds this runtime's view of the namespace out of date
+    /// calls [`Self::forget_namespace_view`] instead, which also drops the
+    /// position of the namespace's writer session. A release of the
+    /// session's engine and a deletion call this method directly, because
+    /// the engine has already dropped its own position by then.
     ///
     /// Cached WAL-tail projections stay. A tail is keyed by namespace,
     /// manifest number, and head sequence, and that key identifies one
