@@ -385,24 +385,23 @@ impl HeadAndWalTailCache {
     /// `manifest`'s check when that check is younger or keeps a higher
     /// boundary (see [`Held::merge`]). Any other head is dropped as
     /// [`Self::invalidate_head`] drops it, so the next read loads the head by
-    /// discovery. The cache reads the cached head and installs the checked
-    /// head under one lock, so a head that an invalidation dropped stays
-    /// dropped.
+    /// discovery. The cache compares the cached head and confirms or drops
+    /// it under one lock, so a head that a read installs on `manifest` or a
+    /// later one while the publication runs stays, and a head that an
+    /// invalidation dropped stays dropped.
     pub fn confirm_or_drop_head(
         &self,
         namespace_id: &NamespaceId,
         manifest: &Held<LoadedManifest>,
     ) {
-        let kept = self
-            .shared
-            .heads
-            .replace_present(&self.head_key(namespace_id), |cached| {
+        self.shared.heads.replace_or_invalidate(
+            &self.head_key(namespace_id),
+            |cached| cached.basis.manifest_no() >= manifest.manifest_no(),
+            |cached| {
                 let mut checked = CachedHead::clone(cached);
                 checked.basis.merge(manifest).then(|| Arc::new(checked))
-            });
-        if !kept.is_some_and(|kept| kept.basis.manifest_no() >= manifest.manifest_no()) {
-            self.invalidate_head(namespace_id);
-        }
+            },
+        );
     }
 
     /// Removes the namespace's cached head, after the runtime learns of a

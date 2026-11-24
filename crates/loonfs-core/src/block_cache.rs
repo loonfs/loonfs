@@ -530,52 +530,52 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     }
 
     /// Replaces the entry under `key` with the value that `change` returns
-    /// for it, and returns the key's entry after the call, or `None` when the
-    /// key has no entry.
+    /// for it when `keep` accepts the entry, and otherwise drops the key as
+    /// [`Self::invalidate`] does.
     ///
-    /// The cache's lock covers reading the entry and replacing it, so a value
-    /// derived from an entry that an invalidation or an eviction dropped is
-    /// never inserted. (`change` runs under that lock, so it combines values
-    /// and does nothing else.) `change` returns `None` to keep the entry. A
-    /// value heavier than the whole budget drops the key, as
-    /// [`Self::insert_if`] does.
-    pub(crate) fn replace_present(&self, key: &K, change: impl FnOnce(&V) -> Option<V>) -> Option<V>
-    where
+    /// The cache's lock covers reading the entry and replacing or dropping
+    /// it, so a value derived from an entry that an invalidation or an
+    /// eviction dropped is never inserted, and an entry that another caller
+    /// installed meanwhile is judged by `keep` too. (`keep` and `change` run
+    /// under that lock, so they compare and combine values and do nothing
+    /// else.) `change` returns `None` to keep the entry. A value heavier than
+    /// the whole budget drops the key, as [`Self::insert_if`] does.
+    pub(crate) fn replace_or_invalidate(
+        &self,
+        key: &K,
+        keep: impl FnOnce(&V) -> bool,
+        change: impl FnOnce(&V) -> Option<V>,
+    ) where
         K: Clone,
     {
-        if self.disabled() {
-            return None;
-        }
         let mut dropped = Vec::new();
-        let kept = {
+        {
             let mut inner = self.lock();
-            let cached = inner.entries.get(key).map(|slot| slot.block.clone())?;
-            let Some(value) = change(&cached) else {
-                return Some(cached);
-            };
-            match self.entry_charge(key, &value) {
-                Ok(entry_charge) => {
-                    self.put(
-                        &mut inner,
-                        key.clone(),
-                        value.clone(),
-                        entry_charge,
-                        None,
-                        &mut dropped,
-                    );
-                    Some(value)
-                }
-                Err(charged_bytes) => {
-                    if let Some(slot) = inner.drop_key(key) {
-                        dropped.push(slot.block);
+            match inner.entries.get(key).map(|slot| slot.block.clone()) {
+                Some(cached) if keep(&cached) => {
+                    if let Some(value) = change(&cached) {
+                        match self.entry_charge(key, &value) {
+                            Ok(entry_charge) => {
+                                self.put(
+                                    &mut inner,
+                                    key.clone(),
+                                    value,
+                                    entry_charge,
+                                    None,
+                                    &mut dropped,
+                                );
+                            }
+                            Err(charged_bytes) => {
+                                dropped.extend(inner.drop_key(key).map(|slot| slot.block));
+                                self.record_rejection(charged_bytes);
+                            }
+                        }
                     }
-                    self.record_rejection(charged_bytes);
-                    None
                 }
+                _ => dropped.extend(inner.drop_key(key).map(|slot| slot.block)),
             }
-        };
+        }
         drop(dropped);
-        kept
     }
 
     /// Returns the charge of an entry of `block` under `key`, or the bytes
