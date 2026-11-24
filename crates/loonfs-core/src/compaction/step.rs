@@ -18,7 +18,6 @@ use super::plan::{plan_compaction, select_family_group, MetadataCompactionSpec};
 use super::publication::{input_segment_keys, CompactionPublication};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
-use crate::manifest::load::metadata_basis_from_manifest;
 use crate::manifest::publish::ManifestChange;
 use crate::manifest::published::PublicationReport;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
@@ -130,12 +129,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         // in the cache, not in its own memo, so the walk reads through the
         // cache, and a block that contains the rows of many directories is
         // fetched once.
-        let segments = metadata_basis_from_manifest(
-            &self.namespace.store,
-            Some(&self.namespace.segment_cache),
-            current,
-        )
-        .segments;
+        let segments = self.namespace.current_segments(current).segments;
         let Some(spec) = plan_compaction(payload, &segments.scan_runs, self.namespace.run_policy)
         else {
             return Ok(CompactionUnitOutcome::NotNeeded);
@@ -165,24 +159,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await;
         let ran = match ran {
             // A collection can delete the input segments of a basis that a
-            // newer manifest replaced while the unit reads them. The unit is
-            // then abandoned, as it is when its put finds the basis replaced.
-            // A missing segment of the current manifest still returns
-            // `namespace_corrupt`.
-            Err(error) if error.is_missing_segment() => {
-                return match self
-                    .namespace
-                    .ensure_manifest_current(payload.manifest_no)
-                    .await
-                {
-                    Err(CoreError::ManifestReplaced { .. }) => {
-                        let outcome = CompactionUnitOutcome::Abandoned;
-                        log_unit_outcome(&self.namespace.namespace_id, &spec, &outcome);
-                        Ok(outcome)
-                    }
-                    Ok(()) => Err(error),
-                    Err(other) => Err(other),
-                };
+            // newer manifest replaced while the unit reads them, and the
+            // unit's read then returns `ManifestReplaced`. The unit is
+            // abandoned, as it is when its put finds the basis replaced.
+            Err(CoreError::ManifestReplaced { .. }) => {
+                let outcome = CompactionUnitOutcome::Abandoned;
+                log_unit_outcome(&self.namespace.namespace_id, &spec, &outcome);
+                return Ok(outcome);
             }
             ran => ran?,
         };

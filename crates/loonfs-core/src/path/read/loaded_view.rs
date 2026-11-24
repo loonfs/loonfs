@@ -5,7 +5,6 @@ use super::current_files::resolve_visible_inode;
 use crate::authorize::{Absence, ReadAccess};
 use crate::engine::RuntimeReadContext;
 use crate::error::{CoreError, HistoryPosition, Result};
-use crate::manifest::load_basis_metadata_segments;
 use crate::metadata::{LeafRevisionPreload, MetadataView};
 use crate::namespace::basis::ReadBasis;
 use crate::namespace::head_cache::WalTailCacheKey;
@@ -56,8 +55,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         crate::namespace::control::ensure_head_identity(head, &self.namespace_id)?;
         let head = head.clone();
         let manifest_no = basis.manifest_no();
-        let loaded_basis =
-            load_basis_metadata_segments(&self.store, Some(&self.segment_cache), basis).await?;
+        let loaded_basis = self
+            .load_context_segments(
+                basis.manifest(),
+                context.boundary().clone(),
+                &context.kept_by,
+            )
+            .await?;
         let visible_seq = context.visible_seq();
         assert!(
             visible_seq <= head.seq,

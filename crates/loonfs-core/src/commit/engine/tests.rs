@@ -236,9 +236,9 @@ async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
 
 /// Checks that a commit that finds a segment of its position's manifest
 /// missing, and can't load the current manifest to check whether a newer
-/// manifest replaced its position's manifest, returns the load's error
-/// instead of `namespace_corrupt`, as a retention advance and a compaction
-/// unit do.
+/// manifest replaced its position's manifest, returns the load's error as
+/// the error of the operation that read the segment, instead of
+/// `namespace_corrupt`.
 #[tokio::test]
 async fn a_commit_that_cannot_check_its_manifest_returns_the_load_error() {
     use loonfs_test_support::stores::{FailStore, InjectedError};
@@ -296,7 +296,12 @@ async fn a_commit_that_cannot_check_its_manifest_returns_the_load_error() {
         .results
         .remove(0)
         .expect_err("the commit finds a segment missing");
-    assert_matches!(error, CoreError::Store { .. }, "{error:?}");
+    assert_matches!(
+        error,
+        CoreError::FailedOperation { operation_index: 0, error }
+            if matches!(*error, CoreError::Store { .. }),
+        "{error:?}"
+    );
 }
 
 /// Checks that a writer session that loads a stored manifest with a writer

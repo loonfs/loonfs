@@ -1,6 +1,5 @@
 //! Folds the visible WAL tail and publishes the next manifest number.
 
-use super::load::metadata_basis_from_manifest;
 use super::publish::ManifestChange;
 use super::published::{same_head, PublicationReport};
 use crate::commit::publish_view::WriterPosition;
@@ -16,6 +15,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::runs::flatten_manifest_segments;
 use crate::segment::scan::VerifiedMetadataSegments;
+use crate::segment::KeptBy;
 use crate::storage::tail_content::{
     assemble_tail_content, write_tail_content, CombinePolicy, ContentWrites,
 };
@@ -159,7 +159,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// folds a new writer's log after the writer's claim. When an attempt
     /// finds a segment of its manifest missing and a newer manifest replaced
     /// that manifest, the next attempt rebuilds against the newest manifest
-    /// the same way (see [`Self::ensure_manifest_current`]). A missing
+    /// the same way (see [`SegmentKeeper::load_error`](crate::segment::SegmentKeeper::load_error)). A missing
     /// segment of the current manifest returns `namespace_corrupt`. A
     /// namespace tombstone stops the fold.
     pub async fn fold_wal_tail(
@@ -230,12 +230,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 )
                 .await?
                 .map(|decoded| {
-                    let segments = VerifiedMetadataSegments::from_decoded(
-                        &self.store,
-                        Some(&self.segment_cache),
-                        decoded,
-                    );
-                    (held, segments)
+                    let segments = self.segments(decoded, self.keeper(KeptBy::Current));
+                    (held, segments.segments)
                 }),
             None => None,
         };
@@ -254,11 +250,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         observed: Observation,
     ) -> Result<ManifestProjection<'_, S>> {
         let anchor = self.load_live_read_anchor(observed).await?;
-        let loaded_basis = super::load::metadata_basis_from_manifest(
-            &self.store,
-            Some(&self.segment_cache),
-            anchor.held.manifest(),
-        );
+        let loaded_basis = self.current_segments(anchor.held.manifest());
         let tail_state = loaded_basis.project_tail(&anchor)?;
         Ok(ManifestProjection {
             basis: anchor.held_basis(),
@@ -435,12 +427,8 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
                 // so the projection keeps that check.
                 self.projection.basis.read_basis_mut().basis =
                     MetadataBasis::new(current.manifest());
-                self.projection.manifest_segments = metadata_basis_from_manifest(
-                    &self.namespace.store,
-                    Some(&self.namespace.segment_cache),
-                    &current,
-                )
-                .segments;
+                self.projection.manifest_segments =
+                    self.namespace.current_segments(&current).segments;
             } else {
                 self.projection = self
                     .namespace
@@ -459,11 +447,11 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
         // The projection reads the rows of `current`, which can be a writer
         // position's manifest kept in memory. A newer manifest may have
         // replaced that manifest, and a collection may then have deleted its
-        // segments. So when a read finds a segment missing and a newer
-        // manifest replaced `current`, the attempt returns `Again`, and the
-        // next attempt builds on the newest manifest through the rebuild
-        // above, as an attempt after a lost put does. A missing segment of
-        // the current manifest stays `namespace_corrupt`.
+        // segments. A read that finds a segment missing then returns
+        // `ManifestReplaced` (see `SegmentKeeper::load_error`), the attempt
+        // returns `Again`, and the next attempt builds on the newest manifest
+        // through the rebuild above, as an attempt after a lost put does. A
+        // missing segment of the current manifest stays `namespace_corrupt`.
         let built = async {
             let layouts = match self.layouts.take() {
                 Some(layouts) => layouts,
@@ -490,17 +478,7 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
                     FoldWalOutcome::Published,
                 ))
             }
-            Err(error) if error.is_missing_segment() => {
-                match self
-                    .namespace
-                    .ensure_manifest_current(payload.manifest_no)
-                    .await
-                {
-                    Ok(()) => Err(error),
-                    Err(CoreError::ManifestReplaced { .. }) => Ok(ManifestChange::Again),
-                    Err(check_error) => Err(check_error),
-                }
-            }
+            Err(CoreError::ManifestReplaced { .. }) => Ok(ManifestChange::Again),
             Err(error) => Err(error),
         }
     }

@@ -3,7 +3,7 @@
 use crate::error::Result;
 use crate::limits::{MAX_UNFOLDED_WAL_BYTES, MAX_UNFOLDED_WAL_OBJECTS};
 use crate::manifest::move_read_basis;
-use crate::manifest::{metadata_basis_from_manifest, LoadedMetadataBasis};
+use crate::manifest::LoadedMetadataBasis;
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::ReadBasis;
 use crate::namespace::control::LoadedManifest;
@@ -12,7 +12,7 @@ use crate::namespace::read_anchor::WriterAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
-use crate::segment::VerifiedMetadataSegments;
+use crate::segment::{KeptBy, VerifiedMetadataSegments};
 use crate::storage::tail_content::ContentWrites;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
@@ -267,7 +267,7 @@ pub enum PositionCheck {
 }
 
 enum ViewSource<'a, S: ObjectStore + ?Sized> {
-    Cached(Box<WriterPosition>, VerifiedMetadataSegments<'a, S>),
+    Cached(Box<WriterPosition>, Box<VerifiedMetadataSegments<'a, S>>),
     Cold(Box<WriterAnchor>),
 }
 
@@ -295,12 +295,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 )
                 .await?
                 .map(|decoded| {
-                    let segments = VerifiedMetadataSegments::from_decoded(
-                        &self.store,
-                        Some(&self.segment_cache),
-                        decoded,
-                    );
-                    ViewSource::Cached(Box::new(cached), segments)
+                    let segments = self.segments(decoded, self.keeper(KeptBy::Current));
+                    ViewSource::Cached(Box::new(cached), Box::new(segments.segments))
                 }),
             None => None,
         };
@@ -314,13 +310,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         };
         let tail_discovered = matches!(source, ViewSource::Cold(_));
         let (position, manifest_segments) = match source {
-            ViewSource::Cached(cached, segments) => (*cached, segments),
+            ViewSource::Cached(cached, segments) => (*cached, *segments),
             ViewSource::Cold(anchor) => {
-                let loaded_basis = metadata_basis_from_manifest(
-                    &self.store,
-                    Some(&self.segment_cache),
-                    anchor.current_manifest(),
-                );
+                let loaded_basis = self.current_segments(anchor.current_manifest());
                 let position = load_writer_position(&anchor, &loaded_basis)?;
                 (position, loaded_basis.segments)
             }

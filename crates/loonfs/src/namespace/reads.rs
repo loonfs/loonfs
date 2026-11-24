@@ -8,7 +8,6 @@ use crate::pagers::{
 };
 use crate::pinned_read::PinnedRead;
 use crate::read_view::{validate_view_cursor, ReadSource, ReadView, SnapshotBoundCursor};
-use crate::runtime_core::classify_read_result;
 use crate::trace::{self, operation_span};
 use crate::{
     CommitSeq, Consistency, ContentRef, CoreError, DiffOptions, DownloadOptions, Error, FileBytes,
@@ -117,10 +116,7 @@ impl<M: crate::Mode> Namespace<M> {
                     .core
                     .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
                     .await?;
-                let context = pinned.context.clone();
-                let source = ReadSource::Snapshot(snapshot_id.clone());
-                let result = read(pinned, source.clone()).await;
-                classify_read_result(&self.core, &context, &source, result).await
+                read(pinned, ReadSource::Snapshot(snapshot_id.clone())).await
             }
         }
     }

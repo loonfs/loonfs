@@ -230,19 +230,11 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .await
         .expect("bootstrap");
 
-    let genesis = super::super::load::load_basis_metadata_segments(
-        &store,
-        None,
-        &crate::namespace::basis::MetadataBasis::new(
-            crate::test_support::namespace_store(&store, &namespace_id)
-                .load_current_manifest()
-                .await
-                .expect("manifest")
-                .manifest(),
-        ),
-    )
-    .await
-    .expect("load genesis from manifest one");
+    let manifest_one = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("manifest");
+    let genesis = super::super::load::metadata_basis_from_manifest(&store, None, &manifest_one);
     let head = crate::test_support::namespace_store(&store, &namespace_id)
         .load_read_state()
         .await

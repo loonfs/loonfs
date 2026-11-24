@@ -4,9 +4,7 @@
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::compaction::CompactionUnitOutcome;
-use crate::error::MetadataProjectionLoadError;
 use crate::manifest::tests::{dropped_segments, segment_keys};
-use crate::manifest::ManifestLoadError;
 use crate::namespace::control::LoadedManifest;
 use loonfs_types::MetadataFamilyGroup;
 
@@ -101,7 +99,7 @@ async fn exists<S: ObjectStore>(store: &S, key: &str) -> bool {
 /// replaced manifest and every segment that only it lists, once both are
 /// older than their grace windows, and keeps the current manifest and its
 /// segments, so a lazy read through a view on the replaced manifest finds a
-/// segment missing.
+/// segment missing and returns `manifest_replaced`.
 #[tokio::test]
 async fn a_replaced_manifest_and_its_own_segments_go_at_the_first_pass_once_old_enough() {
     let directory = tempdir().expect("directory");
@@ -152,12 +150,7 @@ async fn a_replaced_manifest_and_its_own_segments_go_at_the_first_pass_once_old_
         .read_file_bytes("/docs/one", None, &ReadAccess::live(Authorizer::Service))
         .await
         .expect_err("the replaced view's bindings are gone");
-    assert_matches!(
-        error,
-        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
-            ManifestLoadError::MissingSegment { .. }
-        ))
-    );
+    assert_matches!(error, CoreError::ManifestReplaced { .. }, "{error:?}");
 }
 
 /// Checks that a collection keeps a replaced manifest while it is younger

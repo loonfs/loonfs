@@ -30,6 +30,7 @@ pub(crate) mod build;
 pub(crate) mod cache;
 pub(crate) mod data_block_load;
 pub(crate) mod index_block_load;
+pub(crate) mod keeper;
 pub(crate) mod row;
 pub(crate) mod runs;
 pub(crate) mod scan;
@@ -47,4 +48,5 @@ pub use self::segment_block_cache::{
     LoadedSegmentBlock, MemorySegmentBlocks, SegmentBlockCache, SegmentBlockLoad,
 };
 
+pub(crate) use self::keeper::{KeptBy, SegmentKeeper};
 pub(crate) use self::scan::{BlocksPerRefill, PageBounds, VerifiedMetadataSegments};

@@ -29,8 +29,10 @@ pub use self::published::PublicationReport;
 pub use self::retention::{FloorObjectReport, RetentionPlan, RetentionTarget};
 pub use self::statistics::NamespaceStatistics;
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use self::load::metadata_basis_from_manifest;
 pub(crate) use self::load::{
-    ensure_manifest_reference_matches, head_from_manifest, load_basis_metadata_segments,
-    load_namespace_manifest_envelope, load_referenced_manifest, manifest_base_state,
-    metadata_basis_from_manifest, project_manifest_tail, DecodedManifest, LoadedMetadataBasis,
+    ensure_manifest_reference_matches, head_from_manifest, load_namespace_manifest_envelope,
+    load_referenced_manifest, manifest_base_state, project_manifest_tail, DecodedManifest,
+    LoadedMetadataBasis,
 };

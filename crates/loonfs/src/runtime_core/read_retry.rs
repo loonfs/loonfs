@@ -1,86 +1,14 @@
-//! Read failure classification and one refresh of an ordinary read.
+//! Reads that run again after a newer manifest replaced the manifest that
+//! they read above.
 
 use super::{HeadConfirmation, RuntimeCore};
 use crate::pinned_read::PinnedRead;
-use crate::read_view::ReadSource;
 use crate::trace::phase_span;
 use crate::{CommitSeq, Consistency, CoreError, Error, NamespaceId, Result};
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::Phase;
-use loonfs_core::{ManifestLoadError, MetadataProjectionLoadError, RuntimeReadContext};
 use loonfs_types::ManifestNo;
 use tracing::Instrument;
-
-/// A read that finds a segment missing returns what a new read of `source`
-/// would. A snapshot that still admits a read keeps the segment, so the
-/// original error stands as corruption.
-///
-/// A read at the head that finds its manifest missing does the same when
-/// the manifest is at or below the manifest boundary. A missing manifest
-/// above the boundary is a corrupt store, and the original error stands.
-pub(crate) async fn classify_read_result<T>(
-    core: &RuntimeCore,
-    context: &RuntimeReadContext,
-    source: &ReadSource,
-    result: Result<T>,
-) -> Result<T> {
-    let missing_manifest = match &result {
-        Err(Error::Core(CoreError::MetadataProjection(
-            MetadataProjectionLoadError::ManifestLoad(error),
-        ))) => match (error, source) {
-            (ManifestLoadError::MissingSegment { .. }, _) => false,
-            (ManifestLoadError::MissingManifest { .. }, ReadSource::Head) => true,
-            _ => return result,
-        },
-        _ => return result,
-    };
-    if missing_manifest
-        && core
-            .namespace_store(&context.read_basis().head().namespace_id)
-            .above_boundary(
-                context.read_basis().basis().manifest_no(),
-                context.boundary().clone(),
-            )
-            .await?
-            .0
-    {
-        return result;
-    }
-    ensure_source_current(core, context, source).await?;
-    result
-}
-
-/// Returns what a new read of `source` would return before it reads: for the
-/// head, `ManifestReplaced` when a newer manifest replaced the manifest that
-/// `context` reads above, and for a snapshot, the snapshot's error when the
-/// snapshot no longer admits a read.
-pub(crate) async fn ensure_source_current(
-    core: &RuntimeCore,
-    context: &RuntimeReadContext,
-    source: &ReadSource,
-) -> Result<()> {
-    let namespace = core.namespace_store(&context.read_basis().head().namespace_id);
-    match source {
-        ReadSource::Head => {
-            let replaced_manifest_no = context.read_basis().basis().manifest_no();
-            let current = namespace.load_current_manifest().await?;
-            let current_manifest_no = current.payload().manifest_no;
-            if current_manifest_no > replaced_manifest_no {
-                return Err(CoreError::ManifestReplaced {
-                    replaced_manifest_no,
-                    current_manifest_no,
-                }
-                .into());
-            }
-        }
-        ReadSource::Snapshot(snapshot_id) => {
-            namespace
-                .load_snapshot_read_basis(context.read_basis().head(), snapshot_id)
-                .await?;
-        }
-    }
-    Ok(())
-}
 
 /// Returns the error of a read that found its manifest replaced on every
 /// run: `store_contention`, because the `stale_head` code is a write's
@@ -170,8 +98,7 @@ impl RuntimeCore {
                             .await?
                     }
                 };
-                let context = pinned.context.clone();
-                classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await
+                read(pinned).await
             }
         }))
         .await

@@ -448,28 +448,6 @@ pub fn classify_store_failure(kind: ObjectStoreErrorKind) -> ErrorCode {
 }
 
 impl CoreError {
-    /// Returns whether this error reports a metadata segment that a read of
-    /// a manifest's rows found missing, in a batch itself or in one of its
-    /// operations.
-    ///
-    /// A collection can delete the segments of a manifest that a newer
-    /// manifest replaced, so a caller that read from a manifest it kept in
-    /// memory asks whether that manifest is still current (see
-    /// [`NamespaceStore::ensure_manifest_current`](crate::NamespaceStore::ensure_manifest_current))
-    /// before it reports the store as corrupt.
-    pub fn is_missing_segment(&self) -> bool {
-        let error = match self {
-            Self::FailedOperation { error, .. } => error.as_ref(),
-            error => error,
-        };
-        matches!(
-            error,
-            Self::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
-                crate::manifest::ManifestLoadError::MissingSegment { .. }
-            ))
-        )
-    }
-
     /// Builds the core error for a failed object-store operation on
     /// `object_key`.
     ///
@@ -591,20 +569,33 @@ impl CoreError {
         }
     }
 
+    /// Returns this error with the index of the commit operation that failed
+    /// with it. `ManifestReplaced` is returned as it is, because it reports
+    /// the commit's basis and not the operation, and the commit is published
+    /// again on the current manifest.
     pub(crate) fn at_operation(self, operation_index: usize) -> Self {
         let Ok(operation_index) = u32::try_from(operation_index) else {
             return self;
         };
+        if matches!(self, Self::ManifestReplaced { .. }) {
+            return self;
+        }
         Self::FailedOperation {
             operation_index,
             error: Box::new(self),
         }
     }
 
+    /// Returns this error with the index of the commit precondition that
+    /// failed with it. `ManifestReplaced` is returned as it is, as
+    /// [`Self::at_operation`] returns it.
     pub(crate) fn at_precondition(self, precondition_index: usize) -> Self {
         let Ok(precondition_index) = u32::try_from(precondition_index) else {
             return self;
         };
+        if matches!(self, Self::ManifestReplaced { .. }) {
+            return self;
+        }
         Self::FailedPrecondition {
             precondition_index,
             error: Box::new(self),

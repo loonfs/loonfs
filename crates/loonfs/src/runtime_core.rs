@@ -33,7 +33,6 @@ mod read_retry;
 
 pub(crate) use read_heads::HeadConfirmation;
 pub(crate) use read_position::{HeadPositions, ReadPositionSlot};
-pub(crate) use read_retry::{classify_read_result, ensure_source_current};
 
 /// Proof that the runtime's merge allowance isn't zero, so merges are on,
 /// with the allowance in bytes.

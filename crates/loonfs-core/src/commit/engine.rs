@@ -6,7 +6,6 @@ use super::batch::{PublishBatchReport, PublishViewEffect};
 use super::publish_view::WriterPosition;
 use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
-use crate::manifest::metadata_basis_from_manifest;
 use crate::manifest::FloorObjectReport;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
@@ -394,14 +393,11 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         target: CommitSeq,
         clock: &OperationClock,
     ) -> Result<FloorObjectReport> {
-        metadata_basis_from_manifest(
-            &self.namespace.store,
-            Some(&self.namespace.segment_cache),
-            planned,
-        )
-        .segments
-        .verify_segments_exist()
-        .await?;
+        self.namespace
+            .current_segments(planned)
+            .segments
+            .verify_segments_exist()
+            .await?;
         let acquired = matches!(
             *self.position.lock_session(),
             WriterSessionStatus::Acquired(_)
@@ -619,7 +615,7 @@ impl PositionState {
         )
         .await;
         let position = publish_view.into_position();
-        let published = classify_replaced_basis(namespace, &position, published).await;
+        let published = drop_replaced_basis(published);
         let update = self.update_publish_tail_projection(
             &namespace.namespace_id,
             position,
@@ -764,43 +760,14 @@ struct TailProjectionUpdate {
     wal_tail_bytes: usize,
 }
 
-/// Returns `report` with each result that found a metadata segment missing
-/// replaced by the error of [`NamespaceStore::ensure_manifest_current`] for
-/// the batch's basis, when that check fails, and otherwise unchanged.
-///
-/// When a newer manifest replaced the basis, those results become
-/// `ManifestReplaced`, which the caller publishes again, and the batch's
-/// effect drops the position, so the next unit plans on the current
-/// manifest. When the current manifest can't be loaded, they become the
-/// load's error, because the batch can't tell whether its basis was
-/// replaced. When the basis is still the current manifest, they stay
-/// `namespace_corrupt`.
-async fn classify_replaced_basis<S: ObjectStore>(
-    namespace: &NamespaceStore<S>,
-    position: &WriterPosition,
-    mut report: PublishBatchReport,
-) -> PublishBatchReport {
-    let missing = |result: &Result<Commit>| {
-        result
-            .as_ref()
-            .err()
-            .is_some_and(CoreError::is_missing_segment)
-    };
-    if !report.results.iter().any(missing) {
-        return report;
-    }
-    let Err(failed) = namespace
-        .ensure_manifest_current(position.basis.manifest_no())
-        .await
-    else {
-        return report;
-    };
-    let replaced = matches!(failed, CoreError::ManifestReplaced { .. });
-    for result in &mut report.results {
-        if missing(result) {
-            *result = Err(failed.clone());
-        }
-    }
+/// Returns `report` with the batch's effect set to drop the position when a
+/// result is `ManifestReplaced`, so the next unit plans on the current
+/// manifest, where the caller publishes that result's candidate again.
+fn drop_replaced_basis(mut report: PublishBatchReport) -> PublishBatchReport {
+    let replaced = report
+        .results
+        .iter()
+        .any(|result| matches!(result, Err(CoreError::ManifestReplaced { .. })));
     // A put with an unknown outcome in the same batch still leaves the
     // session owing a fence.
     if replaced && !matches!(report.effect, PublishViewEffect::OutcomeUnknown) {

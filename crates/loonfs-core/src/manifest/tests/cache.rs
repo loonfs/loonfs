@@ -1015,6 +1015,7 @@ async fn direntry_segment_after_snapshot() -> (
         .expect("a direntry segment")
         .clone();
     descriptor.filter_inline = None;
+    drop(segments);
     (temp_dir, store, descriptor)
 }
 
@@ -1088,6 +1089,7 @@ async fn multi_block_direntry_segment() -> (
         .expect("a direntry segment")
         .clone();
     descriptor.filter_inline = None;
+    drop(segments);
 
     let rows = segment_rows(&store, &descriptor).await;
     let mut builder = SegmentBlocksBuilder::new(NonZeroUsize::MIN);

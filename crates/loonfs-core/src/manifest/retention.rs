@@ -1,7 +1,6 @@
 //! Retention floor advancement through a floor object in the WAL, and the
 //! namespace's retention window through a verified successor manifest.
 
-use super::load::metadata_basis_from_manifest;
 use super::publish::ManifestChange;
 use super::published::PublicationReport;
 use crate::engine::{NamespaceEngine, Writable};
@@ -11,7 +10,6 @@ use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
-use crate::segment::cache::MetadataSegmentCache;
 use crate::time::Observation;
 use crate::wal::{prepare_floor_object, publish_wal_object, wal_no_is_unfolded, WalPublishError};
 use loonfs_objectstore::ObjectStore;
@@ -122,14 +120,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         if through <= retention_floor_seq {
             return Ok(RetentionPlan::Stays(retention_floor_seq));
         }
-        let floor = last_commit_at_or_before(
-            &self.store,
-            &self.segment_cache,
-            current,
-            through,
-            cutoff_at_ms,
-        )
-        .await?;
+        let floor = last_commit_at_or_before(self, current, through, cutoff_at_ms).await?;
         Ok(if floor <= retention_floor_seq {
             RetentionPlan::Stays(retention_floor_seq)
         } else {
@@ -160,7 +151,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         planned: &LoadedManifest,
         target: CommitSeq,
     ) -> Result<FloorObjectReport> {
-        metadata_basis_from_manifest(&self.store, Some(&self.segment_cache), planned)
+        self.current_segments(planned)
             .segments
             .verify_segments_exist()
             .await?;
@@ -276,14 +267,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 /// later commit is older, because commit times come from writers' clocks and
 /// need not increase with sequence. If the first commit above the floor is
 /// later than the cutoff, the walk returns the floor.
-async fn last_commit_at_or_before<S: ObjectStore + ?Sized>(
-    store: &S,
-    segment_cache: &MetadataSegmentCache,
+async fn last_commit_at_or_before<S: ObjectStore>(
+    namespace: &NamespaceStore<S>,
     current: &LoadedManifest,
     through: CommitSeq,
     cutoff_at_ms: u64,
 ) -> Result<CommitSeq> {
-    let basis = metadata_basis_from_manifest(store, Some(segment_cache), current);
+    let basis = namespace.current_segments(current);
     let mut last = current.retention_floor_seq();
     // One commit per scan: a commit row can be large, and the memo keeps the
     // block for the next call within the caller's read budget.

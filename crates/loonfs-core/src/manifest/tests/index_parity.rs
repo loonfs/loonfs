@@ -556,8 +556,9 @@ async fn manifest_load_rejects_a_child_index_with_more_rows_than_the_slot_index(
     )
     .await;
 
-    match load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number).await
-    {
+    let loaded =
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number).await;
+    match loaded {
         Err(ManifestLoadError::RunManifestMismatch { .. }) => {}
         Err(other) => panic!("expected run manifest mismatch, got {other:?}"),
         Ok(_) => panic!("tampered descriptor counts must not load"),

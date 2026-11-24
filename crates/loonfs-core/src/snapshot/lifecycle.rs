@@ -51,9 +51,24 @@ impl<S: ObjectStore> NamespaceStore<S> {
         live_head: &NamespaceReadState,
         record: SnapshotPayload,
     ) -> Result<SnapshotReadBasis> {
+        let snapshot_id = record.snapshot_id.clone();
         load_snapshot_read_basis_from_record(&self.store, &self.segment_cache, live_head, record)
             .await
-            .map(SnapshotReadBasis)
+            .map(|basis| SnapshotReadBasis { basis, snapshot_id })
+    }
+
+    /// Returns `Ok` when the snapshot `snapshot_id`, a user snapshot or one
+    /// of this namespace's fork snapshots, still admits a read, and
+    /// `snapshot_not_found` when its record is gone, deleted, or expired at
+    /// or before the wall-clock time of the call.
+    pub(crate) async fn ensure_snapshot_readable(&self, snapshot_id: &SnapshotId) -> Result<()> {
+        let now_ms = self.wall_clock.now_ms();
+        let Some(loaded) = self.load_snapshot_record(snapshot_id).await? else {
+            return Err(CoreError::SnapshotNotFound {
+                snapshot_id: snapshot_id.clone(),
+            });
+        };
+        ensure_live(loaded, now_ms).map(drop)
     }
 
     /// Deletes the user snapshot `record`, whose creation failed with
