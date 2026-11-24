@@ -39,7 +39,7 @@ impl Sweep<'_> {
         }
         Decision::aged(
             entry,
-            family.min_age_ms(),
+            GC_GRACE_WINDOW_MS,
             self.clock.request_at_ms(),
             family.deleted_counter(),
         )
@@ -58,11 +58,11 @@ impl Sweep<'_> {
 /// no roots. The caller leaves out the boundary object, which is not a
 /// candidate.
 ///
-/// A fence or a floor object is kept. Any other key of a candidate family is
-/// deleted by the family's age. A snapshot
-/// record is deleted once its listed modification time is at least the grace
-/// window old, and the report counts it as a user snapshot, because the
-/// collection doesn't read its owner. Any other key is kept.
+/// A fence or a floor object is kept. Any other key of a candidate family,
+/// and any snapshot record, is deleted once its age (from its listed
+/// modification time) is at least the grace window. The report counts a
+/// snapshot record as a user snapshot, because the collection doesn't read its owner. Any other
+/// key is kept.
 pub(super) fn retired_candidate(
     entry: ListedObject,
     now_ms: u64,
@@ -76,7 +76,7 @@ pub(super) fn retired_candidate(
         if family.is_fence_or_floor_object(&entry) {
             return Decision::retain(RetainedReason::FencesAndFloorObjects, None, now_ms);
         }
-        return Decision::aged(entry, family.min_age_ms(), now_ms, family.deleted_counter());
+        return Decision::aged(entry, GC_GRACE_WINDOW_MS, now_ms, family.deleted_counter());
     }
     if parse_object_key(&entry.key).map(|parsed| parsed.family())
         == Some(DurableObjectFamily::Snapshot)
