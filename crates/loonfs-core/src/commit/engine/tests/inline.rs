@@ -302,7 +302,7 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
         .expect("get WAL")
         .expect("WAL exists");
     let wal_object = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL");
-    let record = &wal_object.payload().records[0];
+    let record = &wal_object.payload().records()[0];
     assert_eq!(record.inline_content.len(), values.len());
     for (entry, value) in record.inline_content.iter().zip(values.iter().rev()) {
         assert_eq!(entry.content_id, value.content_ref().content_id);

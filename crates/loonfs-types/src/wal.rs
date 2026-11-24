@@ -11,6 +11,7 @@ use crate::{
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -512,11 +513,10 @@ pub struct WalCommitPayload {
     pub inline_content: Vec<WalInlineContent>,
 }
 
-/// Contains the namespace identity, numbered range, and commits stored in one WAL object.
+/// Contains the namespace identity, numbered range, and body of one WAL object.
 ///
 /// See [WAL object rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalObjectPayload {
     /// Namespace this WAL object belongs to; recovery rejects cross-namespace content.
     pub namespace_id: NamespaceId,
@@ -526,13 +526,135 @@ pub struct WalObjectPayload {
     pub writer_epoch: WriterEpoch,
     /// Visible sequence after this WAL object.
     pub head_seq: CommitSeq,
-    /// Logical commits in contiguous ascending sequence order.
-    pub records: Vec<WalCommitPayload>,
-    /// The retention floor that a floor object records, omitted from every
-    /// other WAL object. A floor object has no records, and its floor is at
-    /// most its `head_seq`.
+    /// The kind of WAL object and its contents.
+    pub body: WalObjectBody,
+}
+
+impl WalObjectPayload {
+    /// Returns the WAL object's commits. A fence and a floor object have none.
+    pub fn records(&self) -> &[WalCommitPayload] {
+        match &self.body {
+            WalObjectBody::Commits(commits) => commits,
+            WalObjectBody::Fence | WalObjectBody::Floor { .. } => &[],
+        }
+    }
+}
+
+/// Lists the three kinds of WAL object and what each one contains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WalObjectBody {
+    /// A data WAL object, which contains one or more commits.
+    Commits(WalCommits),
+    /// A fence, which contains no commits and leaves the head unchanged.
+    Fence,
+    /// A floor object, which records a retention floor at or below its
+    /// `head_seq` and leaves the head unchanged.
+    Floor {
+        /// The retention floor that the floor object records.
+        retention_floor_seq: CommitSeq,
+    },
+}
+
+/// The commits of a data WAL object: at least one, in contiguous ascending
+/// sequence order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalCommits(Vec<WalCommitPayload>);
+
+impl WalCommits {
+    /// Returns `records` as the commits of a data WAL object, or `None` when
+    /// `records` is empty.
+    pub fn new(records: Vec<WalCommitPayload>) -> Option<Self> {
+        (!records.is_empty()).then_some(Self(records))
+    }
+
+    /// Returns the commit with the lowest sequence.
+    pub fn oldest(&self) -> &WalCommitPayload {
+        self.0
+            .first()
+            .expect("a data WAL object should contain at least one commit")
+    }
+
+    /// Returns the commit with the highest sequence.
+    pub fn newest(&self) -> &WalCommitPayload {
+        self.0
+            .last()
+            .expect("a data WAL object should contain at least one commit")
+    }
+}
+
+impl std::ops::Deref for WalCommits {
+    type Target = [WalCommitPayload];
+
+    fn deref(&self) -> &[WalCommitPayload] {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for WalCommits {
+    fn deref_mut(&mut self) -> &mut [WalCommitPayload] {
+        &mut self.0
+    }
+}
+
+/// Lists the CBOR fields of a stored WAL object's payload. `records` is
+/// empty in a fence and a floor object, and `retention_floor_seq` appears
+/// only in a floor object.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WalPayloadDocument<'a> {
+    namespace_id: Cow<'a, NamespaceId>,
+    wal_no: WalNo,
+    writer_epoch: WriterEpoch,
+    head_seq: CommitSeq,
+    records: Cow<'a, [WalCommitPayload]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retention_floor_seq: Option<CommitSeq>,
+    retention_floor_seq: Option<CommitSeq>,
+}
+
+impl<'a> From<&'a WalObjectPayload> for WalPayloadDocument<'a> {
+    fn from(payload: &'a WalObjectPayload) -> Self {
+        Self {
+            namespace_id: Cow::Borrowed(&payload.namespace_id),
+            wal_no: payload.wal_no,
+            writer_epoch: payload.writer_epoch,
+            head_seq: payload.head_seq,
+            records: Cow::Borrowed(payload.records()),
+            retention_floor_seq: match payload.body {
+                WalObjectBody::Floor {
+                    retention_floor_seq,
+                } => Some(retention_floor_seq),
+                WalObjectBody::Commits(_) | WalObjectBody::Fence => None,
+            },
+        }
+    }
+}
+
+impl TryFrom<WalPayloadDocument<'_>> for WalObjectPayload {
+    type Error = WalCodecError;
+
+    fn try_from(document: WalPayloadDocument<'_>) -> Result<Self, WalCodecError> {
+        let commits = WalCommits::new(document.records.into_owned());
+        let body = match (commits, document.retention_floor_seq) {
+            (Some(commits), None) => WalObjectBody::Commits(commits),
+            (None, None) => WalObjectBody::Fence,
+            (None, Some(retention_floor_seq)) => WalObjectBody::Floor {
+                retention_floor_seq,
+            },
+            (Some(_), Some(_)) => {
+                return Err(WalCodecError::InvalidWalFloorObject {
+                    wal_no: document.wal_no,
+                    reason: "a floor object has no records",
+                })
+            }
+        };
+        Ok(Self {
+            namespace_id: document.namespace_id.into_owned(),
+            wal_no: document.wal_no,
+            writer_epoch: document.writer_epoch,
+            head_seq: document.head_seq,
+            body,
+        })
+    }
 }
 
 /// A WAL object decoded through its checked durable codec.
@@ -573,7 +695,7 @@ pub(crate) fn encode_wal_payload_cbor(
 ) -> Result<Vec<u8>, WalCodecError> {
     validate_wal_payload(payload)?;
     let mut encoded = Vec::new();
-    into_writer(payload, &mut encoded)
+    into_writer(&WalPayloadDocument::from(payload), &mut encoded)
         .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
     Ok(encoded)
 }
@@ -603,7 +725,7 @@ pub fn encode_wal_object_envelope_zstd(
             .map_err(|err| EnvelopeCodecError::EnvelopeEncode(err.to_string()))?;
         let bytes = envelope::compress_document(&encoded)?;
         let padding_bytes = document.padding.as_ref().map_or(0, Vec::len);
-        if payload.records.is_empty()
+        if !matches!(payload.body, WalObjectBody::Commits(_))
             || bytes.len() > MAX_FENCE_OR_FLOOR_OBJECT_BYTES
             || padding_bytes > MAX_FENCE_OR_FLOOR_OBJECT_BYTES
         {
@@ -669,8 +791,9 @@ fn decode_wal_object_envelope_zstd_with_limit(
     let document: WalObjectDocument = from_reader(decompressed.as_slice())
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
     envelope::verify_payload_checksum(&document.payload_checksum, &document.payload)?;
-    let payload: WalObjectPayload = from_reader(document.payload.as_slice())
+    let payload_document: WalPayloadDocument = from_reader(document.payload.as_slice())
         .map_err(|err| EnvelopeCodecError::PayloadDecode(err.to_string()))?;
+    let payload = WalObjectPayload::try_from(payload_document)?;
     validate_wal_payload(&payload)?;
 
     Ok(WalObjectEnvelope {
@@ -689,7 +812,7 @@ fn validate_wal_payload(payload: &WalObjectPayload) -> Result<(), WalCodecError>
 
 fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
     let mut total_bytes = 0;
-    for record in &payload.records {
+    for record in payload.records() {
         if record.inline_content.is_empty() {
             continue;
         }
@@ -780,7 +903,7 @@ fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), WalCode
 }
 
 fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
-    for record in &payload.records {
+    for record in payload.records() {
         for delta in &record.deltas {
             let WalDelta::AppendFileRevision {
                 content_ref,
@@ -833,7 +956,7 @@ fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), WalCo
 
 /// Requires a revision summary on every file bind and on no directory bind.
 fn validate_wal_bind_revisions(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
-    for record in &payload.records {
+    for record in payload.records() {
         for delta in &record.deltas {
             let WalDelta::BindDirentry {
                 child_inode_id,
@@ -865,7 +988,7 @@ fn validate_wal_bind_revisions(payload: &WalObjectPayload) -> Result<(), WalCode
 /// sequence, and to be of a namespace other than the committing namespace
 /// and the record's other ranges.
 fn validate_wal_merges(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
-    for record in &payload.records {
+    for record in payload.records() {
         let Some(merge) = &record.merge else {
             continue;
         };
@@ -893,23 +1016,18 @@ fn validate_wal_merges(payload: &WalObjectPayload) -> Result<(), WalCodecError> 
     Ok(())
 }
 
-/// Requires a floor object to have no records and a retention floor at or
-/// below its `head_seq`.
+/// Requires a floor object's retention floor to be at or below its
+/// `head_seq`.
 fn validate_wal_floor_object(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
-    let Some(retention_floor_seq) = payload.retention_floor_seq else {
-        return Ok(());
-    };
-    let reason = if !payload.records.is_empty() {
-        "a floor object has no records"
-    } else if retention_floor_seq > payload.head_seq {
-        "`retention_floor_seq` is above `head_seq`"
-    } else {
-        return Ok(());
-    };
-    Err(WalCodecError::InvalidWalFloorObject {
-        wal_no: payload.wal_no,
-        reason,
-    })
+    match payload.body {
+        WalObjectBody::Floor {
+            retention_floor_seq,
+        } if retention_floor_seq > payload.head_seq => Err(WalCodecError::InvalidWalFloorObject {
+            wal_no: payload.wal_no,
+            reason: "`retention_floor_seq` is above `head_seq`",
+        }),
+        WalObjectBody::Commits(_) | WalObjectBody::Fence | WalObjectBody::Floor { .. } => Ok(()),
+    }
 }
 
 #[cfg(test)]

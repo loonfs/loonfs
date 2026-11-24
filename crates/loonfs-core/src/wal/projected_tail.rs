@@ -7,7 +7,9 @@ use crate::metadata::{
 };
 use bytes::Bytes;
 use loonfs_types::format::manifest::ManifestActivity;
-use loonfs_types::format::wal::{committed_activity, WalCommitPayload, WalDelta, WalInlineContent};
+use loonfs_types::format::wal::{
+    committed_activity, WalCommitPayload, WalCommits, WalDelta, WalInlineContent, WalObjectBody,
+};
 use loonfs_types::{CommitId, CommitSeq, ContentId, ContentRef, NamespaceId};
 use std::collections::{hash_map::Entry, HashMap};
 use std::mem::size_of;
@@ -123,23 +125,23 @@ impl ProjectedWalTail {
         }
     }
 
-    /// Appends one WAL object of `namespace_id`, whose size in the store is
-    /// `wal_bytes`, as a chunk. An object with no records, such as a fence,
-    /// adds no chunk and no bytes.
+    /// Appends the body of one WAL object in `namespace_id`. `wal_bytes` is
+    /// that object's stored size. A data WAL object adds a chunk, and a fence
+    /// or a floor object adds no chunk and no bytes.
     pub(crate) fn push_object(
         &mut self,
         namespace_id: &NamespaceId,
-        records: &[WalCommitPayload],
+        body: &WalObjectBody,
         wal_bytes: usize,
     ) -> Result<(), WalObjectError> {
-        if records.is_empty() {
-            return Ok(());
+        match body {
+            WalObjectBody::Commits(commits) => self.push_chunk(Arc::new(TailChunk::from_records(
+                namespace_id,
+                commits,
+                wal_bytes,
+            )?)),
+            WalObjectBody::Fence | WalObjectBody::Floor { .. } => Ok(()),
         }
-        self.push_chunk(Arc::new(TailChunk::from_records(
-            namespace_id,
-            records,
-            wal_bytes,
-        )?))
     }
 
     fn push_chunk(&mut self, chunk: Arc<TailChunk>) -> Result<(), WalObjectError> {
@@ -342,18 +344,15 @@ impl TailChunk {
     /// the store is `wal_bytes`: its pieces, then its rows.
     fn from_records(
         namespace_id: &NamespaceId,
-        records: &[WalCommitPayload],
+        records: &WalCommits,
         wal_bytes: usize,
     ) -> Result<Self, WalObjectError> {
-        let first_seq = records
-            .first()
-            .expect("push_object should skip a WAL object with no records")
-            .committed_seq;
+        let first_seq = records.oldest().committed_seq;
         let mut chunk = Self {
             wal_bytes,
             ..Self::new(first_seq, MetadataState::default())
         };
-        for record in records {
+        for record in records.iter() {
             let activity = committed_activity(record)
                 .and_then(|activity| chunk.activity.checked_add(activity))
                 .ok_or(WalObjectError::ActivityOverflow)?;
@@ -454,7 +453,9 @@ pub(crate) fn inline_content_refs(
 mod tests {
     use super::ProjectedWalTail;
     use crate::metadata::MetadataState;
-    use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalInlineContent};
+    use loonfs_types::format::wal::{
+        WalCommitDelta, WalCommitPayload, WalCommits, WalInlineContent, WalObjectBody,
+    };
     use loonfs_types::{
         CommitId, CommitSeq, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo,
     };
@@ -463,8 +464,9 @@ mod tests {
         NamespaceId::parse("demo").expect("namespace")
     }
 
-    fn commit(seq: u64, content_id: &ContentId, whole: &[u8], offset: usize) -> WalCommitPayload {
-        WalCommitPayload {
+    /// Returns a data WAL object's body with one commit.
+    fn commit(seq: u64, content_id: &ContentId, whole: &[u8], offset: usize) -> WalObjectBody {
+        let commit = WalCommitPayload {
             committed_seq: CommitSeq(seq),
             commit_id: CommitId::parse(format!("c_{seq:032x}")).expect("commit id"),
             committed_by: loonfs_test_support::test_actor(),
@@ -491,7 +493,8 @@ mod tests {
                 offset: offset as u64,
                 bytes: whole[offset..].to_vec(),
             }],
-        }
+        };
+        WalObjectBody::Commits(WalCommits::new(vec![commit]).expect("commits"))
     }
 
     #[test]
@@ -502,12 +505,12 @@ mod tests {
             .collect();
         let mut tail = ProjectedWalTail::default();
         for (seq, content_id) in (1..).zip(&ids) {
-            tail.push_object(&namespace(), &[commit(seq, content_id, b"value", 0)], 100)
+            tail.push_object(&namespace(), &commit(seq, content_id, b"value", 0), 100)
                 .expect("value");
         }
         tail.push_object(
             &namespace(),
-            &[commit(65, &ids[17], b"value appended", 5)],
+            &commit(65, &ids[17], b"value appended", 5),
             100,
         )
         .expect("append");
@@ -543,12 +546,8 @@ mod tests {
             (2, b"value appended", 5),
             (3, b"value appended twice", 14),
         ] {
-            tail.push_object(
-                &namespace(),
-                &[commit(seq, &content_id, whole, offset)],
-                100,
-            )
-            .expect("chunk");
+            tail.push_object(&namespace(), &commit(seq, &content_id, whole, offset), 100)
+                .expect("chunk");
         }
         let newest = ContentRef::blob_v1(
             content_id.clone(),

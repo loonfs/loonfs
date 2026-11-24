@@ -42,7 +42,7 @@ async fn newest_pieces(
     let bytes = store.get(&key, None).await.expect("get").expect("WAL");
     let wal = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL");
     wal.payload()
-        .records
+        .records()
         .iter()
         .flat_map(|record| record.inline_content.clone())
         .collect()
@@ -126,7 +126,7 @@ async fn same_chain_appends_keep_pending_bytes_in_the_wal_without_content_writes
             .expect("WAL key");
         let wal_bytes = store.get(&key, None).await.expect("get").expect("WAL");
         let wal = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL");
-        let record = &wal.payload().records[0];
+        let record = &wal.payload().records()[0];
         assert_eq!(
             record.inline_content,
             vec![WalInlineContent {
@@ -801,7 +801,7 @@ async fn a_fresh_chains_commit_size_does_not_grow_with_resident_base_bytes() {
             .expect("WAL key");
         let bytes = store.get(&key, None).await.expect("get WAL").expect("WAL");
         let wal = decode_wal_object_envelope_zstd(&bytes).expect("decode");
-        let record = &wal.payload().records[0];
+        let record = &wal.payload().records()[0];
         assert_eq!(record.inline_content.len(), 1);
         assert_eq!(record.inline_content[0].bytes, b"?");
         assert_eq!(

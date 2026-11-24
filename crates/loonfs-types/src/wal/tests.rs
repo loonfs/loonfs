@@ -19,12 +19,12 @@ fn activity(
 #[test]
 fn committed_activity_counts_full_revisions_and_semantic_groups() {
     let payload = inline_wal_object(&[5, 5, 0]);
-    let mut record = payload.records[0].clone();
+    let mut record = payload.records()[0].clone();
     record.inline_content.clear();
     record.deltas = payload
-        .records
-        .into_iter()
-        .flat_map(|record| record.deltas)
+        .records()
+        .iter()
+        .flat_map(|record| record.deltas.iter().cloned())
         .collect();
     // Several deltas in one group count once, and indices can have gaps.
     record.deltas[0].semantic_operation_index = 2;
@@ -42,7 +42,7 @@ fn committed_activity_counts_full_revisions_and_semantic_groups() {
 
 #[test]
 fn committed_activity_counts_appended_bytes_once() {
-    let mut record = appended_wal_object().records.remove(0);
+    let mut record = appended_wal_object().records()[0].clone();
     assert_eq!(committed_activity(&record), activity(5, 1, 1));
     let repeated = record.deltas[0].clone();
     record.deltas.push(WalCommitDelta {
@@ -111,14 +111,22 @@ fn inline_wal_object(lengths: &[usize]) -> WalObjectPayload {
         wal_no: WalNo(1),
         writer_epoch: WriterEpoch(1),
         head_seq: CommitSeq(lengths.len() as u64),
-        records,
-        retention_floor_seq: None,
+        body: WalObjectBody::Commits(WalCommits::new(records).expect("commits")),
+    }
+}
+
+/// Returns the commits of a data WAL object for a test to edit.
+fn commits_mut(payload: &mut WalObjectPayload) -> &mut WalCommits {
+    match &mut payload.body {
+        WalObjectBody::Commits(commits) => commits,
+        other => panic!("expected a data WAL object, got {other:?}"),
     }
 }
 
 fn unchecked_wal_object_bytes(payload: &WalObjectPayload) -> Vec<u8> {
     let mut payload_bytes = Vec::new();
-    into_writer(payload, &mut payload_bytes).expect("encode payload directly");
+    into_writer(&WalPayloadDocument::from(payload), &mut payload_bytes)
+        .expect("encode payload directly");
     let document = WalObjectDocument {
         kind: WalEnvelopeKind::WalObject.as_str().to_owned(),
         format_version: WAL_FORMAT_VERSION,
@@ -136,8 +144,8 @@ fn assert_inline_content_rejected(
     record_index: usize,
     expected_reason: &str,
 ) {
-    let expected_seq = payload.records[record_index].committed_seq;
-    let expected_content_id = payload.records[record_index].inline_content[0]
+    let expected_seq = payload.records()[record_index].committed_seq;
+    let expected_content_id = payload.records()[record_index].inline_content[0]
         .content_id
         .clone();
     let decoded_error = decode_wal_object_envelope_zstd(&unchecked_wal_object_bytes(&payload))
@@ -176,11 +184,11 @@ fn assert_inline_content_accepted(payload: WalObjectPayload) {
 fn inline_content_requires_a_revision_reference_in_the_same_commit() {
     let expected_reason = "no `append_file_revision` reference in the same commit";
     let mut missing = inline_wal_object(&[3, 3]);
-    missing.records[0].deltas.clear();
+    commits_mut(&mut missing)[0].deltas.clear();
     assert_inline_content_rejected(missing, 0, expected_reason);
 
     let mut wrong_id = inline_wal_object(&[3]);
-    wrong_id.records[0].inline_content[0].content_id =
+    commits_mut(&mut wrong_id)[0].inline_content[0].content_id =
         ContentId::parse("con_7yvjx9gxjm688fxq5tk1v58cgg").expect("content id");
     assert_inline_content_rejected(wrong_id, 0, expected_reason);
 }
@@ -195,7 +203,7 @@ fn a_layout_of_a_chain_with_pieces_records_the_wal_namespace_as_its_creator() {
         if let WalDelta::AppendFileRevision {
             layout: Some(layout),
             ..
-        } = &mut payload.records[0].deltas[0].delta
+        } = &mut commits_mut(payload)[0].deltas[0].delta
         {
             layout.creator_namespace_id = NamespaceId::parse(creator).expect("namespace");
         }
@@ -210,12 +218,12 @@ fn a_layout_of_a_chain_with_pieces_records_the_wal_namespace_as_its_creator() {
     );
 
     let mut copy = appended_wal_object();
-    copy.records[0].inline_content.clear();
+    commits_mut(&mut copy)[0].inline_content.clear();
     if let WalDelta::AppendFileRevision {
         content_ref,
         layout: Some(layout),
         ..
-    } = &mut copy.records[0].deltas[0].delta
+    } = &mut commits_mut(&mut copy)[0].deltas[0].delta
     {
         content_ref.size_bytes = layout.size_bytes();
     }
@@ -227,11 +235,13 @@ fn a_layout_of_a_chain_with_pieces_records_the_wal_namespace_as_its_creator() {
 fn inline_content_must_end_at_the_longest_reference() {
     let expected_reason = "entries do not end at the reference `size_bytes`";
     let mut payload = inline_wal_object(&[3]);
-    payload.records[0].inline_content[0].bytes.push(42);
+    commits_mut(&mut payload)[0].inline_content[0]
+        .bytes
+        .push(42);
     assert_inline_content_rejected(payload, 0, expected_reason);
 
     let mut payload = inline_wal_object(&[3]);
-    let mut other_reference = payload.records[0].deltas[0].clone();
+    let mut other_reference = commits_mut(&mut payload)[0].deltas[0].clone();
     other_reference.semantic_operation_index = 1;
     match &mut other_reference.delta {
         WalDelta::AppendFileRevision {
@@ -246,22 +256,23 @@ fn inline_content_must_end_at_the_longest_reference() {
         }
         other => panic!("expected file revision, got {other:?}"),
     }
-    payload.records[0].deltas.push(other_reference);
+    commits_mut(&mut payload)[0].deltas.push(other_reference);
     assert_inline_content_rejected(payload, 0, expected_reason);
 }
 
 #[test]
 fn inline_content_offsets_must_be_unique_within_each_commit() {
     let mut payload = inline_wal_object(&[0]);
-    let entry = payload.records[0].inline_content[0].clone();
-    payload.records[0].inline_content.push(entry);
+    let entry = commits_mut(&mut payload)[0].inline_content[0].clone();
+    commits_mut(&mut payload)[0].inline_content.push(entry);
     assert_inline_content_rejected(payload, 0, "duplicate `content_id` and `offset` in commit");
 }
 
 /// One commit appending `[3, 8)` to a content id, as two entries.
 fn appended_wal_object() -> WalObjectPayload {
     let mut payload = inline_wal_object(&[8]);
-    let record = &mut payload.records[0];
+    let namespace_id = payload.namespace_id.clone();
+    let record = &mut commits_mut(&mut payload)[0];
     let bytes = std::mem::take(&mut record.inline_content[0].bytes);
     let entry = record.inline_content[0].clone();
     if let WalDelta::AppendFileRevision {
@@ -271,7 +282,7 @@ fn appended_wal_object() -> WalObjectPayload {
     } = &mut record.deltas[0].delta
     {
         *layout = Some(crate::ContentLayout {
-            creator_namespace_id: payload.namespace_id.clone(),
+            creator_namespace_id: namespace_id,
             extents: vec![crate::ContentExtent {
                 content_id: content_ref.content_id.clone(),
                 object: crate::ExtentObject::Whole,
@@ -300,8 +311,8 @@ fn appended_wal_object() -> WalObjectPayload {
 fn inline_entries_extend_contiguously() {
     assert_inline_content_accepted(appended_wal_object());
     let mut gap = appended_wal_object();
-    gap.records[0].inline_content[1].offset = 6;
-    gap.records[0].inline_content[1].bytes.pop();
+    commits_mut(&mut gap)[0].inline_content[1].offset = 6;
+    commits_mut(&mut gap)[0].inline_content[1].bytes.pop();
     assert_inline_content_rejected(gap, 0, "entries are not contiguous");
 }
 
@@ -335,7 +346,7 @@ fn inline_content_accepts_the_wal_object_limit_and_rejects_one_byte_more() {
 #[test]
 fn inline_content_is_not_hashed_against_the_reference_checksum() {
     let mut payload = inline_wal_object(&[3]);
-    payload.records[0].inline_content[0].bytes[0] = 43;
+    commits_mut(&mut payload)[0].inline_content[0].bytes[0] = 43;
     assert_inline_content_accepted(payload);
 }
 
@@ -346,8 +357,9 @@ fn decoder_accepts_the_limit_and_rejects_the_next_byte_before_decoding() {
         wal_no: WalNo(crate::MAX_PUBLIC_INTEGER),
         writer_epoch: WriterEpoch(crate::MAX_PUBLIC_INTEGER),
         head_seq: CommitSeq(crate::MAX_PUBLIC_INTEGER),
-        records: Vec::new(),
-        retention_floor_seq: Some(CommitSeq(crate::MAX_PUBLIC_INTEGER)),
+        body: WalObjectBody::Floor {
+            retention_floor_seq: CommitSeq(crate::MAX_PUBLIC_INTEGER),
+        },
     })
     .expect("encode");
     let document = zstd::stream::decode_all(encoded.as_bytes()).expect("decompress");
@@ -394,18 +406,20 @@ fn revision_layouts_equal_the_reference_size_or_first_piece_offset() {
     ] {
         let mut payload = inline_wal_object(&[3]);
         if let Some(offset) = piece_offset {
-            let piece = &mut payload.records[0].inline_content[0];
+            let piece = &mut commits_mut(&mut payload)[0].inline_content[0];
             piece.offset = offset;
             piece.bytes.drain(..crate::usize_from_u64(offset));
         } else {
-            payload.records[0].inline_content.clear();
+            commits_mut(&mut payload)[0].inline_content.clear();
         }
-        let WalDelta::AppendFileRevision { layout, .. } = &mut payload.records[0].deltas[0].delta
+        let namespace_id = payload.namespace_id.clone();
+        let WalDelta::AppendFileRevision { layout, .. } =
+            &mut commits_mut(&mut payload)[0].deltas[0].delta
         else {
             panic!("revision");
         };
         *layout = layout_size.map(|length| crate::ContentLayout {
-            creator_namespace_id: payload.namespace_id.clone(),
+            creator_namespace_id: namespace_id,
             extents: vec![crate::ContentExtent {
                 content_id: ContentId::parse("con_7yvjx9gxjm688fxq5tk1v58cgg").expect("content"),
                 object: crate::ExtentObject::Whole,
@@ -490,7 +504,7 @@ fn a_merge_record_covers_at_least_one_commit_of_another_namespace() {
         ),
     ] {
         let mut payload = inline_wal_object(&[0]);
-        payload.records[0].merge = Some(record.clone());
+        commits_mut(&mut payload)[0].merge = Some(record.clone());
         let decoded = decode_wal_object_envelope_zstd(&unchecked_wal_object_bytes(&payload));
         let encoded = encode_wal_object_envelope_zstd(payload);
         match rejected {
@@ -555,13 +569,13 @@ fn a_merge_record_round_trips_its_conflict_report() {
     };
     let payload = |merge: &MergeRecord| {
         let mut payload = inline_wal_object(&[0]);
-        payload.records[0].merge = Some(merge.clone());
+        commits_mut(&mut payload)[0].merge = Some(merge.clone());
         payload
     };
     let encoded =
         encode_wal_object_envelope_zstd(payload(&with)).expect("encode the replay commit");
     let decoded = decode_wal_object_envelope_zstd(&encoded.into_bytes()).expect("decode");
-    assert_eq!(decoded.payload().records[0].merge.as_ref(), Some(&with));
+    assert_eq!(decoded.payload().records()[0].merge.as_ref(), Some(&with));
     let payload_bytes = |merge| {
         encode_wal_payload_cbor(&payload(merge))
             .expect("encode the payload")
@@ -608,7 +622,7 @@ fn a_bind_includes_a_revision_summary_exactly_when_its_child_is_a_file() {
         ),
     ] {
         let mut payload = inline_wal_object(&[0]);
-        let record = &mut payload.records[0];
+        let record = &mut commits_mut(&mut payload)[0];
         record.inline_content.clear();
         record.deltas = vec![WalCommitDelta {
             semantic_operation_index: 0,
@@ -650,29 +664,31 @@ fn tiny_commit_object() -> WalObjectPayload {
         wal_no: WalNo(1),
         writer_epoch: WriterEpoch(1),
         head_seq: CommitSeq(1),
-        records: vec![WalCommitPayload {
-            committed_seq: CommitSeq(1),
-            commit_id: CommitId::parse("c").expect("commit id"),
-            committed_by: crate::ActorId::parse("a").expect("actor"),
-            semantic_commit_fingerprint: CommitFingerprint::parse(format!(
-                "v1:sha256:{}",
-                crate::sha256_hex(b"test")
-            ))
-            .expect("fingerprint"),
-            committed_at_ms: 0,
-            message: None,
-            merge: None,
-            deltas: vec![WalCommitDelta {
-                semantic_operation_index: 0,
-                delta: WalDelta::CreateInode {
-                    delta_index: 0,
-                    inode_id: InodeId(2),
-                    inode_kind: InodeKind::File,
-                },
-            }],
-            inline_content: Vec::new(),
-        }],
-        retention_floor_seq: None,
+        body: WalObjectBody::Commits(
+            WalCommits::new(vec![WalCommitPayload {
+                committed_seq: CommitSeq(1),
+                commit_id: CommitId::parse("c").expect("commit id"),
+                committed_by: crate::ActorId::parse("a").expect("actor"),
+                semantic_commit_fingerprint: CommitFingerprint::parse(format!(
+                    "v1:sha256:{}",
+                    crate::sha256_hex(b"test")
+                ))
+                .expect("fingerprint"),
+                committed_at_ms: 0,
+                message: None,
+                merge: None,
+                deltas: vec![WalCommitDelta {
+                    semantic_operation_index: 0,
+                    delta: WalDelta::CreateInode {
+                        delta_index: 0,
+                        inode_id: InodeId(2),
+                        inode_kind: InodeKind::File,
+                    },
+                }],
+                inline_content: Vec::new(),
+            }])
+            .expect("commits"),
+        ),
     }
 }
 
@@ -706,8 +722,9 @@ fn every_fence_and_floor_object_is_stored_at_or_below_the_bound() {
                 wal_no: WalNo(integer),
                 writer_epoch: WriterEpoch(integer),
                 head_seq: CommitSeq(integer),
-                records: Vec::new(),
-                retention_floor_seq: floor.map(CommitSeq),
+                body: floor.map_or(WalObjectBody::Fence, |floor| WalObjectBody::Floor {
+                    retention_floor_seq: CommitSeq(floor),
+                }),
             })
             .expect("encode");
             assert!(encoded.document_bytes() <= RECORDLESS_WAL_DOCUMENT_BYTES);
@@ -743,7 +760,7 @@ fn a_small_commit_object_is_padded_above_the_bound() {
 #[test]
 fn a_large_commit_object_has_no_padding() {
     let mut payload = inline_wal_object(&[2048]);
-    payload.records[0].inline_content[0].bytes =
+    commits_mut(&mut payload)[0].inline_content[0].bytes =
         wal_object_padding(&sha256_digest(b"incompressible"), 2048);
     let encoded = encode_wal_object_envelope_zstd(payload).expect("encode");
     assert!(encoded.as_bytes().len() > MAX_FENCE_OR_FLOOR_OBJECT_BYTES);
@@ -754,7 +771,7 @@ fn a_large_commit_object_has_no_padding() {
 fn the_decoder_ignores_the_content_of_padding() {
     let payload = tiny_commit_object();
     let mut payload_bytes = Vec::new();
-    into_writer(&payload, &mut payload_bytes).expect("encode payload");
+    into_writer(&WalPayloadDocument::from(&payload), &mut payload_bytes).expect("encode payload");
     let document = WalObjectDocument {
         kind: WalEnvelopeKind::WalObject.as_str().to_owned(),
         format_version: WAL_FORMAT_VERSION,

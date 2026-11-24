@@ -16,7 +16,9 @@ use loonfs_test_support::stores::{
     replace_object, BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate,
     MetadataMapStore, OperationSelector, RecordedOperation, RecordingStore,
 };
-use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
+use loonfs_types::format::wal::{
+    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, WalObjectBody,
+};
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
     CommitId, CommitSeq, ErrorCode, ManifestNo, NamespaceId, WalNo, WriterEpoch, WriterId,
@@ -1009,7 +1011,7 @@ async fn a_writer_resuming_after_a_collection_collides_with_the_kept_fence() {
             )
             .expect("decode fence");
             assert_eq!(fence.payload().writer_epoch, WriterEpoch(2));
-            assert!(fence.payload().records.is_empty());
+            assert_eq!(fence.payload().body, WalObjectBody::Fence);
             crate::test_support::namespace_store(blocked.inner(), &namespace_id)
                 .fold_wal_tail(None, &OperationClock::start(0, timer_b.clone()))
                 .await
@@ -1183,7 +1185,7 @@ async fn fence_epoch<S: ObjectStore>(
             .expect("fence"),
     )
     .expect("decode fence");
-    assert!(fence.payload().records.is_empty());
+    assert_eq!(fence.payload().body, WalObjectBody::Fence);
     fence.payload().writer_epoch
 }
 
@@ -1391,8 +1393,10 @@ async fn a_floor_object_at_an_emptied_number_is_dead_and_the_next_attempt_puts_a
         )
         .expect("decode floor object");
         assert_eq!(
-            floor_object.payload().retention_floor_seq,
-            Some(CommitSeq(1)),
+            floor_object.payload().body,
+            WalObjectBody::Floor {
+                retention_floor_seq: CommitSeq(1)
+            },
             "{wal_no:?}"
         );
     }

@@ -1238,7 +1238,7 @@ async fn planned_appends_match_the_model() {
     {
         let bytes = store.get(&key, None).await.expect("get").expect("WAL");
         let wal = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL");
-        commits.extend(wal.payload().records.iter().map(|record| {
+        commits.extend(wal.payload().records().iter().map(|record| {
             (
                 record.committed_by.clone(),
                 record.committed_at_ms,
@@ -1346,7 +1346,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
     {
         let bytes = store.get(&key, None).await.expect("get").expect("WAL");
         let wal = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL");
-        commits.extend(wal.payload().records.iter().map(|record| {
+        commits.extend(wal.payload().records().iter().map(|record| {
             (
                 record.committed_by.clone(),
                 record.committed_at_ms,
@@ -1663,7 +1663,7 @@ async fn wal_commits(
     {
         let bytes = store.get(&key, None).await.expect("get").expect("WAL");
         let wal = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL");
-        commits.extend(wal.payload().records.iter().cloned());
+        commits.extend(wal.payload().records().iter().cloned());
     }
     commits
 }

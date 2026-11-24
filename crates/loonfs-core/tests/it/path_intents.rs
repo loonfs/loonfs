@@ -1002,12 +1002,12 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
         .expect("read wal")
         .expect("wal exists");
     let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
-    assert_eq!(wal_object.payload().records.len(), 1);
+    assert_eq!(wal_object.payload().records().len(), 1);
     assert_eq!(
-        wal_object.payload().records[0].semantic_commit_fingerprint,
+        wal_object.payload().records()[0].semantic_commit_fingerprint,
         expected_fingerprint
     );
-    assert!(wal_object.payload().records[0]
+    assert!(wal_object.payload().records()[0]
         .deltas
         .iter()
         .any(|delta| matches!(
@@ -1091,7 +1091,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
         .expect("read wal")
         .expect("wal exists");
     let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
-    assert_eq!(wal_object.payload().records.len(), 2);
+    assert_eq!(wal_object.payload().records().len(), 2);
 
     let copied = copy_file_path(
         &store,

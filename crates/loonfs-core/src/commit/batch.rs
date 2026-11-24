@@ -16,11 +16,11 @@ use crate::path::write::PublishPlanningSession;
 use crate::phase::Phase;
 use crate::time::{Observation, OperationClock};
 use crate::wal::WalPublishError;
-use crate::wal::{prepare_commits_object, publish_wal_object};
+use crate::wal::{prepare_wal_object, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{
-    WalCommitPayload, MAX_WAL_OBJECT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
-    WAL_OBJECT_OVERHEAD_BYTES,
+    WalCommitPayload, WalCommits, WalObjectBody, MAX_WAL_OBJECT_BYTES,
+    MAX_WAL_OBJECT_INLINE_CONTENT_BYTES, WAL_OBJECT_OVERHEAD_BYTES,
 };
 use loonfs_types::Commit;
 use loonfs_types::NamespaceId;
@@ -51,7 +51,7 @@ pub(crate) enum PublishViewEffect {
     /// holds (format spec, "Failed and unknown outcomes").
     OutcomeUnknown,
     Advanced {
-        records: Vec<WalCommitPayload>,
+        body: WalObjectBody,
         head: NamespaceReadState,
         /// The published WAL object's size in the store.
         wal_bytes: usize,
@@ -210,13 +210,13 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     );
     drop(prepare_span);
 
-    if accepted_payloads.is_empty() {
+    let Some(commits) = WalCommits::new(accepted_payloads) else {
         return PublishBatchReport::unchanged(finish_batch_outcomes(&slots));
-    }
-    let wal = match prepare_commits_object(
+    };
+    let wal = match prepare_wal_object(
         view.head(),
         view.acquired_writer.writer_epoch,
-        accepted_payloads,
+        WalObjectBody::Commits(commits),
     ) {
         Ok(wal) => wal,
         Err(error) => return abort_batch(slots, &error),
@@ -239,12 +239,12 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     }
 
     let wal_bytes = wal.as_bytes().len();
-    let wal_records = wal.into_envelope().into_payload().records;
-    settle_published_slots(&mut slots, namespace_id, &wal_records);
+    let payload = wal.into_envelope().into_payload();
+    settle_published_slots(&mut slots, namespace_id, payload.records());
     PublishBatchReport {
         results: finish_batch_outcomes(&slots),
         effect: PublishViewEffect::Advanced {
-            records: wal_records,
+            body: payload.body,
             head: resulting_head,
             wal_bytes,
         },

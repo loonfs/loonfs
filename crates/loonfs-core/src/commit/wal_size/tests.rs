@@ -11,12 +11,13 @@ use crate::path::write::PublishPlanningSession;
 use crate::segment::VerifiedMetadataSegments;
 use crate::storage::inline_content::InlineContent;
 use crate::storage::tail_content::ContentWrites;
-use crate::wal::prepare_commits_object;
+use crate::wal::prepare_wal_object;
 use loonfs_test_support::ids::{attribute_key, attribute_text};
 use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
 use loonfs_types::format::wal::{
-    MergeRecord, WalDelta, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_BYTES,
-    MAX_WAL_OBJECT_INLINE_CONTENT_BYTES, WAL_OBJECT_OVERHEAD_BYTES,
+    MergeRecord, WalCommitPayload, WalCommits, WalDelta, WalObjectBody,
+    MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+    WAL_OBJECT_OVERHEAD_BYTES,
 };
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
@@ -26,6 +27,11 @@ use loonfs_types::{
     MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES, MAX_PUBLIC_INTEGER,
 };
 use std::collections::BTreeMap;
+
+/// Returns a data WAL object's body with `commit` alone.
+fn commits_body(commit: WalCommitPayload) -> WalObjectBody {
+    WalObjectBody::Commits(WalCommits::new(vec![commit]).expect("commits"))
+}
 
 fn full_attributes() -> Attributes {
     let mut entries = BTreeMap::from([(attribute_key("x"), attribute_text("a"))]);
@@ -324,10 +330,10 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             merge: None,
             ..plan.clone()
         });
-        let encoded = prepare_commits_object(
+        let encoded = prepare_wal_object(
             &head,
             head.writer_epoch,
-            vec![wal_payload_from_commit_plan(&plan)],
+            commits_body(wal_payload_from_commit_plan(&plan)),
         )
         .expect("encode");
         assert!(
@@ -337,10 +343,10 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         );
         if let Some(without_merge) = without_merge {
             let merge_bytes = encoded.document_bytes()
-                - prepare_commits_object(
+                - prepare_wal_object(
                     &head,
                     head.writer_epoch,
-                    vec![wal_payload_from_commit_plan(&without_merge)],
+                    commits_body(wal_payload_from_commit_plan(&without_merge)),
                 )
                 .expect("encode without the merge record")
                 .document_bytes();

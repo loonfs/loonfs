@@ -6,6 +6,7 @@
 
 use super::*;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::{DeleteDirectoryBehavior, ErrorCode, FilesystemEvent, InodeId, WalNo};
 
 /// The inode rows that the current manifest's segments store.
@@ -50,7 +51,7 @@ async fn wal_no_of_commit(
             .expect("decode a WAL object")
             .into_payload();
         if payload
-            .records
+            .records()
             .iter()
             .any(|record| record.committed_seq == committed_seq)
         {
@@ -264,8 +265,12 @@ async fn an_advance_orders_the_restores_queued_around_it() {
         restored_at.successor().expect("next WAL number"),
     )
     .await;
-    assert!(floor_object.records.is_empty());
-    assert_eq!(floor_object.retention_floor_seq, Some(expired_seq));
+    assert_eq!(
+        floor_object.body,
+        WalObjectBody::Floor {
+            retention_floor_seq: expired_seq
+        }
+    );
     let floor = current_manifest(store.as_ref(), &namespace_id).await;
     assert_eq!(floor.retention_floor_seq, expired_seq);
     assert!(
@@ -347,7 +352,12 @@ async fn a_restore_at_the_floor_objects_number_is_folded_before_the_floor() {
         restored_at.successor().expect("next WAL number"),
     )
     .await;
-    assert_eq!(floor_object.retention_floor_seq, Some(deletion_seq));
+    assert_eq!(
+        floor_object.body,
+        WalObjectBody::Floor {
+            retention_floor_seq: deletion_seq
+        }
+    );
     let floor = current_manifest(store.as_ref(), &namespace_id).await;
     assert_eq!(floor.retention_floor_seq, deletion_seq);
     assert_eq!(

@@ -463,7 +463,7 @@ async fn an_unknown_outcome_before_the_write_stop_keeps_outcome_unknown() {
                         operation.kind(),
                         OperationKind::Put { bytes, mode: PutMode::CreateIfAbsent }
                             if decode_wal_object_envelope_zstd(bytes)
-                                .is_ok_and(|wal| wal.payload().records.is_empty())
+                                .is_ok_and(|wal| !matches!(wal.payload().body, loonfs_types::format::wal::WalObjectBody::Commits(_)))
                     )
             },
             InjectedError::Transport("lost fence acknowledgement".to_owned()),

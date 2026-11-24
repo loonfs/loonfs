@@ -42,9 +42,13 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 fn is_publication(bytes: &[u8]) -> bool {
-    decode_wal_object_envelope_zstd(bytes).is_ok_and(|wal| !wal.payload().records.is_empty())
-        || loonfs_types::format::manifest::decode_namespace_manifest_json(bytes)
-            .is_ok_and(|manifest| manifest.payload().status.is_deleted())
+    decode_wal_object_envelope_zstd(bytes).is_ok_and(|wal| {
+        matches!(
+            wal.payload().body,
+            loonfs_types::format::wal::WalObjectBody::Commits(_)
+        )
+    }) || loonfs_types::format::manifest::decode_namespace_manifest_json(bytes)
+        .is_ok_and(|manifest| manifest.payload().status.is_deleted())
 }
 
 fn is_fold(operation: &OperationContext<'_>) -> bool {
@@ -1970,9 +1974,9 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_object() {
             .expect("read WAL object")
             .expect("WAL object exists");
         let wal_object = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL object");
-        if wal_object.payload().records.len() == 2 {
-            for record in wal_object.into_payload().records {
-                batched_actors.insert(record.commit_id.to_string(), record.committed_by);
+        if wal_object.payload().records().len() == 2 {
+            for record in wal_object.payload().records() {
+                batched_actors.insert(record.commit_id.to_string(), record.committed_by.clone());
             }
         }
     }
@@ -2116,7 +2120,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
             .expect("read wal")
             .expect("wal exists");
         let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
-        record_counts.push(wal_object.payload().records.len());
+        record_counts.push(wal_object.payload().records().len());
     }
     record_counts.sort_unstable();
     // The warmup published alone; the concurrent pair shares a WAL object.

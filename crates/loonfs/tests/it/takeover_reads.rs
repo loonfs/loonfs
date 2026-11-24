@@ -52,7 +52,7 @@ fn data_wal_put(namespace_id: &NamespaceId) -> impl Fn(&OperationContext<'_>) ->
                 operation.kind(),
                 OperationKind::Put { bytes, mode: PutMode::CreateIfAbsent }
                     if decode_wal_object_envelope_zstd(bytes)
-                        .is_ok_and(|wal| !wal.payload().records.is_empty())
+                        .is_ok_and(|wal| matches!(wal.payload().body, loonfs_types::format::wal::WalObjectBody::Commits(_)))
             )
     }
 }

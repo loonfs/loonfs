@@ -500,8 +500,8 @@ async fn written_records(
             decode_wal_object_envelope_zstd(&bytes)
                 .expect("decode WAL")
                 .payload()
-                .records
-                .clone(),
+                .records()
+                .to_vec(),
         );
     }
     records

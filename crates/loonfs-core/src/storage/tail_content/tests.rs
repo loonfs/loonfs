@@ -7,7 +7,9 @@ use loonfs_test_support::stores::{
     BlockingStore, FakeMultipartStore, KeyPredicate, MetadataMapStore, OperationSelector,
     RecordedOperation, RecordingStore,
 };
-use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalInlineContent};
+use loonfs_types::format::wal::{
+    WalCommitDelta, WalCommitPayload, WalCommits, WalInlineContent, WalObjectBody,
+};
 use loonfs_types::{CommitId, CommitSeq, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo};
 use std::assert_matches;
 
@@ -37,6 +39,11 @@ impl LayoutLookup for Layout {
     async fn content_layout(&self, _: &ContentId) -> Result<Option<ContentLayoutRecord>> {
         Ok(Some(self.0.clone()))
     }
+}
+
+/// Returns a data WAL object's body with `records`.
+fn commits(records: Vec<WalCommitPayload>) -> WalObjectBody {
+    WalObjectBody::Commits(WalCommits::new(records).expect("commits"))
 }
 
 fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -> WalCommitPayload {
@@ -180,7 +187,7 @@ fn append_tail(reference: &mut ContentRef, length: usize, seq: u64) -> Projected
     let mut tail = ProjectedWalTail::default();
     tail.push_object(
         &HEAD.namespace_id,
-        &[piece_commit(reference, offset, bytes, seq)],
+        &commits(vec![piece_commit(reference, offset, bytes, seq)]),
         0,
     )
     .expect("tail");
@@ -664,7 +671,7 @@ async fn local_large_tail_assembles_without_sources() {
         records.push(piece_commit(&reference, offset, piece.clone(), index + 2));
     }
     let mut tail = ProjectedWalTail::default();
-    tail.push_object(&HEAD.namespace_id, &records, 0)
+    tail.push_object(&HEAD.namespace_id, &commits(records), 0)
         .expect("tail");
     let content = tail.content(&reference).expect("content");
     let pieces = assemble_tail_content(&HEAD.pool_id, &content).expect("pieces");
@@ -959,8 +966,12 @@ async fn a_chain_that_started_in_another_members_tail_records_that_member_as_cre
     let (layout, _, reference) = fixture(&store, &[], false, 4).await;
     let source = NamespaceId::parse("source").expect("namespace");
     let mut tail = ProjectedWalTail::default();
-    tail.push_object(&source, &[piece_commit(&reference, 0, vec![b'z'; 4], 2)], 0)
-        .expect("tail");
+    tail.push_object(
+        &source,
+        &commits(vec![piece_commit(&reference, 0, vec![b'z'; 4], 2)]),
+        0,
+    )
+    .expect("tail");
     let content = tail.content(&reference).expect("content");
     let written = write_tail_content(
         ContentWrites::new(

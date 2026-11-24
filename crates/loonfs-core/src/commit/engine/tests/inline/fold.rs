@@ -619,7 +619,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         expected
             .push_object(
                 &wal_object.payload().namespace_id,
-                &wal_object.payload().records,
+                &wal_object.payload().body,
                 bytes.len(),
             )
             .expect("later rows");

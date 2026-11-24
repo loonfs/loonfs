@@ -22,6 +22,7 @@ use loonfs_types::format::control::{
     decode_control_object, ControlObjectKind, ManifestBoundary, SnapshotOwner, SnapshotPayload,
     UploadOutcome, UploadOutcomePayload,
 };
+use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::{ContentRef, ManifestNo, NamespaceId, SnapshotId, UploadId};
 use loonfs_types::{GcResponse, PoolGcResponse, PoolId};
 use std::collections::BTreeSet;
@@ -299,8 +300,11 @@ async fn a_retired_namespace_keeps_its_boundary_fences_floor_objects_and_unrecog
         let payload = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&bytes)
             .expect("decode a WAL object")
             .into_payload();
-        assert!(payload.records.is_empty(), "{key}");
-        floor_objects += u64::from(payload.retention_floor_seq.is_some());
+        match payload.body {
+            WalObjectBody::Commits(_) => panic!("{key} contains commits"),
+            WalObjectBody::Fence => {}
+            WalObjectBody::Floor { .. } => floor_objects += 1,
+        }
     }
     assert_eq!(floor_objects, 1);
     assert!(kept_wal.len() > 1, "{kept_wal:?}");
@@ -1038,8 +1042,11 @@ async fn a_collection_keeps_folded_fences_and_floor_objects_and_deletes_commit_o
         let payload = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&bytes)
             .expect("decode a WAL object")
             .into_payload();
-        assert!(payload.records.is_empty(), "{key}");
-        floor_objects += u64::from(payload.retention_floor_seq.is_some());
+        match payload.body {
+            WalObjectBody::Commits(_) => panic!("{key} contains commits"),
+            WalObjectBody::Fence => {}
+            WalObjectBody::Floor { .. } => floor_objects += 1,
+        }
     }
     assert_eq!(floor_objects, 1);
     assert!(kept_wal.len() > 1, "{kept_wal:?}");
