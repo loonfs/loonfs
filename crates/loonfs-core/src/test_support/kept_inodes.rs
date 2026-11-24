@@ -1,7 +1,7 @@
 //! Base compactions whose kept inode filter is seeded by the test, so that an
 //! assertion about removed rows doesn't depend on a filter false positive.
 
-use crate::compaction::group_compaction::run_metadata_compaction;
+use crate::compaction::group_compaction::{run_metadata_compaction, GroupCompactionReport};
 use crate::compaction::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
 use crate::compaction::plan::{group_run_descriptors, CompactionPlacement, MetadataCompactionSpec};
 use crate::compaction::publication::{input_segment_keys, CompactionPublication};
@@ -18,6 +18,7 @@ use loonfs_types::{
     CommitId, CommitSeq, InodeId, InodeKind, MetadataFamilyGroup, NamespaceId, RunNo,
 };
 use std::assert_matches;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Compacts every run of each of `groups` into one base run, with each compaction's
@@ -50,19 +51,7 @@ pub async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
                 break;
             }
             let spec = whole_group_spec(&current, group);
-            let mut seed = None;
-            for offset in 0..64 {
-                let candidate = RunNo(payload.next_run_no.0 + offset);
-                let filter = seeded_kept_inode_filter(store, namespace_id, candidate).await;
-                if hidden
-                    .iter()
-                    .all(|inode_id| !filter.keeps(&inode_probe(*inode_id)))
-                {
-                    seed = Some(candidate);
-                    break;
-                }
-            }
-            let seed = seed.expect("a seed whose kept inode filter keeps no hidden row");
+            let seed = seed_keeping_none_of(store, namespace_id, payload.next_run_no, hidden).await;
             compact_with_seed(store, namespace_id, &spec, seed).await;
             if compacted_every_run {
                 break;
@@ -73,6 +62,29 @@ pub async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
             "{group:?} is compacted into one base run"
         );
     }
+}
+
+/// The first run number from `first` that seeds a kept inode filter over the
+/// current manifest that keeps no row that `hidden` inodes own.
+pub(crate) async fn seed_keeping_none_of<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    first: RunNo,
+    hidden: &[InodeId],
+) -> RunNo {
+    let mut seed = None;
+    for offset in 0..64 {
+        let candidate = RunNo(first.0 + offset);
+        let filter = seeded_kept_inode_filter(store, namespace_id, candidate).await;
+        if hidden
+            .iter()
+            .all(|inode_id| !filter.keeps(&inode_probe(*inode_id)))
+        {
+            seed = Some(candidate);
+            break;
+        }
+    }
+    seed.expect("a seed whose kept inode filter keeps no hidden row")
 }
 
 /// The plan of a base compaction of `group`'s oldest runs in `current`, up
@@ -148,6 +160,28 @@ pub(crate) async fn compact_with_seed<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     seed: RunNo,
 ) {
+    let rewritten = rewrite_with_seed(store, namespace_id, spec, seed).await;
+    assert_matches!(
+        publish_rewritten(store, namespace_id, spec, rewritten).await,
+        CompactionUnitOutcome::Published { .. }
+    );
+}
+
+/// A compaction unit's output, written but not yet published, with the keys of
+/// the input segments it replaces.
+pub(crate) struct RewrittenUnit {
+    input_keys: BTreeSet<String>,
+    compacted: GroupCompactionReport,
+}
+
+/// Rewrites `spec`'s window over the current manifest, with its kept inode
+/// filter seeded by `seed`, and publishes nothing.
+pub(crate) async fn rewrite_with_seed<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    spec: &MetadataCompactionSpec,
+    seed: RunNo,
+) -> RewrittenUnit {
     let current = super::namespace_store(store, namespace_id)
         .load_current_manifest()
         .await
@@ -167,23 +201,35 @@ pub(crate) async fn compact_with_seed<S: ObjectStore + ?Sized>(
     .await
     .expect("compact")
     .expect("not cancelled");
-    drop(basis);
+    RewrittenUnit {
+        input_keys,
+        compacted,
+    }
+}
+
+/// Publishes `rewritten`, the output of `spec`'s window, over the current
+/// manifest.
+pub(crate) async fn publish_rewritten<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    spec: &MetadataCompactionSpec,
+    rewritten: RewrittenUnit,
+) -> CompactionUnitOutcome {
     let timer = super::std_timer();
-    let outcome = super::namespace_store(store, namespace_id)
+    super::namespace_store(store, namespace_id)
         .finalize_metadata_compaction(
             None,
             spec,
-            &input_keys,
-            compacted,
-            &cancellation,
+            &rewritten.input_keys,
+            rewritten.compacted,
+            &MetadataCompactionCancellation::default(),
             &CompactionPublication {
                 compaction: OperationClock::start(0, Arc::clone(&timer)),
                 publication: OperationClock::start(0, timer),
             },
         )
         .await
-        .expect("publish the compaction");
-    assert_matches!(outcome, CompactionUnitOutcome::Published { .. });
+        .expect("publish the compaction")
 }
 
 /// The kept inode filter of a base compaction of the inodes group over the
