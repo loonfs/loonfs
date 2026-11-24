@@ -426,18 +426,12 @@ impl NamespacePublisher {
         &self,
         mut engine: tokio::sync::MutexGuard<'_, NamespaceCommitEngine<SharedObjectStore>>,
     ) {
-        // A panic can stop the engine partway through a unit of work, after a
-        // put whose outcome the engine hasn't recorded (a commit's WAL put or
-        // a deletion's tombstone put). During a panic, the release drops the
-        // engine's position, so the session's next unit of work loads the
-        // namespace from the store. A session that owes a fence sent a WAL
-        // put whose outcome it hasn't learned, but it keeps its position. In
-        // both cases the put may have committed, so the cached head may be
-        // older than a commit that this runtime made. The release drops the
-        // head even when the slot had no position.
-        let panicking = std::thread::panicking();
-        if panicking {
-            engine.invalidate_projection();
+        // A panic can stop any holder of the engine, in any task, partway
+        // through its work, after a put whose outcome the engine hasn't
+        // recorded (a commit's WAL put or a deletion's tombstone put).
+        if std::thread::panicking() {
+            self.drop_view_after_panic(&mut engine);
+            return;
         }
         let position = self.read_position.prepare(engine.read_position());
         match position {
@@ -445,16 +439,39 @@ impl NamespacePublisher {
             None => {
                 // When the slot had a position, the engine found a change it
                 // can't follow, such as another writer's claim, so the position
-                // that just became the cached head may be out of date.
+                // that just became the cached head may be out of date. A
+                // session that owes a fence sent a WAL put whose outcome it
+                // hasn't learned, so the put may have committed and the cached
+                // head may be older than a commit that this runtime made. It
+                // keeps its position, but the release drops the head even when
+                // the slot had no position.
                 let cleared = self.read_position.clear();
-                if cleared || panicking || self.owes_fence() {
+                if cleared || self.owes_fence() {
                     self.context
                         .runtime_core
                         .invalidate_namespace_read_cache(&self.namespace_id);
                 }
             }
         }
-        drop(engine);
+    }
+
+    /// Drops the session's view of the namespace after a panic: the engine's
+    /// position, the position that reads start from, and the namespace's
+    /// cached head, even when the slot had no position.
+    ///
+    /// The work that panicked may have stopped after a put whose outcome the
+    /// session hasn't recorded, so the put may have committed. After this,
+    /// the session's next unit of work loads the namespace from the store,
+    /// and the next read loads it by discovery. The engine's release calls
+    /// this for a panic in any holder of the engine, and
+    /// [`Self::contain_panic`] calls it for a panic in publisher work that
+    /// puts without the engine locked, which is a fold or a compaction.
+    fn drop_view_after_panic(&self, engine: &mut NamespaceCommitEngine<SharedObjectStore>) {
+        engine.invalidate_projection();
+        self.read_position.clear();
+        self.context
+            .runtime_core
+            .invalidate_namespace_read_cache(&self.namespace_id);
     }
 
     /// Returns when this session last published, on the runtime's monotonic

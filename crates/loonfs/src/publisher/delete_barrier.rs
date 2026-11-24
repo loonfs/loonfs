@@ -1,38 +1,22 @@
 //! The delete barrier: a namespace deletion that publishes after the work
 //! admitted before it, and fails the work admitted after it.
 
-use super::queue::{take_queued_waiters, PendingDelete};
+use super::admission::AdmittedWaiter;
+use super::queue::take_queued_waiters;
 use super::{NamespacePublisher, PublisherAdmissionStatus};
 use crate::trace::phase_event;
 use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode, Result};
-use futures::FutureExt;
 use loonfs_core::{Administrator, Phase};
-use loonfs_types::panic_message;
-use std::panic::AssertUnwindSafe;
 
 impl NamespacePublisher {
-    /// Runs the delete barrier. Returns true when the publisher is now
+    /// Ends the delete barrier with the deletion's `outcome`, and returns
+    /// it to the deletion's `waiters`. Returns true when the publisher is now
     /// terminal and its worker should exit.
-    pub(super) async fn execute_delete(&self, pending: PendingDelete) -> bool {
-        let PendingDelete {
-            options,
-            administrator,
-            waiters,
-        } = pending;
-        let outcome = match AssertUnwindSafe(self.delete_through_engine(&administrator, options))
-            .catch_unwind()
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(payload) => {
-                // Contain deletion panics so the worker can continue. Deletion has no commit
-                // receipt for reconciliation, so report the task failure to its callers.
-                self.record_panic("delete", panic_message(payload.as_ref()));
-                Err(Error::RuntimeTask(
-                    "delete task aborted mid-delete".to_owned(),
-                ))
-            }
-        };
+    pub(super) async fn finish_delete(
+        &self,
+        outcome: Result<DeleteNamespaceResponse>,
+        waiters: Vec<AdmittedWaiter<Result<DeleteNamespaceResponse>>>,
+    ) -> bool {
         let deleted = outcome
             .as_ref()
             .err()
@@ -91,7 +75,7 @@ impl NamespacePublisher {
     /// The deletion folds the tail before its tombstone, with the
     /// namespace's fold lock in exclusive mode, so it waits for any other
     /// fold of the namespace instead of folding the same tail.
-    async fn delete_through_engine(
+    pub(super) async fn delete_through_engine(
         &self,
         administrator: &Administrator,
         options: DeleteNamespaceOptions,

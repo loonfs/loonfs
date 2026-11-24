@@ -4,14 +4,15 @@
 use super::admission::AdmissionPermit;
 use super::folds::wal_tail_reached_fold_size;
 use super::metrics::PublishOutcome;
-use super::queue::{queued_candidates, BatchCandidate, OpenBatch, WorkItem};
+use super::queue::{
+    queued_candidates, BatchCandidate, OpenBatch, PendingDelete, PendingRetentionAdvance, WorkItem,
+};
 use super::session_tasks::WorkerHandle;
 use super::{LastPublish, NamespacePublisher, NamespacePublisherState, PublisherAdmissionStatus};
 use crate::metrics::RESULT_OK;
 use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
 use crate::{CoreError, Error, Result};
-use futures::FutureExt;
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::publish::{
     is_retryable_wal_publish, settle_publish_attempt, TailSource, WalPublishError,
@@ -19,8 +20,7 @@ use loonfs_core::publish::{
 use loonfs_core::time::OperationClock;
 use loonfs_core::Phase;
 use loonfs_types::Commit;
-use loonfs_types::{panic_message, u64_from_usize, CommitId};
-use std::panic::AssertUnwindSafe;
+use loonfs_types::{u64_from_usize, CommitId};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tracing::Instrument;
@@ -43,6 +43,10 @@ impl NamespacePublisher {
     }
 
     /// Drains the queue in admission order, then exits.
+    ///
+    /// The worker contains a panic in each unit it takes (see
+    /// [`Self::contain_panic`]), returns `outcome_unknown` to every caller of
+    /// that unit, and goes on to the next unit.
     pub(super) async fn run_worker(self) {
         loop {
             let collect_started = self.context.runtime_core.timer().monotonic_now_ms();
@@ -85,7 +89,20 @@ impl NamespacePublisher {
                         wal_record_bytes_upper_bound,
                         inline_content_bytes,
                     } = batch;
-                    let waiting = self.publish_batch(candidates).await;
+                    let commit_ids = candidates
+                        .iter()
+                        .map(|candidate| candidate.commit_id.clone())
+                        .collect::<Vec<_>>();
+                    let waiting = match self
+                        .contain_panic("publish", self.publish_taken_batch(candidates))
+                        .await
+                    {
+                        Some(waiting) => waiting,
+                        None => {
+                            self.fail_panicked_commits(commit_ids);
+                            Vec::new()
+                        }
+                    };
                     drop(publication);
                     if !waiting.is_empty() {
                         let waiting = OpenBatch {
@@ -96,20 +113,44 @@ impl NamespacePublisher {
                         self.wait_at_write_stop(waiting, fold_published).await;
                     }
                 }
-                WorkItem::Delete(pending) => {
+                WorkItem::Delete(PendingDelete {
+                    options,
+                    administrator,
+                    waiters,
+                }) => {
                     // A delete is bounded by its fold permit alone. Keeping a
                     // publication permit while it waits for one would stall
                     // other namespaces' publications behind folds.
                     drop(publication);
-                    if self.execute_delete(pending).await {
+                    let outcome = self
+                        .contain_panic(
+                            "delete",
+                            self.delete_through_engine(&administrator, options),
+                        )
+                        .await
+                        .unwrap_or_else(panicked_outcome);
+                    if self.finish_delete(outcome, waiters).await {
                         return;
                     }
                 }
-                WorkItem::RetentionAdvance(pending) => {
+                WorkItem::RetentionAdvance(PendingRetentionAdvance {
+                    target,
+                    planned,
+                    waiters,
+                }) => {
                     // An advance is one WAL put, so it's bounded by the
                     // publication permit, as a batch is.
-                    self.execute_retention_advance(pending).await;
+                    let outcome = self
+                        .contain_panic(
+                            "retention_advance",
+                            self.publish_floor_object(&planned, target),
+                        )
+                        .await
+                        .unwrap_or_else(panicked_outcome);
                     drop(publication);
+                    for waiter in waiters {
+                        let _ = waiter.send(outcome.clone());
+                    }
                 }
             }
         }
@@ -136,49 +177,25 @@ impl NamespacePublisher {
         item
     }
 
-    /// Publishes one batch while containing panics from the publication, and
-    /// returns the commits that wait at the write stop.
+    /// Returns `outcome_unknown` to every caller that still waits for one of
+    /// `commit_ids`, the commits of a batch whose publication panicked.
     ///
-    /// This worker is the namespace's only publication path. If publication
-    /// panics, each request in the batch receives `outcome_unknown`
-    /// because the panic may have occurred before or after the WAL put. Callers
-    /// can retry with the same commit ID and use the durable receipt to resolve
-    /// the outcome. The engine's release drops the engine's position, so the
-    /// next unit loads the namespace from the store. The worker then
-    /// continues with queued work. (A panic in one commit's preparation
-    /// doesn't reach this catch, because the core fails only that commit,
-    /// before the WAL put.)
-    pub(super) async fn publish_batch(
-        &self,
-        candidates: Vec<BatchCandidate>,
-    ) -> Vec<BatchCandidate> {
-        let taken_commit_ids = candidates
-            .iter()
-            .map(|candidate| candidate.commit_id.clone())
-            .collect::<Vec<_>>();
-        let payload = match AssertUnwindSafe(self.publish_taken_batch(candidates))
-            .catch_unwind()
-            .await
-        {
-            Ok(waiting) => return waiting,
-            Err(payload) => payload,
-        };
-        self.record_panic("publish", panic_message(payload.as_ref()));
-        let orphaned_waiters = {
+    /// A caller can retry with the same commit ID, and LoonFS returns the
+    /// original result from the durable receipt. (A panic in one commit's preparation doesn't
+    /// reach the worker, because the core fails only that commit, before the
+    /// WAL put.)
+    fn fail_panicked_commits(&self, commit_ids: Vec<CommitId>) {
+        let waiters = {
             let mut state = self.lock_state();
-            taken_commit_ids
+            commit_ids
                 .into_iter()
                 .filter_map(|commit_id| state.in_flight.remove(&commit_id))
                 .flat_map(|request| request.waiters)
                 .collect::<Vec<_>>()
         };
-        for waiter in orphaned_waiters {
-            let _ = waiter.send(Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(
-                "publish task aborted mid-batch".to_owned(),
-            ))
-            .into()));
+        for waiter in waiters {
+            let _ = waiter.send(panicked_outcome());
         }
-        Vec::new()
     }
 
     /// Publishes one batch and delivers each result, except to the new
@@ -512,6 +529,16 @@ fn split_write_stop_waiters(
         }
     }
     (waiting, delivered_ids, delivered)
+}
+
+/// Returns the result that every caller of a unit of work receives when the
+/// unit panics. The unit may have stopped after its put, so the outcome is
+/// unknown.
+fn panicked_outcome<T>() -> Result<T> {
+    Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(
+        "the publisher's work panicked before it reported an outcome".to_owned(),
+    ))
+    .into())
 }
 
 /// Returns whether `error` is core's refusal of a commit at the write stop.
