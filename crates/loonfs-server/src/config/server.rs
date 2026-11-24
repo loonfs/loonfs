@@ -79,11 +79,10 @@ pub struct ServerConfig {
     /// planning the merge uses, whichever is larger. A merge whose estimate
     /// exceeds the allowance returns `merge_too_large`, and a merge whose
     /// reservation doesn't fit beside other merges' reservations returns
-    /// `server_busy`. Zero turns merges off, and the sizing
-    /// formula then reserves nothing for them. Defaults to the runtime's
+    /// `server_busy`. Defaults to the runtime's
     /// [`DEFAULT_MAX_MERGE_BYTES`](loonfs::DEFAULT_MAX_MERGE_BYTES), 512 MiB,
     /// with or without a memory limit.
-    pub max_merge_bytes: Option<usize>,
+    pub max_merge_bytes: Option<NonZeroUsize>,
     /// Maximum publication batches running at once. Defaults to 8.
     pub max_concurrent_publications: Option<NonZeroUsize>,
     /// The per-namespace admission limits of the server's runtime. The
@@ -426,7 +425,7 @@ impl ServerConfig {
         let mut builder = ExecutionBudget::builder()
             .max_compaction_input_bytes(positive(memory.compaction_input.bytes))
             .max_admitted_bytes(positive(memory.admitted.bytes))
-            .max_merge_bytes(memory.merge.bytes)
+            .max_merge_bytes(positive(memory.merge.bytes))
             // Scheduled and explicit collections share one limit, which is
             // the count that the memory sizing multiplies the collection
             // budget by.

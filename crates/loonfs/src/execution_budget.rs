@@ -42,7 +42,7 @@ const DEFAULT_MAX_ADMITTED_BYTES: NonZeroUsize = NonZeroUsize::new(64 * 1024 * 1
 /// no other merge is admitted. One WAL object fits about 98,800 creates,
 /// and an allowance of 2.5 GiB, five times the WAL object's 512 MiB,
 /// admits every merge that fits one WAL object.
-pub const DEFAULT_MAX_MERGE_BYTES: usize = 512 * 1024 * 1024;
+pub const DEFAULT_MAX_MERGE_BYTES: NonZeroUsize = NonZeroUsize::new(512 * 1024 * 1024).unwrap();
 
 /// Work in flight that one or more runtimes share.
 ///
@@ -187,9 +187,8 @@ impl ExecutionBudget {
     }
 
     /// Returns the merge allowance, the estimated peak memory that the merges
-    /// planning and publishing at once may have, which is zero when merges
-    /// are off.
-    pub fn max_merge_bytes(&self) -> usize {
+    /// planning and publishing at once may have.
+    pub fn max_merge_bytes(&self) -> NonZeroUsize {
         self.inner.admission.max_merge_bytes
     }
 
@@ -252,7 +251,7 @@ impl ExecutionBudget {
 pub struct ExecutionBudgetBuilder {
     max_admitted_requests: NonZeroUsize,
     max_admitted_bytes: NonZeroUsize,
-    max_merge_bytes: usize,
+    max_merge_bytes: NonZeroUsize,
     max_concurrent_reads: NonZeroUsize,
     max_concurrent_publications: NonZeroUsize,
     max_concurrent_folds: NonZeroUsize,
@@ -295,9 +294,8 @@ impl ExecutionBudgetBuilder {
     /// reservation doesn't fit beside the others fails at once with
     /// `server_busy`. A merge whose estimate exceeds the whole allowance
     /// fails with `merge_too_large`. Defaults to
-    /// [`DEFAULT_MAX_MERGE_BYTES`]; zero turns merges off, so a merge, a
-    /// rebase, and the next-range query return `not_supported`.
-    pub fn max_merge_bytes(mut self, bytes: usize) -> Self {
+    /// [`DEFAULT_MAX_MERGE_BYTES`].
+    pub fn max_merge_bytes(mut self, bytes: NonZeroUsize) -> Self {
         self.max_merge_bytes = bytes;
         self
     }
@@ -460,7 +458,7 @@ pub struct ExecutionBudgetStats {
 struct AdmittedTotals {
     max_requests: NonZeroUsize,
     max_bytes: NonZeroUsize,
-    max_merge_bytes: usize,
+    max_merge_bytes: NonZeroUsize,
     admitted: Mutex<Admitted>,
     instruments: AdmissionInstruments,
 }
@@ -536,7 +534,12 @@ impl AdmittedTotals {
         {
             return AdmissionChange::Rejected;
         }
-        if reserved_merge_bytes > self.max_merge_bytes.saturating_sub(admitted.merge_bytes) {
+        if reserved_merge_bytes
+            > self
+                .max_merge_bytes
+                .get()
+                .saturating_sub(admitted.merge_bytes)
+        {
             return AdmissionChange::MergeAllowanceInUse;
         }
         admitted.requests += 1;
@@ -549,7 +552,7 @@ impl AdmittedTotals {
     fn grow_merge_reservation(&self, from: usize, to: usize) -> AdmissionChange {
         let mut admitted = self.lock();
         let others = admitted.merge_bytes - from;
-        if to > self.max_merge_bytes.saturating_sub(others) {
+        if to > self.max_merge_bytes.get().saturating_sub(others) {
             return AdmissionChange::MergeAllowanceInUse;
         }
         admitted.merge_bytes = others + to;

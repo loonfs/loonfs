@@ -6,7 +6,6 @@ use super::admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use super::registry::MergeReservation;
 use super::{NamespacePublisher, NamespacePublisherState};
 use crate::publish::CommitCandidate;
-use crate::runtime_core::MergesEnabled;
 use crate::trace::phase_event;
 use crate::{CommitSeq, CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Result};
 use loonfs_core::commit::CommitFingerprint;
@@ -182,19 +181,13 @@ impl NamespacePublisher {
             .acquire_candidate(&self.namespace_id, candidate)
     }
 
-    /// Reserves a merge's share of the merge allowance in `merges`, before
-    /// the merge is planned, so that the allowance covers the merge's
-    /// planning and its publication.
-    pub(crate) fn reserve_merge(
-        &self,
-        merges: MergesEnabled,
-    ) -> std::result::Result<MergeReservation, CoreError> {
+    /// Reserves a merge's share of the merge allowance, before the merge is
+    /// planned, so that the allowance covers the merge's planning and its
+    /// publication.
+    pub(crate) fn reserve_merge(&self) -> std::result::Result<MergeReservation, CoreError> {
         drop(self.admitted_session(&self.lock_state())?);
-        let permit = self
-            .context
-            .admission
-            .reserve_merge(&self.namespace_id, merges.max_merge_bytes())?;
-        Ok(MergeReservation { permit, merges })
+        let permit = self.context.admission.reserve_merge(&self.namespace_id)?;
+        Ok(MergeReservation { permit })
     }
 
     /// Submits a merge under `reservation`, and checks the merge against one

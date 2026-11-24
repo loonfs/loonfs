@@ -4,7 +4,6 @@
 
 use super::merges::{MergeOutcome, PlannedMerge};
 use crate::publisher::MergeReservation;
-use crate::runtime_core::MergesEnabled;
 use crate::trace::{self, operation_span};
 use crate::{
     ActorId, CommitId, Consistency, Error, LoonFs, MergeConflict, MergeForkOptions, Namespace,
@@ -23,9 +22,7 @@ impl LoonFs<Writable> {
     /// start of the fork's unmerged range is at or above the fork's own
     /// retention floor. Creating the new fork needs the right to fork
     /// `namespace_id`, as [`Self::fork_namespace`] does, and a
-    /// `new_namespace_id` that already exists returns `namespace_exists`. A
-    /// runtime whose merge allowance is zero returns `not_supported` for
-    /// `filesystem.merges` before it reads or creates a namespace.
+    /// `new_namespace_id` that already exists returns `namespace_exists`.
     pub async fn fork_namespace_for_rebase(
         &self,
         namespace_id: &NamespaceId,
@@ -36,7 +33,6 @@ impl LoonFs<Writable> {
         trace::in_operation(
             operation_span!(self.core, "fork_namespace_for_rebase", namespace_id),
             async {
-                self.core.merges_enabled()?;
                 let administrator = self.namespace(namespace_id).administrator().await?;
                 let administrator = &administrator;
                 let target = self
@@ -111,9 +107,7 @@ impl Namespace<Writable> {
     /// plan reports a changed row that isn't the fork's own. The subject of
     /// this handle has to be able to read each inode whose change the replay
     /// commit applies in the fork, and needs the rights in this namespace
-    /// that each planned operation needs. A runtime whose merge allowance is
-    /// zero returns `not_supported` for `filesystem.merges` before it reads
-    /// either namespace.
+    /// that each planned operation needs.
     pub async fn replay_fork_with_options(
         &self,
         source_namespace_id: &NamespaceId,
@@ -123,7 +117,6 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "replay_fork", self.namespace_id),
             async {
-                let merges = self.core.merges_enabled()?;
                 let request = MergeRequest {
                     source_namespace_id: source_namespace_id.clone(),
                     through_seq: options.through_seq,
@@ -132,12 +125,10 @@ impl Namespace<Writable> {
                     actor_id: actor.clone(),
                     message: options.message.clone(),
                 };
-                let planned = self.plan_replay(&request, merges, None).await?;
+                let planned = self.plan_replay(&request, None).await?;
                 let (commit, conflicts) = match self
                     .commit_merge(&request, planned, |request, reservation| {
-                        Box::pin(async move {
-                            self.plan_replay(&request, merges, Some(reservation)).await
-                        })
+                        Box::pin(async move { self.plan_replay(&request, Some(reservation)).await })
                     })
                     .await?
                 {
@@ -166,12 +157,11 @@ impl Namespace<Writable> {
     pub(crate) async fn plan_replay(
         &self,
         request: &MergeRequest,
-        merges: MergesEnabled,
         reservation: Option<MergeReservation>,
     ) -> Result<PlannedMerge<Vec<MergeConflict>>> {
         let source_namespace_id = &request.source_namespace_id;
         // Boxed so the replay's future stays within the compiler's layout depth.
-        self.plan_commit(request, merges, reservation, |new_fork, allowance| {
+        self.plan_commit(request, reservation, |new_fork, allowance| {
             Box::pin(async move {
                 let new_fork = &new_fork;
                 // The plan runs inside the new fork's read loop, which runs the

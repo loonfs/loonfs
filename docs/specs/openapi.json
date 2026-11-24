@@ -10663,21 +10663,6 @@
               }
             }
           },
-          "501": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Merges are disabled",
-            "headers": {
-              "x-request-id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            }
-          },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
           }
@@ -10834,21 +10819,6 @@
               }
             },
             "description": "The merge is too large, or the JSON body exceeds the 2 MiB limit",
-            "headers": {
-              "x-request-id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            }
-          },
-          "501": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Merges are disabled",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"
@@ -11019,21 +10989,6 @@
               }
             }
           },
-          "501": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Merges are disabled",
-            "headers": {
-              "x-request-id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            }
-          },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
           }
@@ -11195,21 +11150,6 @@
               }
             },
             "description": "The replay commit is too large, or the JSON body exceeds the 2 MiB limit",
-            "headers": {
-              "x-request-id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            }
-          },
-          "501": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Merges are disabled",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"

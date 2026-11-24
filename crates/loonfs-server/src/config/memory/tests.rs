@@ -247,28 +247,28 @@ fn the_smallest_limit_that_fits_the_default_counts_is_3532_mib() {
     );
 }
 
-/// Checks that `max_merge_bytes = 0`, which turns merges off, reserves
-/// nothing for merges, so the smallest limit that fits the default counts
-/// falls from 3,532 MiB to 2,892 MiB.
+/// Checks that the sizing formula reserves the merge allowance that the
+/// config sets, so a 1 MiB allowance lowers the smallest limit that fits
+/// the default counts from 3,532 MiB to 2,894 MiB.
 #[test]
-fn turning_merges_off_lowers_the_smallest_limit_to_2892_mib() {
-    let merges_off = |limit: usize| {
+fn a_one_mib_merge_allowance_lowers_the_smallest_limit_to_2894_mib() {
+    let small_allowance = |limit: usize| {
         memory_config(&format!(
-            "memory_limit_bytes = {limit}\nmax_merge_bytes = 0"
+            "memory_limit_bytes = {limit}\nmax_merge_bytes = 1048576"
         ))
     };
-    let memory = merges_off(2892 * MIB)
+    let memory = small_allowance(2894 * MIB)
         .validate()
-        .expect("2,892 MiB fits the default counts without merges")
+        .expect("2,894 MiB fits the default counts with a 1 MiB allowance")
         .memory;
     assert_eq!(
         (memory.merge.bytes, memory.merge.source),
-        (0, MemorySource::Set)
+        (MIB, MemorySource::Set)
     );
-    assert_eq!(memory.headroom, 276 * MIB);
-    assert_eq!(memory.managed, 256 * MIB);
+    assert_eq!(memory.headroom, 289_826_406);
+    assert_eq!(memory.managed, 269_064_602);
     assert_invalid_field(
-        merges_off(2891 * MIB)
+        small_allowance(2893 * MIB)
             .validate()
             .expect_err("managed memory is below 256 MiB"),
         "memory_limit_bytes",

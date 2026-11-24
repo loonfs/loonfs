@@ -10,7 +10,6 @@ use loonfs_core::{MergeAllowance, MergeReservation, MERGE_COMMITS_PAGE_BYTES};
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::NamespaceId;
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::oneshot;
@@ -109,17 +108,16 @@ impl PublicationAdmission {
         self.charge(namespace_id, AdmissionCharge::Request { estimated_bytes })
     }
 
-    /// Reserves [`MIN_MERGE_RESERVED_BYTES`] of the merge allowance
-    /// `max_merge_bytes`, or the whole allowance when it's smaller, for a
-    /// merge into `namespace_id`. When the other merges' reservations leave
-    /// no room, the merge gets `server_busy`. The reservation lasts until the
-    /// permit is dropped.
+    /// Reserves [`MIN_MERGE_RESERVED_BYTES`] of the budget's merge allowance,
+    /// or the whole allowance when it's smaller, for a merge into
+    /// `namespace_id`. When the other merges' reservations leave no room,
+    /// the merge gets `server_busy`. The reservation lasts until the permit
+    /// is dropped.
     pub(super) fn reserve_merge(
         self: &Arc<Self>,
         namespace_id: &NamespaceId,
-        max_merge_bytes: NonZeroUsize,
     ) -> Result<Arc<AdmissionPermit>, CoreError> {
-        let reserved_bytes = MIN_MERGE_RESERVED_BYTES.min(max_merge_bytes.get());
+        let reserved_bytes = MIN_MERGE_RESERVED_BYTES.min(self.budget.max_merge_bytes().get());
         self.charge(namespace_id, AdmissionCharge::Merge { reserved_bytes })
     }
 
@@ -294,15 +292,12 @@ impl AdmissionPermit {
         Ok(())
     }
 
-    /// Returns the merge allowance of `max_merge_bytes`, with the
-    /// reservation of the merge that this permit admits, which the merge
-    /// planner and admission check.
-    pub(super) fn merge_allowance(
-        self: &Arc<Self>,
-        max_merge_bytes: NonZeroUsize,
-    ) -> MergeAllowance {
+    /// Returns the budget's merge allowance, with the reservation of the
+    /// merge that this permit admits, which the merge planner and admission
+    /// check.
+    pub(super) fn merge_allowance(self: &Arc<Self>) -> MergeAllowance {
         MergeAllowance {
-            max_bytes: max_merge_bytes,
+            max_bytes: self.admission.budget.max_merge_bytes(),
             peak_per_planned_byte: MERGE_PEAK_PER_PLANNED_BYTE,
             reservation: Arc::clone(self) as Arc<dyn MergeReservation>,
         }
@@ -490,13 +485,11 @@ mod tests {
         namespace_id: &NamespaceId,
         candidate: &PreparedCandidate,
     ) -> Result<Arc<AdmissionPermit>, CoreError> {
-        let max_merge_bytes =
-            NonZeroUsize::new(admission.budget.max_merge_bytes()).expect("merges are on");
-        let permit = admission.reserve_merge(namespace_id, max_merge_bytes)?;
+        let permit = admission.reserve_merge(namespace_id)?;
         PublicationAdmission::validate_merge(
             &candidate.candidate,
             candidate.wal_record_bytes_upper_bound,
-            &permit.merge_allowance(max_merge_bytes),
+            &permit.merge_allowance(),
         )?;
         Ok(permit)
     }
@@ -544,7 +537,7 @@ mod tests {
         let overhead = 512 + namespace_id.as_str().len();
         let budget = ExecutionBudget::builder()
             .max_admitted_bytes(limit(4096))
-            .max_merge_bytes(16384)
+            .max_merge_bytes(limit(16384))
             .build();
         let admission = runtime_admission(
             PublicationPolicy {
@@ -604,7 +597,7 @@ mod tests {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let allowance = 2 * MIN_MERGE_RESERVED_BYTES;
         let budget = ExecutionBudget::builder()
-            .max_merge_bytes(allowance)
+            .max_merge_bytes(limit(allowance))
             .metrics_recorder(recorder.clone())
             .build();
         let first_runtime = runtime_admission(PublicationPolicy::default(), &budget);

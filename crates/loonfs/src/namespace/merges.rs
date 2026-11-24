@@ -6,7 +6,7 @@
 use crate::pinned_read::PinnedRead;
 use crate::publish::CommitCandidate;
 use crate::publisher::MergeReservation;
-use crate::runtime_core::{HeadConfirmation, MergesEnabled};
+use crate::runtime_core::HeadConfirmation;
 use crate::trace::{self, operation_span};
 use crate::{
     ActorId, Commit, CommitId, Consistency, CoreError, Error, LiveReadOptions, MergeConflict,
@@ -75,12 +75,10 @@ impl<M: Mode> Namespace<M> {
     /// instead of returning the error. A handle with a subject needs an
     /// administrator in both namespaces, as the change feed does. A source
     /// that doesn't exist, was deleted, or isn't a fork of this namespace
-    /// returns `invalid_request`. A runtime whose merge allowance is zero
-    /// returns `not_supported` for `filesystem.merges` before it reads a
-    /// namespace. Both heads are read as an `eventual` read reads them, and
-    /// the read runs again from this namespace's newest manifest when a
-    /// newer manifest replaced the one that it read, as an ordinary read
-    /// does.
+    /// returns `invalid_request`. Both heads are read as an `eventual` read
+    /// reads them, and the read runs again from this namespace's newest
+    /// manifest when a newer manifest replaced the one that it read, as an
+    /// ordinary read does.
     pub async fn next_merge_range(
         &self,
         source_namespace_id: &NamespaceId,
@@ -100,7 +98,6 @@ impl<M: Mode> Namespace<M> {
         trace::in_operation(
             operation_span!(self.core, "next_merge_range", self.namespace_id),
             async {
-                self.core.merges_enabled()?;
                 let _permit = self.core.read_permit().await;
                 self.core
                     .read(&self.namespace_id, options.consistency, |main| async move {
@@ -162,13 +159,10 @@ impl Namespace<Writable> {
     /// WAL object counts toward this namespace's fold triggers like any commit.
     /// The subject of this handle has to be able to read each inode whose
     /// change the merge applies in the fork, and needs the rights in this
-    /// namespace that each planned operation needs. A runtime whose merge
-    /// allowance
+    /// namespace that each planned operation needs. A merge whose
+    /// reservation of the merge allowance
     /// ([`ExecutionBudgetBuilder::max_merge_bytes`](crate::ExecutionBudgetBuilder::max_merge_bytes))
-    /// is zero has merges turned off, and a merge returns `not_supported` for
-    /// `filesystem.merges` before it reads either namespace. A merge whose
-    /// reservation of the allowance doesn't fit beside other merges'
-    /// reservations returns `server_busy`.
+    /// doesn't fit beside other merges' reservations returns `server_busy`.
     pub async fn merge_fork_with_options(
         &self,
         source_namespace_id: &NamespaceId,
@@ -178,7 +172,6 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "merge_fork", self.namespace_id),
             async {
-                let merges = self.core.merges_enabled()?;
                 let request = MergeRequest {
                     source_namespace_id: source_namespace_id.clone(),
                     through_seq: options.through_seq,
@@ -187,12 +180,10 @@ impl Namespace<Writable> {
                     actor_id: actor.clone(),
                     message: options.message.clone(),
                 };
-                let planned = self.plan_merge(&request, merges, None).await?;
+                let planned = self.plan_merge(&request, None).await?;
                 let (MergeOutcome::Found { commit, .. } | MergeOutcome::Committed { commit, .. }) =
                     self.commit_merge(&request, planned, |request, reservation| {
-                        Box::pin(async move {
-                            self.plan_merge(&request, merges, Some(reservation)).await
-                        })
+                        Box::pin(async move { self.plan_merge(&request, Some(reservation)).await })
                     })
                     .await?;
                 Ok(commit)
@@ -204,7 +195,7 @@ impl Namespace<Writable> {
     /// Returns the merge that this namespace committed under the request's
     /// commit ID, or the commit that makes the merge, planned against this
     /// namespace's head under `reservation`, or under a reservation of the
-    /// allowance in `merges` that the plan takes (see [`Self::plan_commit`]).
+    /// merge allowance that the plan takes (see [`Self::plan_commit`]).
     /// The plan checks the fork and the floors and finds the range's start,
     /// takes a snapshot of the fork, and plans. It checks the merge's size,
     /// and then its conflicts. The checks read the fork's view as
@@ -213,12 +204,11 @@ impl Namespace<Writable> {
     pub(crate) async fn plan_merge(
         &self,
         request: &MergeRequest,
-        merges: MergesEnabled,
         reservation: Option<MergeReservation>,
     ) -> Result<PlannedMerge> {
         let source_namespace_id = &request.source_namespace_id;
         // Boxed so the merge's future stays within the compiler's layout depth.
-        self.plan_commit(request, merges, reservation, |main, allowance| {
+        self.plan_commit(request, reservation, |main, allowance| {
             Box::pin(async move {
                 // The plan runs inside this namespace's read loop, which runs
                 // the plan again after a replaced manifest of either
@@ -256,7 +246,7 @@ impl Namespace<Writable> {
     /// Returns the merge or replay commit that this namespace committed under
     /// the request's commit ID, or the commit, its record, and its report
     /// that `plan` plans from this namespace's head under `reservation`, or
-    /// under a reservation of the allowance in `merges` that this call takes.
+    /// under a reservation of the merge allowance that this call takes.
     /// `plan` plans against the merge allowance with the reservation, and
     /// grows the reservation as it plans.
     ///
@@ -273,7 +263,6 @@ impl Namespace<Writable> {
     pub(super) async fn plan_commit<R, Plan>(
         &self,
         request: &MergeRequest,
-        merges: MergesEnabled,
         reservation: Option<MergeReservation>,
         plan: impl Fn(PinnedRead, MergeAllowance) -> Plan,
     ) -> Result<PlannedMerge<R>>
@@ -290,7 +279,7 @@ impl Namespace<Writable> {
                 }
                 let reservation = match lock_reservation(&held).take() {
                     Some(reservation) => reservation,
-                    None => self.session().reserve_merge(merges)?,
+                    None => self.session().reserve_merge()?,
                 };
                 match plan(target, reservation.allowance()).await {
                     Ok((candidate, record, report)) => {

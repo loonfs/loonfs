@@ -279,10 +279,9 @@ async fn a_merge_of_the_fork_and_of_its_new_fork_refuse_the_second_to_commit() {
             actor_id: actor(),
             message: None,
         };
-        let merges = family.main.core.merges_enabled().expect("merges are on");
         let PlannedMerge::Candidate(planned) = family
             .main
-            .plan_merge(&request, merges, None)
+            .plan_merge(&request, None)
             .await
             .expect("plan the late merge")
         else {
@@ -294,7 +293,7 @@ async fn a_merge_of_the_fork_and_of_its_new_fork_refuse_the_second_to_commit() {
         let reservation = family
             .main
             .session()
-            .reserve_merge(merges)
+            .reserve_merge()
             .expect("a reservation");
         let error = family
             .main

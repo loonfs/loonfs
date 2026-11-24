@@ -41,8 +41,7 @@ async fn submit_merge(
     publisher: &NamespacePublisher,
     candidate: CommitCandidate,
 ) -> crate::Result<Commit> {
-    let merges = publisher.context.runtime_core.merges_enabled()?;
-    let reservation = publisher.reserve_merge(merges)?;
+    let reservation = publisher.reserve_merge()?;
     publisher.submit_merge(candidate, &reservation).await
 }
 
@@ -158,6 +157,7 @@ async fn merges_that_fit_the_allowance_are_admitted_together() {
     let merge_peak = super::super::admission::MERGE_PEAK_PER_PLANNED_BYTE
         * prepared.wal_record_bytes_upper_bound;
     let publisher_with_allowance = |max_merge_bytes: usize| {
+        let max_merge_bytes = NonZeroUsize::new(max_merge_bytes).expect("allowance");
         let mut core = TestCore::unpaced();
         let below_the_merge = NonZeroUsize::new(ordinary_bytes - 1).expect("limit");
         core.config.publication.max_estimated_bytes_per_namespace = below_the_merge;

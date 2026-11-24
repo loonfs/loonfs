@@ -503,8 +503,7 @@ pub(super) async fn fork_namespace(
 }
 
 /// Merges a fork into the namespace. The server stores the `Loonfs-Actor`
-/// header, and the shared token doesn't verify the header. A runtime whose
-/// merge allowance is zero returns `not_supported` for `filesystem.merges`.
+/// header, and the shared token doesn't verify the header.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -533,7 +532,6 @@ pub(super) async fn fork_namespace(
             (status = 409, description = "Merge conflict, range conflict, or history below a retention floor", body = ErrorResponse),
             (status = 410, description = "The namespace or the fork was deleted, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 413, description = "The merge is too large, or the JSON body exceeds the 2 MiB limit", body = ErrorResponse),
-            (status = 501, description = "Merges are disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -574,8 +572,7 @@ pub(super) async fn merge_fork(
 
 /// Returns where a fork's next merge into the namespace starts. A request
 /// with a subject needs an administrator in both namespaces, as the change
-/// feed does. A runtime whose merge allowance is zero returns
-/// `not_supported` for `filesystem.merges` before it reads a namespace.
+/// feed does.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -604,7 +601,6 @@ pub(super) async fn merge_fork(
             (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 410, description = "The namespace or the fork was deleted, and `details.namespace_id` identifies which", body = ErrorResponse),
-            (status = 501, description = "Merges are disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -632,9 +628,7 @@ pub(super) async fn get_next_merge_range(
 /// Creates a rebase's new fork: a new fork of the namespace's head for a
 /// fork of the namespace, which the fork's replay commits then go into. The
 /// server stores the `Loonfs-Actor` header, and the shared token doesn't
-/// verify the header. A runtime whose merge allowance is zero returns
-/// `not_supported` for `filesystem.merges` before it reads or creates a
-/// namespace.
+/// verify the header.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -663,7 +657,6 @@ pub(super) async fn get_next_merge_range(
             (status = 409, description = "The new fork already exists, or history is below a retention floor", body = ErrorResponse),
             (status = 410, description = "The namespace or the fork was deleted, or the new fork's ID was deleted and can't be used again, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
-            (status = 501, description = "Merges are disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -695,9 +688,7 @@ pub(super) async fn fork_namespace_for_rebase(
 
 /// Replays a fork's unmerged commits into the namespace, a rebase's new fork
 /// for the fork, as one replay commit. The server stores the `Loonfs-Actor`
-/// header, and the shared token doesn't verify the header. A runtime whose
-/// merge allowance is zero returns `not_supported` for `filesystem.merges`
-/// before it reads a namespace.
+/// header, and the shared token doesn't verify the header.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -726,7 +717,6 @@ pub(super) async fn fork_namespace_for_rebase(
             (status = 409, description = "Range conflict, or history below a retention floor", body = ErrorResponse),
             (status = 410, description = "The new fork or the fork was deleted, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 413, description = "The replay commit is too large, or the JSON body exceeds the 2 MiB limit", body = ErrorResponse),
-            (status = 501, description = "Merges are disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
