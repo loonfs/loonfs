@@ -23,7 +23,7 @@ use loonfs_types::{FilesystemEvent, ListChangesResponse};
 /// views confirm the head as a `strong` read does, so the head is at or above
 /// that sequence and includes the worker's own publications.
 const STRONG: LiveReadOptions = LiveReadOptions {
-    consistency: Some(Consistency::Strong),
+    consistency: Consistency::Strong,
 };
 
 /// Filesystem reads for one namespace.
@@ -67,10 +67,10 @@ impl NamespaceReads {
     }
 
     /// Captures one read view for a query, at the head that `consistency`
-    /// confirms, or at the runtime's default consistency for `None`.
+    /// confirms.
     pub(crate) async fn read_view(
         &self,
-        consistency: Option<Consistency>,
+        consistency: Consistency,
     ) -> Result<NamespaceReadView<'_>> {
         let namespace = self.subject_namespace.as_ref().unwrap_or(&self.namespace);
         let view = namespace
@@ -143,7 +143,7 @@ impl NamespaceReads {
         limit: usize,
     ) -> Result<ListChangesResponse> {
         let options = ListChangesOptions {
-            at: ReadAt::Live(Some(Consistency::Strong)),
+            at: ReadAt::Live(Consistency::Strong),
             ..ListChangesOptions::default()
         };
         match self

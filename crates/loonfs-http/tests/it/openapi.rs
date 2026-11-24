@@ -285,32 +285,19 @@ fn openapi_documents_current_server_paths() {
         paths,
         "/v0/namespaces/{namespace_id}/filesystem/entries",
         "get",
-        &[
-            "path",
-            "limit",
-            "cursor",
-            "snapshot_id",
-            "consistency",
-            "max_staleness_ms",
-        ],
+        &["path", "limit", "cursor", "snapshot_id", "consistency"],
     );
     assert_query_params(
         paths,
         "/v0/namespaces/{namespace_id}/filesystem/entry",
         "get",
-        &["path", "snapshot_id", "consistency", "max_staleness_ms"],
+        &["path", "snapshot_id", "consistency"],
     );
     assert_query_params(
         paths,
         "/v0/namespaces/{namespace_id}/filesystem/content",
         "get",
-        &[
-            "path",
-            "revision_no",
-            "snapshot_id",
-            "consistency",
-            "max_staleness_ms",
-        ],
+        &["path", "revision_no", "snapshot_id", "consistency"],
     );
     assert_query_params(
         paths,
@@ -322,19 +309,19 @@ fn openapi_documents_current_server_paths() {
         paths,
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
         "get",
-        &["limit", "cursor", "consistency", "max_staleness_ms"],
+        &["limit", "cursor", "consistency"],
     );
     assert_query_params(
         paths,
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
         "get",
-        &["snapshot_id", "consistency", "max_staleness_ms"],
+        &["snapshot_id", "consistency"],
     );
     assert_query_params(
         paths,
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
         "get",
-        &["consistency", "max_staleness_ms"],
+        &["consistency"],
     );
     assert_query_params(
         paths,
@@ -352,13 +339,7 @@ fn openapi_documents_current_server_paths() {
         paths,
         "/v0/namespaces/{namespace_id}/changes",
         "get",
-        &[
-            "after_seq",
-            "limit",
-            "snapshot_id",
-            "consistency",
-            "max_staleness_ms",
-        ],
+        &["after_seq", "limit", "snapshot_id", "consistency"],
     );
     assert_query_params(
         paths,
@@ -371,7 +352,6 @@ fn openapi_documents_current_server_paths() {
             "after_seq",
             "limit",
             "consistency",
-            "max_staleness_ms",
         ],
     );
     assert_query_params(
@@ -946,18 +926,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         assert_eq!(consistency.get("required"), Some(&Value::Bool(false)));
         assert_eq!(
             consistency.pointer("/schema/$ref").and_then(Value::as_str),
-            Some("#/components/schemas/ReadConsistency")
-        );
-        let max_staleness = query_parameter(paths, path, "get", "max_staleness_ms");
-        assert_eq!(max_staleness.get("required"), Some(&Value::Bool(false)));
-        let schema = max_staleness
-            .get("schema")
-            .expect("max_staleness_ms schema");
-        assert_eq!(schema.get("type").and_then(Value::as_str), Some("integer"));
-        assert_eq!(schema.get("minimum").and_then(Value::as_u64), Some(0));
-        assert_eq!(
-            schema.get("maximum").and_then(Value::as_u64),
-            Some(loonfs::READ_REVALIDATION_BOUND_MS)
+            Some("#/components/schemas/Consistency")
         );
     }
 
@@ -970,26 +939,14 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         let properties = &schemas[request_name]["properties"];
         assert_eq!(
             properties["consistency"]["$ref"],
-            json!("#/components/schemas/ReadConsistency"),
+            json!("#/components/schemas/Consistency"),
             "{request_name}"
         );
-        let max_staleness = &properties["max_staleness_ms"];
-        assert_eq!(max_staleness["type"], json!("integer"), "{request_name}");
-        assert_eq!(max_staleness["minimum"], json!(0), "{request_name}");
-        assert_eq!(
-            max_staleness["maximum"],
-            json!(loonfs::READ_REVALIDATION_BOUND_MS),
-            "{request_name}"
-        );
+        assert_eq!(properties.get("max_staleness_ms"), None, "{request_name}");
     }
     assert_eq!(
-        schemas["ReadConsistency"]["enum"],
+        schemas["Consistency"]["enum"],
         json!(["eventual", "strong"])
-    );
-    assert_eq!(
-        schemas["ReadConsistency"].get("default"),
-        None,
-        "the default is the server's `consistency` setting, so the schema declares none"
     );
 
     let grep_path = "/v0/namespaces/{namespace_id}/grep";

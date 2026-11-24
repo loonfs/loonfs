@@ -79,8 +79,8 @@ impl<M: Mode> Namespace<M> {
     /// that doesn't exist, was deleted, or isn't a fork of this namespace
     /// returns `invalid_request`. A runtime whose merge allowance is zero
     /// returns `not_supported` for `filesystem.merges` before it reads a
-    /// namespace. Both heads are read at the runtime's default consistency,
-    /// and the read runs again from this namespace's newest manifest when a
+    /// namespace. Both heads are read as an `eventual` read reads them, and
+    /// the read runs again from this namespace's newest manifest when a
     /// newer manifest replaced the one that it read, as an ordinary read
     /// does.
     pub async fn next_merge_range(
@@ -93,8 +93,7 @@ impl<M: Mode> Namespace<M> {
 
     /// Returns where the fork `source_namespace_id`'s next merge into this
     /// namespace starts, as [`Self::next_merge_range`] does, reading both
-    /// namespaces' heads at the consistency that `options` sets, or at the
-    /// runtime's default consistency when it sets none.
+    /// namespaces' heads at the consistency that `options` sets.
     pub async fn next_merge_range_with_options(
         &self,
         source_namespace_id: &NamespaceId,

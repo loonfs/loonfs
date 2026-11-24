@@ -12,7 +12,6 @@
       "put_deleted": "conf-read-consistency-put-deleted",
       "delete": "conf-read-consistency-delete"
     },
-    "max_staleness_ms": 2500,
     "snapshot_name": "consistency"
   },
   "expected": {

@@ -260,7 +260,6 @@ impl Client {
             revision_no,
             snapshot_id: at.snapshot_id,
             consistency: at.consistency,
-            max_staleness_ms: at.max_staleness_ms,
             start_offset: options.start_offset,
         };
         // Repeating the request writes only the same immutable extent bytes.
@@ -353,7 +352,6 @@ impl Client {
         let request = CreateDownloadByInodeRequest {
             snapshot_id: at.snapshot_id,
             consistency: at.consistency,
-            max_staleness_ms: at.max_staleness_ms,
             start_offset: options.start_offset,
         };
         self.send_json(self.request(operation, &url).json(&request)?)

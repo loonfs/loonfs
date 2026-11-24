@@ -9,10 +9,10 @@ use crate::pagers::{
 use crate::pinned_read::PinnedRead;
 use crate::runtime_core::RuntimeCore;
 use crate::{
-    CommitSeq, ContentRef, CoreError, CurrentFileState, DownloadOptions, Error, FileBytes,
-    FileContentStream, InodeId, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
-    ListSnapshotFilesOptions, NamespaceId, PathEntry, ReadAt, ReadFileStreamOptions, Result,
-    RevisionNo, SharedObjectStore, SnapshotId, StatOptions,
+    CommitSeq, Consistency, ContentRef, CoreError, CurrentFileState, DownloadOptions, Error,
+    FileBytes, FileContentStream, InodeId, ListInodeChildrenResponse, ListOptions,
+    ListPathEntriesResponse, ListSnapshotFilesOptions, NamespaceId, PathEntry, ReadAt,
+    ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore, SnapshotId, StatOptions,
 };
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::options::CommitSplitting;
@@ -227,15 +227,16 @@ impl ReadView {
     }
 
     /// Rejects read options that ask for a state other than the one this
-    /// view captured. A view is pinned, so a read through it has no
-    /// consistency setting, and the options can refer to the snapshot this
-    /// view reads but to no other, because a read of another snapshot through
-    /// this view would silently return the wrong state.
+    /// view captured. A view is pinned, so a read through it can't confirm
+    /// the head again as a `strong` read does, and the options can refer to
+    /// the snapshot this view reads but to no other, because a read of
+    /// another snapshot through this view would silently return the wrong
+    /// state.
     fn ensure_read_at(&self, at: &ReadAt) -> Result<()> {
         match at {
-            ReadAt::Live(None) => Ok(()),
-            ReadAt::Live(Some(_)) => Err(Error::InvalidRequest {
-                message: "a read through a read view has no consistency setting".to_owned(),
+            ReadAt::Live(Consistency::Eventual) => Ok(()),
+            ReadAt::Live(Consistency::Strong) => Err(Error::InvalidRequest {
+                message: "a read through a read view can't be strong".to_owned(),
                 param: "consistency",
             }),
             ReadAt::Snapshot(requested) if Some(requested) == self.snapshot_id() => Ok(()),

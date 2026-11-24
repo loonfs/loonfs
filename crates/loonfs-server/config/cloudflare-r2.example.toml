@@ -7,7 +7,6 @@ writer_id = "loonfs-server-r2"
 memory_limit_bytes = 6442450944
 #manifest_revalidation_interval_ms = 1000
 #max_staleness_ms = 1000
-#consistency = "eventual"
 # Record a 30-day retention window in each namespace that the server creates
 # without a window of its own. Each maintenance sweep advances a namespace's
 # retention floor past the history older than the namespace's window. Omit it

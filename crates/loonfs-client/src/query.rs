@@ -81,7 +81,7 @@ mod tests {
             scope: GrepScope::Namespace,
             allow_stale: false,
             allow_scan: false,
-            consistency: None,
+            consistency: loonfs_types::options::Consistency::Eventual,
         };
         let mut pager = client
             .grep(&NamespaceId::parse("demo").expect("namespace id"), &request)

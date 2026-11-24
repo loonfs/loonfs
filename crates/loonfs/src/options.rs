@@ -18,8 +18,8 @@ pub use loonfs_types::options::{
     DeleteOptions, DiffOptions, DirectMultipartUploadOptions, DownloadOptions,
     ForkNamespaceOptions, ListChangesOptions, ListFileRevisionsOptions, ListOptions,
     ListTrashOptions, LiveReadOptions, MergeForkOptions, MoveOptions, PutFileOptions, ReadAt,
-    ReadConsistency, ReadFileOptions, ReadRange, RestoreDeletedDestination, RestoreDeletedOptions,
-    StatOptions, UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
+    ReadFileOptions, ReadRange, RestoreDeletedDestination, RestoreDeletedOptions, StatOptions,
+    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
     UpdateAttributesOptions,
 };
 
@@ -106,8 +106,8 @@ pub struct ReadFileStreamOptions {
     /// byte. See [`StreamRange`](loonfs_core::StreamRange) for how a resumed
     /// read and a ranged read are verified.
     pub range: StreamRange,
-    /// The live head or the snapshot that the read reads, by default the
-    /// live head at the runtime's default consistency. A snapshot read
+    /// The live head or the snapshot that the read reads, by default an
+    /// `eventual` read of the live head. A snapshot read
     /// returns the file revision that the snapshot captured.
     pub at: ReadAt,
 }

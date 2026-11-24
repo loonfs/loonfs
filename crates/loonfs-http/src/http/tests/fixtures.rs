@@ -35,11 +35,8 @@ pub(super) struct TestOptions {
 pub(super) struct TestAppOptions {
     pub(super) store: Option<SharedObjectStore>,
     pub(super) direct_transfers: Option<DirectTransferIssuers>,
-    /// The runtime's default maximum staleness of an eventual read, or the default when
-    /// `None`.
+    /// The runtime's maximum staleness of an eventual read, or the default when `None`.
     pub(super) max_staleness_ms: Option<u64>,
-    /// The runtime's default consistency, or the default when `None`.
-    pub(super) consistency: Option<loonfs::ReadConsistency>,
     /// The runtime's monotonic timer, or the system timer when `None`.
     pub(super) monotonic_timer: Option<Arc<dyn MonotonicTimer>>,
     /// The runtime's execution budget, or the default when `None`.
@@ -94,7 +91,6 @@ pub(super) async fn test_app_with_sessions(
     )
     .config(loonfs::RuntimeConfig {
         max_staleness_ms: inputs.max_staleness_ms.unwrap_or(defaults.max_staleness_ms),
-        consistency: inputs.consistency.unwrap_or(defaults.consistency),
         min_publish_interval_ms: 0,
         inline_content: config.inline_content,
         max_read_content_bytes: options

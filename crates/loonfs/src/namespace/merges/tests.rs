@@ -1231,7 +1231,7 @@ async fn the_next_merge_range_with_fresh_positions_checks_each_position() {
         .next_merge_range_with_options(
             family.fork.id(),
             &crate::LiveReadOptions {
-                consistency: Some(crate::Consistency::Strong),
+                consistency: crate::Consistency::Strong,
             },
         )
         .await

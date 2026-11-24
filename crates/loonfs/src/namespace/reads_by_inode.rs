@@ -165,12 +165,16 @@ impl<M: crate::Mode> Namespace<M> {
             async {
                 let _permit = self.core.read_permit().await;
                 self.core
-                    .read(&self.namespace_id, None, |pinned| async move {
-                        Ok(pinned
-                            .engine
-                            .stat_current_files_by_inode(inode_ids, &pinned.context)
-                            .await?)
-                    })
+                    .read(
+                        &self.namespace_id,
+                        crate::Consistency::Eventual,
+                        |pinned| async move {
+                            Ok(pinned
+                                .engine
+                                .stat_current_files_by_inode(inode_ids, &pinned.context)
+                                .await?)
+                        },
+                    )
                     .await
             },
         )

@@ -124,7 +124,7 @@ pub(crate) async fn run_filesystem_grep(
         ),
         allow_stale: args.allow_stale,
         allow_scan: args.allow_scan,
-        consistency: None,
+        consistency: loonfs_types::options::Consistency::Eventual,
     };
     let mut tail_scanned = true;
     let listing = collect_or_stream_pages(

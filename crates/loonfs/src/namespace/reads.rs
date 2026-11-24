@@ -136,17 +136,16 @@ impl<M: crate::Mode> Namespace<M> {
     /// publish concurrently. It retains nothing in the store and is meant to
     /// live for one request or unit of work.
     ///
-    /// The view reads the head at the runtime's default consistency. Use
-    /// [`Self::read_view_with_options`] to capture the head at another
-    /// consistency.
+    /// The view reads the head as an `eventual` read does. Use
+    /// [`Self::read_view_with_options`] to capture the head as a `strong`
+    /// read does.
     pub async fn read_view(&self) -> Result<ReadView> {
         self.read_view_with_options(&LiveReadOptions::default())
             .await
     }
 
     /// Captures the current namespace state for a group of related reads, as
-    /// [`Self::read_view`] does, at the consistency that `options` sets, or
-    /// at the runtime's default consistency when it sets none.
+    /// [`Self::read_view`] does, at the consistency that `options` sets.
     pub async fn read_view_with_options(&self, options: &LiveReadOptions) -> Result<ReadView> {
         trace::in_operation(
             operation_span!(self.core, "read_view", self.namespace_id),
@@ -237,8 +236,7 @@ impl<M: crate::Mode> Namespace<M> {
     }
 
     /// Returns this namespace's metadata, as [`Self::metadata`] does, at the
-    /// head that the consistency in `options` confirms, or at the runtime's
-    /// default consistency when it sets none.
+    /// head that the consistency in `options` confirms.
     pub async fn metadata_with_options(
         &self,
         options: &LiveReadOptions,
@@ -506,12 +504,16 @@ impl<M: crate::Mode> Namespace<M> {
             async {
                 let _permit = self.core.read_permit().await;
                 self.core
-                    .read(&self.namespace_id, None, |pinned| async move {
-                        Ok(pinned
-                            .engine
-                            .read_content_ref(content_ref, max_bytes, &pinned.context)
-                            .await?)
-                    })
+                    .read(
+                        &self.namespace_id,
+                        Consistency::Eventual,
+                        |pinned| async move {
+                            Ok(pinned
+                                .engine
+                                .read_content_ref(content_ref, max_bytes, &pinned.context)
+                                .await?)
+                        },
+                    )
                     .await
             },
         )
@@ -541,7 +543,7 @@ impl<M: crate::Mode> Namespace<M> {
     async fn trash_page(
         &self,
         request: PageRequest<TrashPageCursor>,
-        consistency: Option<Consistency>,
+        consistency: Consistency,
     ) -> Result<loonfs_types::ListTrashResponse> {
         trace::in_operation(
             operation_span!(self.core, "list_trash", self.namespace_id),

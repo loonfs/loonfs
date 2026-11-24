@@ -23,7 +23,7 @@ pub(crate) enum ReadHeadSource {
     /// had none.
     Loaded,
     /// The namespace's cached head as it was, for an eventual read within
-    /// its maximum staleness, with no request to confirm the head.
+    /// the runtime's maximum staleness, with no request to confirm the head.
     Eventual,
 }
 

@@ -313,7 +313,7 @@ Manifest checks detect manifests published above the position: the position adva
 
 ### Consistency
 
-A live-read option controlling how recently LoonFS confirms the namespace [head](#head): `eventual` (default unless the host sets `strong`) skips head confirmation while the last confirmation is younger than `max_staleness_ms`, while `strong` confirms the head before every read. Pinned reads (such as snapshot reads) have no consistency option. See [Read consistency](api.md#read-consistency).
+A live-read option controlling how recently LoonFS confirms the namespace [head](#head): `eventual` (the default) skips head confirmation while the last confirmation is younger than the runtime's `max_staleness_ms` setting, while `strong` confirms the head before every read. Pinned reads (such as snapshot reads) have no consistency option. See [Read consistency](api.md#read-consistency).
 
 ### Eventual read
 

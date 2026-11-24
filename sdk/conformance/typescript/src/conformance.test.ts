@@ -301,7 +301,6 @@ interface ReadConsistencyRequest {
     actor_id: LoonFS.ActorId;
     content_utf8: string;
     commit_ids: { put: string; put_deleted: string; delete: string };
-    max_staleness_ms: number;
     snapshot_name: string;
 }
 
@@ -654,7 +653,6 @@ const READ_CONSISTENCY_REQUEST_FIELDS = [
     "actor_id",
     "content_utf8",
     "commit_ids",
-    "max_staleness_ms",
     "snapshot_name",
 ] as const;
 const READ_CONSISTENCY_EXPECTED_FIELDS = [
@@ -3299,9 +3297,9 @@ conformanceTest("read_consistency", async (activeHarness, testCase) => {
         await client.files.retrieve({ namespace_id: namespaceId, path: request.path }),
     ).inode_id;
 
-    const settings: Array<{ consistency: LoonFS.ReadConsistency; max_staleness_ms?: number }> = [
+    const settings: Array<{ consistency: LoonFS.Consistency }> = [
         { consistency: "strong" },
-        { consistency: "eventual", max_staleness_ms: request.max_staleness_ms },
+        { consistency: "eventual" },
     ];
     for (const setting of settings) {
         const trash = await client.trash.list({ namespace_id: namespaceId, ...setting });

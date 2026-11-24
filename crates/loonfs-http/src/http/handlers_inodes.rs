@@ -9,7 +9,7 @@ use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
 use loonfs::{
-    ListFileRevisionsOptions, ListOptions, ReadConsistency, ReadFileStreamOptions, StatOptions,
+    Consistency, ListFileRevisionsOptions, ListOptions, ReadFileStreamOptions, StatOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
@@ -37,15 +37,11 @@ pub(super) struct InodeRevisionPathParams {
 pub(super) struct InodeContentQuery {
     /// The snapshot whose captured file revision to read.
     snapshot_id: Option<SnapshotId>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read. It can't be combined with `snapshot_id`.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined
+    /// with `snapshot_id`.
+    consistency: Option<Consistency>,
 }
 
 /// The query of a revision content read by inode.
@@ -58,14 +54,10 @@ pub(super) struct InodeRevisionContentQuery {
     /// in. The snapshot's manifest keeps the revision after the namespace's retention floor passes it.
     snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head that it finds the revision in. `eventual`
-    /// (the default, unless the server's `consistency` setting is `strong`) reads at the head that
-    /// the server confirmed last while that confirmation is younger than the maximum staleness, and
-    /// `strong` confirms the head before the read. It can't be combined with `snapshot_id`.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// (the default) reads at the head that the server confirmed last while that confirmation is
+    /// younger than the server's `max_staleness_ms`, and `strong` confirms the head before the
+    /// read. It can't be combined with `snapshot_id`.
+    consistency: Option<Consistency>,
 }
 
 /// The query of an inode stat.
@@ -80,15 +72,11 @@ pub(super) struct StatInodeQuery {
     include_attributes: Option<bool>,
     /// The snapshot whose captured path state to read.
     snapshot_id: Option<SnapshotId>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read. It can't be combined with `snapshot_id`.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined
+    /// with `snapshot_id`.
+    consistency: Option<Consistency>,
 }
 
 #[cfg_attr(
@@ -134,7 +122,7 @@ pub(super) async fn get_inode(
     let runtime = state.runtime_for(context);
     let inode_id = path.inode_id;
     let mut options = StatOptions {
-        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
+        at: read_at(query.snapshot_id, query.consistency)?,
         ..StatOptions::default()
     };
     if let Some(include) = query.include_attributes {
@@ -173,15 +161,11 @@ pub(super) struct ListInodeChildrenQuery {
     recursive: Option<bool>,
     /// The snapshot whose captured directory state to read.
     snapshot_id: Option<SnapshotId>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read. It can't be combined with `snapshot_id`.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined
+    /// with `snapshot_id`.
+    consistency: Option<Consistency>,
 }
 
 #[cfg_attr(
@@ -235,7 +219,7 @@ pub(super) async fn list_inode_children(
         options.recursive = recursive;
     }
     let limit = effective_page_limit(query.limit)?;
-    options.at = read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?;
+    options.at = read_at(query.snapshot_id, query.consistency)?;
     let listing = runtime
         .namespace(&namespace_id)
         .list_by_inode_with_options(inode_id, &options)
@@ -264,15 +248,11 @@ pub(super) struct ListInodeRevisionsQuery {
     /// The snapshot whose state to list the file's revisions in. The listing starts at the
     /// revision that the snapshot captured.
     snapshot_id: Option<SnapshotId>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read. It can't be combined with `snapshot_id`.
-    consistency: Option<ReadConsistency>,
-    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
-    /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
-    max_staleness_ms: Option<u64>,
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined
+    /// with `snapshot_id`.
+    consistency: Option<Consistency>,
 }
 
 #[cfg_attr(
@@ -320,7 +300,7 @@ pub(super) async fn list_file_revisions_by_inode(
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = path.inode_id;
     let options = ListFileRevisionsOptions {
-        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
+        at: read_at(query.snapshot_id, query.consistency)?,
     };
     let response = namespace
         .list_file_revisions_by_inode_with_options(inode_id, &options)
@@ -382,7 +362,7 @@ pub(super) async fn get_file_content_by_inode(
     let inode_id = path.inode_id;
     let options = ReadFileStreamOptions {
         range: range.stream_range(),
-        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
+        at: read_at(query.snapshot_id, query.consistency)?,
         ..ReadFileStreamOptions::default()
     };
     let permit = acquire_download_permit(&state)?;
@@ -447,7 +427,7 @@ pub(super) async fn get_file_revision_content_by_inode(
     let revision_no = path.revision_no;
     let options = ReadFileStreamOptions {
         range: range.stream_range(),
-        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
+        at: read_at(query.snapshot_id, query.consistency)?,
         ..ReadFileStreamOptions::default()
     };
     let permit = acquire_download_permit(&state)?;

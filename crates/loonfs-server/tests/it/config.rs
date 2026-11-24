@@ -4,8 +4,8 @@
 use loonfs::GC_GRACE_WINDOW_MS;
 use loonfs::READ_REVALIDATION_BOUND_MS;
 use loonfs_server::{
-    load_server_config, JobMode, MetadataCacheConfig, MetadataCacheSsdConfig, ReadConsistency,
-    ServerConfig, ServerError, TlsServerConfig, TransportConfig,
+    load_server_config, JobMode, MetadataCacheConfig, MetadataCacheSsdConfig, ServerConfig,
+    ServerError, TlsServerConfig, TransportConfig,
 };
 use loonfs_test_support::EnvGuard;
 use loonfs_types::config::ConfigFieldError;
@@ -874,7 +874,6 @@ root = "/tmp/loonfs-server"
     assert_eq!(config.metadata_cache, MetadataCacheConfig::default());
     assert_eq!(config.manifest_revalidation_interval_ms, None);
     assert_eq!(config.max_staleness_ms, None);
-    assert_eq!(config.consistency, ReadConsistency::Eventual);
 }
 
 #[test]
@@ -885,7 +884,6 @@ bind = "127.0.0.1:9400"
 writer_id = "loonfs-server"
 manifest_revalidation_interval_ms = 250
 max_staleness_ms = 5000
-consistency = "strong"
 
 [metadata_cache]
 max_segment_bytes = 16384
@@ -906,7 +904,6 @@ root = "/tmp/loonfs-server"
         .clone();
     assert_eq!(config.manifest_revalidation_interval_ms, Some(250));
     assert_eq!(config.max_staleness_ms, Some(5000));
-    assert_eq!(config.consistency, ReadConsistency::Strong);
     assert_eq!(
         config.metadata_cache,
         MetadataCacheConfig {

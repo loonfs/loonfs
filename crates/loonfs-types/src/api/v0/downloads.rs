@@ -1,7 +1,7 @@
 //! Download requests and responses for direct object-store reads in the v0 HTTP API.
 
 use super::ObjectTransfer;
-use crate::options::ReadConsistency;
+use crate::options::Consistency;
 use crate::{AbsolutePath, ContentRef, InodeId, NamespaceId, RevisionNo, SnapshotId};
 use serde::{Deserialize, Serialize};
 
@@ -22,18 +22,13 @@ pub struct CreateDownloadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub snapshot_id: Option<SnapshotId>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read. It can't be combined with `snapshot_id`.
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined
+    /// with `snapshot_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub consistency: Option<ReadConsistency>,
-    /// With `consistency` set to `eventual`, how old the server's last confirmation of the head can
-    /// be, in milliseconds. The default is the server's `max_staleness_ms`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub max_staleness_ms: Option<u64>,
+    pub consistency: Option<Consistency>,
     /// The first byte that the download reads. The download covers the revision's bytes from
     /// `start_offset` up to `size_bytes`, so a client that resumes a download asks for a new download
     /// that starts after the bytes it already has. The offset must be less than the revision's
@@ -52,18 +47,13 @@ pub struct CreateDownloadByInodeRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub snapshot_id: Option<SnapshotId>,
-    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
-    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
-    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read. It can't be combined with `snapshot_id`.
+    /// How recently the read confirms the namespace head. `eventual` (the default) reads at the
+    /// head that the server confirmed last while that confirmation is younger than the server's
+    /// `max_staleness_ms`, and `strong` confirms the head before the read. It can't be combined
+    /// with `snapshot_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub consistency: Option<ReadConsistency>,
-    /// With `consistency` set to `eventual`, how old the server's last confirmation of the head can
-    /// be, in milliseconds. The default is the server's `max_staleness_ms`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub max_staleness_ms: Option<u64>,
+    pub consistency: Option<Consistency>,
     /// The first byte that the download reads. It defaults to 0 and must be less than the file's size.
     /// For a file of zero bytes, it must be 0.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -82,17 +72,12 @@ pub struct CreateRevisionDownloadByInodeRequest {
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head that it finds the revision in. `eventual`
-    /// (the default, unless the server's `consistency` setting is `strong`) reads at the head that
-    /// the server confirmed last while that confirmation is younger than the maximum staleness,
-    /// and `strong` confirms the head before the read. It can't be combined with `snapshot_id`.
+    /// (the default) reads at the head that the server confirmed last while that confirmation is
+    /// younger than the server's `max_staleness_ms`, and `strong` confirms the head before the
+    /// read. It can't be combined with `snapshot_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub consistency: Option<ReadConsistency>,
-    /// With `consistency` set to `eventual`, how old the server's last confirmation of the head can
-    /// be, in milliseconds. The default is the server's `max_staleness_ms`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub max_staleness_ms: Option<u64>,
+    pub consistency: Option<Consistency>,
     /// The first byte that the download reads. It defaults to 0 and must be less than the revision's
     /// size. For a revision of zero bytes, it must be 0.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -152,8 +137,8 @@ pub struct DownloadRange {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
-        CreateDownloadResponse, CreateRevisionDownloadByInodeRequest, ReadConsistency,
+        Consistency, CreateDownloadByInodeRequest, CreateDownloadByInodeResponse,
+        CreateDownloadRequest, CreateDownloadResponse, CreateRevisionDownloadByInodeRequest,
     };
     use crate::{AbsolutePath, ContentId, ContentRef, NamespaceId, RevisionNo, SnapshotId};
     use crate::{DownloadRange, ObjectTransfer};
@@ -223,12 +208,12 @@ mod tests {
         .expect_err("a client must not be able to name the content object");
     }
 
-    /// Checks that each download request decodes the consistency fields, and
-    /// that a request without them serializes neither, so an older server
-    /// that rejects unknown fields still accepts it.
+    /// Checks that each download request decodes the consistency field and
+    /// refuses a maximum staleness, and that a request without a consistency
+    /// doesn't serialize the field.
     #[test]
-    fn download_requests_take_the_consistency_fields_only_when_set() {
-        let fields = serde_json::json!({"consistency": "eventual", "max_staleness_ms": 2500});
+    fn download_requests_take_the_consistency_field_only_when_set() {
+        let fields = serde_json::json!({"consistency": "strong"});
         let mut path_body = fields.clone();
         path_body["path"] = serde_json::json!("/docs/report.txt");
         let path: CreateDownloadRequest =
@@ -237,16 +222,15 @@ mod tests {
             serde_json::from_value(fields.clone()).expect("decode inode request");
         let revision: CreateRevisionDownloadByInodeRequest =
             serde_json::from_value(fields).expect("decode revision request");
-        for (consistency, max_staleness_ms) in [
-            (path.consistency, path.max_staleness_ms),
-            (inode.consistency, inode.max_staleness_ms),
-            (revision.consistency, revision.max_staleness_ms),
-        ] {
-            assert_eq!(consistency, Some(ReadConsistency::Eventual));
-            assert_eq!(max_staleness_ms, Some(2500));
+        for consistency in [path.consistency, inode.consistency, revision.consistency] {
+            assert_eq!(consistency, Some(Consistency::Strong));
         }
         serde_json::from_str::<CreateDownloadByInodeRequest>(r#"{"consistency":"sometimes"}"#)
             .expect_err("an unknown consistency should be rejected");
+        serde_json::from_str::<CreateDownloadByInodeRequest>(
+            r#"{"consistency":"eventual","max_staleness_ms":2500}"#,
+        )
+        .expect_err("a request has no maximum staleness");
 
         for unset in [
             serde_json::to_value(CreateDownloadByInodeRequest::default()),

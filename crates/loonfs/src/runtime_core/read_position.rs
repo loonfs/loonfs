@@ -167,11 +167,11 @@ impl RuntimeCore {
     /// when the read starts from the read cache instead.
     ///
     /// A read takes the position as it is while the position's last check is
-    /// younger than the read's maximum staleness. A read without one (a
+    /// younger than `max_staleness_ms`. A read without one (a
     /// `strong` read), or past it, needs a check of the position (see
     /// [`Self::check_writer_position`]). It waits for the check in flight,
     /// and then takes the position if that check confirmed it within the
-    /// read's maximum staleness, or else shares the next check or runs it
+    /// maximum staleness, or else shares the next check or runs it
     /// (see [`SharedCheck`]). So a wave of concurrent reads costs at most two
     /// checks.
     pub(crate) async fn checked_writer_position(

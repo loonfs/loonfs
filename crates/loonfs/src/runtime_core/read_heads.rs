@@ -4,8 +4,8 @@
 //! new commits and whose interval check finds a newer manifest. Each strong
 //! read of the position waits for the session's check for a newer manifest.
 //! The reads that need a refresh or a check share one. An eventual read
-//! skips these while its head was confirmed less than its maximum staleness
-//! ago.
+//! skips these while its head was confirmed less than the runtime's maximum
+//! staleness ago.
 
 use super::RuntimeCore;
 use crate::metrics::ReadHeadSource;
@@ -27,9 +27,8 @@ use tracing::Instrument;
 /// How a read confirms the namespace head that it starts from.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum HeadConfirmation {
-    /// As the read's consistency asks, or as the runtime's default
-    /// consistency when the read sets none.
-    Consistency(Option<Consistency>),
+    /// As the read's consistency asks.
+    Consistency(Consistency),
     /// As a load of the namespace's immutable identity, or a check before a
     /// write that commits through the writer session, needs: the writer
     /// position as it is, in a runtime with the namespace's writer session,
@@ -44,22 +43,16 @@ pub(crate) enum HeadConfirmation {
     View,
 }
 
-impl From<Option<Consistency>> for HeadConfirmation {
-    fn from(consistency: Option<Consistency>) -> Self {
+impl From<Consistency> for HeadConfirmation {
+    fn from(consistency: Consistency) -> Self {
         Self::Consistency(consistency)
     }
 }
 
-impl From<Consistency> for HeadConfirmation {
-    fn from(consistency: Consistency) -> Self {
-        Self::Consistency(Some(consistency))
-    }
-}
-
 impl RuntimeCore {
-    /// Returns the namespace's head, confirmed or loaded for a read with the
-    /// maximum staleness `max_staleness_ms`, or for a `strong` read when
-    /// it's `None`.
+    /// Returns the namespace's head, confirmed or loaded for an eventual read
+    /// with the maximum staleness `max_staleness_ms`, or for a `strong` read
+    /// when it's `None`.
     ///
     /// One refresh of the namespace's head runs at a time in this runtime,
     /// and the reads that need one share it (see
@@ -161,18 +154,16 @@ impl RuntimeCore {
     /// In a runtime with the namespace's writer session, the head is the
     /// session's position (see [`Self::checked_writer_position`]). Otherwise
     /// it's the namespace's cached head. An eventual read takes either head
-    /// as it is while it was confirmed less than the read's maximum
+    /// as it is while it was confirmed less than the runtime's maximum
     /// staleness ago (see [`Self::eventual_head`] for the cached head), and
     /// every other read confirms or loads the head.
     ///
-    /// Every read with a caller's consistency calls this method before it
-    /// starts from a head, so a read whose maximum staleness is longer than
-    /// the revalidation bound returns `invalid_request` here, before the read
-    /// sends a request to the store (see [`Self::max_staleness_ms`]). An
-    /// eventual read therefore starts from the writer position without a new
-    /// check only while the position's last check is younger than the
-    /// revalidation bound, the same limit that [`Self::eventual_head`]
-    /// applies to the cached head's manifest check.
+    /// The runtime's maximum staleness is at most the revalidation bound
+    /// (see [`RuntimeConfig::validate`](crate::RuntimeConfig::validate)), so
+    /// an eventual read starts from the writer position without a new check
+    /// only while the position's last check is younger than the revalidation
+    /// bound, the same limit that [`Self::eventual_head`] applies to the
+    /// cached head's manifest check.
     pub(crate) async fn current_read_context(
         &self,
         namespace_id: &NamespaceId,
@@ -195,8 +186,7 @@ impl RuntimeCore {
     ) -> Result<T> {
         let (max_staleness_ms, position_staleness_ms) = match confirmation.into() {
             HeadConfirmation::Consistency(consistency) => {
-                let consistency = consistency.unwrap_or(self.inner.config.consistency.into());
-                let max_staleness_ms = self.max_staleness_ms(consistency)?;
+                let max_staleness_ms = self.max_staleness_ms(consistency);
                 (max_staleness_ms, max_staleness_ms)
             }
             HeadConfirmation::View => (None, Some(READ_REVALIDATION_BOUND_MS)),
@@ -236,7 +226,7 @@ impl RuntimeCore {
     /// way a `strong` read does.
     ///
     /// An eventual read takes the cached head while the head was confirmed
-    /// less than the read's maximum staleness ago, so the read sees every
+    /// less than the runtime's maximum staleness ago, so the read sees every
     /// commit acknowledged before that confirmation. The head's manifest
     /// check must also be younger than the revalidation bound: garbage
     /// collection deletes the segments of a replaced manifest once the
@@ -258,27 +248,14 @@ impl RuntimeCore {
         Some(cached)
     }
 
-    /// Returns the maximum staleness of a read with `consistency`, or `None`
-    /// for a `strong` read.
-    ///
-    /// A read's consistency becomes a maximum staleness only in this method,
-    /// so a read whose maximum staleness is longer than the revalidation
-    /// bound returns `invalid_request` from it.
-    fn max_staleness_ms(&self, consistency: Consistency) -> Result<Option<u64>> {
-        let Consistency::Eventual { max_staleness_ms } = consistency else {
-            return Ok(None);
-        };
-        let max_staleness_ms = max_staleness_ms.unwrap_or(self.inner.config.max_staleness_ms);
-        if max_staleness_ms > READ_REVALIDATION_BOUND_MS {
-            return Err(Error::InvalidRequest {
-                message: format!(
-                    "max_staleness_ms {max_staleness_ms} exceeds the revalidation bound \
-                     ({READ_REVALIDATION_BOUND_MS} ms)"
-                ),
-                param: "max_staleness_ms",
-            });
+    /// Returns the maximum staleness of a read with `consistency`: the
+    /// runtime's setting for an `eventual` read, and `None` for a `strong`
+    /// read.
+    fn max_staleness_ms(&self, consistency: Consistency) -> Option<u64> {
+        match consistency {
+            Consistency::Eventual => Some(self.inner.config.max_staleness_ms),
+            Consistency::Strong => None,
         }
-        Ok(Some(max_staleness_ms))
     }
 
     /// Returns the read context of `basis`, which is a cached head's basis or

@@ -261,9 +261,7 @@ async fn check_eventual_read_access(content_size: usize) {
         .with_context(subject("viewer").into());
     let namespace = reader.namespace(&namespace_id);
     let eventual = ReadFileOptions {
-        at: ReadAt::Live(Some(Consistency::Eventual {
-            max_staleness_ms: None,
-        })),
+        at: ReadAt::Live(Consistency::Eventual),
     };
     let read = namespace
         .read_file_with_options("/team/file", &eventual)
@@ -315,10 +313,7 @@ async fn a_former_writer_sees_revocation_on_its_first_strong_read() {
 #[tokio::test]
 async fn a_former_writer_sees_revocation_past_the_maximum_staleness() {
     for warm_before_handoff in [false, true] {
-        let eventual = Consistency::Eventual {
-            max_staleness_ms: None,
-        };
-        check_former_writer_read(warm_before_handoff, eventual).await;
+        check_former_writer_read(warm_before_handoff, Consistency::Eventual).await;
     }
 }
 
@@ -408,7 +403,7 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
         )
         .await
         .expect("revoke read access");
-    if let Consistency::Eventual { .. } = consistency {
+    if consistency == Consistency::Eventual {
         clock.advance_ms(1_000);
     }
     assert_eq!(
@@ -416,7 +411,7 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
             .read_file_with_options(
                 "/team/file",
                 &ReadFileOptions {
-                    at: ReadAt::Live(Some(consistency)),
+                    at: ReadAt::Live(consistency),
                 },
             )
             .await

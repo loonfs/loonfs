@@ -65,7 +65,8 @@ pub struct CachedHead {
     /// When the WAL probe last confirmed the head, or when the head was
     /// loaded. The observation is taken before the probe or the load is sent,
     /// so the head includes every commit acknowledged before it. An eventual
-    /// read within its maximum staleness reads at the head without a request.
+    /// read within the runtime's maximum staleness reads at the head without a
+    /// request.
     head_confirmed: Observation,
 }
 

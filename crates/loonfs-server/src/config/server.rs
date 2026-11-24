@@ -1,7 +1,7 @@
 //! The server config file's top-level settings, its `[auth]` and
 //! `[transport]` tables, and their defaults.
 
-use super::{GrepConfig, JobMode, MemorySizing, MetadataCacheConfig, ReadConsistency, StoreConfig};
+use super::{GrepConfig, JobMode, MemorySizing, MetadataCacheConfig, StoreConfig};
 use crate::{Result, ServerError};
 use loonfs::metrics::MetricsRecorder;
 use loonfs::ExecutionBudget;
@@ -219,15 +219,11 @@ pub struct ServerConfig {
     /// in milliseconds. Zero checks on every read. Unset keeps the runtime
     /// default of 1000. At most 1200000, the revalidation bound.
     pub manifest_revalidation_interval_ms: Option<u64>,
-    /// The maximum staleness, in milliseconds, of an eventual read that doesn't
-    /// set its own `max_staleness_ms`. Zero confirms the namespace head on
-    /// every read. Unset keeps the runtime default of 1000. At most 1200000,
-    /// the revalidation bound.
+    /// The maximum staleness, in milliseconds, of an eventual read, the
+    /// consistency of every read that doesn't ask for `strong`. Zero confirms
+    /// the namespace head on every read. Unset keeps the runtime default of
+    /// 1000. At most 1200000, the revalidation bound.
     pub max_staleness_ms: Option<u64>,
-    /// The runtime's default consistency, which every read that doesn't set
-    /// its own takes.
-    #[serde(default)]
-    pub consistency: ReadConsistency,
     /// How old a WAL tail's newest commit must be before maintenance folds
     /// a tail that is below the fold thresholds, in milliseconds. The
     /// maintenance scheduler and explicit `metadata` requests use the same
@@ -389,7 +385,6 @@ impl ServerConfig {
                 .manifest_revalidation_interval_ms
                 .unwrap_or(defaults.manifest_revalidation_interval_ms),
             max_staleness_ms: self.max_staleness_ms.unwrap_or(defaults.max_staleness_ms),
-            consistency: self.consistency,
             trace_mode: loonfs::TraceMode::Remote,
             min_publish_interval_ms: self.min_publish_interval_ms,
             publication: loonfs::PublicationPolicy {

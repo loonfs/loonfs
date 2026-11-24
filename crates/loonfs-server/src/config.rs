@@ -9,7 +9,6 @@ mod tables;
 mod tests;
 mod validate;
 
-pub use loonfs::ReadConsistency;
 pub use loonfs_http::JobMode;
 pub use loonfs_objectstore::StoreConfig;
 pub(crate) use memory::MemorySizing;
