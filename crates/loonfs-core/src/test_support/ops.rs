@@ -392,7 +392,11 @@ impl<S: ObjectStore> crate::engine::NamespaceEngine<S, crate::engine::Writable> 
         &self,
         target: crate::manifest::RetentionTarget,
     ) -> Result<crate::manifest::PublicationReport<loonfs_types::AdvanceRetentionResponse>> {
-        let planned = &self.namespace.load_current_manifest().await?;
+        let planned = &self
+            .namespace
+            .load_live_basis(crate::test_support::observed_now())
+            .await?
+            .into_manifest();
         let report = match self
             .namespace
             .plan_retention_floor(planned, planned.retention_floor_seq(), target)

@@ -19,7 +19,6 @@ use crate::path::read::{
 };
 use crate::segment::KeptBy;
 use crate::storage::content::DurableContentValidationError;
-use crate::storage::content_location::ContentLocation;
 use crate::storage::content_stream::{FileContentStream, StreamRange};
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
@@ -668,30 +667,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::path::read::ensure_stat_batch_within_cap(inode_ids.len())?;
         let read = self.authorized_read(context).await?;
         crate::path::read::stat_current_files_by_inode(&read.view, inode_ids, &read.access()).await
-    }
-
-    /// Resolves where the bytes of `content_ref` are, including an unpublished upload.
-    pub async fn resolve_content_location(
-        &self,
-        content_ref: &ContentRef,
-        context: &RuntimeReadContext,
-    ) -> Result<ContentLocation> {
-        let view = self
-            .namespace
-            .load_metadata_view_for_authorization(context)
-            .await?;
-        if view
-            .metadata_view()
-            .content_published(&content_ref.content_id)
-            .await?
-        {
-            view.resolve_published_content_location(content_ref).await
-        } else {
-            Ok(ContentLocation::whole(
-                &context.read_basis().head.pool_id,
-                content_ref,
-            ))
-        }
     }
 
     /// Reads and verifies the bytes named by a published reference.

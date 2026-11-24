@@ -113,7 +113,7 @@ async fn unfolded_wal_objects<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> u64 {
     loonfs_core::test_support::namespace_store(store, namespace_id)
-        .load_diagnostics()
+        .load_wal_tail_usage()
         .await
         .expect("load namespace diagnostics")
         .wal_tail_objects

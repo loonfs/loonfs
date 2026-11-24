@@ -658,9 +658,10 @@ impl Maintenance {
     /// Returns the manifest and the retention floor that a retention advance
     /// plans from. Those are this runtime's writer position after a strong
     /// read's check of it (see [`RuntimeCore::checked_writer_position`]), or
-    /// the current manifest and its floor when no position is left after the
-    /// check or the position's manifest is missing from the store and at or
-    /// below the manifest boundary (see [`Self::position_basis`]).
+    /// the current manifest of a live namespace and its floor when no
+    /// position is left after the check or the position's manifest is missing
+    /// from the store and at or below the manifest boundary (see
+    /// [`Self::position_basis`]).
     async fn load_retention_view(
         &self,
         namespace_id: &NamespaceId,
@@ -677,8 +678,9 @@ impl Maintenance {
         let current = self
             .core
             .namespace_store(namespace_id)
-            .load_current_manifest()
-            .await?;
+            .load_live_basis(self.core.observation())
+            .await?
+            .into_manifest();
         let retention_floor_seq = current.retention_floor_seq();
         Ok((current, retention_floor_seq))
     }

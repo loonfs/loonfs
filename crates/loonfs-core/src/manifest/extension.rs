@@ -6,9 +6,10 @@ use super::published::PublicationReport;
 use super::validate::validate_manifest;
 use crate::engine::{NamespaceEngine, RuntimeReadContext, Writable};
 use crate::error::Result;
-use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::time::OperationClock;
+use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{ExtensionEntry, NamespaceManifestPayload};
 use loonfs_types::ExtensionName;
@@ -62,9 +63,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// change, and starts the clock of the change's publication.
     pub async fn load_extension_basis(&self) -> Result<ExtensionBasis> {
         let clock = self.namespace.start_clock();
-        let basis = self.namespace.load_current_basis(clock.origin()).await?;
-        let payload = basis.manifest().payload();
-        ensure_namespace_live(&payload.namespace_id, payload.status)?;
+        let basis = self.namespace.load_live_basis(clock.origin()).await?;
         Ok(ExtensionBasis { basis, clock })
     }
 
@@ -99,12 +98,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let built_on = basis.find_entry(name);
         let update = self
             .namespace
-            .update_manifest(
+            .update_live_manifest(
                 Some(basis.basis.clone()),
                 &basis.clock,
-                |current: LoadedManifest| {
-                    let change = extension_change(&current, name, built_on, &entry);
-                    async move { change }
+                |payload: NamespaceManifestPayload| {
+                    let change = extension_change(payload, name, built_on, &entry);
+                    async move { Ok(change) }
                 },
             )
             .await?;
@@ -128,24 +127,20 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 /// Returns the manifest after `current` with `entry` as the entry of
 /// extension `name`, or `Finished` when `current`'s entry of `name` isn't
 /// `built_on`.
-///
-/// Returns `namespace_deleted` when `current` is a tombstone.
 fn extension_change(
-    current: &LoadedManifest,
+    mut current: NamespaceManifestPayload,
     name: &ExtensionName,
     built_on: Option<&ExtensionEntry>,
     entry: &ExtensionEntry,
-) -> Result<ManifestChange<()>> {
-    let payload = current.payload();
-    ensure_namespace_live(&payload.namespace_id, payload.status)?;
-    if payload.extensions.get(name) != built_on {
-        return Ok(ManifestChange::Finished(()));
+) -> ManifestChange<()> {
+    if current.extensions.get(name) != built_on {
+        return ManifestChange::Finished(());
     }
-    let mut next = payload.clone();
-    next.extensions.insert(name.clone(), entry.clone());
-    validate_manifest(&current.object_key, &next)
+    let object_key = metadata_manifest_object(&current.namespace_id, &current.manifest_no);
+    current.extensions.insert(name.clone(), entry.clone());
+    validate_manifest(&object_key, &current)
         .expect("an extension's publication should list valid runs");
-    Ok(ManifestChange::Next(Box::new(next), ()))
+    ManifestChange::Next(Box::new(current), ())
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
