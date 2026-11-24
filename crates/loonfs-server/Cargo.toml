@@ -16,7 +16,6 @@ path = "src/main.rs"
 [dependencies]
 axum.workspace = true
 clap.workspace = true
-http-body.workspace = true
 http.workspace = true
 hyper-util = { workspace = true, features = ["server-auto", "server-graceful", "service", "tokio"] }
 loonfs-types.workspace = true

@@ -39,8 +39,6 @@ utoipa = { workspace = true, optional = true }
 [dev-dependencies]
 async-trait.workspace = true
 http-body-util.workspace = true
-hyper = { workspace = true, features = ["server", "http1"] }
-hyper-util = { workspace = true, features = ["tokio", "service"] }
 # The session tests lower the WAL objects that make a session's fold due.
 loonfs = { workspace = true, features = ["test-support"] }
 loonfs-client.workspace = true
