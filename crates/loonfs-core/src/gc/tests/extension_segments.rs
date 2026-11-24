@@ -1,5 +1,5 @@
 //! Extension segments under the core segment rule: a segment stays while a
-//! root lists it, and goes once it's unlisted and strictly older than the
+//! root lists it, and goes once it's unlisted and at least as old as the
 //! grace window.
 
 use super::*;

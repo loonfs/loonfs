@@ -3106,7 +3106,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     assert!(!orphans.is_empty());
     failing.clear();
     let store = MetadataMapStore::aged(failing, KeyPredicate::any());
-    for age_ms in [GC_GRACE_WINDOW_MS, GC_GRACE_WINDOW_MS + 1] {
+    for age_ms in [GC_GRACE_WINDOW_MS - 1, GC_GRACE_WINDOW_MS] {
         crate::test_support::namespace_store(&store, &namespace)
             .gc(&writer_at("collector", age_ms).clock())
             .await
@@ -3114,7 +3114,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         for key in &orphans {
             assert_eq!(
                 store.head(key).await.expect("head").is_some(),
-                age_ms == GC_GRACE_WINDOW_MS
+                age_ms < GC_GRACE_WINDOW_MS
             );
         }
         for key in &current_keys {
