@@ -53,11 +53,40 @@ pub(super) async fn wait_for_exit(mut liveness: watch::Receiver<bool>) {
 }
 
 impl NamespacePublisher {
+    /// Runs one unit of the session's work, and returns `None` if the unit
+    /// panics.
+    ///
+    /// LoonFS records the panic (see [`Self::record_panic`]) and keeps the
+    /// session open, because a panic is a bug that a new session might hit
+    /// again. Then LoonFS drops the session's view of the namespace (see
+    /// [`Self::drop_view_after_panic`]). For a unit that panicked with the
+    /// engine locked, the engine's release already did that, so this call
+    /// covers a fold or a compaction, which puts manifests without the
+    /// engine locked. The worker runs each unit it takes from the queue
+    /// inside this function, and [`Self::spawn_session_task`] runs each fold
+    /// and compaction inside it. The worker, not this function, returns
+    /// `outcome_unknown` to the callers of a unit that panicked.
+    pub(super) async fn contain_panic<T>(
+        &self,
+        unit: &'static str,
+        work: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        match AssertUnwindSafe(work).catch_unwind().await {
+            Ok(output) => Some(output),
+            Err(payload) => {
+                self.record_panic(unit, panic_message(payload.as_ref()));
+                drop(payload);
+                self.drop_view_after_panic(&mut *self.lock_engine().await);
+                None
+            }
+        }
+    }
+
     /// Starts a fold task after its triggering publication releases the engine.
-    /// A panicked fold is retried by the next publish over the threshold. The
-    /// drain reports the contained panic. A fold that publishes starts the
-    /// session's compaction after it releases its fold permit, and the task
-    /// folds again while the tail that the fold left is at the trigger.
+    /// A panicked fold is retried by the next publish over the threshold. A
+    /// fold that publishes starts the session's compaction after it releases
+    /// its fold permit, and the task folds again while the tail that the fold
+    /// left is at the trigger.
     pub(super) fn start_fold(&self) -> Option<oneshot::Sender<()>> {
         let mut state = self.lock_state();
         let _session = self.unfenced_session().ok()?;
@@ -70,7 +99,7 @@ impl NamespacePublisher {
         }
         let (start, started) = oneshot::channel();
         let publisher = self.clone();
-        let fold = self.spawn_session_task(&mut state, async move {
+        let fold = self.spawn_session_task(&mut state, "fold", async move {
             if started.await.is_err() {
                 return;
             }
@@ -78,15 +107,8 @@ impl NamespacePublisher {
             // it runs starts no fold, so the task checks the trigger again
             // after each fold that published. Each fold after the first folds
             // commits published during the fold before it.
-            loop {
-                match AssertUnwindSafe(publisher.run_fold()).catch_unwind().await {
-                    Ok(true) => publisher.start_compaction(),
-                    Ok(false) => return,
-                    Err(payload) => {
-                        publisher.record_panic("fold", panic_message(payload.as_ref()));
-                        return;
-                    }
-                }
+            while publisher.run_fold().await {
+                publisher.start_compaction();
             }
         });
         state.fold = Some(fold);
@@ -95,7 +117,7 @@ impl NamespacePublisher {
 
     /// Starts the session's metadata compaction unless one is running or the
     /// session no longer admits work. A panicked compaction may run again
-    /// after the next fold. The drain reports the contained panic.
+    /// after the next fold.
     pub(super) fn start_compaction(&self) {
         let mut state = self.lock_state();
         let Ok(_session) = self.admitted_session(&state) else {
@@ -109,13 +131,8 @@ impl NamespacePublisher {
             return;
         }
         let publisher = self.clone();
-        let compaction = self.spawn_session_task(&mut state, async move {
-            if let Err(payload) = AssertUnwindSafe(publisher.run_compaction())
-                .catch_unwind()
-                .await
-            {
-                publisher.record_panic("compaction", panic_message(payload.as_ref()));
-            }
+        let compaction = self.spawn_session_task(&mut state, "compaction", async move {
+            publisher.run_compaction().await;
         });
         state.compaction = Some(compaction);
     }
@@ -218,16 +235,19 @@ impl NamespacePublisher {
 
     /// Spawns `work` as a task whose exit the drain and close can wait for,
     /// and that removes the session's entry if it was the last thing running.
+    /// The task contains a panic in `work` (see [`Self::contain_panic`]), and
+    /// `unit` identifies the work in the record of the panic.
     pub(super) fn spawn_session_task(
         &self,
         state: &mut NamespacePublisherState,
+        unit: &'static str,
         work: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> SessionTask {
         let id = state.next_task_id;
         state.next_task_id = state.next_task_id.wrapping_add(1);
         let publisher = self.clone();
         let (task, liveness) = self.spawn_tracked(|exit| async move {
-            work.await;
+            publisher.contain_panic(unit, work).await;
             drop(exit);
             publisher.forget_if_ended();
         });

@@ -2469,11 +2469,11 @@ async fn a_first_commit_with_an_unknown_outcome_drops_the_cached_head() {
 }
 
 /// Checks that a deletion whose tombstone put stores the tombstone and then
-/// panics acknowledges no commit queued behind it. The deletion waits at the
-/// put of its fold while a commit queues, and its tombstone put panics after
-/// the store keeps the tombstone. If that commit were acknowledged, its WAL
-/// object would come after the tombstone's folded WAL number, so no read
-/// would replay it.
+/// panics returns `outcome_unknown` and acknowledges no commit queued behind
+/// it. The deletion waits at the put of its fold while a commit queues, and
+/// its tombstone put panics after the store keeps the tombstone. If that
+/// commit were acknowledged, its WAL object would come after the tombstone's
+/// folded WAL number, so no read would replay it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_deletion_that_panics_after_its_tombstone_put_acknowledges_no_later_commit() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2518,7 +2518,7 @@ async fn a_deletion_that_panics_after_its_tombstone_put_acknowledges_no_later_co
     let delete_error = settle_delete(delete, "the panicked deletion")
         .await
         .expect_err("the deletion panicked after its tombstone put");
-    assert_eq!(delete_error.code(), ErrorCode::ServerError);
+    assert_eq!(delete_error.code(), ErrorCode::OutcomeUnknown);
     let manifest = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
         .load_current_manifest()
         .await
@@ -3019,6 +3019,106 @@ async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
         "{tail_objects:?}"
     );
     writer.shutdown().await.expect("shut down writer");
+}
+
+/// Checks that a session task contains a panic in its fold: the writer
+/// records the panic in `loonfs.publisher.panics` and in the count that a
+/// drain reports, and drops the session's position and the namespace's
+/// cached head. The session keeps publishing, and the fold after its next
+/// commit folds the tail.
+#[tokio::test]
+async fn a_panicked_fold_drops_the_position_and_the_session_keeps_publishing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(loonfs_test_support::stores::PanicStore::panicking_on(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        is_fold,
+    ));
+    let namespace_id = NamespaceId::parse("panicked-fold").expect("valid namespace id");
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer = test_writer_with_cache(
+        store.clone() as SharedStore,
+        MetadataCache::default(),
+        recorder.clone(),
+    )
+    .await;
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("bootstrap");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    loonfs_core::test_support::NamespaceFixture::new(
+        store.as_ref(),
+        &namespace_id,
+        &WriterAt {
+            writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
+            now_ms: 1_000,
+        },
+    )
+    .append_wal_objects(FOLD_AT_WAL_OBJECTS.get() - 1)
+    .await
+    .expect("seed the WAL tail below the fold threshold");
+
+    store.arm();
+    namespace
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "cross-threshold",
+            "docs",
+        )))
+        .await
+        .expect("publish across the fold threshold");
+    namespace
+        .wait_for_fold()
+        .await
+        .expect("the fold task contains the panic");
+    assert_eq!(store.attempts(), 1);
+    assert_eq!(counter(&recorder, "loonfs.publisher.panics"), 1);
+    assert!(
+        writer.core.writer_position(&namespace_id).is_none(),
+        "the panicked fold dropped the position"
+    );
+    assert!(
+        writer
+            .core
+            .head_and_wal_tail_cache()
+            .get_head(&namespace_id)
+            .is_none(),
+        "the panicked fold dropped the cached head"
+    );
+
+    store.disarm();
+    namespace
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "after-panic",
+            "after-panic",
+        )))
+        .await
+        .expect("publish after the panicked fold");
+    namespace
+        .wait_for_fold()
+        .await
+        .expect("fold the tail after the panic");
+    let publisher = writer
+        .mode
+        .publisher
+        .live_publisher(&namespace_id)
+        .expect("live session");
+    let tail_objects = publisher.engine.lock().await.wal_tail_objects();
+    assert!(
+        tail_objects.is_some_and(|objects| objects < FOLD_AT_WAL_OBJECTS.get()),
+        "{tail_objects:?}"
+    );
+    let drain_error = writer
+        .drain()
+        .await
+        .expect_err("drain reports the contained panic");
+    assert!(
+        drain_error
+            .to_string()
+            .contains("1 publisher task(s) panicked"),
+        "{drain_error}"
+    );
 }
 
 #[tokio::test]
