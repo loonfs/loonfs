@@ -94,7 +94,9 @@ impl NamespaceReadAnchor {
 /// is read (see [`ensure_stored_writer_epoch`]), and the anchor's status is
 /// checked after the epoch, so a session whose namespace another writer
 /// deleted gets `writer_fenced`. A fence put moves the anchor's tip through
-/// the inner anchor, which code in the `namespace` module can reach.
+/// the inner anchor, and each retry of the put loads the next anchor with
+/// [`NamespaceStore::load_writer_read_anchor`], so the put returns a writer
+/// anchor too.
 #[derive(Debug, Clone)]
 pub(crate) struct WriterAnchor(pub(super) NamespaceReadAnchor);
 
