@@ -12,8 +12,7 @@ use crate::pool_store::PoolStore;
 use crate::time::OperationClock;
 use crate::upload::abort::AbandonedUpload;
 use crate::upload::records::{
-    create_upload_outcome, load_upload_outcome, load_upload_session_record, OutcomeCreation,
-    UploadSessionState,
+    create_upload_outcome, load_upload_outcome, load_upload_session_record, UploadSessionState,
 };
 use futures::{Stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::upload_session_prefix;
@@ -306,7 +305,10 @@ impl<S: ObjectStore> PoolStore<S> {
     /// The outcome record is created with put-if-absent, so this abort can't
     /// replace a completion that was recorded first. A completion that arrives
     /// after the lease is refused, so the grace only covers a completing host
-    /// whose clock runs behind the collector's.
+    /// whose clock runs behind the collector's. When the session ended in an
+    /// abort, the collection deletes its content, because no commit can
+    /// reference it. If the other request also deletes the content, the
+    /// second delete finds nothing.
     async fn abort_expired_session(
         &self,
         clock: &OperationClock,
@@ -316,11 +318,12 @@ impl<S: ObjectStore> PoolStore<S> {
         if !window.has_passed(clock.request_at_ms()) {
             return Ok(retain_until(window.ends_at_ms));
         }
-        let aborted_at_ms = clock.request_at_ms();
-        let aborted = UploadOutcome::Aborted { aborted_at_ms };
+        let aborted = UploadOutcome::Aborted {
+            aborted_at_ms: clock.request_at_ms(),
+        };
         match create_upload_outcome(&self.store, &self.pool_id, session, &aborted).await {
-            // Keep the newly aborted session until its post-abort grace period expires.
-            Ok(OutcomeCreation::Created) => {
+            // Keep the aborted session until its post-abort grace period expires.
+            Ok(UploadOutcome::Aborted { aborted_at_ms }) => {
                 let _ = AbandonedUpload::of(&self.pool_id, session)
                     .release(&self.store)
                     .await;
@@ -328,14 +331,15 @@ impl<S: ObjectStore> PoolStore<S> {
                     AgeWindow::after(aborted_at_ms, GC_GRACE_WINDOW_MS).ends_at_ms,
                 ))
             }
-            Ok(OutcomeCreation::Existing(_)) => {
-                tracing::debug!(
-                    namespace_id = %session.namespace_id,
-                    upload_id = %session.upload_id,
-                    "another request ended the expired upload session first; retaining"
-                );
-                Ok(retain_undated())
-            }
+            // A completion recorded first keeps the session for the
+            // completed-content grace, as the sweep does for a session it
+            // finds completed.
+            Ok(UploadOutcome::Completed {
+                completed_at_ms, ..
+            }) => Ok(completed_content_grace(
+                clock.request_at_ms(),
+                completed_at_ms,
+            )),
             // Another collection deleted the session after this one listed it.
             Err(CoreError::UploadNotFound { .. }) => Ok(retain_undated()),
             Err(error) => Err(error),

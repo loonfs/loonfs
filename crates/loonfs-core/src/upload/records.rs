@@ -115,14 +115,16 @@ pub(crate) async fn load_upload_outcome<S: ObjectStore + ?Sized>(
 }
 
 /// Records how an upload session ended, under the prefix of
-/// `pool_id`, then confirms that the session record still exists.
+/// `pool_id`, then confirms that the session record still exists, and
+/// returns the session's outcome.
 ///
 /// The outcome record is created with put-if-absent, so a completion, a
 /// client's abort, and garbage collection's abort of an expired session race
 /// on one create, and the session ends exactly once. After a put whose result
 /// is unknown, or that fails its precondition, this function reads the record
-/// back. An equal outcome is this call's own write, and a different one is
-/// returned as [`OutcomeCreation::Existing`].
+/// back and returns the outcome it finds, which is `outcome` when this call's
+/// put created the record. Every caller acts on the returned outcome, so no
+/// caller needs to know which request wrote it.
 ///
 /// An outcome record counts only while its session record exists, so after
 /// the put this function sends a HEAD request for the session record, and
@@ -142,7 +144,7 @@ pub(crate) async fn create_upload_outcome<S: ObjectStore + ?Sized>(
     pool_id: &PoolId,
     session: &UploadSessionPayload,
     outcome: &UploadOutcome,
-) -> Result<OutcomeCreation> {
+) -> Result<UploadOutcome> {
     let upload_id = &session.upload_id;
     let object_key = upload_outcome(pool_id, upload_id);
     let record = UploadOutcomePayload {
@@ -154,9 +156,9 @@ pub(crate) async fn create_upload_outcome<S: ObjectStore + ?Sized>(
         encode_control_state(ControlObjectKind::UploadOutcome, &record)
             .expect("an upload outcome record should encode"),
     );
-    let creation = retry_while_contended(|| async {
+    let standing = retry_while_contended(|| async {
         let error = match store.put_if_absent(&object_key, encoded.clone()).await {
-            Ok(_) => return Ok(CasOutcome::Settled(OutcomeCreation::Created)),
+            Ok(_) => return Ok(CasOutcome::Settled(outcome.clone())),
             Err(
                 error @ (ObjectStoreError::PreconditionFailed { .. }
                 | ObjectStoreError::Transport { .. }),
@@ -164,12 +166,9 @@ pub(crate) async fn create_upload_outcome<S: ObjectStore + ?Sized>(
             Err(error) => return Err(CoreError::store(&object_key, &error)),
         };
         match load_upload_outcome(store, pool_id, upload_id).await? {
-            Some(stored) if stored == record => Ok(CasOutcome::Settled(OutcomeCreation::Created)),
             Some(stored) => {
                 ensure_outcome_matches_session(session, &stored)?;
-                Ok(CasOutcome::Settled(OutcomeCreation::Existing(
-                    stored.outcome,
-                )))
+                Ok(CasOutcome::Settled(stored.outcome))
             }
             // An earlier attempt's put can still be applied after this read,
             // so a write whose result is unknown is sent again.
@@ -186,7 +185,7 @@ pub(crate) async fn create_upload_outcome<S: ObjectStore + ?Sized>(
     .await??;
     let session_key = upload_session(pool_id, upload_id);
     match store.head(&session_key).await {
-        Ok(Some(_)) => Ok(creation),
+        Ok(Some(_)) => Ok(standing),
         Ok(None) => Err(CoreError::UploadNotFound {
             upload_id: upload_id.clone(),
         }),
@@ -249,16 +248,6 @@ fn ensure_outcome_matches_session(
         }
     }
     Ok(())
-}
-
-/// What [`create_upload_outcome`] found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OutcomeCreation {
-    /// The caller's outcome is the session's outcome.
-    Created,
-    /// The session had already ended with this other outcome, and nothing
-    /// was written.
-    Existing(UploadOutcome),
 }
 
 #[cfg(test)]
@@ -333,6 +322,34 @@ mod tests {
                     assert_matches!(&error, CoreError::NamespaceCorrupt(message) if message.contains(refusal));
                 }
             }
+        }
+    }
+
+    /// Checks that a create that finds an outcome record already written
+    /// returns the stored outcome, whether it equals the caller's or not.
+    #[tokio::test]
+    async fn a_create_that_finds_a_stored_outcome_returns_it() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let session = proxied_upload_session(&namespace_id, 2_000);
+        let catalog = VerifiedNamespaceCatalogEntry::from_head(
+            &crate::namespace::state::NamespaceReadState::initial(
+                namespace_id.clone(),
+                1_000,
+                loonfs_test_support::test_actor(),
+            ),
+        );
+        let stored = UploadOutcome::Aborted {
+            aborted_at_ms: 1_500,
+        };
+        write_upload_records(&store, catalog.pool_id(), &session, Some(stored.clone())).await;
+        for aborted_at_ms in [1_500, 1_600] {
+            let outcome = UploadOutcome::Aborted { aborted_at_ms };
+            let standing = create_upload_outcome(&store, catalog.pool_id(), &session, &outcome)
+                .await
+                .expect("create");
+            assert_eq!(standing, stored);
         }
     }
 }
