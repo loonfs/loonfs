@@ -37,11 +37,13 @@ const MAX_GREP_STEPS_PER_INDEX_STEP: usize = 16;
 /// interval, and each later failure in a row doubles it up to this bound.
 const MAX_STEP_BACKOFF_MS: u64 = 60 * 60 * 1000;
 
-/// The scheduler's current values for one held session.
+/// The state that the scheduler keeps beside each session of its
+/// [`Namespaces`] table, so a host builds the table as
+/// `Namespaces<SchedulerState>`.
 ///
-/// They are the seqs that the scheduler last indexed and collected, what the
-/// last metadata step reported about the tail, and the retry state of each
-/// step that the scheduler retries.
+/// It records the seqs that the scheduler last indexed and collected, what
+/// the last metadata step reported about the tail, and the retry state of
+/// each step that the scheduler retries.
 pub struct SchedulerState {
     indexed_seq: Option<CommitSeq>,
     collected_seq: Option<CommitSeq>,
@@ -121,27 +123,27 @@ pub(crate) struct StepRetry {
 ///
 /// Each held entry keeps one retry time per step, which the scheduler waits
 /// for. A step that fails waits its failure backoff: one maintenance
-/// interval, doubled for each failure in a row up to
-/// [`MAX_STEP_BACKOFF_MS`]. A failed metadata step waits the later of its
-/// backoff and `metadata_retry_interval_ms`, because its work remains. A
-/// success clears the backoff. A step that panics counts as a
-/// `server_error` failure. The panic stops neither the scheduler nor the
-/// steps of other namespaces.
+/// interval, doubled for each failure in a row up to one hour. A failed
+/// metadata step waits the later of its backoff and
+/// `metadata_retry_interval_ms`, because its work remains. A success clears
+/// the backoff. A step that panics counts as a `server_error` failure. The
+/// panic stops neither the scheduler nor the steps of other namespaces.
 ///
 /// A session closes after `idle_session_close_after_ms` without an open,
 /// when nothing else is due, its metadata step in the same run found its
 /// metadata caught up or it has no position, and no caller has its
 /// handle. An open during close waits for its drain. A failing step keeps an
 /// idle session held, so the scheduler retries the step, until its backoff
-/// reaches [`MAX_STEP_BACKOFF_MS`]. A session that was closed or fenced, or
-/// whose namespace is gone, closes once no caller has its handle.
+/// reaches one hour. A session that was closed or fenced, or whose namespace
+/// is gone, closes once no caller has its handle.
 ///
-/// A scheduler built without a maintenance handle belongs to a server whose
+/// A scheduler built without a maintenance handle belongs to a host that
+/// doesn't maintain the store, such as the reference server when its
 /// maintenance mode is `serve_only` or `disabled`. Folds, compactions,
 /// sweeps, and collections are another process's work there, so the
 /// scheduler runs no metadata, collection, or index step and sweeps nothing,
 /// and it closes a session on the idle age and ownership conditions alone,
-/// because the session's metadata needs no step from this server. The close
+/// because the session's metadata needs no step from this host. The close
 /// writes nothing and sends no store requests.
 ///
 /// A sweep runs at start and then every `sweep_interval_ms`, beside the
@@ -168,9 +170,9 @@ pub(crate) struct StepRetry {
 /// that are busiest.
 ///
 /// An advance whose floor moves creates a floor object in the WAL, through
-/// the namespace's writer session in this server when the server has one,
+/// the namespace's writer session in this host when the host has one,
 /// and then folds the namespace, so a manifest records the new floor. For a
-/// namespace that the server has no session for, the advance creates the
+/// namespace that the host has no session for, the advance creates the
 /// floor object itself and opens no session. The advance claims no writer
 /// epoch, so a writer session of the namespace in another process isn't
 /// fenced, and the session plans its next commit against the new floor. A
@@ -184,8 +186,12 @@ pub(crate) struct StepRetry {
 /// steps of one namespace twice at once. A listing failure stops a sweep
 /// from starting more namespaces or pools, and the namespaces and pools it
 /// already started finish before it returns a [`SweepReport`] that isn't
-/// complete. Hosts can call [`Self::run_sweep`] and [`Self::run_due_steps`]
-/// directly.
+/// complete.
+///
+/// The scheduler runs nothing on its own until [`Self::start`] starts its
+/// two loops. A host that decides when maintenance runs calls
+/// [`Self::run_due_steps`] and [`Self::run_sweep`] instead, and
+/// [`Self::cancel`] stops either way of running it.
 #[derive(Clone)]
 pub struct Scheduler {
     inner: Arc<SchedulerInner>,
@@ -269,8 +275,8 @@ pub const DEFAULT_SWEEP_INTERVAL_MS: u64 = 86_400_000;
 /// reference server's config uses.
 pub const DEFAULT_IDLE_SESSION_CLOSE_AFTER_MS: u64 = 1_800_000;
 
-/// The cadence and limits of the scheduler, under the names of the server
-/// config settings.
+/// The cadence and limits of the scheduler, under the names of the
+/// reference server's config settings.
 #[derive(Debug, Clone, Copy)]
 pub struct SchedulerConfig {
     /// How many namespaces the scheduler runs steps on at once, shared by
@@ -281,20 +287,21 @@ pub struct SchedulerConfig {
     pub maintenance_interval_ms: u64,
     /// Milliseconds before a metadata step that left work runs again.
     pub metadata_retry_interval_ms: u64,
-    /// Least milliseconds between two collections of a held session whose
-    /// seq moved.
+    /// The minimum time, in milliseconds, between two collections of a held
+    /// session whose seq moved.
     pub gc_interval_ms: u64,
     /// Milliseconds between sweeps, after the sweep at start.
     pub sweep_interval_ms: u64,
-    /// Milliseconds since its last open before a held session that has
-    /// nothing due and no caller closes.
+    /// How long, in milliseconds, after a held session's last open the
+    /// scheduler waits before it closes the session, when the session has
+    /// nothing due and no caller.
     pub idle_session_close_after_ms: u64,
 }
 
 struct SchedulerInner {
     store: SharedObjectStore,
-    /// The maintenance handle of a server that maintains the store, and
-    /// `None` for one whose maintenance mode is `serve_only` or `disabled`.
+    /// The maintenance handle of a host that maintains the store, and `None`
+    /// for one that doesn't.
     maintenance: Option<Maintenance>,
     grep: Option<GrepIndexing>,
     namespaces: Arc<Namespaces<SchedulerState>>,
@@ -308,7 +315,7 @@ struct SchedulerInner {
     metrics: SchedulerMetrics,
 }
 
-/// The grep worker of a server that maintains the grep index, and the build
+/// The grep worker of a host that maintains the grep index, and the build
 /// policy of its steps.
 pub struct GrepIndexing {
     worker: GrepWorker<SharedObjectStore>,
@@ -323,27 +330,28 @@ impl GrepIndexing {
 }
 
 impl Scheduler {
-    /// Builds a scheduler over `store` with the cadence and limits in
-    /// `config`, which schedules its calls on `timer`. `maintenance` is the
-    /// maintenance handle of a server that maintains the store, and `None`
-    /// for one that runs only the close step. `grep` is the indexing of a
-    /// server that maintains the grep index, and `None` otherwise.
+    /// Builds a scheduler over the sessions of `namespaces`, with the cadence
+    /// and limits in `config`, and starts no loop. The scheduler reads the
+    /// store and the monotonic timer of the runtime that `namespaces` was
+    /// built from. `maintenance` is the maintenance handle of a host that
+    /// maintains the store, and `None` for one that runs only the close step.
+    /// `grep` is the indexing of a host that maintains the grep index, and
+    /// `None` otherwise. The scheduler registers its metrics with `recorder`.
     pub fn new(
         config: SchedulerConfig,
-        store: SharedObjectStore,
-        maintenance: Option<Maintenance>,
         namespaces: Arc<Namespaces<SchedulerState>>,
-        timer: Arc<dyn MonotonicTimer>,
+        maintenance: Option<Maintenance>,
         grep: Option<GrepIndexing>,
         recorder: &dyn MetricsRecorder,
     ) -> Self {
+        let runtime = namespaces.runtime();
         Self {
             inner: Arc::new(SchedulerInner {
-                store,
+                store: runtime.object_store(),
+                timer: runtime.monotonic_timer(),
                 maintenance,
                 grep,
                 namespaces,
-                timer,
                 config,
                 claims: Mutex::default(),
                 slots: Semaphore::new(config.max_concurrent_maintenance.get()),
@@ -352,6 +360,12 @@ impl Scheduler {
                 metrics: SchedulerMetrics::register(recorder),
             }),
         }
+    }
+
+    /// Stops the scheduler from starting new steps, and stops a running
+    /// compaction unit at its next block. Returns at once.
+    pub fn cancel(&self) {
+        self.inner.stop.cancel();
     }
 
     /// Lists `page_limit` namespace ids per store request instead of the
@@ -571,30 +585,25 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .expect("a maintenance scheduler lock should not be poisoned")
 }
 
-/// A started scheduler. Stop it before the runtime shuts down.
+/// The loops of a scheduler that [`Scheduler::start`] started. Stop them
+/// before the runtime shuts down.
 pub struct RunningScheduler {
-    stop: MaintenanceCancellation,
+    scheduler: Scheduler,
     task: JoinHandle<()>,
 }
 
 impl RunningScheduler {
-    /// Starts no new steps and stops a running compaction unit at its next
-    /// block. Returns at once.
-    pub fn cancel(&self) {
-        self.stop.cancel();
-    }
-
     /// Cancels the scheduler and waits for the calls it is running to
     /// return, until `deadline`. When the deadline ends first, aborts the
-    /// scheduler, which drops the steps still running, and logs a warning. A
-    /// dropped step leaves what a crash leaves. Like an expired request
-    /// drain, that is not an error.
+    /// scheduler, which drops the steps still running, and logs a warning
+    /// that includes `shutdown_deadline_ms`. A dropped step leaves what a
+    /// crash leaves. Like an expired request drain, that is not an error.
     pub async fn stop(
         self,
         deadline: Pin<&mut Sleep>,
         shutdown_deadline_ms: u64,
     ) -> loonfs::Result<()> {
-        self.stop.cancel();
+        self.scheduler.cancel();
         let mut task = self.task;
         tokio::select! {
             biased;

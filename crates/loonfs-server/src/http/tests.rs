@@ -167,10 +167,8 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
             runtime: writer.clone(),
             scheduler: loonfs_http::Scheduler::new(
                 test_config(temp_dir.path(), "shutdown-deadline-writer").scheduler_config(),
-                writer.object_store(),
-                None,
                 Arc::new(loonfs_http::Namespaces::new(writer.clone())),
-                writer.monotonic_timer(),
+                None,
                 None,
                 &loonfs::metrics::DefaultMetricsRecorder::new(),
             ),
@@ -441,10 +439,10 @@ async fn shutdown_abandons_a_parked_sweep_at_its_deadline_and_settles_the_runtim
     store.release();
 }
 
-/// Checks that `app` builds the scheduler in the modes that don't maintain,
-/// over the table of writer sessions that the HTTP API opens sessions
-/// through, and that `AppState::run_due_steps` closes an idle session of that
-/// table without a store request.
+/// Checks that, in the `serve_only` and `disabled` maintenance modes, `app`
+/// builds the scheduler over the HTTP API's table of writer sessions, and
+/// that `AppState::run_due_steps` closes an idle session in that table
+/// without a store request.
 #[tokio::test]
 async fn app_state_run_due_steps_closes_an_idle_session_when_the_server_does_not_maintain() {
     use crate::config::JobMode;
@@ -468,8 +466,8 @@ async fn app_state_run_due_steps_closes_an_idle_session_when_the_server_does_not
         )
         .await
         .expect("build app");
-        // The table's handle keeps the session open until the scheduler
-        // closes it.
+        // The table keeps the session open after the handle is dropped,
+        // until the scheduler closes it.
         let sessions_open = || {
             state
                 .http

@@ -112,7 +112,7 @@ impl Scheduler {
             Some(Err(code)) if code.is_namespace_gone() => Due::Close(Close::Ended),
             metadata => {
                 // Metadata that another process maintains needs no step from
-                // this server.
+                // this host.
                 let metadata_settled = inner.maintenance.is_none()
                     || metadata.map_or(!positioned, |answer| {
                         answer == Ok(MetadataMaintenanceOutcome::CaughtUp)
@@ -171,7 +171,7 @@ impl Scheduler {
     }
 
     /// Whether a collection step is pending for a held session at `seq`:
-    /// this server maintains the store, the session has published, its seq
+    /// this host maintains the store, the session has published, its seq
     /// moved since the last collection, and `gc_interval_ms` passed since
     /// that collection.
     fn collection_pending(
@@ -190,7 +190,7 @@ impl Scheduler {
     }
 
     /// Whether an index step is pending for a held session at `seq`: this
-    /// server maintains the grep index, and the index is marked dirty or the
+    /// host maintains the grep index, and the index is marked dirty or the
     /// scheduler last brought it up to date at another seq.
     fn index_pending(&self, held: &HeldNamespace<SchedulerState>, seq: Option<CommitSeq>) -> bool {
         self.inner.grep.is_some() && (held.index_dirty || held.host_state.indexed_seq != seq)
@@ -247,7 +247,8 @@ impl Scheduler {
 
     /// Starts the scheduler's two loops on the current Tokio runtime: a sweep
     /// at start and then every `sweep_interval_ms`, and the due steps of each
-    /// held session every `maintenance_interval_ms`.
+    /// held session every `maintenance_interval_ms`. The reference server
+    /// starts them when it serves.
     pub fn start(&self) -> RunningScheduler {
         let inner = &self.inner;
         let config = &inner.config;
@@ -263,7 +264,7 @@ impl Scheduler {
         );
         let scheduler = self.clone();
         RunningScheduler {
-            stop: inner.stop.clone(),
+            scheduler: self.clone(),
             task: tokio::spawn(async move {
                 tokio::join!(scheduler.run_sweeps(), scheduler.run_sessions());
             }),

@@ -104,10 +104,8 @@ impl SchedulerServer {
         });
         let scheduler = Scheduler::new(
             config.scheduler,
-            runtime.object_store(),
-            config.maintenance.maintains().then(|| maintenance.clone()),
             Arc::new(Namespaces::new(runtime.clone())),
-            runtime.monotonic_timer(),
+            config.maintenance.maintains().then(|| maintenance.clone()),
             grep,
             recorder.as_ref(),
         );
@@ -228,7 +226,7 @@ impl SchedulerServer {
     }
 }
 
-/// The settings of a test server: those of its runtime and its scheduler,
+/// The settings of a test host: those of its runtime and its scheduler,
 /// whether it maintains the store, and those of its grep worker when it
 /// maintains the grep index.
 struct TestConfig {

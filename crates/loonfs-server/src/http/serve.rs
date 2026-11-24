@@ -130,10 +130,8 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
     let namespaces = Arc::new(Namespaces::<SchedulerState>::new(runtime.clone()));
     let scheduler = Scheduler::new(
         config.scheduler_config(),
-        runtime.object_store(),
-        config.maintenance.maintains().then(|| maintenance.clone()),
         Arc::clone(&namespaces),
-        runtime.monotonic_timer(),
+        config.maintenance.maintains().then(|| maintenance.clone()),
         grep_worker
             .as_ref()
             .map(|worker| GrepIndexing::new(worker.clone(), grep_policy)),
@@ -516,7 +514,7 @@ where
         scheduler,
         deadline_ms,
     } = settlement;
-    let scheduler = scheduler.start();
+    let running = scheduler.start();
     let (listener_close_tx, listener_close_rx) = tokio::sync::oneshot::channel();
     let mut server = Box::pin(serve_connections(
         listener,
@@ -558,7 +556,7 @@ where
     drop(server);
     // The scheduler waits under the same deadline, and is aborted when the
     // deadline ends.
-    let stopped = scheduler.stop(deadline.as_mut(), deadline_ms).await;
+    let stopped = running.stop(deadline.as_mut(), deadline_ms).await;
     let runtime_settled = runtime.shutdown().await;
     // Nothing reads through the cache any more, so the SSD tier can write
     // the blocks it queued and stop.

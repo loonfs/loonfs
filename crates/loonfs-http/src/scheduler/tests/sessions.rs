@@ -918,10 +918,8 @@ async fn a_session_that_maintained_itself_leaves_the_session_steps_nothing_to_do
     namespaces.open(&namespace_id).await.expect("hold");
     let scheduler = super::Scheduler::new(
         scheduler_config(None).scheduler,
-        runtime.object_store(),
-        Some(runtime.maintenance(writer_id("maintenance"))),
         namespaces,
-        runtime.monotonic_timer(),
+        Some(runtime.maintenance(writer_id("maintenance"))),
         None,
         &recorder,
     );
@@ -1005,8 +1003,9 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
     server.runtime.shutdown().await.expect("shutdown");
 }
 
-/// Checks that the scheduler of a server whose maintenance mode is
-/// `serve_only` or `disabled` closes a session that passes
+/// Checks that the scheduler of a host that doesn't maintain the store, such
+/// as the reference server in `serve_only` or `disabled` mode, closes a
+/// session that passes
 /// `idle_session_close_after_ms` or ends early, without a store request and
 /// without folding the WAL tail, and that its sweep lists nothing.
 #[tokio::test]

@@ -36,7 +36,7 @@ impl CallFailure {
     }
 
     /// Whether the failure counts against the call. A namespace that is
-    /// gone, or a server that is shutting down, doesn't.
+    /// gone, or a host that is shutting down, doesn't.
     fn counts(&self) -> bool {
         !self.namespace_gone() && self.code() != ErrorCode::ShuttingDown
     }

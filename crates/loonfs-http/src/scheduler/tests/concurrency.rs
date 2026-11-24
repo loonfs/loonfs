@@ -443,7 +443,7 @@ async fn a_step_parked_in_one_session_does_not_stop_another_sessions_fold_on_the
     .expect("a later run folds the other session's tail while the first session's step is parked");
 
     store.release();
-    running.cancel();
+    server.scheduler.cancel();
     running.task.await.expect("the scheduler stops");
     drop((parked_handle, folded_handle));
     server.runtime.shutdown().await.expect("shutdown");
