@@ -43,6 +43,9 @@ pub struct WalTailReport {
     /// Stored bytes of the unfolded WAL objects with commits that the
     /// position records, leaving out a put whose outcome is unknown.
     pub wal_bytes: usize,
+    /// Inline content bytes of the unfolded WAL objects that the position
+    /// records, leaving out a put whose outcome is unknown.
+    pub inline_bytes: usize,
     /// Where the attempt found the tail.
     pub source: TailSource,
 }
@@ -627,6 +630,7 @@ impl PositionState {
             wal_tail: Some(WalTailReport {
                 objects: update.wal_tail_objects,
                 wal_bytes: update.wal_tail_bytes,
+                inline_bytes: update.wal_tail_inline_bytes,
                 source: if wal_tail_discovered {
                     TailSource::Store
                 } else {
@@ -714,10 +718,7 @@ impl PositionState {
             PublishViewEffect::Unchanged => {}
             PublishViewEffect::Invalidated | PublishViewEffect::OutcomeUnknown => {
                 self.invalidate_projection();
-                return TailProjectionUpdate {
-                    wal_tail_objects: position.wal_tail_objects(),
-                    wal_tail_bytes: position.wal_tail_bytes(),
-                };
+                return TailProjectionUpdate::of(&position);
             }
             PublishViewEffect::Advanced {
                 body,
@@ -736,17 +737,11 @@ impl PositionState {
                         "could not update the committed WAL projection"
                     );
                     self.invalidate_projection();
-                    return TailProjectionUpdate {
-                        wal_tail_objects: position.wal_tail_objects(),
-                        wal_tail_bytes: position.wal_tail_bytes(),
-                    };
+                    return TailProjectionUpdate::of(&position);
                 }
             }
         }
-        let update = TailProjectionUpdate {
-            wal_tail_objects: position.wal_tail_objects(),
-            wal_tail_bytes: position.wal_tail_bytes(),
-        };
+        let update = TailProjectionUpdate::of(&position);
         self.current = Some(position);
         update
     }
@@ -765,6 +760,17 @@ struct LoadedPublishView<'a, S: ObjectStore + ?Sized> {
 struct TailProjectionUpdate {
     wal_tail_objects: u64,
     wal_tail_bytes: usize,
+    wal_tail_inline_bytes: usize,
+}
+
+impl TailProjectionUpdate {
+    fn of(position: &WriterPosition) -> Self {
+        Self {
+            wal_tail_objects: position.wal_tail_objects(),
+            wal_tail_bytes: position.wal_tail_bytes(),
+            wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
+        }
+    }
 }
 
 /// Returns `report` with the batch's effect set to drop the position when a

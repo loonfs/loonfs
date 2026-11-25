@@ -121,6 +121,20 @@ impl ValidatedWalTail {
             .sum()
     }
 
+    /// Returns the inline content bytes of the tail, counted as a projected
+    /// tail counts them (see `inline_piece_bytes`).
+    pub(crate) fn inline_bytes(&self) -> usize {
+        self.objects
+            .iter()
+            .map(|object| match &object.envelope().payload().body {
+                WalObjectBody::Commits(commits) => {
+                    super::projected_tail::inline_piece_bytes(commits)
+                }
+                WalObjectBody::Fence | WalObjectBody::Floor { .. } => 0,
+            })
+            .sum()
+    }
+
     pub(crate) fn push_published(&mut self, envelope: WalObjectEnvelope, stored_bytes: usize) {
         let payload = envelope.payload();
         let object_key = super::wal_object_key(&payload.namespace_id, &payload.wal_no);

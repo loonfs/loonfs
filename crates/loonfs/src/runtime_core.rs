@@ -349,7 +349,7 @@ impl RuntimeCore {
     }
 
     /// Returns `namespace_id`'s components: this core's store, caches,
-    /// clocks, content write permits, and run policy.
+    /// clocks, content write permits, run policy, and inline tail limit.
     pub(crate) fn namespace_store(
         &self,
         namespace_id: &NamespaceId,
@@ -364,11 +364,15 @@ impl RuntimeCore {
             Arc::clone(&self.inner.timer),
             self.inner.execution_budget.content_writes(),
             self.inner.run_policy,
+            self.inner
+                .config
+                .inline_content
+                .inline_content_tail_limit_bytes,
         )
     }
 
     /// Returns `pool_id`'s components: this core's store, caches, clocks,
-    /// content write permits, and run policy.
+    /// content write permits, run policy, and inline tail limit.
     pub(crate) fn pool_store(&self, pool_id: &PoolId) -> PoolStore<SharedObjectStore> {
         PoolStore::new(
             Arc::clone(&self.inner.store),
@@ -380,6 +384,10 @@ impl RuntimeCore {
             Arc::clone(&self.inner.timer),
             self.inner.execution_budget.content_writes(),
             self.inner.run_policy,
+            self.inner
+                .config
+                .inline_content
+                .inline_content_tail_limit_bytes,
         )
     }
 

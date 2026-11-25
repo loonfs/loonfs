@@ -176,8 +176,11 @@ impl Namespace<Writable> {
     /// A session starts a fold when a publish leaves its WAL tail over the
     /// fold trigger
     /// ([`FOLD_AT_WAL_OBJECTS`](loonfs_core::limits::FOLD_AT_WAL_OBJECTS) WAL
-    /// objects, or [`FOLD_AT_WAL_BYTES`](loonfs_core::limits::FOLD_AT_WAL_BYTES)
-    /// of unfolded WAL bytes). The fold task folds again while the tail that its
+    /// objects, [`FOLD_AT_WAL_BYTES`](loonfs_core::limits::FOLD_AT_WAL_BYTES)
+    /// of unfolded WAL bytes, or a quarter of the inline tail limit in inline
+    /// content bytes from
+    /// [`fold_at_inline_bytes`](loonfs_core::limits::fold_at_inline_bytes)).
+    /// The fold task folds again while the tail that its
     /// last fold left is over the trigger, so the wait usually ends with the
     /// tail under the trigger, and commits published during the wait can keep
     /// the task folding. The task also ends after a fold that fails, or that

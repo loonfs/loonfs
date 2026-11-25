@@ -363,6 +363,7 @@ impl TailChunk {
             chunk.activity = activity;
         }
         chunk.orders = RowOrders::new(&chunk.rows);
+        chunk.inline_bytes = inline_piece_bytes(records);
         Ok(chunk)
     }
 
@@ -411,16 +412,22 @@ impl TailChunk {
             offset: entry.offset,
             bytes: Bytes::copy_from_slice(&entry.bytes),
         };
-        let replaced = content.insert_piece(content_ref, piece, committed_seq);
+        content.insert_piece(content_ref, piece, committed_seq);
         self.inline_entry_heap_bytes = self.inline_entry_heap_bytes
             + content.content_ref.heap_bytes()
             + (content.pieces.capacity() - slots) * size_of::<ProjectedPiece>()
             - reference_bytes;
-        self.inline_bytes += entry.bytes.len();
-        if let Some(replaced) = replaced {
-            self.inline_bytes -= replaced.bytes.len();
-        }
     }
+}
+
+/// Returns the bytes of every inline piece in `records`, the count of inline
+/// content bytes that the inline tail limit and its fold trigger read.
+pub(crate) fn inline_piece_bytes(records: &WalCommits) -> usize {
+    records
+        .iter()
+        .flat_map(|record| &record.inline_content)
+        .map(|piece| piece.bytes.len())
+        .sum()
 }
 
 /// Pairs each inline entry of `record` with the largest same-commit

@@ -44,17 +44,31 @@ pub(super) enum WriteStop {
     Objects(u64),
     /// The tail has at least `MAX_UNFOLDED_WAL_BYTES` unfolded WAL bytes.
     Bytes(usize),
+    /// The tail has at least `limit` inline content bytes, the namespace's
+    /// inline tail limit.
+    InlineBytes { inline_bytes: usize, limit: usize },
 }
 
 impl WriteStop {
-    /// Returns the write stop that a tail of `objects` WAL objects and
-    /// `wal_bytes` unfolded WAL bytes has reached, or `None` when it has
-    /// reached neither.
-    fn reached(objects: u64, wal_bytes: usize) -> Option<Self> {
+    /// Returns the write stop that a tail of `objects` WAL objects,
+    /// `wal_bytes` unfolded WAL bytes, and `inline_bytes` inline content
+    /// bytes has reached, or `None` when it has reached none. `inline_limit`
+    /// is the namespace's inline tail limit.
+    fn reached(
+        objects: u64,
+        wal_bytes: usize,
+        inline_bytes: usize,
+        inline_limit: usize,
+    ) -> Option<Self> {
         if objects >= MAX_UNFOLDED_WAL_OBJECTS {
             Some(Self::Objects(objects))
         } else if wal_bytes >= MAX_UNFOLDED_WAL_BYTES {
             Some(Self::Bytes(wal_bytes))
+        } else if inline_bytes >= inline_limit {
+            Some(Self::InlineBytes {
+                inline_bytes,
+                limit: inline_limit,
+            })
         } else {
             None
         }
@@ -71,6 +85,12 @@ impl WriteStop {
                 "WAL tail has {wal_bytes} bytes, at the write stop of {} MiB; publishes resume once maintenance brings it back under {} MiB",
                 MAX_UNFOLDED_WAL_BYTES / (1024 * 1024),
                 MAX_UNFOLDED_WAL_BYTES / (1024 * 1024),
+            ),
+            Self::InlineBytes {
+                inline_bytes,
+                limit,
+            } => format!(
+                "WAL tail has {inline_bytes} inline content bytes, at the write stop of {limit} inline content bytes; publishes resume once maintenance brings it back under {limit} inline content bytes"
             ),
         }
     }
@@ -317,7 +337,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 (position, loaded_basis.segments)
             }
         };
-        let write_stop = WriteStop::reached(position.wal_tail_objects(), position.wal_tail_bytes());
+        let write_stop = WriteStop::reached(
+            position.wal_tail_objects(),
+            position.wal_tail_bytes(),
+            position.wal_tail_inline_bytes(),
+            self.inline_tail_limit_bytes,
+        );
         Ok(PublishMetadataView {
             acquired_writer,
             content_write_permits: &self.content_writes,
@@ -346,28 +371,49 @@ mod tests {
     use super::WriteStop;
     use crate::limits::{MAX_UNFOLDED_WAL_BYTES, MAX_UNFOLDED_WAL_OBJECTS};
 
+    const INLINE_LIMIT: usize = 4096;
+
     #[test]
     fn the_write_stop_names_the_threshold_that_the_tail_reached() {
         assert_eq!(
-            WriteStop::reached(MAX_UNFOLDED_WAL_OBJECTS - 1, MAX_UNFOLDED_WAL_BYTES - 1),
+            WriteStop::reached(
+                MAX_UNFOLDED_WAL_OBJECTS - 1,
+                MAX_UNFOLDED_WAL_BYTES - 1,
+                INLINE_LIMIT - 1,
+                INLINE_LIMIT
+            ),
             None
         );
-        for (objects, wal_bytes, threshold) in [
-            (MAX_UNFOLDED_WAL_OBJECTS, 0, "1024 objects"),
+        for (objects, wal_bytes, inline_bytes, threshold) in [
+            (
+                MAX_UNFOLDED_WAL_OBJECTS,
+                0,
+                0,
+                "at the write stop of 1024 objects",
+            ),
             (
                 MAX_UNFOLDED_WAL_OBJECTS + 1,
                 MAX_UNFOLDED_WAL_BYTES,
-                "1024 objects",
+                INLINE_LIMIT,
+                "at the write stop of 1024 objects",
             ),
-            (1, MAX_UNFOLDED_WAL_BYTES, "64 MiB"),
+            (
+                1,
+                MAX_UNFOLDED_WAL_BYTES,
+                INLINE_LIMIT,
+                "at the write stop of 64 MiB",
+            ),
+            (
+                1,
+                1,
+                INLINE_LIMIT,
+                "at the write stop of 4096 inline content bytes",
+            ),
         ] {
-            let reason = WriteStop::reached(objects, wal_bytes)
+            let reason = WriteStop::reached(objects, wal_bytes, inline_bytes, INLINE_LIMIT)
                 .expect("the tail is at a write stop")
                 .reason();
-            assert!(
-                reason.contains(&format!("at the write stop of {threshold}")),
-                "{reason}"
-            );
+            assert!(reason.contains(threshold), "{reason}");
         }
     }
 }

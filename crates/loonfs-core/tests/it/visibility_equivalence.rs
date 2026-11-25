@@ -49,6 +49,7 @@ impl VisibilityHarness {
                 loonfs_core::test_support::std_timer(),
                 std::sync::Arc::new(loonfs_core::test_support::content_writes()),
                 loonfs_core::MetadataRunPolicy::default(),
+                loonfs_core::limits::DEFAULT_INLINE_TAIL_LIMIT_BYTES,
             ),
             writer_id: loonfs_types::WriterId::parse("visibility-equivalence").expect("writer id"),
         };

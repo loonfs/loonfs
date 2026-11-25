@@ -709,3 +709,117 @@ async fn a_commit_at_the_byte_write_stop_waits_for_the_fold_and_commits() {
 async fn engine_wal_tail_bytes(publisher: &NamespacePublisher) -> usize {
     publisher.engine.lock().await.wal_tail_bytes().unwrap_or(0)
 }
+
+/// Returns whether a commit in `publisher`'s queue waits after the engine
+/// refused it at a write stop whose reason contains `stop`.
+fn waits_at_the_write_stop(publisher: &NamespacePublisher, stop: &str) -> bool {
+    publisher_state(publisher).queue.iter().any(|item| {
+        matches!(item, crate::publisher::queue::WorkItem::Batch(batch)
+        if batch.candidates.iter().any(|candidate| {
+            candidate
+                .write_stop_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(stop))
+        }))
+    })
+}
+
+/// Checks that a fold becomes due once the inline tail reaches a quarter of
+/// the inline tail limit while commits still succeed, that commits stop once
+/// the tail reaches the limit while that fold lags, that a commit that waits
+/// past the write-stop wait returns `maintenance_required` with a reason
+/// that names the inline stop, and that commits resume once the fold
+/// publishes.
+#[tokio::test]
+async fn inline_commits_stop_at_the_inline_tail_limit_until_a_fold() {
+    use loonfs_types::format::wal::{
+        MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+    };
+
+    // The smallest limit that a config accepts, filled by files of the
+    // largest inline size, so the fold trigger is four files and the limit
+    // sixteen.
+    const LIMIT: usize = MAX_WAL_OBJECT_INLINE_CONTENT_BYTES;
+    const FILES: usize = LIMIT / MAX_WAL_INLINE_CONTENT_BYTES;
+    let fixture = fixture(|builder| {
+        builder.config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            publication: short_write_stop_wait(),
+            inline_content: crate::InlineContentPolicy {
+                inline_content_threshold_bytes: Some(MAX_WAL_INLINE_CONTENT_BYTES),
+                inline_content_tail_limit_bytes: LIMIT,
+                ..crate::InlineContentPolicy::default()
+            },
+            ..crate::RuntimeConfig::default()
+        })
+    })
+    .await;
+    let (namespace, publisher) = (
+        &fixture.namespace,
+        fixture.namespace.session().publisher.clone(),
+    );
+    let actor = loonfs_test_support::test_actor();
+    let file = vec![b'f'; MAX_WAL_INLINE_CONTENT_BYTES];
+    // The fourth file reaches the fold trigger, a quarter of the limit, and
+    // the fold that it makes due parks at its manifest put.
+    fixture.store.block_next();
+    for index in 0..FILES / 4 {
+        namespace
+            .put_file(&format!("/file-{index}"), &file, &actor)
+            .await
+            .expect("a file below the fold trigger");
+    }
+    fixture.store.wait_until_blocked().await;
+    assert!(publisher_state(&publisher).fold.is_some());
+    for index in FILES / 4..FILES {
+        namespace
+            .put_file(&format!("/file-{index}"), &file, &actor)
+            .await
+            .expect("a commit below the limit while the fold is parked");
+    }
+    assert_eq!(
+        publisher.engine.lock().await.wal_tail_inline_bytes(),
+        Some(LIMIT)
+    );
+
+    let stopped = {
+        let namespace = namespace.clone();
+        let actor = actor.clone();
+        tokio::spawn(async move { namespace.put_file("/stopped", b"stopped", &actor).await })
+    };
+    wait_until(
+        || waits_at_the_write_stop(&publisher, "inline content bytes") || stopped.is_finished(),
+        "the commit waits at the inline tail limit",
+    )
+    .await;
+    let error = settle_commit(stopped)
+        .await
+        .expect_err("the parked fold outlasts the write-stop wait");
+    assert_matches!(
+        &error,
+        Error::Core(CoreError::MaintenanceRequired { reason, .. })
+            if reason.starts_with("the write-stop wait of ")
+                && reason.contains(&format!("at the write stop of {LIMIT} inline content bytes")),
+        "{error}"
+    );
+
+    fixture.store.release();
+    namespace
+        .wait_for_fold()
+        .await
+        .expect("the released fold settles");
+    namespace
+        .put_file("/resumed", b"resumed", &actor)
+        .await
+        .expect("an inline commit after the fold");
+    let missing = namespace
+        .stat("/stopped")
+        .await
+        .expect_err("the refused commit isn't committed");
+    assert_eq!(missing.code(), ErrorCode::PathNotFound);
+    assert_eq!(
+        counter(&fixture.recorder, "loonfs.publisher.write_stop_refusals"),
+        1
+    );
+    fixture.writer.shutdown().await.expect("shut down writer");
+}

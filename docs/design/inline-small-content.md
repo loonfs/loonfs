@@ -54,10 +54,10 @@ The identity is set when the content is prepared. Preparing content at or under 
 
 ## Where the writer chooses the path
 
-Every inline limit is a preference. When a limit is reached, the writer stages that content through an upload session under its own content ID, so no inline limit causes a write error. Uploads are never staged inside the publication loop, but validation can materialize pending pieces for a copy, a restore, or a fresh chain. The writer chooses the path at three points:
+The per-object budget and the per-value limit are preferences. When one is reached, the writer stages that content through an upload session under its own content ID, so neither limit causes a write error. Uploads are never staged inside the publication loop, but validation can materialize pending pieces for a copy, a restore, or a fresh chain. The writer chooses the path at three points:
 
 - **Building the commit candidate.** A commit must fit in one WAL object. If a commit's inline total would exceed the per-object budget, the writer keeps values inline in operation order until the budget is reached, and stages the rest. The commit stays atomic.
-- **Admission.** The writer chooses based on the unfolded inline bytes that the publisher knows about. [Resource sizing](../../crates/loonfs-server/docs/self-hosting.md#resource-sizing) describes how that count is kept.
+- **Admission.** The writer chooses based on the unfolded inline bytes that the publisher knows about. [Resource sizing](../../crates/loonfs-server/docs/self-hosting.md#resource-sizing) describes how that count is kept. Once the unfolded tail reaches the inline tail limit, new commits wait for a fold at the [write stop](write-stop-wait.md), as [Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy) in the format spec describes.
 - **Publishing.** When a WAL object's inline budget is full, the publisher closes that object, and the next commit starts the next object. One commit is never split.
 
 ## Reading
@@ -90,9 +90,9 @@ A fold's objects stay [rooted](../specs/glossary.md#content-root) while a fold c
 
 A fold can pause between reading a tail and writing its content, and the namespace can be deleted and swept in the meantime. A fold call reads a fresh manifest, but a writer's own fold starts from its retained view, and neither one checks its publication budget until its content writes return. So a content object can be written after a collection lists the content prefix. It's found the same way as a late upload, because every later collection of the namespace's [pool](../specs/glossary.md#pool) lists the pool's content prefix again, including after the namespace is retired (see [Content roots](../specs/format.md#119-content-roots)).
 
-A fold becomes due when the unfolded tail reaches 256 WAL objects, when its WAL bytes reach 8 MiB, or when the tail's newest commit reaches the idle fold age (`idle_fold_after_ms`, 15 minutes by default), as [Folding and compacting a namespace](maintenance-hosting.md#folding-and-compacting-a-namespace) describes.
+A fold becomes due when the unfolded tail reaches 256 WAL objects, when its WAL bytes reach 8 MiB, when its inline content bytes reach a quarter of the inline tail limit (8 MiB at the default limit of 32 MiB), or when the tail's newest commit reaches the idle fold age (`idle_fold_after_ms`, 15 minutes by default), as [Folding and compacting a namespace](maintenance-hosting.md#folding-and-compacting-a-namespace) describes.
 
-Why is there a byte trigger? It limits how much a cold reader has to download to replay a tail. The trigger counts WAL bytes, and the pieces are part of those bytes, so a tail of inline content folds at the same size as any other tail.
+Why is there a byte trigger? It limits how much a cold reader has to download to replay a tail. The trigger counts WAL bytes, and the pieces are part of those bytes, so a tail of inline content folds at the same size as any other tail. The WAL bytes are compressed, though, and a writer keeps the decoded pieces in memory, so a tail whose pieces compress well also folds once its decoded inline bytes reach that trigger.
 
 ## Collection
 

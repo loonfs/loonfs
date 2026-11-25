@@ -58,6 +58,12 @@ impl NamespaceReadAnchor {
         self.tail.wal_bytes()
     }
 
+    /// Returns the inline content bytes above the anchor's manifest: the
+    /// bytes of every piece in the WAL objects that the anchor read.
+    pub fn wal_tail_inline_bytes(&self) -> usize {
+        self.tail.inline_bytes()
+    }
+
     /// Returns the anchor's manifest with its check time and the manifest
     /// boundary that the anchor's last check read, which a publication can
     /// build on.

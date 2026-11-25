@@ -736,6 +736,8 @@ async fn new_commits_wait_at_the_byte_write_stop_and_the_refusal_names_it() {
     };
 
     let (_directory, _store, mut engine, context) = setup().await;
+    // The inline tail limit stays above the byte write stop.
+    engine.namespace.inline_tail_limit_bytes = 2 * MAX_UNFOLDED_WAL_BYTES;
     let values_per_commit = MAX_WAL_OBJECT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES;
     let mut commits = 0;
     while engine.wal_tail_bytes().unwrap_or(0) < MAX_UNFOLDED_WAL_BYTES {
@@ -772,4 +774,50 @@ async fn new_commits_wait_at_the_byte_write_stop_and_the_refusal_names_it() {
         CoreError::MaintenanceRequired { reason, .. } if reason.contains("write stop of 64 MiB"),
         "{refused}"
     );
+}
+
+/// Checks that a commit that takes the tail to the namespace's inline tail
+/// limit publishes, that the next commit is refused with a reason that names
+/// the inline stop, and that a commit publishes again once a fold frees the
+/// tail.
+#[tokio::test]
+async fn new_commits_wait_at_the_inline_tail_limit_until_a_fold() {
+    let (_directory, store, mut engine, context) = setup().await;
+    engine.namespace.inline_tail_limit_bytes = 4;
+    publish(
+        &mut engine,
+        &context,
+        candidate("past", vec![inline(Bytes::from_static(b"five!"))]),
+    )
+    .await
+    .expect("the commit that takes the tail to the limit");
+    let refused = publish(
+        &mut engine,
+        &context,
+        candidate("refused", vec![inline(Bytes::from_static(b"next"))]),
+    )
+    .await
+    .expect_err("a new commit at the inline tail limit");
+    assert_matches!(
+        &refused,
+        CoreError::MaintenanceRequired { reason, .. }
+            if reason.contains("at the write stop of 4 inline content bytes"),
+        "{refused}"
+    );
+    let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+        .fold_wal_tail(
+            engine.writer_position(),
+            &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("fold");
+    engine.record_manifest_published(folded.current);
+    assert_eq!(engine.wal_tail_inline_bytes(), Some(0));
+    publish(
+        &mut engine,
+        &context,
+        candidate("resumed", vec![inline(Bytes::from_static(b"next"))]),
+    )
+    .await
+    .expect("a commit after the fold");
 }

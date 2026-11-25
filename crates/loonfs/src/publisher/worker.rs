@@ -312,8 +312,10 @@ impl NamespacePublisher {
         let fold_start = if publish.wal_tail.is_some_and(|tail| {
             wal_tail_reached_fold_size(
                 core.session_fold_at_wal_objects().get(),
+                core.config().inline_content.inline_content_tail_limit_bytes,
                 tail.objects,
                 tail.wal_bytes,
+                tail.inline_bytes,
             )
         }) || write_stopped
         {

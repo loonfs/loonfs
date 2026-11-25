@@ -86,7 +86,6 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
                 inline_content_threshold_bytes: Some(4),
-                inline_content_tail_limit_bytes: 4,
                 ..Default::default()
             },
             min_publish_interval_ms: 0,
@@ -194,12 +193,12 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             &put_options("next"),
         )
         .await
-        .expect("full known tail stages next value");
+        .expect("the next value publishes inline");
     let recovered = loonfs_core::test_support::namespace_store(store.inner().inner(), &namespace)
         .load_wal_tail_usage()
         .await
         .expect("recovered usage");
-    assert_eq!(recovered.wal_tail_inline_bytes, 4);
+    assert_eq!(recovered.wal_tail_inline_bytes, 8);
     assert_eq!(
         writer
             .mode
@@ -298,72 +297,6 @@ async fn the_fold_trigger_waits_for_the_reloaded_tail_after_an_unknown_outcome()
     writer.shutdown().await.expect("shutdown");
 }
 
-#[tokio::test]
-async fn a_new_session_keeps_one_wal_object_budget_inline_until_it_observes_the_tail() {
-    let (_directory, store, writer, namespace, namespace_writer) =
-        writer_with_policy(InlineContentPolicy {
-            inline_content_wal_object_budget_bytes: 4,
-            inline_content_tail_limit_bytes: 8,
-            ..policy()
-        })
-        .await;
-    for (path, bytes) in [("/four", b"four".as_slice()), ("/three", b"abc")] {
-        namespace_writer
-            .put_file_with_options(
-                path,
-                bytes,
-                &loonfs_test_support::test_actor(),
-                &put_options(&path[1..]),
-            )
-            .await
-            .expect("fill tail below the fold trigger");
-    }
-    namespace_writer.close().await.expect("close session");
-    let namespace_writer = writer.open_namespace(&namespace).expect("reopen namespace");
-    let folds = hold_every_fold_permit(&writer).await;
-    let slots = hold_every_publication_permit(&writer).await;
-    store.reset();
-    let actor = loonfs_test_support::test_actor();
-    let (a, b, c) = (put_options("a"), put_options("b"), put_options("c"));
-    let (first, second, third, ()) = tokio::join!(
-        namespace_writer.put_file_with_options("/a", b"aaaa", &actor, &a),
-        namespace_writer.put_file_with_options("/b", b"bbbb", &actor, &b),
-        namespace_writer.put_file_with_options("/c", b"cccc", &actor, &c),
-        async {
-            let publisher = namespace_writer.session().publisher.clone();
-            bounded(
-                Duration::from_secs(10),
-                wait_for_queued_candidates(&publisher, 3),
-            )
-            .await
-            .expect("all three admitted before the first publish");
-            drop(slots);
-        }
-    );
-    for result in [first, second, third] {
-        result.expect("put");
-    }
-    let inline_bytes: usize = written_records(&store)
-        .await
-        .iter()
-        .flat_map(|record| &record.inline_content)
-        .map(|value| value.bytes.len())
-        .sum();
-    assert_eq!(inline_bytes, 4);
-    let staged = store
-        .snapshot()
-        .into_iter()
-        .filter(|operation| {
-            matches!(operation, RecordedOperation::Put { key, .. }
-                if parse_object_key(key)
-                    .is_some_and(|parsed| parsed.family() == DurableObjectFamily::ContentBlob))
-        })
-        .count();
-    assert_eq!(staged, 2);
-    drop(folds);
-    writer.shutdown().await.expect("shutdown");
-}
-
 async fn writer_with_policy(
     policy: InlineContentPolicy,
 ) -> (
@@ -392,23 +325,6 @@ async fn writer_with_policy_and_byte_limit(
         FOLD_AT_WAL_OBJECTS,
     )
     .await
-}
-
-/// Builds the writer of [`writer_with_policy`], whose session folds at
-/// `session_fold_at_wal_objects` WAL objects. The claim's fence and the
-/// warmup commit leave two.
-async fn writer_folding_at(
-    policy: InlineContentPolicy,
-    session_fold_at_wal_objects: u64,
-) -> (
-    tempfile::TempDir,
-    Arc<RecordingStore<LocalFsStore>>,
-    crate::LoonFs<crate::Writable>,
-    NamespaceId,
-    crate::Namespace<crate::Writable>,
-) {
-    let objects = NonZeroU64::new(session_fold_at_wal_objects).expect("a fold trigger");
-    writer_with(policy, 8192, objects).await
 }
 
 async fn writer_with(
@@ -797,94 +713,6 @@ async fn appends_fill_the_wal_object_budget_before_inline_values() {
 }
 
 #[tokio::test]
-async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
-    // The first put's WAL object reaches the session's fold trigger.
-    let (_directory, store, writer, namespace, namespace_writer) = writer_folding_at(
-        InlineContentPolicy {
-            inline_content_tail_limit_bytes: 4,
-            ..policy()
-        },
-        3,
-    )
-    .await;
-    let namespace_reader = writer.namespace(&namespace);
-    let fold_permits = hold_every_fold_permit(&writer).await;
-    namespace_writer
-        .put_file_with_options(
-            "/first",
-            b"full",
-            &loonfs_test_support::test_actor(),
-            &put_options("first"),
-        )
-        .await
-        .expect("fill tail");
-    let prepared = namespace_writer
-        .prepare_content(b"next", &loonfs_test_support::test_actor())
-        .await
-        .expect("prepare");
-    let request = CommitIntent::single(
-        CommitId::parse("fallback").expect("commit"),
-        loonfs_test_support::test_actor(),
-        None,
-        put_operation("/fallback", &prepared),
-    );
-    let candidate = CommitCandidate::prepared(request, vec![prepared.clone()]);
-    let fingerprint = candidate.semantic_identity(&namespace);
-    store.reset();
-    let first = namespace_writer
-        .put_file_prepared_with_options(
-            "/fallback",
-            prepared.clone(),
-            &loonfs_test_support::test_actor(),
-            &put_options("fallback"),
-        )
-        .await
-        .expect("fallback");
-    let records = written_records(&store).await;
-    assert_eq!(records.len(), 1);
-    assert!(records[0].inline_content.is_empty());
-    assert_eq!(records[0].semantic_commit_fingerprint, fingerprint);
-    assert!(family_requests(&store, DurableObjectFamily::ContentBlob) > 0);
-    let file = namespace_reader.read_file("/fallback").await.expect("read");
-    assert_eq!(file.bytes, b"next");
-    assert_ne!(
-        file.entry.content_ref().expect("reference").content_id,
-        prepared.content_ref().content_id
-    );
-    store.reset();
-    assert_eq!(
-        namespace_writer
-            .put_file_prepared_with_options(
-                "/fallback",
-                prepared.clone(),
-                &loonfs_test_support::test_actor(),
-                &put_options("fallback")
-            )
-            .await
-            .expect("replay staged fallback"),
-        first
-    );
-    assert!(written_records(&store).await.is_empty());
-    drop(fold_permits);
-    namespace_writer.wait_for_fold().await.expect("fold");
-    store.reset();
-    assert_eq!(
-        namespace_writer
-            .put_file_prepared_with_options(
-                "/fallback",
-                prepared,
-                &loonfs_test_support::test_actor(),
-                &put_options("fallback")
-            )
-            .await
-            .expect("replay inline after fold"),
-        first
-    );
-    assert_eq!(store.count(OperationSelector::Put), 0);
-    writer.shutdown().await.expect("shutdown");
-}
-
-#[tokio::test]
 async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fail() {
     for bytes in [b"four".as_slice(), b"longer"] {
         let directory = tempdir().expect("directory");
@@ -901,7 +729,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
                 inline_content: InlineContentPolicy {
                     inline_content_threshold_bytes: Some(8),
                     inline_content_wal_object_budget_bytes: 4,
-                    inline_content_tail_limit_bytes: 5,
+                    ..Default::default()
                 },
                 min_publish_interval_ms: 0,
                 ..crate::RuntimeConfig::default()
@@ -1269,117 +1097,47 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
     writer.shutdown().await.expect("shutdown");
 }
 
+/// Checks that two queued writes whose inline bytes together pass the WAL
+/// object budget publish in two WAL objects, each with its value inline.
 #[tokio::test]
-async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budget() {
-    for limited_tail in [false, true] {
-        let mut options = InlineContentPolicy {
-            inline_content_wal_object_budget_bytes: 4,
-            ..policy()
-        };
-        if limited_tail {
-            options.inline_content_tail_limit_bytes = 5;
-        }
-        let (_directory, store, writer, _namespace, namespace) = writer_with_policy(options).await;
-        let slots = hold_every_publication_permit(&writer).await;
-        let publisher = namespace.session().publisher.clone();
-        let actor = loonfs_test_support::test_actor();
-        let (one, two) = (put_options("one"), put_options("two"));
-        let (first, second, ()) = tokio::join!(
-            namespace.put_file_with_options("/one", b"one", &actor, &one),
-            namespace.put_file_with_options("/two", b"two", &actor, &two),
-            async {
-                bounded(Duration::from_secs(10), async {
-                    while queued_candidates(&publisher.lock_state()) < 2 {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .expect("both candidates admitted while publication is blocked");
-                assert_eq!(
-                    publisher.lock_state().queue.len(),
-                    if limited_tail { 1 } else { 2 }
-                );
-                drop(slots);
-            }
-        );
-        first.expect("first");
-        second.expect("second");
-        let records = written_records(&store).await;
-        assert_eq!(records.len(), 2);
-        let inline_bytes: usize = records
-            .iter()
-            .flat_map(|record| &record.inline_content)
-            .map(|value| value.bytes.len())
-            .sum();
-        assert_eq!(inline_bytes, if limited_tail { 3 } else { 6 });
-        if limited_tail {
-            store.reset();
-            namespace
-                .put_file_with_options(
-                    "/warmup",
-                    b"x",
-                    &loonfs_test_support::test_actor(),
-                    &put_options("fails"),
-                )
-                .await
-                .expect_err("directory cannot be replaced by a file");
-            assert_eq!(store.count(OperationSelector::Put), 0);
-            let folds = hold_every_fold_permit(&writer).await;
-            namespace
-                .put_file_with_options(
-                    "/after-failure",
-                    b"ok",
-                    &loonfs_test_support::test_actor(),
-                    &put_options("after-failure"),
-                )
-                .await
-                .expect("reservation released on failure");
-            assert_eq!(store.count(OperationSelector::Put), 1);
-            assert_eq!(written_records(&store).await[0].inline_content.len(), 1);
-            drop(folds);
-        } else {
-            assert_eq!(store.count(OperationSelector::Put), 2);
-            assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
-        }
-        writer.shutdown().await.expect("shutdown");
-    }
-}
-
-/// Checks that a commit after a dropped position is admitted against the
-/// WAL object budget alone, and that its publish restores the inline count,
-/// so the tail limit stages the next commit's content again.
-#[tokio::test]
-async fn a_commit_after_a_dropped_position_is_admitted_against_the_wal_object_budget_alone() {
-    let (_directory, store, writer, namespace, namespace_writer) =
+async fn queued_writes_split_at_the_wal_object_budget() {
+    let (_directory, store, writer, _namespace, namespace) =
         writer_with_policy(InlineContentPolicy {
-            inline_content_tail_limit_bytes: 4,
+            inline_content_wal_object_budget_bytes: 4,
             ..policy()
         })
         .await;
-    let folds = hold_every_fold_permit(&writer).await;
-    let registry = writer.mode.publisher.clone();
+    let slots = hold_every_publication_permit(&writer).await;
+    let publisher = namespace.session().publisher.clone();
     let actor = loonfs_test_support::test_actor();
-    namespace_writer
-        .put_file_with_options("/full", b"full", &actor, &put_options("full"))
-        .await
-        .expect("fill the tail to its limit");
-    registry
-        .invalidate_namespace(&namespace, NamespaceChange::Unknown)
-        .await;
-    assert_eq!(registry.wal_tail_inline_bytes(&namespace).await, None);
-    namespace_writer
-        .put_file_with_options("/over", b"over", &actor, &put_options("over"))
-        .await
-        .expect("publish after the dropped position");
+    let (one, two) = (put_options("one"), put_options("two"));
+    let (first, second, ()) = tokio::join!(
+        namespace.put_file_with_options("/one", b"one", &actor, &one),
+        namespace.put_file_with_options("/two", b"two", &actor, &two),
+        async {
+            bounded(Duration::from_secs(10), async {
+                while queued_candidates(&publisher.lock_state()) < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("both candidates admitted while publication is blocked");
+            assert_eq!(publisher.lock_state().queue.len(), 2);
+            drop(slots);
+        }
+    );
+    first.expect("first");
+    second.expect("second");
+    let records = written_records(&store).await;
+    assert_eq!(records.len(), 2);
+    let inline_bytes: usize = records
+        .iter()
+        .flat_map(|record| &record.inline_content)
+        .map(|value| value.bytes.len())
+        .sum();
+    assert_eq!(inline_bytes, 6);
+    assert_eq!(store.count(OperationSelector::Put), 2);
     assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
-    assert_eq!(registry.wal_tail_inline_bytes(&namespace).await, Some(8));
-    namespace_writer
-        .put_file_with_options("/staged", b"next", &actor, &put_options("staged"))
-        .await
-        .expect("publish over the tail limit");
-    assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 1);
-    assert_eq!(registry.wal_tail_inline_bytes(&namespace).await, Some(8));
-    drop(folds);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -1404,7 +1162,6 @@ async fn a_fold_that_leaves_the_tail_over_the_trigger_folds_again() {
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
                 inline_content_threshold_bytes: Some(4),
-                inline_content_tail_limit_bytes: 8,
                 ..Default::default()
             },
             min_publish_interval_ms: 0,
@@ -1489,7 +1246,7 @@ async fn a_fold_that_leaves_the_tail_over_the_trigger_folds_again() {
         .load_wal_tail_usage()
         .await
         .expect("tail usage after recovery");
-    assert_eq!(usage.wal_tail_inline_bytes, 8);
+    assert_eq!(usage.wal_tail_inline_bytes, 16);
 
     drop(fold_permits);
     writer.shutdown().await.expect("shutdown");
@@ -1769,10 +1526,13 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
         ),
         (
             InlineContentPolicy {
-                inline_content_tail_limit_bytes: 0,
+                inline_content_tail_limit_bytes: MAX_WAL_OBJECT_INLINE_CONTENT_BYTES - 1,
                 ..policy()
             },
-            "`inline_content.inline_content_tail_limit_bytes` must be greater than zero".to_owned(),
+            format!(
+                "`inline_content.inline_content_tail_limit_bytes` must be at least \
+                 {MAX_WAL_OBJECT_INLINE_CONTENT_BYTES}, the inline bytes of one WAL object"
+            ),
         ),
     ] {
         let error = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
@@ -1816,7 +1576,6 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
                 inline_content_threshold_bytes: Some(4),
-                inline_content_tail_limit_bytes: 8,
                 ..Default::default()
             },
             min_publish_interval_ms: 0,
@@ -1913,12 +1672,12 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
     namespace_writer
         .commit_candidate(CommitCandidate::prepared(request, prepared))
         .await
-        .expect("publish with only four inline bytes available");
+        .expect("publish both values inline");
     let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
         .load_wal_tail_usage()
         .await
         .expect("actual tail usage");
-    assert_eq!(usage.wal_tail_inline_bytes, 8);
+    assert_eq!(usage.wal_tail_inline_bytes, 12);
     for (path, bytes) in [
         ("/first", b"four"),
         ("/during", b"next"),

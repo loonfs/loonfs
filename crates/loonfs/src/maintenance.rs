@@ -182,7 +182,10 @@ impl Maintenance {
 
     /// Folds the WAL tail at `max_wal_tail_objects` WAL objects, at
     /// [`FOLD_AT_WAL_BYTES`](loonfs_core::limits::FOLD_AT_WAL_BYTES) of
-    /// unfolded WAL bytes, or once the tail's newest commit reaches the
+    /// unfolded WAL bytes, at a quarter of the inline tail limit in inline
+    /// content bytes (see
+    /// [`fold_at_inline_bytes`](loonfs_core::limits::fold_at_inline_bytes)),
+    /// or once the tail's newest commit reaches the
     /// runtime's idle fold age (see
     /// [`RuntimeConfig::idle_fold_after_ms`](crate::RuntimeConfig::idle_fold_after_ms)).
     /// The check reads the position of this runtime's writer session when

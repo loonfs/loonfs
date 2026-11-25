@@ -20,6 +20,7 @@
 //!     CacheScope, HeadAndWalTailCache, MetadataSegmentCache, ObjectCache, ObjectStoreScope,
 //!     SharedHeadsAndWalTails, SharedObjects,
 //! };
+//! use loonfs_core::limits::DEFAULT_INLINE_TAIL_LIMIT_BYTES;
 //! use loonfs_core::publish::{
 //!     CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 //! };
@@ -54,6 +55,7 @@
 //!         None,
 //!     )),
 //!     MetadataRunPolicy::default(),
+//!     DEFAULT_INLINE_TAIL_LIMIT_BYTES,
 //! );
 //!
 //! let writer_id = WriterId::parse("example-writer").expect("valid writer id");
