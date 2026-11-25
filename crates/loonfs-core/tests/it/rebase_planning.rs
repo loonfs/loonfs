@@ -269,37 +269,33 @@ impl Family {
         .await
     }
 
-    /// Returns `source`'s newest row in `main`'s merge index, and where
-    /// `source`'s next merge into `main` starts.
-    async fn main_range(&self, source: &NamespaceId) -> (Option<Merge>, CommitSeq) {
-        let response = namespace_engine(&self.store, &self.main, &self.writer)
+    /// Returns the outcome of the next-range query of the fork into `main`.
+    async fn fork_outcome(&self) -> NextMergeRangeOutcome {
+        namespace_engine(&self.store, &self.main, &self.writer)
             .next_merge_range(
                 &administrator_of(&self.store, &self.main),
                 &read_context(&self.store, &self.main).await,
-                &namespace_engine(&self.store, source, &self.writer),
-                &administrator_of(&self.store, source),
-                &read_context(&self.store, source).await,
+                &namespace_engine(&self.store, &self.fork, &self.writer),
+                &administrator_of(&self.store, &self.fork),
+                &read_context(&self.store, &self.fork).await,
             )
             .await
-            .expect("the next range");
-        let NextMergeRangeOutcome::Open {
-            merge,
-            next_after_seq,
-        } = response.outcome
-        else {
-            panic!("the floors allow the merge: {:?}", response.outcome);
-        };
-        (merge, next_after_seq)
+            .expect("the next range")
+            .outcome
     }
 
-    /// Returns the range of the fork that `main`'s merge index says a merge
-    /// covered, after `after_seq` through `through_seq`.
-    fn fork_range(&self, after_seq: CommitSeq, through_seq: CommitSeq) -> Option<Merge> {
-        Some(Merge {
-            source_namespace_id: self.fork.clone(),
-            source_after_seq: after_seq,
-            source_through_seq: through_seq,
-        })
+    /// Returns the outcome of the next-range query of the fork into `main`
+    /// after a merge of the new fork covered the fork's commits after
+    /// `after_seq` through `through_seq`.
+    fn covered(&self, after_seq: CommitSeq, through_seq: CommitSeq) -> NextMergeRangeOutcome {
+        NextMergeRangeOutcome::Covered {
+            merge: Merge {
+                source_namespace_id: self.fork.clone(),
+                source_after_seq: after_seq,
+                source_through_seq: through_seq,
+            },
+            covered_by_namespace_id: self.rebase.clone(),
+        }
     }
 
     /// Advances the new fork's floor to its fork point, and compacts it, so
@@ -852,11 +848,12 @@ async fn a_subtree_change_on_main_before_the_rebase_is_found_through_the_snapsho
     );
 }
 
-/// Checks that a merge of a new fork whose replay covered only a prefix of
-/// the fork covers that prefix in `main`'s merge index, and that the fork's
-/// next merge applies the rest of its commits.
+/// Checks that a new fork whose first merge covered only a prefix of the
+/// fork replays the rest of the fork and merges again, and that its second
+/// merge covers the rest, which continues the row that its first merge
+/// wrote for the fork in `main`'s merge index.
 #[tokio::test]
-async fn a_merge_of_a_prefix_replay_leaves_the_rest_of_the_fork_to_merge() {
+async fn a_new_fork_replays_and_merges_the_rest_of_the_fork_after_its_first_merge() {
     let family = Family::new().await;
     let prefix = family.write(&family.fork, "/x.txt", b"x").await;
     family.write(&family.fork, "/y.txt", b"y").await;
@@ -870,18 +867,18 @@ async fn a_merge_of_a_prefix_replay_leaves_the_rest_of_the_fork_to_merge() {
         .merge_into_main(&family.rebase, "merge-new-fork")
         .await;
     assert_eq!(
-        family.main_range(&family.fork).await,
-        (
-            family.fork_range(CommitSeq(2), prefix.committed_seq),
-            prefix.committed_seq
-        )
+        family.fork_outcome().await,
+        family.covered(CommitSeq(2), prefix.committed_seq)
     );
 
-    let merged = family.merge_into_main(&family.fork, "merge-rest").await;
-    let merge = merged.merge.expect("a merge");
+    family
+        .replay("rest", None)
+        .await
+        .expect("replay the rest after the new fork merged");
+    family.merge_into_main(&family.rebase, "merge-rest").await;
     assert_eq!(
-        (merge.source_after_seq, merge.source_through_seq),
-        (prefix.committed_seq, last.committed_seq)
+        family.fork_outcome().await,
+        family.covered(prefix.committed_seq, last.committed_seq)
     );
     for path in ["/x.txt", "/y.txt", "/z.txt"] {
         assert!(family.entry(&family.main, path).await.is_some(), "{path}");
@@ -889,11 +886,12 @@ async fn a_merge_of_a_prefix_replay_leaves_the_rest_of_the_fork_to_merge() {
 }
 
 /// Checks that a merge of a new fork that holds two replay pieces covers
-/// the fork from the first piece's start through the second piece's end,
-/// and that a merge of the fork with nothing after that returns
-/// `invalid_request`.
+/// the fork from the first piece's start through the second piece's end, and
+/// that once it did, a merge and a rebase of the fork return
+/// `invalid_request`, whose message identifies the new fork, even after the
+/// fork has a later commit.
 #[tokio::test]
-async fn a_merge_of_two_replay_pieces_covers_both_and_leaves_nothing_to_merge() {
+async fn a_merge_of_two_replay_pieces_covers_both_and_closes_the_fork() {
     let family = Family::new().await;
     let first = family.write(&family.fork, "/x.txt", b"x").await;
     let last = family.write(&family.fork, "/y.txt", b"y").await;
@@ -910,22 +908,38 @@ async fn a_merge_of_two_replay_pieces_covers_both_and_leaves_nothing_to_merge() 
         .merge_into_main(&family.rebase, "merge-new-fork")
         .await;
     assert_eq!(
-        family.main_range(&family.fork).await,
-        (
-            family.fork_range(CommitSeq(2), last.committed_seq),
-            last.committed_seq
-        )
+        family.fork_outcome().await,
+        family.covered(CommitSeq(2), last.committed_seq)
     );
 
-    let error = family
+    family.write(&family.fork, "/later.txt", b"later").await;
+    let merge_error = family
         .try_merge_into_main(&family.fork, "merge-again", None)
         .await
-        .expect_err("nothing of the fork is left to merge");
-    assert_eq!(
-        error.code(),
-        loonfs_types::ErrorCode::InvalidRequest,
-        "{error:?}"
-    );
+        .expect_err("a rebase's new fork merged the fork's work");
+    let rebase_error = namespace_engine(&family.store, &family.main, &family.writer)
+        .fork_point_for_rebase(
+            &read_context(&family.store, &family.main).await,
+            &namespace_engine(&family.store, &family.fork, &family.writer),
+            &read_context(&family.store, &family.fork).await,
+        )
+        .await
+        .expect_err("a rebase of a covered fork");
+    for error in [merge_error, rebase_error] {
+        assert_eq!(
+            error.code(),
+            loonfs_types::ErrorCode::InvalidRequest,
+            "{error:?}"
+        );
+        assert_matches!(
+            &error,
+            CoreError::InvalidMerge {
+                param: "source_namespace_id",
+                message,
+            } if message.contains("`main-rebase`")
+        );
+    }
+    assert!(family.entry(&family.main, "/later.txt").await.is_none());
 }
 
 /// Checks that a replay piece whose every change conflicted, and which
@@ -945,11 +959,8 @@ async fn a_replay_piece_whose_every_change_conflicted_is_covered() {
         .merge_into_main(&family.rebase, "merge-new-fork")
         .await;
     assert_eq!(
-        family.main_range(&family.fork).await,
-        (
-            family.fork_range(CommitSeq(2), last.committed_seq),
-            last.committed_seq
-        )
+        family.fork_outcome().await,
+        family.covered(CommitSeq(2), last.committed_seq)
     );
     assert_eq!(
         family.bytes(&family.main, "/docs/a.txt").await.as_deref(),
@@ -973,14 +984,11 @@ async fn a_split_whose_second_piece_holds_no_replay_commit_covers_nothing() {
         .try_merge_into_main(&family.rebase, "piece-1", Some(replay.commit.committed_seq))
         .await
         .expect("the first piece");
-    let expected = (
-        family.fork_range(CommitSeq(2), last.committed_seq),
-        last.committed_seq,
-    );
-    assert_eq!(family.main_range(&family.fork).await, expected);
+    let expected = family.covered(CommitSeq(2), last.committed_seq);
+    assert_eq!(family.fork_outcome().await, expected);
 
     family.merge_into_main(&family.rebase, "piece-2").await;
-    assert_eq!(family.main_range(&family.fork).await, expected);
+    assert_eq!(family.fork_outcome().await, expected);
     assert!(family.entry(&family.main, "/resolved.txt").await.is_some());
 }
 

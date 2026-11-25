@@ -202,10 +202,9 @@ impl NamedSchemas {
                     "Whether the store passed the check, failed it, or doesn't support the \
                      capability.",
                 ),
-                "NextMergeRangeResponse" => Some(
-                    "Whether the retention floors allow the fork's next merge, and where that \
-                     merge starts.",
-                ),
+                "NextMergeRangeResponse" => {
+                    Some("Whether the fork can merge again, and where its next merge starts.")
+                }
                 _ => None,
             };
             if let Some(description) = description {

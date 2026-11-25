@@ -257,9 +257,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md)).
     ///
     /// The plan checks the fork point against this namespace's retention
-    /// floor, takes the range's start from this namespace's merge index and
-    /// checks it against the fork's own floor, computes the fork's net change
-    /// over the range, and classifies it against this namespace's head. When
+    /// floor, takes the range's start from this namespace's merge index,
+    /// refuses a fork whose work a rebase's new fork already merged (see
+    /// [`merge_start`]), checks the start against the fork's own floor,
+    /// computes the fork's net change over the range, and classifies it
+    /// against this namespace's head. When
     /// `fork` is a rebase's new fork, the merge also covers the ranges that
     /// the replay commits in its range cover, and the plan fails with
     /// `merge_range_conflict` when one of them doesn't continue this
@@ -441,6 +443,34 @@ impl From<FloorRefusal> for CoreError {
     }
 }
 
+/// Why a fork's next merge into a namespace is refused.
+pub(crate) enum MergeRefusal {
+    /// The fork point is below a retention floor.
+    Floor(FloorRefusal),
+    /// The fork's newest row in the merge index, which this variant
+    /// includes, was covered by a merge of a rebase's new fork, so the fork's
+    /// work reached the namespace through that new fork.
+    Covered(MergeIndexRecord),
+}
+
+impl From<MergeRefusal> for CoreError {
+    fn from(refusal: MergeRefusal) -> Self {
+        match refusal {
+            MergeRefusal::Floor(refusal) => refusal.into(),
+            MergeRefusal::Covered(cover) => CoreError::InvalidMerge {
+                param: "source_namespace_id",
+                message: format!(
+                    "`{}`, a rebase's new fork, already merged fork `{}`'s commits through `{}`, \
+                     so the fork can't merge or rebase again (fork the namespace again to continue)",
+                    cover.covered_by_namespace_id,
+                    cover.source_namespace_id,
+                    cover.source_through_seq
+                ),
+            },
+        }
+    }
+}
+
 /// Where the next merge from a fork into a namespace starts, under the range
 /// rule.
 pub(crate) struct MergeStart {
@@ -451,9 +481,19 @@ pub(crate) struct MergeStart {
     pub(crate) previous: Option<MergeIndexRecord>,
 }
 
+impl MergeStart {
+    /// Returns the start of a merge that continues `previous`.
+    fn after(previous: MergeIndexRecord) -> Self {
+        Self {
+            after_seq: previous.source_through_seq,
+            previous: Some(previous),
+        }
+    }
+}
+
 /// Returns where the next merge from `source_namespace_id`, a fork made at
 /// `fork_point_seq`, into the namespace that `head` and `view` describe
-/// starts, under the range rule and the floor rule
+/// starts, under the range rule, the floor rule and the rule for covered forks
 /// ([format section 6.2](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#merges)).
 ///
 /// The merge starts after the fork's newest merge in the merge index, or
@@ -465,22 +505,27 @@ pub(crate) struct MergeStart {
 /// fork's: only the merge index rows above it count, the first replay commit
 /// starts after `resume_after_seq`, and the namespace's own fork point has to
 /// be at or above its floor.
+///
+/// When the fork's newest row was written by a merge of a rebase's new fork,
+/// this function refuses the fork's own merge, its rebase and its replay
+/// commit, and the next-range query reports the refusal. [`ensure_ranges_continue`] continues a covered range in another
+/// namespace's merge from that row instead.
 pub(crate) async fn merge_start<S: ObjectStore + ?Sized>(
     view: &MetadataView<'_, '_, S>,
     head: &NamespaceReadState,
     source_namespace_id: &NamespaceId,
     fork_point_seq: CommitSeq,
-) -> Result<std::result::Result<MergeStart, FloorRefusal>> {
+) -> Result<std::result::Result<MergeStart, MergeRefusal>> {
     let rebase = rebase_basis(head, source_namespace_id);
     let checked_fork_point_seq = rebase.map_or(fork_point_seq, |(basis, _)| basis.fork_point_seq);
     let retention_floor_seq = view.retention_floor_seq();
     if checked_fork_point_seq < retention_floor_seq {
-        return Ok(Err(FloorRefusal {
+        return Ok(Err(MergeRefusal::Floor(FloorRefusal {
             below: HistoryPosition::ForkPoint {
                 fork_point_seq: checked_fork_point_seq,
             },
             retention_floor_seq,
-        }));
+        })));
     }
     let newest = view.newest_merge(source_namespace_id).await?;
     let (previous, first_after_seq) = match rebase {
@@ -492,12 +537,16 @@ pub(crate) async fn merge_start<S: ObjectStore + ?Sized>(
         ),
         None => (newest, fork_point_seq),
     };
-    Ok(Ok(MergeStart {
-        after_seq: previous
-            .as_ref()
-            .map_or(first_after_seq, |previous| previous.source_through_seq),
-        previous,
-    }))
+    Ok(match previous {
+        Some(previous) if previous.covered_by_namespace_id != previous.source_namespace_id => {
+            Err(MergeRefusal::Covered(previous))
+        }
+        Some(previous) => Ok(MergeStart::after(previous)),
+        None => Ok(MergeStart {
+            after_seq: first_after_seq,
+            previous: None,
+        }),
+    })
 }
 
 /// Refuses a merge into the namespace that `head` and `view` describe with
@@ -512,7 +561,10 @@ pub(crate) async fn merge_start<S: ObjectStore + ?Sized>(
 /// checked, because the namespace knows that fork's fork point only from
 /// the fork itself. No merge in the index covers such a fork, so no row can
 /// contradict the range, and the merge that commits first writes the row
-/// that every later range of the fork is checked against.
+/// that every later range of the fork is checked against. A range of
+/// another fork whose newest row a merge of a rebase's new fork wrote
+/// continues that row, so the new fork can merge again after its first
+/// merge.
 pub(crate) async fn ensure_ranges_continue<S: ObjectStore + ?Sized>(
     view: &MetadataView<'_, '_, S>,
     head: &NamespaceReadState,
@@ -522,8 +574,13 @@ pub(crate) async fn ensure_ranges_continue<S: ObjectStore + ?Sized>(
 ) -> Result<()> {
     for range in ranges {
         let source_namespace_id = range.source_namespace_id;
-        let start = merge_start(view, head, &source_namespace_id, fork_point_seq).await??;
-        if start.previous.is_none() && source_namespace_id != *merged_source {
+        let own = source_namespace_id == *merged_source;
+        let start = match merge_start(view, head, &source_namespace_id, fork_point_seq).await? {
+            Ok(start) => start,
+            Err(MergeRefusal::Covered(cover)) if !own => MergeStart::after(cover),
+            Err(refusal) => return Err(refusal.into()),
+        };
+        if start.previous.is_none() && !own {
             continue;
         }
         if range.source_after_seq != start.after_seq {

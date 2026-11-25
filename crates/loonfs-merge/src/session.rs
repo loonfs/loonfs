@@ -162,7 +162,14 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
                         merge: PendingCommit::new(through_seq),
                     }
                 } else {
-                    MergeSessionStatus::Merged
+                    status_with_nothing_left(
+                        &self.mechanics,
+                        &self.state.namespace_id,
+                        &self.state.original_fork_id,
+                        self.state.through_seq,
+                        fork_id,
+                    )
+                    .await?
                 };
                 return Ok(Transition::new(
                     status,
@@ -286,7 +293,19 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
             .next_merge_range(&self.state.namespace_id, new_fork_id)
             .await?;
         let through_seq = range.source_head_seq;
-        let status = status_after_range(new_fork_id, through_seq, &range.outcome, reports);
+        let status = match status_after_range(new_fork_id, through_seq, &range.outcome, reports) {
+            MergeSessionStatus::Merged => {
+                status_with_nothing_left(
+                    &self.mechanics,
+                    &self.state.namespace_id,
+                    &self.state.original_fork_id,
+                    self.state.through_seq,
+                    new_fork_id,
+                )
+                .await?
+            }
+            status => status,
+        };
         let outcome = match status {
             MergeSessionStatus::Failed { .. } => MergeSessionOutcome::Failed,
             _ => MergeSessionOutcome::Resolved {
@@ -337,11 +356,48 @@ fn next_request(
     )
 }
 
+/// Returns the session's status once `fork_id` has nothing left to merge.
+///
+/// A session is `merged` when the merge index of `namespace_id` has the
+/// original fork's commits through `through_seq`, the sequence that the
+/// session merges the original fork through. When `fork_id` is the original
+/// fork, the session merged it through `through_seq`, or its next-range
+/// query said that nothing was left up to that sequence, so the session is
+/// `merged`. When `fork_id` is a rebase's new fork, its merges wrote the
+/// original fork's row, which ends before `through_seq` if the new fork
+/// replayed a shorter range than the session asks for. (A recovered session
+/// merges a new fork that an earlier run made, through the new fork's own
+/// head.) So the status comes from the original fork's row: what
+/// [`status_after_range`] returns for the original fork through
+/// `through_seq`.
+pub(crate) async fn status_with_nothing_left(
+    mechanics: &impl Mechanics,
+    namespace_id: &NamespaceId,
+    original_fork_id: &NamespaceId,
+    through_seq: CommitSeq,
+    fork_id: &NamespaceId,
+) -> Result<MergeSessionStatus> {
+    if fork_id == original_fork_id {
+        return Ok(MergeSessionStatus::Merged);
+    }
+    let range = mechanics
+        .next_merge_range(namespace_id, original_fork_id)
+        .await?;
+    Ok(status_after_range(
+        original_fork_id,
+        through_seq,
+        &range.outcome,
+        &[],
+    ))
+}
+
 /// Returns the status after the next-range query of `fork_id` returned
 /// `outcome`: `merging` through `through_seq`, `merged` when the fork's next
-/// merge starts at or after `through_seq`, or `failed` with `reports` when a
-/// retention floor refuses that merge or the outcome is one that this crate
-/// doesn't know.
+/// merge starts at or after `through_seq`, or when a merge of a rebase's new
+/// fork wrote the fork's row through `through_seq` or later, or `failed` with
+/// `reports` when a retention floor refuses that merge, when that row ends
+/// before `through_seq` (so the fork's later commits can't merge), or when
+/// the outcome is one that this crate doesn't know.
 pub(crate) fn status_after_range(
     fork_id: &NamespaceId,
     through_seq: CommitSeq,
@@ -358,6 +414,18 @@ pub(crate) fn status_after_range(
                 through_seq,
                 merge: PendingCommit::new(through_seq),
             };
+        }
+        NextMergeRangeOutcome::Covered {
+            ref merge,
+            ref covered_by_namespace_id,
+        } => {
+            if merge.source_through_seq >= through_seq {
+                return MergeSessionStatus::Merged;
+            }
+            MergeFailure::Covered {
+                covered_by_namespace_id: covered_by_namespace_id.clone(),
+                source_through_seq: merge.source_through_seq,
+            }
         }
         NextMergeRangeOutcome::RangeStartBelowFloor {
             retention_floor_seq,

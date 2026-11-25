@@ -295,11 +295,11 @@ A single commit applying a contiguous range of a fork's commits (`(source_after_
 
 ### Merge index
 
-The derived `merges` row family storing one row for each range of a fork's commits that a committed merge covers, keyed by that fork and merge sequence newest first. A merge covers its own source's range, and a merge of a rebase's new fork also covers the range of the fork that the new fork's replay commits replayed. Before committing a merge, LoonFS checks the latest row of each fork that the merge covers, to ensure the fork's commits apply once and contiguously. See [Merges](format.md#merges).
+The derived `merges` row family storing one row for each range of a fork's commits that a committed merge covers, keyed by that fork and merge sequence newest first. A merge covers its own source's range, and a merge of a rebase's new fork also covers the range of the fork that the new fork's replay commits replayed. Each row records the source of the merge that covered the range. Before committing a merge, LoonFS checks the latest row of each fork that the merge covers, to ensure the fork's commits apply once and contiguously. See [Merges](format.md#merges).
 
 ### Rebase
 
-Replaying a fork's unmerged commits onto a fresh fork of its parent namespace when a direct merge conflicts. Non-conflicting changes apply as "replay commits" (merges into the new fork), while conflicts are returned so a person or tool can resolve them before merging the new fork back into the parent. The new fork's `fork_basis.rebased_from` identifies the original fork and starting sequence. See [Merges](format.md#merges).
+Replaying a fork's unmerged commits onto a fresh fork of its parent namespace when a direct merge conflicts. Non-conflicting changes apply as "replay commits" (merges into the new fork), while conflicts are returned so a person or tool can resolve them before merging the new fork back into the parent. The new fork's `fork_basis.rebased_from` identifies the original fork and starting sequence. Once a merge of the new fork has written a row for the original fork in the parent's merge index, which happens when that merge's range includes a replay commit, the original fork can't merge or rebase into the parent again. See [Merges](format.md#merges).
 
 ### Writer position
 

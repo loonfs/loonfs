@@ -16,10 +16,6 @@ use serde::{Deserialize, Serialize};
 /// through the fork that it was rebased from, so if the state is lost after
 /// a `merged` session deleted some of its new forks, recovery can't connect
 /// the remaining new forks to the original fork, and nothing deletes them.
-/// The recovered session still merges each of the original fork's commits
-/// once, because the merge of the last new fork covered the original fork's
-/// replayed commits, so the next-range query of the original fork starts
-/// after them, and the session is `merged` when nothing comes after them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeSessionState {
@@ -27,6 +23,12 @@ pub struct MergeSessionState {
     pub namespace_id: NamespaceId,
     /// The fork that the session started with.
     pub original_fork_id: NamespaceId,
+    /// The fork sequence that the session merges the original fork through:
+    /// the sequence that the caller asked for, or the original fork's head
+    /// when the session started. The session is `merged` only when the
+    /// namespace's merge index has the original fork's commits through this
+    /// sequence, whichever fork the session merged last.
+    pub through_seq: CommitSeq,
     /// The actor that every merge and replay commit of the session commits
     /// as. A request that the session sends again has to repeat it, because
     /// the actor is part of a commit's identity.
@@ -109,8 +111,8 @@ pub enum MergeSessionStatus {
         /// The conflict report of every replay commit into the new fork.
         reports: Vec<ConflictReport>,
     },
-    /// The session's last merge committed. The next steps delete the new
-    /// forks.
+    /// The namespace's merge index has the original fork's commits through
+    /// the state's `through_seq`. The next steps delete the new forks.
     Merged,
     /// A merge, a rebase, or the resolver failed in a way that the loop can't
     /// act on, or the next-range query said that the fork can't merge. The
@@ -228,6 +230,17 @@ pub enum MergeFailure {
     ForkPointBelowFloor {
         /// The retention floor of the namespace that the session merges into.
         retention_floor_seq: CommitSeq,
+    },
+    /// The next-range query returned `covered`: a merge of a rebase's new
+    /// fork wrote the fork's row through a sequence below the one that the
+    /// session merges through, so the fork's later commits didn't merge, and
+    /// a merge or a rebase of the fork would return `invalid_request`.
+    Covered {
+        /// The rebase's new fork whose merge wrote the fork's row.
+        covered_by_namespace_id: NamespaceId,
+        /// The fork sequence that the new fork's merge applied the fork's
+        /// commits through.
+        source_through_seq: CommitSeq,
     },
     /// The next-range query returned an outcome from a newer server, which
     /// this crate doesn't know.

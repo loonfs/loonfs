@@ -750,7 +750,8 @@ async fn load_initializing_target<S: ObjectStore>(
 /// with the fork sequence that the next merge of `rebase`'s fork into the
 /// namespace of `head` starts after (see [`merge_start`]), or
 /// `below_retention_floor` when the fork point is below the retention floor
-/// of `head`.
+/// of `head`, or `invalid_request` when a rebase's new fork already merged
+/// the fork's work into that namespace.
 ///
 /// The new fork's state at its fork point is `head`, so the floor check and
 /// the merge index read describe exactly the history that the new fork

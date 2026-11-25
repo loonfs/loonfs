@@ -448,22 +448,24 @@ pub struct MergeIndexRecord {
     pub source_after_seq: CommitSeq,
     /// The fork's commits at or below this sequence were covered.
     pub source_through_seq: CommitSeq,
+    /// The source of the merge that covered the range: the fork itself, or a
+    /// rebase's new fork whose replay commits applied the range.
+    pub covered_by_namespace_id: NamespaceId,
 }
 
 impl MergeIndexRecord {
     /// Derives the merge index rows of `commit`, one for each range that its
     /// merge record covers, and none when the commit isn't a merge.
     pub fn from_commit(commit: &WalCommitPayload) -> impl Iterator<Item = Self> + '_ {
-        commit
-            .merge
-            .iter()
-            .flat_map(|merge| merge.ranges())
-            .map(|range| Self {
+        commit.merge.iter().flat_map(|merge| {
+            merge.ranges().map(|range| Self {
                 source_namespace_id: range.source_namespace_id,
                 committed_seq: commit.committed_seq,
                 source_after_seq: range.source_after_seq,
                 source_through_seq: range.source_through_seq,
+                covered_by_namespace_id: merge.source_namespace_id.clone(),
             })
+        })
     }
 }
 

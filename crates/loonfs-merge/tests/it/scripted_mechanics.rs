@@ -397,6 +397,19 @@ pub(crate) fn merges(sent: &[Sent]) -> Vec<(NamespaceId, MergeForkOptions)> {
         .collect()
 }
 
+/// Returns the next-range outcome of the original fork after the merge of
+/// `new_fork` covered the fork's commits through `through_seq`.
+pub(crate) fn covered(new_fork: &str, through_seq: u64) -> NextMergeRangeOutcome {
+    NextMergeRangeOutcome::Covered {
+        merge: Merge {
+            source_namespace_id: sandbox(),
+            source_after_seq: CommitSeq(5),
+            source_through_seq: CommitSeq(through_seq),
+        },
+        covered_by_namespace_id: namespace_id(new_fork),
+    }
+}
+
 /// Returns a `content` conflict on one file.
 pub(crate) fn conflict(path: &str) -> MergeConflict {
     serde_json::from_value(json!({

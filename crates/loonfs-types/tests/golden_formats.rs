@@ -2395,21 +2395,26 @@ fn sample_merge_commit_row() -> MetadataRow {
 }
 
 /// Merge index rows of two forks, in row-key order: one fork's two merges
-/// newest first, then the other fork's merge.
+/// newest first, the newer of them covered by a rebase's new fork, then the
+/// other fork's merge.
 fn sample_merge_index_rows() -> [MetadataRow; 3] {
     [
-        ("demo-fork", 41, 30, 36),
-        ("demo-fork", 20, 12, 30),
-        ("demo-other", 33, 5, 9),
+        ("demo-fork", 41, 30, 36, "demo-rebase"),
+        ("demo-fork", 20, 12, 30, "demo-fork"),
+        ("demo-other", 33, 5, 9, "demo-other"),
     ]
-    .map(|(source, committed_seq, after_seq, through_seq)| {
-        MetadataRow::Merge(loonfs_types::format::manifest::MergeIndexRecord {
-            source_namespace_id: NamespaceId::parse(source).expect("valid namespace id"),
-            committed_seq: CommitSeq(committed_seq),
-            source_after_seq: CommitSeq(after_seq),
-            source_through_seq: CommitSeq(through_seq),
-        })
-    })
+    .map(
+        |(source, committed_seq, after_seq, through_seq, covered_by)| {
+            MetadataRow::Merge(loonfs_types::format::manifest::MergeIndexRecord {
+                source_namespace_id: NamespaceId::parse(source).expect("valid namespace id"),
+                committed_seq: CommitSeq(committed_seq),
+                source_after_seq: CommitSeq(after_seq),
+                source_through_seq: CommitSeq(through_seq),
+                covered_by_namespace_id: NamespaceId::parse(covered_by)
+                    .expect("valid namespace id"),
+            })
+        },
+    )
 }
 
 fn sample_inode_rows() -> [MetadataRow; 2] {

@@ -860,8 +860,10 @@ mod tests {
     }
 
     fn merge_row(source: &str, committed_seq: u64) -> MergeIndexRecord {
+        let source_namespace_id = NamespaceId::parse(source).expect("namespace");
         MergeIndexRecord {
-            source_namespace_id: NamespaceId::parse(source).expect("namespace"),
+            covered_by_namespace_id: source_namespace_id.clone(),
+            source_namespace_id,
             committed_seq: CommitSeq(committed_seq),
             source_after_seq: CommitSeq(3),
             source_through_seq: CommitSeq(8),

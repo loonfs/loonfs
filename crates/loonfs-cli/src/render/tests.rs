@@ -611,6 +611,7 @@ fn human_merge_failure_lists_the_conflicts_and_the_fork_to_inspect() {
     let session: loonfs_merge::MergeSessionState = serde_json::from_value(serde_json::json!({
         "namespace_id": "demo",
         "original_fork_id": "sandbox",
+        "through_seq": 9,
         "actor_id": "loonfs-cli",
         "new_fork_ids": ["rebase-1"],
         "status": {

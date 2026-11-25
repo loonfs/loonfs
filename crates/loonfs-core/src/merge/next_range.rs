@@ -2,7 +2,7 @@
 //! read without planning the merge
 //! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#the-next-range-query)).
 
-use super::{ensure_range_start_retained, fork_point, merge_start, rebase_basis};
+use super::{ensure_range_start_retained, fork_point, merge_start, rebase_basis, MergeRefusal};
 use crate::engine::{Administrator, NamespaceEngine, RuntimeReadContext};
 use crate::error::Result;
 use loonfs_objectstore::ObjectStore;
@@ -19,7 +19,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// `below_retention_floor`, the response's outcome says which floor
     /// instead. When the fork point is below this namespace's floor, the
     /// outcome has no start, because the merge index might no longer list
-    /// the fork's newest merge. A namespace that isn't a fork of this
+    /// the fork's newest merge. When a rebase's new fork covered the fork's
+    /// newest range, the outcome is `covered`, because the merge would return
+    /// `invalid_request`. A namespace that isn't a fork of this
     /// namespace, or of the namespace that a rebase made this one from,
     /// returns `invalid_request`.
     ///
@@ -68,8 +70,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                         },
                     }
                 }
-                Err(refusal) => NextMergeRangeOutcome::ForkPointBelowFloor {
+                Err(MergeRefusal::Floor(refusal)) => NextMergeRangeOutcome::ForkPointBelowFloor {
                     retention_floor_seq: refusal.retention_floor_seq,
+                },
+                Err(MergeRefusal::Covered(cover)) => NextMergeRangeOutcome::Covered {
+                    merge: Merge {
+                        source_namespace_id: cover.source_namespace_id,
+                        source_after_seq: cover.source_after_seq,
+                        source_through_seq: cover.source_through_seq,
+                    },
+                    covered_by_namespace_id: cover.covered_by_namespace_id,
                 },
             };
         Ok(NextMergeRangeResponse {

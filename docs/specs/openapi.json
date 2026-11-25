@@ -3471,6 +3471,52 @@
         ],
         "type": "object"
       },
+      "NextMergeRangeOutcomeCovered": {
+        "description": "A rebase's new fork already merged the fork's work into the namespace, so a merge or a\nrebase of the fork returns `invalid_request`. To continue, a caller forks the namespace\nagain and copies the changes that it wants to keep.",
+        "properties": {
+          "covered_by_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The rebase's new fork whose merge covered `merge`."
+          },
+          "fork_point_seq": {
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The sequence that the fork was made at, of the namespace or, for a rebase's new fork, of\nthe namespace that the rebase forked."
+          },
+          "merge": {
+            "$ref": "#/components/schemas/Merge",
+            "description": "The fork's newest range in the namespace's merge index, which the new fork's replay\ncommits applied."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The namespace that the fork merges into (or, for a rebase, the rebase's new fork)."
+          },
+          "outcome": {
+            "description": "Whether the fork can merge again, and where its next merge starts.",
+            "enum": [
+              "covered"
+            ],
+            "type": "string"
+          },
+          "source_head_seq": {
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The fork's head sequence when the server read it."
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose next merge range was queried."
+          }
+        },
+        "required": [
+          "merge",
+          "covered_by_namespace_id",
+          "outcome",
+          "namespace_id",
+          "source_namespace_id",
+          "fork_point_seq",
+          "source_head_seq"
+        ],
+        "type": "object"
+      },
       "NextMergeRangeOutcomeForkPointBelowFloor": {
         "description": "The fork point is below the namespace's retention floor, so a merge of the fork returns\n`below_retention_floor`. The outcome doesn't say where the next merge would start, because\na compaction might have removed the fork's newest merge from the namespace's merge index.",
         "properties": {
@@ -3483,7 +3529,7 @@
             "description": "The namespace that the fork merges into (or, for a rebase, the rebase's new fork)."
           },
           "outcome": {
-            "description": "Whether the retention floors allow the fork's next merge, and where that merge starts.",
+            "description": "Whether the fork can merge again, and where its next merge starts.",
             "enum": [
               "fork_point_below_floor"
             ],
@@ -3513,7 +3559,7 @@
         "type": "object"
       },
       "NextMergeRangeOutcomeOpen": {
-        "description": "The floors allow the next merge.",
+        "description": "The fork can merge again.",
         "properties": {
           "fork_point_seq": {
             "$ref": "#/components/schemas/CommitSeq",
@@ -3521,7 +3567,7 @@
           },
           "merge": {
             "$ref": "#/components/schemas/Merge",
-            "description": "The fork's newest range in the namespace's merge index, which the next merge\ncontinues. After a merge of a rebase's new fork, it's the range of this fork that the\nnew fork's replay commits applied, so its source is this fork, not the new fork. It's\nabsent before the fork's first merge. In a rebase's new fork, it's the fork's newest\nreplay commit, never a merge that the new fork inherited."
+            "description": "The fork's newest range in the namespace's merge index, which the next merge\ncontinues. It's absent before the fork's first merge. In a rebase's new fork, it's the fork's newest\nreplay commit, never a merge that the new fork inherited."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -3532,7 +3578,7 @@
             "description": "The fork sequence that the next merge starts after: the newest merge's\n`source_through_seq`, or the fork point before the fork's first merge. In a rebase's\nnew fork, it's the new fork's `resume_after_seq` before the first replay commit."
           },
           "outcome": {
-            "description": "Whether the retention floors allow the fork's next merge, and where that merge starts.",
+            "description": "Whether the fork can merge again, and where its next merge starts.",
             "enum": [
               "open"
             ],
@@ -3577,7 +3623,7 @@
             "description": "The fork sequence that the next merge would start after, as for `open`."
           },
           "outcome": {
-            "description": "Whether the retention floors allow the fork's next merge, and where that merge starts.",
+            "description": "Whether the fork can merge again, and where its next merge starts.",
             "enum": [
               "range_start_below_floor"
             ],
@@ -3611,6 +3657,7 @@
         "description": "Where a fork's next merge into a namespace starts.",
         "discriminator": {
           "mapping": {
+            "covered": "#/components/schemas/NextMergeRangeOutcomeCovered",
             "fork_point_below_floor": "#/components/schemas/NextMergeRangeOutcomeForkPointBelowFloor",
             "open": "#/components/schemas/NextMergeRangeOutcomeOpen",
             "range_start_below_floor": "#/components/schemas/NextMergeRangeOutcomeRangeStartBelowFloor"
@@ -3626,6 +3673,9 @@
           },
           {
             "$ref": "#/components/schemas/NextMergeRangeOutcomeForkPointBelowFloor"
+          },
+          {
+            "$ref": "#/components/schemas/NextMergeRangeOutcomeCovered"
           }
         ]
       },

@@ -2521,7 +2521,7 @@ To merge a fork, the server executes nine steps (reading one view of each namesp
 2. Reserves 8 MiB of the server's merge memory allowance (or the full allowance if smaller), returning `server_busy` immediately if full. At step 7, the reservation grows to the larger of `5 * planned_wal_bytes` or planning memory (touched inodes, paths, and one commit page), again failing immediately with `server_busy` if room is unavailable. The reservation is released once the commit settles. (A concurrent retry with an in-flight `commit_id` also plans, and whichever commits second returns the first commit.)
 3. Verifies the fork was created from this namespace and reads `fork_point_seq`.
 4. Rejects a fork point below this namespace's retention floor with `below_retention_floor`.
-5. Reads this namespace's [merge index](glossary.md#merge-index) for the fork's latest merge to determine the range start, rejecting a start below the fork's own floor with `below_retention_floor`.
+5. Reads this namespace's [merge index](glossary.md#merge-index) for the fork's latest merge to determine the range start, rejecting a fork whose latest range a rebase's new fork merged with `invalid_request`, and a start below the fork's own floor with `below_retention_floor`.
 6. Reads the fork's manifest and WAL tail and creates an unnamed temporary user snapshot of the fork's manifest (without folding unless a tail commit is older than 11 hours and 45 minutes, see [Cross-namespace copies and moves](format.md#97-cross-namespace-copies-and-moves)). The snapshot expires 5 minutes after the plan starts, and until then the fork's snapshot listing includes it, without a name.
 7. Computes the fork's net change and planned commit size before conflict checks, returning `merge_too_large` (with a split hint when a shorter range fits) if the touched-inode cap, WAL object limit, or merge allowance is exceeded.
 8. Classifies every changed inode against this namespace's head under the conflict rule ([Validation](format.md#62-validation)) and materializes any pending WAL tail pieces needed by merge content references. Returns `merge_conflict` on any conflict, or `merge_too_large` if adding layouts exceeds one WAL object (leaving materialized content objects for GC).
@@ -2577,7 +2577,7 @@ Merge-specific errors beyond ordinary commit errors:
 | `inode_not_found` | 404 | Target changed four times in a row, last failing because a deletion hid an affected inode or destination directory. Retry the merge. |
 | `server_busy` | 503 | Concurrent merges exhausted the server's merge memory allowance (step 2). Retry later. |
 | `namespace_not_found`, `namespace_deleted` | 404, 410 | Target or fork is missing or deleted (`details.namespace_id` identifies which). |
-| `invalid_request` | 400 | Fork wasn't created from this namespace (`param`: `/source_namespace_id`), `through_seq` is out of range, or operations couldn't be ordered (`param`: `/through_seq`). |
+| `invalid_request` | 400 | Fork wasn't created from this namespace, or a rebase's new fork already merged the fork's work (`param`: `/source_namespace_id`), `through_seq` is out of range, or operations couldn't be ordered (`param`: `/through_seq`). |
 
 ### 6.15 `GET /merges`
 
@@ -2614,15 +2614,16 @@ Representative request and response:
 | `source_namespace_id` | Fork whose next merge range was queried. |
 | `fork_point_seq` | Fork point sequence in the parent namespace. |
 | `source_head_seq` | Fork's head sequence when read (default end of a merge without `through_seq`). |
-| `outcome` | Floor status: `open`, `range_start_below_floor`, or `fork_point_below_floor` (clients MUST tolerate other values). |
+| `outcome` | Whether the fork can merge: `open`, `range_start_below_floor`, `fork_point_below_floor`, or `covered` (clients MUST tolerate other values). |
 
-Rather than returning `below_retention_floor` when steps 3 to 5 of [`POST /merges`](#614-post-merges) fail a floor check, `GET /merges` reports the status in `outcome` with outcome-specific sibling fields:
+Rather than returning `below_retention_floor` or `invalid_request` when steps 3 to 5 of [`POST /merges`](#614-post-merges) fail a floor check or find a covered fork, `GET /merges` reports the status in `outcome` with outcome-specific sibling fields:
 
 | `outcome` | Fields | Means |
 | --- | --- | --- |
 | `open` | `merge`, `next_after_seq` | Floors allow the next merge. `merge` is the fork's newest row in the [merge index](glossary.md#merge-index) (absent before the first merge), and `next_after_seq` is its `source_through_seq` (or `fork_point_seq` before the first merge). |
 | `range_start_below_floor` | `merge`, `next_after_seq`, `retention_floor_seq` | Range start is below the fork's own floor (`retention_floor_seq`), so `POST /merges` will return `below_retention_floor`. |
 | `fork_point_below_floor` | `retention_floor_seq` | Fork point is below this namespace's floor (`retention_floor_seq`), so `POST /merges` will return `below_retention_floor` (and `merge` / `next_after_seq` are omitted because compaction may have pruned the [merge index](glossary.md#merge-index)). |
+| `covered` | `merge`, `covered_by_namespace_id` | A [rebase](glossary.md#rebase)'s new fork (`covered_by_namespace_id`) merged the fork's range `merge`, so `POST /merges` and `POST /rebases` will return `invalid_request`. To continue, fork this namespace again and copy the changes to keep. |
 
 Example when the parent's floor has passed the fork point:
 
@@ -2630,7 +2631,7 @@ Example when the parent's floor has passed the fork point:
 {"namespace_id":"demo","source_namespace_id":"demo-branch","fork_point_seq":418,"source_head_seq":440,"outcome":"fork_point_below_floor","retention_floor_seq":450}
 ```
 
-`merge.source_namespace_id` is always the queried fork, even when the merge that wrote the row had another source. After a merge of a [rebase](glossary.md#rebase)'s new fork, `merge` for the original fork is the range of the original fork that the new fork's replay commits applied (see [Merges](format.md#merges)), and the original fork's next merge starts after it.
+`merge.source_namespace_id` is always the queried fork, even when the merge that wrote the row had another source. After a merge of a [rebase](glossary.md#rebase)'s new fork, the outcome for the original fork is `covered`, and `merge` is the range of the original fork that the new fork's replay commits applied (see [Merges](format.md#merges)).
 
 When queried on a rebase fork with `source_namespace_id` set to its `fork_basis.rebased_from.source_namespace_id`, the route inspects replay progress for [`POST /replays`](#617-post-replays): `merge` is the newest replay commit in the rebase fork (ignoring inherited merges from the parent namespace), `next_after_seq` starts at `resume_after_seq`, `fork_point_seq` is the source fork's fork point in the parent namespace, and `outcome` is `fork_point_below_floor` if the rebase fork's floor passed its own fork point.
 
@@ -2692,7 +2693,7 @@ To create the rebase fork, the server:
 
 1. Checks `new_namespace_id` (returning `namespace_exists` if active, `namespace_deleted` if deleted, or finishing an initializing rebase fork whose manifest 1 matches, as in [`POST /forks`](#613-post-forks)).
 2. Verifies the source fork was forked from this parent namespace and reads its fork point.
-3. Rejects with `below_retention_floor` if the source fork's fork point is below the parent's floor or if the source fork's next merge start is below the source fork's own floor.
+3. Rejects with `below_retention_floor` if the source fork's fork point is below the parent's floor or if the source fork's next merge start is below the source fork's own floor, and with `invalid_request` if an earlier rebase's new fork already merged the source fork's work into the parent.
 4. Forks this parent namespace at its current head (as in [`POST /forks`](#613-post-forks)) and records `rebased_from` in `fork_basis`.
 
 Errors:
@@ -2703,7 +2704,7 @@ Errors:
 | `below_retention_floor` | 409 | Source fork point is below parent's floor, or next merge start is below source fork's floor (`details` specifies which). |
 | `snapshot_not_found` | 404 | Tail-folding rebase fork exceeded its 5-minute temporary snapshot window or lost a parent tail WAL object while finishing, as in [`POST /forks`](#613-post-forks). |
 | `namespace_not_found`, `namespace_deleted` | 404, 410 | Parent namespace, source fork, or `new_namespace_id` is missing or deleted (`details.namespace_id` identifies which). |
-| `invalid_request` | 400 | Source fork wasn't created from this parent namespace (`param`: `/source_namespace_id`). |
+| `invalid_request` | 400 | Source fork wasn't created from this parent namespace, or an earlier rebase's new fork already merged its work (`param`: `/source_namespace_id`). |
 
 Replay commits created by [`POST /replays`](#617-post-replays) follow the merge rules in [`POST /merges`](#614-post-merges) with four rebase-specific adaptations:
 
