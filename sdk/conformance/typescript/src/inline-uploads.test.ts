@@ -10,8 +10,7 @@ type Fixture = {
     name: string;
     bytes: number;
     size: number | null;
-    limit?: number | null;
-    feature?: boolean;
+    limit?: number;
     inline?: boolean;
     error?: boolean;
     fault?: boolean;
@@ -67,17 +66,15 @@ for (const fixture of cases) {
                 value = {
                     protocol_version: "v0",
                     api_groups: ["filesystem/v0"],
-                    features: { "filesystem.commits.inline_content": fixture.feature ?? true },
-                    limits:
-                        fixture.limit === null ? {} : { "commit.max_inline_content_bytes_per_operation": fixture.limit ?? 65536 },
+                    features: { "filesystem.commits.inline_content": true },
+                    limits: { "commit.max_inline_content_bytes_per_operation": fixture.limit ?? 65536 },
                 };
             } else if (path.endsWith("/uploads")) {
                 assert.ok(!fixture.inline && !fixture.error, "inline preparation starts no upload");
-                if (fixture.feature !== false && fixture.limit !== null)
-                    assert.ok(
-                        position <= Math.min(fixture.limit ?? 65536, 65536) + 1024,
-                        "bounded lookahead plus one caller chunk",
-                    );
+                assert.ok(
+                    position <= Math.min(fixture.limit ?? 65536, 65536) + 1024,
+                    "bounded lookahead plus one caller chunk",
+                );
                 assert.equal((await request.json()).mode, "service_proxied");
                 value = {
                     ...session, status: "open", checksum_algorithm: fixture.algorithm,

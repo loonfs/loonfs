@@ -62,8 +62,8 @@ impl Client {
     /// Writes file bytes to a path.
     ///
     /// Content at or under the advertised inline limit is identified by its bytes.
-    /// A rerun with the same bytes and commit ID replays. Larger content, or content
-    /// prepared without inline support, uploads a new object, so a rerun conflicts.
+    /// A rerun with the same bytes and commit ID replays. Larger content uploads a
+    /// new object, so a rerun conflicts.
     /// At every size, retain [`Self::prepare_content`]'s result and retry with
     /// [`Self::put_file_prepared_with_options`], the same commit ID, and
     /// unchanged options.

@@ -2136,7 +2136,7 @@ fn a_remote_put_replays_its_exact_request_after_the_upload_session_is_gone() {
     let server = harness.start_external_server(harness.write_server_config_with(
         "remote",
         "put-recovery",
-        "\n[inline_content]\ninline_content_threshold_bytes = false\n",
+        "\n[inline_content]\ninline_content_threshold_bytes = 0\n",
     ));
     assert_success(&harness.run(&[
         "profile",

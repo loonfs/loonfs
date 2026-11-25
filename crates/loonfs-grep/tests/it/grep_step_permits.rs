@@ -52,7 +52,7 @@ async fn content_object_writer(store: &SharedObjectStore) -> LoonFs<Writable> {
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
             inline_content: InlineContentPolicy {
-                inline_content_threshold_bytes: None,
+                inline_content_threshold_bytes: 0,
                 ..InlineContentPolicy::default()
             },
             ..loonfs::RuntimeConfig::default()

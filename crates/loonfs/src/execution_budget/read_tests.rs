@@ -135,7 +135,7 @@ impl Fixture {
             .execution_budget(budget)
             .config(crate::RuntimeConfig {
                 inline_content: InlineContentPolicy {
-                    inline_content_threshold_bytes: None,
+                    inline_content_threshold_bytes: 0,
                     ..InlineContentPolicy::default()
                 },
                 ..crate::RuntimeConfig::default()

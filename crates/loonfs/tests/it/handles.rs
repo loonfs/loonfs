@@ -565,7 +565,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             .writer_id(loonfs_test_support::ids::writer_id("fold-failure-writer"))
             .config(loonfs::RuntimeConfig {
                 inline_content: loonfs::InlineContentPolicy {
-                    inline_content_threshold_bytes: None,
+                    inline_content_threshold_bytes: 0,
                     ..Default::default()
                 },
                 publication: loonfs::PublicationPolicy {

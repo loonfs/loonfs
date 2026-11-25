@@ -129,7 +129,7 @@ async fn session_steps_leave_a_tail_below_the_fold_triggers_until_it_is_idle() {
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(None);
-    config.runtime.inline_content.inline_content_threshold_bytes = Some(VALUE_BYTES);
+    config.runtime.inline_content.inline_content_threshold_bytes = VALUE_BYTES;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("large-fold-trigger");
     server
@@ -201,7 +201,7 @@ async fn a_metadata_step_waits_for_the_sessions_fold_instead_of_folding_the_tail
     ));
     let store = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
     let mut config = scheduler_config(None);
-    config.runtime.inline_content.inline_content_threshold_bytes = Some(FILE_BYTES);
+    config.runtime.inline_content.inline_content_threshold_bytes = FILE_BYTES;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("held-folding");
     server

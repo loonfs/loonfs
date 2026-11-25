@@ -61,27 +61,17 @@ class Endpoint:
                 json=dict(
                     protocol_version="v0",
                     api_groups=["filesystem/v0"],
-                    features={
-                        "filesystem.commits.inline_content": self.fixture.get(
-                            "feature", True
-                        )
-                    },
-                    limits={}
-                    if limit is None
-                    else {"commit.max_inline_content_bytes_per_operation": limit},
+                    features={"filesystem.commits.inline_content": True},
+                    limits={"commit.max_inline_content_bytes_per_operation": limit},
                 ),
             )
         if path.endswith("/uploads"):
             assert not self.fixture.get("inline") and not self.fixture.get("error")
-            if (
-                self.fixture.get("feature", True)
-                and self.fixture.get("limit", 65536) is not None
-            ):
-                bound = min(self.fixture.get("limit", 65536), 65536) + 1
-                if self.iterator:
-                    assert bound <= self.source.tell() < bound + 65536
-                else:
-                    assert self.source.tell() == bound
+            bound = min(self.fixture.get("limit", 65536), 65536) + 1
+            if self.iterator:
+                assert bound <= self.source.tell() < bound + 65536
+            else:
+                assert self.source.tell() == bound
             assert json.loads(request.content)["mode"] == "service_proxied"
             return httpx.Response(
                 200,

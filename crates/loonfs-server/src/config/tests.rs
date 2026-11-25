@@ -8,26 +8,27 @@ use loonfs_types::env::CONTENT_TOKEN_SECRET_ENV;
 use loonfs_types::SecretString;
 
 #[test]
-fn inline_content_defaults_and_overrides_preserve_explicit_disablement() {
+fn inline_content_defaults_and_overrides_keep_the_threshold_a_number() {
     let defaults = loonfs::InlineContentPolicy::default();
-    assert_eq!(defaults.inline_content_threshold_bytes, Some(64 * 1024));
+    assert_eq!(defaults.inline_content_threshold_bytes, 64 * 1024);
     assert_eq!(defaults.inline_content_wal_object_budget_bytes, 1024 * 1024);
     assert_eq!(defaults.inline_content_tail_limit_bytes, 32 * 1024 * 1024);
     for (source, threshold) in [
-        ("", Some(64 * 1024)),
-        (
-            "inline_content_wal_object_budget_bytes = 1024",
-            Some(64 * 1024),
-        ),
-        ("inline_content_threshold_bytes = 4096", Some(4096)),
-        ("inline_content_threshold_bytes = 0", Some(0)),
-        ("inline_content_threshold_bytes = false", None),
+        ("", 64 * 1024),
+        ("inline_content_wal_object_budget_bytes = 1024", 64 * 1024),
+        ("inline_content_threshold_bytes = 4096", 4096),
+        ("inline_content_threshold_bytes = 0", 0),
     ] {
         let overrides: loonfs::InlineContentPolicy = toml::from_str(source).expect("overrides");
         assert_eq!(overrides.inline_content_threshold_bytes, threshold);
     }
-    toml::from_str::<loonfs::InlineContentPolicy>("inline_content_threshold_bytes = true")
-        .expect_err("a boolean threshold should be rejected");
+    for source in [
+        "inline_content_threshold_bytes = true",
+        "inline_content_threshold_bytes = false",
+    ] {
+        toml::from_str::<loonfs::InlineContentPolicy>(source)
+            .expect_err("a boolean threshold should be rejected");
+    }
     toml::from_str::<loonfs::InlineContentPolicy>("inline_content_fold_at_bytes = 1")
         .expect_err("the fold trigger isn't a setting");
 }

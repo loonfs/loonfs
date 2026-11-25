@@ -486,7 +486,7 @@ mod tests {
             None,
             ConfiguredObjectStoreKind::LocalFs,
             loonfs::InlineContentPolicy {
-                inline_content_threshold_bytes: None,
+                inline_content_threshold_bytes: 0,
                 ..Default::default()
             },
             crate::args::TransientRetry::NoRetry,

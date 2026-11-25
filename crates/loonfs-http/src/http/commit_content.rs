@@ -2,13 +2,11 @@
 
 use super::error::ApiResponseError;
 use loonfs::publish::InlineContent;
-use loonfs_types::{
-    ContentId, ErrorCode, FileContent, FilesystemOperation, FEATURE_COMMIT_INLINE_CONTENT,
-};
+use loonfs_types::{ContentId, ErrorCode, FileContent, FilesystemOperation};
 
 pub(super) fn prepare_inline_content(
     operations: &mut [FilesystemOperation],
-    threshold: Option<usize>,
+    threshold: usize,
     algorithm: loonfs_types::ChecksumAlgorithm,
 ) -> Result<Vec<InlineContent>, ApiResponseError> {
     let mut values = Vec::new();
@@ -22,12 +20,6 @@ pub(super) fn prepare_inline_content(
         let FileContent::Inline(bytes) = content else {
             continue;
         };
-        let threshold = threshold.ok_or_else(|| {
-            ApiResponseError::not_supported(
-                FEATURE_COMMIT_INLINE_CONTENT,
-                "inline content is disabled",
-            )
-        })?;
         if bytes.len() > threshold {
             return Err(ApiResponseError::new(
                 ErrorCode::ContentTooLarge,

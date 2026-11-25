@@ -23,7 +23,7 @@ struct Harness {
 }
 
 impl Harness {
-    async fn new(threshold: Option<usize>, wal_object_budget: usize) -> Self {
+    async fn new(threshold: usize, wal_object_budget: usize) -> Self {
         Self::with_policy(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: threshold,
             inline_content_wal_object_budget_bytes: wal_object_budget,
@@ -293,8 +293,8 @@ async fn append_commits_write_only_wal_and_replay_by_bytes() {
 }
 
 #[tokio::test]
-async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
-    for threshold in [Some(4), None] {
+async fn inline_sources_and_capabilities_follow_the_threshold_before_any_write() {
+    for threshold in [4, 0] {
         let harness = Harness::new(threshold, 1).await;
         let (status, body) = harness
             .request("GET", "/v0/capabilities", Value::Null)
@@ -303,14 +303,14 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
         let capabilities: CapabilityDocument = serde_json::from_slice(&body).expect("capabilities");
         assert_eq!(
             capabilities.features.get(FEATURE_COMMIT_INLINE_CONTENT),
-            threshold.map(|_| &true)
+            Some(&true)
         );
         assert_eq!(
             capabilities
                 .limits
                 .get(LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION)
                 .copied(),
-            threshold.map(|limit| limit as u64)
+            Some(threshold as u64)
         );
         for mut operation in [
             json!({"kind": "put_file", "path": "/file"}),
@@ -335,21 +335,18 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
                 (invalid_base64, ErrorCode::InvalidRequest),
                 (unknown, ErrorCode::InvalidRequest),
             ];
-            if threshold.is_some() {
-                // An oversized value is refused like an oversized append.
-                cases.push((oversized, ErrorCode::ContentTooLarge));
-            } else {
-                cases.push((inline, ErrorCode::NotSupported));
-            }
+            // A value over the threshold is refused like an oversized
+            // append. A threshold of zero refuses every nonempty value.
+            cases.push((
+                if threshold == 0 { inline } else { oversized },
+                ErrorCode::ContentTooLarge,
+            ));
             for (operation, code) in cases {
                 let (status, error) = harness
                     .commit(json!({"commit_id": "rejected", "operations": [operation]}))
                     .await;
                 assert_eq!(status, status_for(code), "{error}");
                 assert_eq!(error["code"], code.as_str());
-                if code == ErrorCode::NotSupported {
-                    assert_eq!(error["feature"], FEATURE_COMMIT_INLINE_CONTENT);
-                }
                 if code == ErrorCode::ContentTooLarge {
                     assert_eq!(error["param"], "/operations/0/inline_content");
                 }
@@ -362,7 +359,7 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
 
 #[tokio::test]
 async fn inode_inline_operations_over_the_wal_object_budget_keep_retry_identity() {
-    let harness = Harness::new(Some(4), 4).await;
+    let harness = Harness::new(4, 4).await;
     let request = json!({"commit_id": "two-files", "operations": [
         {"kind": "create_file_by_inode", "parent_inode_id": "ino_00000000000000000000000000", "display_name": "first", "inline_content": "c2FtZQ=="},
         {"kind": "put_file", "path": "/second", "inline_content": "c2FtZQ=="}
@@ -410,8 +407,8 @@ async fn inode_inline_operations_over_the_wal_object_budget_keep_retry_identity(
 }
 
 #[tokio::test]
-async fn rust_client_small_puts_use_one_request_only_when_inline_is_advertised() {
-    for threshold in [Some(4), None] {
+async fn rust_client_small_puts_use_one_request_at_or_under_the_threshold() {
+    for threshold in [4, 0] {
         let harness = Harness::new(threshold, 1024).await;
         let requests = Arc::new(AtomicUsize::new(0));
         let observed = requests.clone();
@@ -450,10 +447,10 @@ async fn rust_client_small_puts_use_one_request_only_when_inline_is_advertised()
             .expect("put");
         assert_eq!(
             requests.swap(0, Ordering::SeqCst),
-            if threshold.is_some() { 1 } else { 4 }
+            if threshold == 0 { 4 } else { 1 }
         );
         let retry = client.put_file_with_options(&spec, b"same", &options).await;
-        if threshold.is_some() {
+        if threshold > 0 {
             assert_eq!(retry.expect("replay"), first);
             assert_eq!(requests.load(Ordering::SeqCst), 1);
         } else {

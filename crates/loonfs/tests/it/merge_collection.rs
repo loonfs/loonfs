@@ -67,7 +67,7 @@ async fn family() -> Family {
             min_publish_interval_ms: 0,
             // Each version is a content object, not inline bytes.
             inline_content: loonfs::InlineContentPolicy {
-                inline_content_threshold_bytes: None,
+                inline_content_threshold_bytes: 0,
                 ..Default::default()
             },
             ..Default::default()
