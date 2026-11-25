@@ -347,7 +347,7 @@ A commitless WAL object written by a new writer session at the next WAL number t
 
 ### Owes a fence
 
-The state of a [writer session](#writer-session) from the moment it sends a WAL put until it learns the put's outcome. A session that owes a fence writes a [fence](#fence) with its own [writer epoch](#writer-epoch) before it plans another commit, because the put may still be written at the next WAL number. For example, if a session's put at WAL 31 loses its acknowledgment, the session's next publication writes a fence at the tip it discovers, 31 or above, before it commits anything. See [Writer ownership](format.md#61-writer-ownership).
+The state of a [writer session](#writer-session) from the moment it sends a commit's WAL put until it learns the put's outcome. A session that owes a fence writes a [fence](#fence) with its own [writer epoch](#writer-epoch) before it plans another commit, because the put may still be written at the next WAL number. For example, if a session's put at WAL 31 loses its acknowledgment, the session's next publication writes a fence at the tip it discovers, 31 or above, before it commits anything. See [Writer ownership](format.md#61-writer-ownership).
 
 ### Floor object
 
