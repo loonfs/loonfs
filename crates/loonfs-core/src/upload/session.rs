@@ -79,7 +79,7 @@ pub(crate) async fn create_upload_session<S: ObjectStore + ?Sized>(
 }
 
 /// Writes the record that starts a new upload session, with put-if-absent.
-pub(crate) async fn create_upload_session_record<S: ObjectStore + ?Sized>(
+async fn create_upload_session_record<S: ObjectStore + ?Sized>(
     store: &S,
     head: &NamespaceReadState,
     actor_id: ActorId,

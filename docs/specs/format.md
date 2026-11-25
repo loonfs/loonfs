@@ -131,7 +131,7 @@ File bytes become durable no later than the commit referencing them through one 
 
 | Path | Durability mechanism |
 | --- | --- |
-| Uploaded | An upload session writes and verifies the content object before the commit ([Uploading content](#5-uploading-content)). |
+| Uploaded | Before the commit, either an upload session writes and verifies the content object, or an embedded runtime writes the content object itself with one put and no upload session ([Uploading content](#5-uploading-content)). [Admission proofs](#55-admission-proofs) says how long each kind of object can wait for its commit. |
 | Inline | The committing WAL object stores raw bytes as "pieces" ([WAL records](#a5-wal-records)), either a full small file or appended bytes. Before a fold publishes a manifest covering that WAL object, it writes all pieces to content objects as extents ([Publishing a manifest](#72-publishing-a-manifest)). |
 
 Because GC deletes a commit WAL object only after a manifest covers it, bytes never disappear while only in the WAL. Only the chain's "creator" (the namespace that created it, stored in its layout) extends a chain in place. An append by another pool member starts a new chain sharing the original extents ([Operations and WAL deltas](#66-operations-and-wal-deltas)). LoonFS does not deduplicate across separate uploads (retries within one session reuse that session's content ID).
@@ -516,7 +516,7 @@ When `size_bytes` is shorter than the layout, the final extent is truncated. Eac
 
 ### 5.1 Upload sessions
 
-Every uploaded content object belongs to an upload session whose `content_id` is allocated when the session begins. Both the content object and session records are stored under the namespace's [pool](glossary.md#pool) prefix (`pools/{pool_id}/`) and record `namespace_id`.
+An upload session tracks one content object that a client uploads, and the session's `content_id` is allocated when the session begins. Both the content object and session records are stored under the namespace's [pool](glossary.md#pool) prefix (`pools/{pool_id}/`) and record `namespace_id`. (An embedded runtime that prepares content above the inline threshold writes the content object itself, without an upload session, as [Admission proofs](#55-admission-proofs) describes.)
 
 A session uses two write-once put-if-absent records rather than one mutated record (avoiding rapid same-key overwrites that hit 1 write/s provider caps, [Alternatives considered](#13-alternatives-considered)):
 
@@ -573,13 +573,16 @@ At completion, the server verifies the client's claimed size and checksum agains
 
 ### 5.5 Admission proofs
 
-Commits referencing uploaded content require "admission evidence" bound to the namespace and full `ContentRef` (proving the bytes were verified in a completed upload). Inline content needs no evidence ([Operations and WAL deltas](#66-operations-and-wal-deltas)).
+Commits referencing uploaded content require "admission evidence" bound to the namespace and full `ContentRef` (proving the bytes were verified in a completed upload, or written by the runtime that commits them). Inline content needs no evidence ([Operations and WAL deltas](#66-operations-and-wal-deltas)).
 
 Evidence expires so GC can eventually reclaim completed but unpublished uploads ([Upload-session cleanup](#116-upload-session-cleanup), [Upload admission](#c2-upload-admission)):
 
 - A completed session issues new evidence only during `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` after `completed_at_ms` (status reads never extend this window).
 - HTTP signed content tokens last `CONTENT_RECEIPT_TTL_MS` from issuance (never past the admission window). Embedded runtimes need not sign tokens.
-- In-process evidence expires `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` after `completed_at_ms`.
+- The evidence that `complete_upload_prepared` returns in process expires `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` after `completed_at_ms`.
+- Evidence for content that an embedded runtime writes itself expires `OWNED_STAGING_ADMISSION_WINDOW_MS` (23 hours 35 minutes) after the write started, as the writing host's clock read it before sending the put.
+
+No record refers to an object that an embedded runtime writes itself, so only the object's age protects it until a commit references it ([Candidate and age rules](#113-candidate-and-age-rules)). The runtime reads the write's start before it sends the put, so the provider stamps the object no earlier than the moment the write started. The window ends `PUBLICATION_COMPLETION_BOUND_MS` (25 minutes) before `T`. The commit's WAL put takes up to `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` (5 minutes), and the collector's clock reading uses one `GC_SAFETY_MARGIN_MS` (5 minutes), as for every age rule in [Clock and operation assumptions](#114-clock-and-operation-assumptions). This rule also compares two readings of the writing host's clock taken in different operations (the write's start and the commit's check), and that host's clock error can change by up to two allowances (10 minutes) between them. The remaining 5 minutes cover the time between the check and the put and the provider's timestamp precision, so a commit that passes the check below is applied before any collection that finds the object old enough to delete reads the namespace's commits. If the runtime stops between the put and the commit, pool collection deletes the object once its provider age is at least `T`.
 
 Immediately before publishing, the writer verifies matching, unexpired evidence for every uploaded `ContentRef` using request clock plus monotonic elapsed time since batch start (so retries never extend expiry, [Publication and group commit](#63-publication-and-group-commit)). Retained commit-receipt retries replay without new evidence, internal copies/restores reuse existing namespace references, and merges reuse fork references.
 
@@ -1343,7 +1346,7 @@ CONTENT_RECLAMATION_GRACE_WINDOW_MS
        + PUBLICATION_COMPLETION_BOUND_MS
 ```
 
-With the current constants, that's 8 days against 7 days plus 1 hour plus 25 minutes. Every token issue checks the original completion time so a receipt can't extend its window. In-process proofs expire at the end of the admission window, and publication checks expiry immediately before the WAL put. Once the 8-day grace passes, an unpublished upload can never be committed for the first time, while published content stays as long as any content root refers to it.
+With the current constants, that's 8 days against 7 days plus 1 hour plus 25 minutes. Every token issue checks the original completion time so a receipt can't extend its window. The evidence that `complete_upload_prepared` returns in process expires at the end of the admission window, and publication checks expiry immediately before the WAL put. Once the 8-day grace passes, an unpublished upload can never be committed for the first time, while published content stays as long as any content root refers to it.
 
 ### 11.7 Snapshot cleanup
 
@@ -1365,7 +1368,7 @@ After sweeping its candidate families, a namespace collection retires the namesp
 
 If any step fails, the collection fails and the tombstone stays the newest manifest so the next collection retries from step 1. Because deleting a missing object succeeds and absent snapshots aren't counted, every step is safely idempotent without any progress journal. Later collections see the retired boundary and sweep the namespace prefix as [One complete collection](#111-one-complete-collection) describes.
 
-For a deleted namespace, LoonFS refuses every request that starts an upload session, returns a presigned upload URL, or completes an upload. Preparing content above the inline threshold starts an upload session, so LoonFS refuses that too. A runtime checks its cached head for a successor at least every `READ_REVALIDATION_BOUND_MS` (20 minutes), so it can still stage content or grant one of those requests for up to 20 minutes after another process deletes the namespace. The 24-hour grace window before the retirement deadline covers the 20 minutes in which such a request can start. LoonFS refuses to complete an open session when the request starts more than 20 minutes after the namespace was deleted, or at or after the session's expiry, and it refuses every completion of an aborted session, whenever the request started. So when a PUT through a presigned URL arrives after one of those points, only a completion request that was already in progress can admit the object, and only if the session isn't aborted and the object is written before the request verifies the object (for a multipart upload, before the request asks the provider to assemble the parts). Pool collection deletes an object that no completion admits, whatever the URL's lifetime. A completion request has no time limit, so one that started in those 20 minutes can record its outcome after the deadline. The session's content still can't be published, because a deleted namespace refuses commits, and from the deadline on, pool collection applies the rules of a retired namespace to the session, so it deletes the records of a completed session without the completed-content grace ([Upload-session cleanup](#116-upload-session-cleanup)).
+For a deleted namespace, LoonFS refuses every request that starts an upload session, returns a presigned upload URL, or completes an upload, and it refuses to prepare content above the inline threshold. A runtime checks its cached head for a successor at least every `READ_REVALIDATION_BOUND_MS` (20 minutes), so it can still stage content or grant one of those requests for up to 20 minutes after another process deletes the namespace. (Content that such a preparation writes can't be committed, because a deleted namespace refuses commits, and pool collection deletes the object once its provider age is at least `T`.) The 24-hour grace window before the retirement deadline covers the 20 minutes in which such a request can start. LoonFS refuses to complete an open session when the request starts more than 20 minutes after the namespace was deleted, or at or after the session's expiry, and it refuses every completion of an aborted session, whenever the request started. So when a PUT through a presigned URL arrives after one of those points, only a completion request that was already in progress can admit the object, and only if the session isn't aborted and the object is written before the request verifies the object (for a multipart upload, before the request asks the provider to assemble the parts). Pool collection deletes an object that no completion admits, whatever the URL's lifetime. A completion request has no time limit, so one that started in those 20 minutes can record its outcome after the deadline. The session's content still can't be published, because a deleted namespace refuses commits, and from the deadline on, pool collection applies the rules of a retired namespace to the session, so it deletes the records of a completed session without the completed-content grace ([Upload-session cleanup](#116-upload-session-cleanup)).
 
 ### 11.9 Content roots
 
@@ -2220,6 +2223,7 @@ Completed-content grace uses its own constant below, not `T`. Changing any publi
 | `CONTENT_RECEIPT_TTL_MS` | 3,600,000 | 1-hour receipt token lifetime. |
 | `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` | 608,400,000 | Receipt issuance window plus final token lifetime. |
 | `CONTENT_RECLAMATION_GRACE_WINDOW_MS` | 691,200,000 | 8-day completed-content grace, at least the admission window plus `PUBLICATION_COMPLETION_BOUND_MS`. |
+| `OWNED_STAGING_ADMISSION_WINDOW_MS` | 84,900,000 | 23 hours 35 minutes (`GC_GRACE_WINDOW_MS` minus `PUBLICATION_COMPLETION_BOUND_MS`), during which a commit admits content that an embedded runtime wrote itself. |
 
 [Upload-session cleanup](#116-upload-session-cleanup) details how the 8-day completed-content grace covers every receipt and in-flight publication. Reaching that age never deletes referenced content.
 

@@ -211,13 +211,9 @@ async fn owned_staging_over_an_occupied_key_answers_the_same_for_bytes_and_for_a
                     .engine();
             let staged = if streamed {
                 let body = futures::stream::once(async { Ok(Bytes::from_static(BYTES)) }).boxed();
-                engine
-                    .stage_owned_stream(&live_context, &loonfs_test_support::test_actor(), body)
-                    .await
+                engine.stage_owned_stream(&live_context, body).await
             } else {
-                engine
-                    .stage_owned_bytes(&live_context, &loonfs_test_support::test_actor(), BYTES)
-                    .await
+                engine.stage_owned_bytes(&live_context, BYTES).await
             };
 
             if settles {
@@ -568,19 +564,19 @@ async fn every_upload_writes_its_session_record_and_its_outcome_record_once() {
     .await
     .expect("complete direct put");
 
-    let prepared = crate::test_support::NamespaceFixture::new(
+    // An embedded write writes no upload record.
+    crate::test_support::NamespaceFixture::new(
         &store,
         &live_context.read_basis().head().namespace_id,
         &setup,
     )
     .engine()
-    .stage_owned_bytes(&live_context, &loonfs_test_support::test_actor(), BYTES)
+    .stage_owned_bytes(&live_context, BYTES)
     .await
     .expect("stage owned bytes");
-    let owned = prepared.upload_id().expect("owned staging session").clone();
 
     let mut expected = Vec::new();
-    for upload_id in [&proxied.upload_id, &direct.session.upload_id, &owned] {
+    for upload_id in [&proxied.upload_id, &direct.session.upload_id] {
         expected.push((
             upload_session(&live_context.read_basis().head().pool_id, upload_id),
             1,

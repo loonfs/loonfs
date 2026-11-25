@@ -442,11 +442,10 @@ mod tests {
                         expected_revision_no: None,
                     },
                 ),
-                vec![PreparedContent::for_completed_upload(
+                vec![PreparedContent::for_staged_content(
                     namespace_id.clone(),
                     content_ref,
                     expires_at_ms,
-                    None,
                 )],
             )
         });

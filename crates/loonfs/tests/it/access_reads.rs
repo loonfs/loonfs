@@ -103,7 +103,7 @@ async fn check_buffered_read_access(content_size: usize) {
     for byte in *b"ab" {
         let bytes = vec![byte; content_size];
         let prepared = namespace_writer
-            .prepare_content(&bytes, &loonfs_test_support::test_actor())
+            .prepare_content(&bytes)
             .await
             .expect("prepare file");
         namespace_writer
@@ -564,7 +564,7 @@ async fn publish_team_and_private_files(
         .expect("open namespace")
         .with_context(subject("prn_root").into());
     let prepared = namespace_writer
-        .prepare_content(b"body", &loonfs_test_support::test_actor())
+        .prepare_content(b"body")
         .await
         .expect("prepare content");
     let put = |path: String| FilesystemOperation::PutFile {

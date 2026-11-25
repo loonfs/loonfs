@@ -56,7 +56,7 @@ impl Namespace<Writable> {
                 payload_class = trace::payload_class(u64_from_usize(bytes.len()))
             ),
             async {
-                let prepared_content = self.prepare_content_inner(bytes, actor).await?;
+                let prepared_content = self.prepare_content_inner(bytes).await?;
                 let operation = FilesystemOperation::create_file_by_inode(
                     parent_inode_id,
                     display_name.clone(),
@@ -112,7 +112,7 @@ impl Namespace<Writable> {
                 payload_class = trace::payload_class(u64_from_usize(bytes.len()))
             ),
             async {
-                let prepared_content = self.prepare_content_inner(bytes, actor).await?;
+                let prepared_content = self.prepare_content_inner(bytes).await?;
                 let operation = FilesystemOperation::put_file_revision_by_inode(
                     inode_id,
                     FileContent::Ref(prepared_content.content_ref().clone()),

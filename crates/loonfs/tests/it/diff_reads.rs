@@ -57,10 +57,7 @@ async fn a_cold_diff_reads_a_revisions_segment_in_a_few_data_gets() {
     let mut from_seq = None;
     for round in 0..4 {
         let prepared = namespace_writer
-            .prepare_content(
-                format!("round {round}").as_bytes(),
-                &loonfs_test_support::test_actor(),
-            )
+            .prepare_content(format!("round {round}").as_bytes())
             .await
             .expect("prepare file content");
         for (batch, paths) in paths.chunks(500).enumerate() {

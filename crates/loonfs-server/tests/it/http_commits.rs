@@ -185,11 +185,11 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .expect("create embedded namespace");
     let namespace_writer = writer.open_namespace(&embedded_ns).expect("open namespace");
     let first_prepared = namespace_writer
-        .prepare_content(FIRST_BYTES, &loonfs_test_support::test_actor())
+        .prepare_content(FIRST_BYTES)
         .await
         .expect("prepare first");
     let second_prepared = namespace_writer
-        .prepare_content(SECOND_BYTES, &loonfs_test_support::test_actor())
+        .prepare_content(SECOND_BYTES)
         .await
         .expect("prepare second");
     let embedded_committed = namespace_writer

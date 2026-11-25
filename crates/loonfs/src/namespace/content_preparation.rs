@@ -8,16 +8,17 @@ use crate::ByteStream;
 use crate::Result;
 use crate::{Namespace, Writable};
 use futures::StreamExt;
-use loonfs_types::{u64_from_usize, ActorId};
+use loonfs_types::u64_from_usize;
 
 impl Namespace<Writable> {
     /// Prepares content for publication.
     ///
     /// Content at or under the configured inline threshold needs no store
-    /// request and has no expiry. Larger content writes an upload session,
-    /// which belongs to `actor`, and an object. Its proof expires at the
-    /// completed upload's receipt horizon.
-    pub async fn prepare_content(&self, bytes: &[u8], actor: &ActorId) -> Result<PreparedContent> {
+    /// request and has no expiry. Larger content is written as one content
+    /// object with one put, and a commit admits it until 23 hours and 35
+    /// minutes after the write started
+    /// ([`loonfs_core::limits::OWNED_STAGING_ADMISSION_WINDOW_MS`]).
+    pub async fn prepare_content(&self, bytes: &[u8]) -> Result<PreparedContent> {
         trace::in_operation(
             operation_span!(
                 self.core,
@@ -25,16 +26,12 @@ impl Namespace<Writable> {
                 self.namespace_id,
                 payload_class = trace::payload_class(u64_from_usize(bytes.len()))
             ),
-            self.prepare_content_inner(bytes, actor),
+            self.prepare_content_inner(bytes),
         )
         .await
     }
 
-    pub(super) async fn prepare_content_inner(
-        &self,
-        bytes: &[u8],
-        actor: &ActorId,
-    ) -> Result<PreparedContent> {
+    pub(super) async fn prepare_content_inner(&self, bytes: &[u8]) -> Result<PreparedContent> {
         if bytes.len()
             <= self
                 .core
@@ -51,19 +48,14 @@ impl Namespace<Writable> {
             .core
             .current_read_context(&self.namespace_id, HeadConfirmation::View)
             .await?;
-        Ok(self
-            .engine()
-            .stage_owned_bytes(&context, actor, bytes)
-            .await?)
+        Ok(self.engine().stage_owned_bytes(&context, bytes).await?)
     }
 
     /// Prepares a stream, buffering at most the inline threshold plus one byte
     /// before choosing inline content or forwarding the stream to storage.
-    pub async fn prepare_content_stream(
-        &self,
-        body: ByteStream,
-        actor: &ActorId,
-    ) -> Result<PreparedContent> {
+    ///
+    /// The prepared content expires as [`Self::prepare_content`]'s does.
+    pub async fn prepare_content_stream(&self, body: ByteStream) -> Result<PreparedContent> {
         trace::in_operation(
             operation_span!(
                 self.core,
@@ -71,7 +63,7 @@ impl Namespace<Writable> {
                 self.namespace_id,
                 payload_class = "streamed"
             ),
-            self.prepare_content_stream_inner(body, actor),
+            self.prepare_content_stream_inner(body),
         )
         .await
     }
@@ -79,7 +71,6 @@ impl Namespace<Writable> {
     pub(super) async fn prepare_content_stream_inner(
         &self,
         mut body: ByteStream,
-        actor: &ActorId,
     ) -> Result<PreparedContent> {
         let threshold = self
             .core
@@ -112,10 +103,7 @@ impl Namespace<Writable> {
             .core
             .current_read_context(&self.namespace_id, HeadConfirmation::View)
             .await?;
-        Ok(self
-            .engine()
-            .stage_owned_stream(&context, actor, body)
-            .await?)
+        Ok(self.engine().stage_owned_stream(&context, body).await?)
     }
 
     /// Verifies an authorized content token for this namespace. A namespace

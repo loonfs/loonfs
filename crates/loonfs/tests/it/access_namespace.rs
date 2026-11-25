@@ -353,17 +353,6 @@ async fn a_scoped_writer_uses_its_subject_for_commits_and_the_actor_owns_its_upl
         .get_upload(&upload.upload_id, &loonfs_test_support::test_actor())
         .await
         .expect("same actor");
-    let staged = scoped_namespace_writer
-        .prepare_content(&vec![0; 128 * 1024], &loonfs_test_support::test_actor())
-        .await
-        .expect("stage scoped content");
-    scoped_namespace_writer
-        .get_upload(
-            staged.upload_id().expect("staged upload"),
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("staged upload belongs to the actor");
     assert_eq!(
         scoped_namespace_writer
             .get_upload(

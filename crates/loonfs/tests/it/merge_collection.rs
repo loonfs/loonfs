@@ -20,7 +20,7 @@ use loonfs::{
     Maintenance, MergeForkOptions, Namespace, NamespaceId, PoolGcResponse, PoolId, PutFileOptions,
     RetentionTarget, SharedObjectStore, Writable,
 };
-use loonfs_core::limits::{CONTENT_RECLAMATION_GRACE_WINDOW_MS, GC_GRACE_WINDOW_MS};
+use loonfs_core::limits::GC_GRACE_WINDOW_MS;
 use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -38,8 +38,8 @@ const HOUR_MS: u64 = 60 * 60 * 1000;
 const WAIT_BOUND: Duration = Duration::from_secs(60);
 
 /// A source namespace and its fork, where the fork wrote `/f` twice, each
-/// version folded into its own delta run, and the clock is past the upload
-/// sessions' grace window.
+/// version folded into its own delta run, and the clock is past the grace
+/// window, so only the revisions' layouts protect the versions' content.
 struct Family {
     directory: TempDir,
     store: SharedObjectStore,
@@ -138,15 +138,7 @@ async fn family() -> Family {
         v2_seq,
         _writer: writer,
     };
-    // A completed upload session roots its content until a collection a
-    // reclamation grace window after its completion deletes its records, so
-    // this collection leaves the revisions' layouts as the only roots.
-    family
-        .clock
-        .advance_ms(CONTENT_RECLAMATION_GRACE_WINDOW_MS + HOUR_MS);
-    let sessions = family.collect(family.store.clone()).await;
-    assert_eq!(sessions.deleted.upload_sessions, 2);
-    assert_eq!(sessions.deleted.content_objects, 0);
+    family.clock.advance_ms(GC_GRACE_WINDOW_MS + HOUR_MS);
     family
 }
 

@@ -387,7 +387,6 @@ mod streamed_content {
     use super::*;
     use futures::StreamExt;
     use loonfs_objectstore::keys::content_blob;
-    use loonfs_objectstore::ObjectStoreExtension;
 
     #[tokio::test]
     async fn a_slow_upload_that_outlives_its_records_leaves_content_for_the_content_sweep() {
@@ -508,124 +507,6 @@ mod streamed_content {
         // While the records exist, the session's cleanup deletes the object.
         // Once they're gone, the object is unreferenced, and the content sweep
         // deletes it.
-        assert_eq!(
-            report.deleted.content_objects,
-            u64::from(forget_before_resume)
-        );
-    }
-
-    #[tokio::test]
-    async fn a_slow_owned_stream_that_outlives_its_records_leaves_content_for_the_content_sweep() {
-        owned_stream_expiry_schedule(true).await;
-    }
-
-    #[tokio::test]
-    async fn expired_owned_stream_finishing_before_final_gc_is_reclaimed() {
-        owned_stream_expiry_schedule(false).await;
-    }
-
-    async fn owned_stream_expiry_schedule(forget_before_resume: bool) {
-        use loonfs_objectstore::keys::upload_session_prefix;
-
-        let temp_dir = tempdir().expect("tempdir");
-        let store = store_with_aged_content(temp_dir.path());
-        let context = default_writer();
-        let namespace_id = NamespaceId::parse("slow-owned-stream").expect("namespace");
-        NamespaceFixture::new(&store, &namespace_id, &context)
-            .create()
-            .await
-            .expect("bootstrap");
-        let live_context = loonfs_core::test_support::manifest_context(&store, &namespace_id).await;
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
-        let body = futures::stream::once(async move {
-            started_tx.send(()).expect("signal implicit session exists");
-            resume_rx.await.expect("resume input");
-            Ok(Bytes::from_static(b"late owned bytes"))
-        })
-        .boxed();
-        let engine = namespace_engine(&store, &namespace_id, &context);
-        let actor = loonfs_test_support::test_actor();
-        let staging = engine.stage_owned_stream(&live_context, &actor, body);
-        let collecting = async {
-            started_rx.await.expect("owned staging waiting for input");
-            let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
-            let sessions = store
-                .list_prefix(&upload_session_prefix(&pool_id))
-                .await
-                .expect("list implicit owner");
-            assert_eq!(sessions.len(), 1, "one in-process staging session");
-            let session_key = sessions.into_iter().next().expect("session key");
-            let encoded = store
-                .get(&session_key, None)
-                .await
-                .expect("get")
-                .expect("open session");
-            let session = decode_control_object::<UploadSessionPayload>(
-                &encoded,
-                ControlObjectKind::UploadSession,
-            )
-            .expect("decode")
-            .into_payload();
-            let expires_at_ms = session.expires_at_ms;
-            let content_key = content_blob(&pool_id, &session.content_id);
-            // Model a source stalled past its lease and both collection graces.
-            // GC, not a caller's explicit abort, moves the implicit session terminal.
-            let expired = WriterAt {
-                now_ms: expires_at_ms + loonfs_core::limits::GC_GRACE_WINDOW_MS + 1,
-                ..context.clone()
-            };
-            collect_pool(&store, &namespace_id, &expired.clock())
-                .await
-                .expect("GC aborts expired implicit session");
-            let (_, aborted) = read_upload_records(&store, &namespace_id, &session.upload_id).await;
-            assert_eq!(
-                aborted,
-                Some(UploadOutcome::Aborted {
-                    aborted_at_ms: expired.now_ms
-                }),
-                "the first collection keeps the aborted session"
-            );
-            let aged = WriterAt {
-                now_ms: expired.now_ms + loonfs_core::limits::GC_GRACE_WINDOW_MS + 1,
-                ..context.clone()
-            };
-            if forget_before_resume {
-                collect_pool(&store, &namespace_id, &aged.clock())
-                    .await
-                    .expect("forget expired implicit owner");
-                assert!(store.get(&session_key, None).await.expect("get").is_none());
-            }
-            assert!(store.get(&content_key, None).await.expect("get").is_none());
-            resume_tx.send(()).expect("release late input");
-            (session.upload_id, session_key, content_key, aged)
-        };
-        let (result, (upload_id, session_key, content_key, aged)) =
-            tokio::join!(staging, collecting);
-        assert_eq!(
-            result.expect_err("expired owner cannot complete").code(),
-            ErrorCode::UploadNotFound
-        );
-        assert!(
-            store.head(&content_key).await.expect("head").is_some(),
-            "the late input is written after the abort's cleanup"
-        );
-        if !forget_before_resume {
-            let (_, outcome) = read_upload_records(&store, &namespace_id, &upload_id).await;
-            assert_matches!(
-                outcome,
-                Some(UploadOutcome::Aborted { .. }),
-                "the late completion doesn't replace the abort"
-            );
-        }
-        let report = collect_pool(&store, &namespace_id, &aged.clock())
-            .await
-            .expect("GC after failed late completion");
-        assert!(store.get(&session_key, None).await.expect("get").is_none());
-        assert!(
-            store.get(&content_key, None).await.expect("get").is_none(),
-            "the session's cleanup or the content sweep deletes the late object"
-        );
         assert_eq!(
             report.deleted.content_objects,
             u64::from(forget_before_resume)

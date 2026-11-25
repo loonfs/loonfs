@@ -720,14 +720,11 @@ async fn content_staging_holds_the_shared_write_permit_without_publication_admis
         .expect("namespace");
     let namespace = runtime.open_namespace(&namespace_id).expect("open");
     store.inner().block_next();
-    let actor = loonfs_test_support::test_actor();
     let mut writes = std::pin::pin!(async {
         tokio::join!(
-            namespace.prepare_content(b"first", &actor),
-            namespace.prepare_content_stream(
-                stream::iter([Ok(Bytes::from_static(b"second"))]).boxed(),
-                &actor,
-            )
+            namespace.prepare_content(b"first"),
+            namespace
+                .prepare_content_stream(stream::iter([Ok(Bytes::from_static(b"second"))]).boxed())
         )
     });
     tokio::select! {

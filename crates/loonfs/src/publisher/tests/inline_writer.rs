@@ -542,7 +542,7 @@ async fn inline_preparation_makes_no_request_and_retained_values_replay() {
     for bytes in [b"".as_slice(), b"same"] {
         store.reset();
         let prepared = namespace_writer
-            .prepare_content(bytes, &loonfs_test_support::test_actor())
+            .prepare_content(bytes)
             .await
             .expect("prepare");
         assert!(store.snapshot().is_empty());
@@ -612,7 +612,7 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
         .boxed();
         store.reset();
         let prepared = namespace_writer
-            .prepare_content_stream(stream, &loonfs_test_support::test_actor())
+            .prepare_content_stream(stream)
             .await
             .expect("prepare stream");
         if expected.len() <= 4 {
@@ -665,7 +665,7 @@ async fn a_put_and_an_append_over_the_wal_object_budget_stay_in_the_wal() {
         })
         .await;
     let prepared = namespace_writer
-        .prepare_content(b"four", &loonfs_test_support::test_actor())
+        .prepare_content(b"four")
         .await
         .expect("prepare");
     let request = CommitIntent {
@@ -753,7 +753,7 @@ async fn retained_receipts_answer_retries_when_content_writes_fail() {
             .expect("namespace");
         let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
         let prepared = namespace_writer
-            .prepare_content(bytes, &loonfs_test_support::test_actor())
+            .prepare_content(bytes)
             .await
             .expect("prepare");
         let original = namespace_writer
@@ -818,7 +818,7 @@ async fn a_commit_whose_values_stay_inline_is_charged_its_own_weight() {
         .await;
     let publisher = namespace_writer.session().publisher.clone();
     let prepared = namespace_writer
-        .prepare_content(b"longer", &loonfs_test_support::test_actor())
+        .prepare_content(b"longer")
         .await
         .expect("prepare");
     let candidate = CommitCandidate::prepared(
@@ -964,7 +964,7 @@ async fn prepared_puts(
     for bytes in payloads {
         prepared.push(
             namespace_writer
-                .prepare_content(bytes, &loonfs_test_support::test_actor())
+                .prepare_content(bytes)
                 .await
                 .expect("prepare"),
         );
@@ -1147,11 +1147,11 @@ async fn commit_two_values(
     let namespace_writer = writer.open_namespace(namespace).expect("open namespace");
     let prepared = vec![
         namespace_writer
-            .prepare_content(b"more", &loonfs_test_support::test_actor())
+            .prepare_content(b"more")
             .await
             .expect("prepare first value"),
         namespace_writer
-            .prepare_content(b"last", &loonfs_test_support::test_actor())
+            .prepare_content(b"last")
             .await
             .expect("prepare second value"),
     ];
@@ -1536,11 +1536,11 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
     );
     let prepared = vec![
         namespace_writer
-            .prepare_content(b"more", &loonfs_test_support::test_actor())
+            .prepare_content(b"more")
             .await
             .expect("prepare"),
         namespace_writer
-            .prepare_content(b"last", &loonfs_test_support::test_actor())
+            .prepare_content(b"last")
             .await
             .expect("prepare"),
     ];

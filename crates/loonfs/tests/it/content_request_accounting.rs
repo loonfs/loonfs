@@ -242,7 +242,7 @@ async fn prepare_content_performs_one_content_put_and_no_reads() {
     harness.recording.reset();
 
     let prepared = namespace
-        .prepare_content(bytes, &loonfs_test_support::test_actor())
+        .prepare_content(bytes)
         .await
         .expect("prepare file bytes");
 
@@ -252,7 +252,20 @@ async fn prepare_content_performs_one_content_put_and_no_reads() {
         content_ref.checksum,
         loonfs_types::Checksum::crc64nvme(bytes)
     );
-    assert_content_counts(harness.recording.snapshot(), 0, 0, 1, 0);
+    let counts = harness.recording.snapshot();
+    assert_content_counts(counts, 0, 0, 1, 0);
+    // The one other request is the read of the next WAL number that confirms
+    // the namespace's head. Preparation writes no record.
+    assert_eq!(
+        counts.operations(KeyClass::Other),
+        OperationCounts {
+            head: 0,
+            get: 1,
+            put: 0
+        },
+        "{:?}",
+        harness.recording.other_keys()
+    );
 }
 
 #[tokio::test]
@@ -275,7 +288,7 @@ async fn independent_namespaces_sharing_a_store_reject_each_others_prepared_cont
         .await
         .expect("warm the shared target's head");
     let prepared = source_writer
-        .prepare_content(b"independently shared", &loonfs_test_support::test_actor())
+        .prepare_content(b"independently shared")
         .await
         .expect("prepare through source namespace");
     recording.reset();
@@ -300,7 +313,7 @@ async fn fork_and_source_reject_each_others_prepared_content() {
     let writer = build_initialized_writer(store, &source, "fork-sharing-writer").await;
     let source_writer = writer.open_namespace(&source).expect("open namespace");
     let prepared_for_fork = source_writer
-        .prepare_content(b"prepared before fork", &loonfs_test_support::test_actor())
+        .prepare_content(b"prepared before fork")
         .await
         .expect("prepare through source namespace");
     writer
@@ -327,7 +340,7 @@ async fn fork_and_source_reject_each_others_prepared_content() {
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
 
     let prepared_for_source = fork_writer
-        .prepare_content(b"prepared through fork", &loonfs_test_support::test_actor())
+        .prepare_content(b"prepared through fork")
         .await
         .expect("prepare through fork namespace");
     recording.reset();
@@ -639,11 +652,7 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
     .into_iter()
     .map(|bytes| {
         let namespace = namespace.clone();
-        tokio::spawn(async move {
-            namespace
-                .prepare_content(bytes, &loonfs_test_support::test_actor())
-                .await
-        })
+        tokio::spawn(async move { namespace.prepare_content(bytes).await })
     });
     let mut prepared = Vec::new();
     for preparation in preparations {

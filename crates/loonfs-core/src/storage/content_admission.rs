@@ -12,7 +12,7 @@ use crate::storage::inline_content::InlineContent;
 use loonfs_types::ContentToken;
 use loonfs_types::{
     decode_token, decode_token_bytes, encode_token, encode_token_bytes, ChecksumAlgorithm,
-    ContentId, ContentLayout, ContentRef, NamespaceId, OpaqueToken, OpaqueTokenError, UploadId,
+    ContentId, ContentLayout, ContentRef, NamespaceId, OpaqueToken, OpaqueTokenError,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -64,13 +64,13 @@ pub struct PreparedContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PreparedContentKind {
     Inline(InlineContent),
-    /// Content that an upload session of `namespace_id` stored, which only
-    /// that namespace's commits admit, so a chain has one creator.
+    /// A whole content object that `namespace_id` stored, through an upload
+    /// session or an embedded write. Only that namespace's commits admit the
+    /// object, so a chain has one creator.
     Staged {
         namespace_id: NamespaceId,
         content_ref: ContentRef,
         expires_at_ms: u64,
-        upload_id: Option<UploadId>,
     },
     /// Content of another member of the pool, or of `namespace_id`
     /// itself, that `namespace_id` reuses without a copy. The layout is the
@@ -90,9 +90,8 @@ impl HeapBytes for PreparedContent {
             PreparedContentKind::Staged {
                 namespace_id,
                 content_ref,
-                upload_id,
                 ..
-            } => namespace_id.heap_bytes() + content_ref.heap_bytes() + upload_id.heap_bytes(),
+            } => namespace_id.heap_bytes() + content_ref.heap_bytes(),
             PreparedContentKind::Shared {
                 namespace_id,
                 content_ref,
@@ -132,21 +131,19 @@ impl PreparedContent {
         namespace_id: NamespaceId,
         content_ref: ContentRef,
     ) -> Self {
-        Self::for_completed_upload(namespace_id, content_ref, u64::MAX, None)
+        Self::for_staged_content(namespace_id, content_ref, u64::MAX)
     }
 
-    pub(crate) fn for_completed_upload(
+    pub(crate) fn for_staged_content(
         namespace_id: NamespaceId,
         content_ref: ContentRef,
         expires_at_ms: u64,
-        upload_id: Option<UploadId>,
     ) -> Self {
         Self {
             kind: PreparedContentKind::Staged {
                 namespace_id,
                 content_ref,
                 expires_at_ms,
-                upload_id,
             },
         }
     }
@@ -167,14 +164,6 @@ impl PreparedContent {
                 layout,
                 expires_at_ms,
             },
-        }
-    }
-
-    /// Identifies the completed upload that can restore a staged preparation.
-    pub fn upload_id(&self) -> Option<&UploadId> {
-        match &self.kind {
-            PreparedContentKind::Staged { upload_id, .. } => upload_id.as_ref(),
-            PreparedContentKind::Inline(_) | PreparedContentKind::Shared { .. } => None,
         }
     }
 
@@ -210,9 +199,10 @@ impl PreparedContent {
     /// Returns the layout that a revision of the prepared reference records,
     /// in a commit of `namespace_id`.
     ///
-    /// An upload is one whole object, and `namespace_id` is its creator. The
-    /// upload's reference covers the whole object, so its checksum is the
-    /// stored checksum that the upload's completion checked. Content from a
+    /// Staged content is one whole object, and `namespace_id` is its creator.
+    /// The staged reference covers the whole object, so its checksum is the
+    /// stored checksum that the upload's completion or the embedded write
+    /// checked. Content from a
     /// member of the pool records the source's layout, whose creator is the
     /// chain's.
     pub(crate) fn revision_layout(&self, namespace_id: &NamespaceId) -> Option<ContentLayout> {
@@ -360,11 +350,10 @@ pub fn verify_content_token(
         return Err(ContentTokenError::Expired);
     }
 
-    Ok(PreparedContent::for_completed_upload(
+    Ok(PreparedContent::for_staged_content(
         payload.namespace_id,
         payload.content_ref,
         payload.expires_at_ms,
-        None,
     ))
 }
 

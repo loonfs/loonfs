@@ -76,10 +76,10 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         ("/docs/recover.txt", b"recovered".as_slice()),
     ] {
         let prepared = namespace_writer
-            .prepare_content(bytes, &loonfs_test_support::test_actor())
+            .prepare_content(bytes)
             .await
             .expect("prepare inline content");
-        assert!(prepared.upload_id().is_none());
+        assert!(prepared.inline_content().is_some());
         namespace_writer
             .put_file_prepared(path, prepared, &test_actor())
             .await
@@ -87,10 +87,10 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
     }
     let uploaded_bytes = vec![b'u'; 128 * 1024];
     let prepared = namespace_writer
-        .prepare_content(&uploaded_bytes, &loonfs_test_support::test_actor())
+        .prepare_content(&uploaded_bytes)
         .await
         .expect("stage upload");
-    assert!(prepared.upload_id().is_some());
+    assert!(prepared.inline_content().is_none());
     namespace_writer
         .put_file_prepared("/docs/nested/uploaded.txt", prepared, &test_actor())
         .await

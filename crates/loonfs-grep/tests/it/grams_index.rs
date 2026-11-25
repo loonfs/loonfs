@@ -201,7 +201,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         let bytes = format!("bounded needle file {index:04}\n");
         assert_eq!(bytes.len(), content_bytes);
         let content = namespace
-            .prepare_content(bytes.as_bytes(), &loonfs_test_support::test_actor())
+            .prepare_content(bytes.as_bytes())
             .await
             .expect("prepare atomic-commit content");
         operations.push(FilesystemOperation::PutFile {

@@ -76,7 +76,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// All upload modes use this transition. Completion makes the content
     /// eligible for publication and later garbage collection.
-    pub(crate) async fn record_completion(
+    async fn record_completion(
         &self,
         head: &NamespaceReadState,
         session: &UploadSessionPayload,
@@ -180,11 +180,10 @@ fn completed_upload(
             mode,
             status: completed_status(content, completed_at_ms),
         },
-        prepared: PreparedContent::for_completed_upload(
+        prepared: PreparedContent::for_staged_content(
             namespace_id.clone(),
             content.clone(),
             completed_at_ms.saturating_add(COMPLETED_UPLOAD_ADMISSION_WINDOW_MS),
-            Some(upload_id.clone()),
         ),
         evidence: evidence_within_window(namespace_id, content, completed_at_ms, now_ms),
     }

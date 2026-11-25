@@ -105,15 +105,32 @@ impl ContentFixture {
             .expect("write the file")
     }
 
-    /// Writes `bytes` to `path` through an upload of its own, replacing any
-    /// file there, and returns the upload beside the commit, so a later
-    /// commit can refer to the same content value.
+    /// Writes `bytes` to `path` through an upload session of its own,
+    /// replacing any file there, and returns the upload beside the commit, so
+    /// a later commit can refer to the same content value. The completed
+    /// session's proof stays valid after the grace window, which the proof
+    /// of an embedded write doesn't.
     pub(crate) async fn put_prepared(&self, path: &str, bytes: &[u8]) -> (PreparedContent, Commit) {
+        let actor = loonfs_test_support::test_actor();
+        let upload = self
+            .namespace
+            .create_upload(&actor)
+            .await
+            .expect("create an upload");
+        self.namespace
+            .put_upload_content(&upload.upload_id, bytes, &actor)
+            .await
+            .expect("upload the content");
         let prepared = self
             .namespace
-            .prepare_content(bytes, &loonfs_test_support::test_actor())
+            .complete_upload(
+                &upload.upload_id,
+                loonfs_types::CompleteUploadBody::ServiceProxied {},
+                &actor,
+            )
             .await
-            .expect("prepare the content");
+            .expect("complete the upload")
+            .prepared;
         let commit = self
             .commit_prepared(path, &prepared, loonfs::DestinationBehavior::Replace)
             .await;

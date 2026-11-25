@@ -453,7 +453,7 @@ pub(crate) async fn publish_same_content_files(
     content: &[u8],
 ) {
     let prepared = namespace
-        .prepare_content(content, &loonfs_test_support::test_actor())
+        .prepare_content(content)
         .await
         .expect("prepare shared content");
     let content_ref = prepared.content_ref().clone();
