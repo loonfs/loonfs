@@ -325,6 +325,7 @@ fn sample_wal_payload() -> WalObjectPayload {
                     extents: vec![loonfs_types::ContentExtent {
                         content_id: sample_content_ref().content_id,
                         object: loonfs_types::ExtentObject::Whole,
+                        object_bytes: sample_content_ref().size_bytes,
                         object_checksum: sample_content_ref().checksum,
                         offset: 0,
                         length: sample_content_ref().size_bytes,
@@ -387,6 +388,7 @@ fn sample_wal_payload() -> WalObjectPayload {
                     extents: vec![loonfs_types::ContentExtent {
                         content_id: sample_content_ref().content_id,
                         object: loonfs_types::ExtentObject::Whole,
+                        object_bytes: sample_content_ref().size_bytes,
                         object_checksum: sample_content_ref().checksum,
                         offset: 0,
                         length: sample_content_ref().size_bytes,
@@ -517,6 +519,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
                 extents: vec![loonfs_types::ContentExtent {
                     content_id: sample_content_ref().content_id,
                     object: loonfs_types::ExtentObject::Whole,
+                    object_bytes: 6,
                     object_checksum: sample_content_ref().checksum,
                     offset: 0,
                     length: 6,
@@ -3091,6 +3094,7 @@ fn sample_content_layout_row() -> MetadataRow {
                 loonfs_types::ContentExtent {
                     content_id: reference.content_id.clone(),
                     object: loonfs_types::ExtentObject::Whole,
+                    object_bytes: 8,
                     object_checksum: Checksum::crc64nvme(b"golden b"),
                     offset: 0,
                     length: 8,
@@ -3102,9 +3106,8 @@ fn sample_content_layout_row() -> MetadataRow {
                             "span_3fz8k1cm7d0q5wvbn2xh6atg9r",
                         )
                         .expect("span object id"),
-                        start: 8,
-                        end: 12,
                     },
+                    object_bytes: 4,
                     object_checksum: Checksum::crc64nvme(b"ytes"),
                     offset: 0,
                     length: 4,

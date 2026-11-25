@@ -155,7 +155,7 @@ The namespace whose commit created a chain, recorded in its [layout](#layout). O
 
 A byte range inside one content object representing part of a chain, storing the object reference, offset, length, and the provider's stored whole-object checksum ("object checksum").
 
-Extents are either "own extents" (written for the chain itself) or "shared base extents" (borrowed from an earlier chain when a fork or branched revision appends). A fold in the chain's creator may merge a shared base extent whose object is a span that the extent takes whole into a new own extent, which copies those bytes. A shared base extent that takes part of its object or whose object is a whole object is never merged, and no other write of a chain's pieces merges shared base extents.
+Extents are either "own extents" (written for the chain itself) or "shared base extents" (borrowed from an earlier chain when a fork or branched revision appends). A fold in the chain's creator may merge a shared base extent that takes the whole of its object (a span object or an upload's whole object) into a new own extent, which copies those bytes. A shared base extent that takes part of its object is never merged, and no other write of a chain's pieces merges shared base extents.
 
 ### Layout
 
@@ -325,7 +325,7 @@ An opaque resume token returned by paginated reads or bounded index builds.
 
 ### Ranged read
 
-A service-proxied content read fetching a single byte range via an HTTP `Range` header (for reading part of a file or chunking a file larger than the proxied limit). Whole-file checksum verification does not apply to partial reads, though LoonFS verifies any [span object](#span-object) completely covered by the range against its extent object checksum. See [Ranged reads](api.md#ranged-reads).
+A service-proxied content read fetching a single byte range via an HTTP `Range` header (for reading part of a file or chunking a file larger than the proxied limit). Whole-file checksum verification does not apply to partial reads, though LoonFS verifies any content object, whether an upload's whole object or a [span object](#span-object), that the range covers completely against its extent object checksum. See [Ranged reads](api.md#ranged-reads).
 
 ## Writers
 

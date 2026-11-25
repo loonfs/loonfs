@@ -127,18 +127,13 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                     // layout records.
                     extents: (0..16)
                         .map(|index| {
-                            let (start, length) = if index == 0 {
-                                (0, u64::MAX - 15)
-                            } else {
-                                (u64::MAX - 16 + index, 1)
-                            };
+                            let length = if index == 0 { u64::MAX - 15 } else { 1 };
                             loonfs_types::ContentExtent {
                                 content_id: content_ref.content_id.clone(),
                                 object: loonfs_types::ExtentObject::Span {
                                     object_id: loonfs_types::SpanObjectId::generate(),
-                                    start,
-                                    end: start + length,
                                 },
+                                object_bytes: length,
                                 object_checksum: Checksum::crc64nvme(b"extent"),
                                 offset: 0,
                                 length,
@@ -196,6 +191,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                     extents: vec![loonfs_types::ContentExtent {
                         content_id: log_ref.content_id.clone(),
                         object: loonfs_types::ExtentObject::Whole,
+                        object_bytes: log_ref.size_bytes,
                         object_checksum: log_ref.checksum.clone(),
                         offset: 0,
                         length: log_ref.size_bytes,
@@ -377,6 +373,7 @@ fn a_merges_bound_includes_the_layouts_of_its_proofs() {
             .map(|offset| loonfs_types::ContentExtent {
                 content_id: content_ref.content_id.clone(),
                 object: loonfs_types::ExtentObject::Whole,
+                object_bytes: 1,
                 object_checksum: content_ref.checksum.clone(),
                 offset,
                 length: 1,
@@ -468,7 +465,7 @@ fn a_merge_records_bound_counts_its_conflict_report() {
 
 /// Checks the bounds of a merge's creates that the docs state, so a change
 /// of the WAL format has to update them: a file create whose content has a
-/// layout of one extent plans 5,432 bytes (4,646 for the create and 786 for
+/// layout of one extent plans 5,418 bytes (4,646 for the create and 772 for
 /// the layout), and a directory create plans 1,844 bytes. The passages are
 /// the `merge_too_large` sizing in `docs/specs/api.md` and the merge
 /// allowance in `docs/design/merge.md`. The file create's bound, or a
@@ -494,7 +491,7 @@ fn a_merges_creates_plan_the_bytes_that_the_docs_state() {
         display_name: DisplayName::parse("merged").expect("name"),
     };
     assert_eq!(merge_operation_bytes(&file, None), 4_646);
-    assert_eq!(layout_bytes(1), 786);
-    assert_eq!(merge_operation_bytes(&file, Some(1)), 5_432);
+    assert_eq!(layout_bytes(1), 772);
+    assert_eq!(merge_operation_bytes(&file, Some(1)), 5_418);
     assert_eq!(merge_operation_bytes(&directory, None), 1_844);
 }

@@ -88,18 +88,10 @@ async fn warm_read_of_an_appended_file_gets_every_extent_at_once() {
         .into_iter()
         .zip(&layout.extents)
         .map(|((start_line, end_line), extent)| {
-            let loonfs_types::ExtentObject::Span {
-                object_id,
-                start,
-                end,
-            } = &extent.object
-            else {
+            let loonfs_types::ExtentObject::Span { object_id } = &extent.object else {
                 panic!("every extent is a span object: {extent:?}");
             };
-            assert_eq!(
-                (*start, *end),
-                (start_line * LINE_BYTES, end_line * LINE_BYTES)
-            );
+            assert_eq!(extent.object_bytes, (end_line - start_line) * LINE_BYTES);
             content_span(&pool_id, content_id, object_id)
         })
         .collect();

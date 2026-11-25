@@ -223,6 +223,7 @@ impl PreparedContent {
                 extents: vec![loonfs_types::ContentExtent {
                     content_id: content_ref.content_id.clone(),
                     object: loonfs_types::ExtentObject::Whole,
+                    object_bytes: content_ref.size_bytes,
                     object_checksum: content_ref.checksum.clone(),
                     offset: 0,
                     length: content_ref.size_bytes,

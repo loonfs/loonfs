@@ -5,7 +5,7 @@ use super::*;
 use crate::error::ErrorCode;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::PutMode;
-use loonfs_types::{Checksum, ContentRefKind, ExtentObject};
+use loonfs_types::{Checksum, ContentRefKind};
 use std::assert_matches;
 
 fn append(path: &str, bytes: &[u8]) -> FilesystemOperation {
@@ -518,6 +518,7 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
                         extents: vec![loonfs_types::ContentExtent {
                             content_id,
                             object: loonfs_types::ExtentObject::Whole,
+                            object_bytes: 6,
                             object_checksum: checksum.clone(),
                             offset: 0,
                             length: 6,
@@ -742,12 +743,7 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
             // its whole object, because the suffix is longer than each of
             // them, and keeps every carried extent otherwise.
             let newest = carried.extents.last().expect("a carried extent");
-            let whole = match newest.object {
-                ExtentObject::Span { start, end, .. } => {
-                    newest.offset == 0 && newest.length == end - start
-                }
-                ExtentObject::Whole => true,
-            };
+            let whole = newest.offset == 0 && newest.length == newest.object_bytes;
             let kept = if whole { 0 } else { carried.extents.len() };
             assert_eq!(row.layout.extents.len(), kept + 1);
             assert_eq!(&row.layout.extents[..kept], &carried.extents[..kept]);
@@ -856,6 +852,7 @@ async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
                 extents: vec![loonfs_types::ContentExtent {
                     content_id: value.content_ref().content_id.clone(),
                     object: loonfs_types::ExtentObject::Whole,
+                    object_bytes: offset as u64,
                     object_checksum: Checksum::crc64nvme(whole),
                     offset: 0,
                     length: offset as u64,

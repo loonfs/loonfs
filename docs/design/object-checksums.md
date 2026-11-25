@@ -42,7 +42,7 @@ A verification job could check every object that a namespace's references reach 
 
 A read that already fetches a whole object checks it against the recorded value, with no extra request:
 
-- A ranged GET that returns a whole [span object](../specs/glossary.md#span-object) (from offset 0 to the span's length) is checked against the extent's object checksum. This covers each span object that a whole-file read fetches in full, and each span object that a [ranged read](../specs/glossary.md#ranged-read) covers completely. A span object that an extent takes only part of, such as a shared base extent of 100 bytes in a 130-byte object, isn't checked.
+- A ranged GET that returns a complete object (from offset 0 to the object's length), whether an upload's whole object or a [span object](../specs/glossary.md#span-object), is checked against the extent's object checksum. This covers each object that a whole-file read fetches in full, and each object that a [ranged read](../specs/glossary.md#ranged-read) covers completely. An object that an extent takes only part of, such as a shared base extent of 100 bytes in a 130-byte object, isn't checked.
 - A segment small enough to fetch whole (up to 256 KiB) is checked against its descriptor's checksum, both when a lookup loads it and when a compaction reads it as an input.
 
 A mismatch is corruption, and the error identifies the object's key, so an operator knows which object to look at, rather than only which file failed its whole-file check.
@@ -51,9 +51,7 @@ When LoonFS assembles a new span object from a chain's existing extents (in a fo
 
 ## What the checksums don't check
 
-A ranged read inside one object isn't checked. The object checksum is a CRC of the whole object, and a CRC of the whole object can't check a slice taken from the middle of it. For example, a ranged read of bytes 110 to 120 of a chain whose layout lists a span object with the start 100 and the end 130 reads 10 bytes from the middle of that object, and the reader checks only the length of the response.
-
-An extent that lists a chain's whole object records the range that the extent takes from the object, but not the object's size. So a reader can't tell whether a ranged GET of a whole object returned the complete object, and the reader doesn't check that GET against the object checksum. A read of the whole file is still checked against the content reference's checksum, as every whole-file read is.
+A ranged read inside one object isn't checked. The object checksum is a CRC of the whole object, and a CRC of the whole object can't check a slice taken from the middle of it. For example, a ranged read of bytes 110 to 120 of a chain whose layout lists a 30-byte span object that starts at chain offset 100 reads 10 bytes from the middle of that object, and the reader checks only the length of the response.
 
 A segment larger than 256 KiB is read in sections, and each section is already checked against the CRC32C in its block handle.
 
@@ -63,7 +61,7 @@ The object checksums have these costs:
 
 - **Bytes.** A segment descriptor's `checksum` adds 64 bytes of JSON to the manifest, and an extent's `object_checksum` adds 60 bytes of CBOR to each layout row and to each revision delta that includes a layout. (A CRC-32C value is 8 bytes shorter.) After zstd compression, a descriptor or an extent costs about 11 bytes more, because the field names and the algorithm repeat and only the 8 bytes of the CRC differ. That figure comes from compressing 1,000 descriptors with and without the field.
 - **Memory.** Each extent and each descriptor that a process keeps in memory is 48 bytes larger for a CRC-64/NVME checksum: 32 bytes in the struct and 16 bytes of hexadecimal on the heap. The memory accounting of layouts and segment descriptors includes both.
-- **CPU.** A segment's writer computes one more CRC over the segment's bytes, which is small next to the zstd compression of the same bytes. A whole-file read that fetches complete span objects computes a CRC of those bytes twice, once for each object and once for the file.
+- **CPU.** A segment's writer computes one more CRC over the segment's bytes, which is small next to the zstd compression of the same bytes. A whole-file read that fetches complete objects computes a CRC of those bytes twice, once for each object and once for the file.
 - **Requests.** No write or read sends an extra request to produce or check an object checksum.
 
 ## Alternatives considered

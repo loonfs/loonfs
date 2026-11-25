@@ -127,10 +127,9 @@ const EXTENT_BYTES: usize = cbor_map_bytes(&[
         cbor_map_bytes(&[
             ("kind", cbor_string_bytes("whole".len())),
             ("object_id", cbor_string_bytes(MAX_ID_BYTES)),
-            ("start", INTEGER_BYTES),
-            ("end", INTEGER_BYTES),
         ]),
     ),
+    ("object_bytes", INTEGER_BYTES),
     ("object_checksum", CHECKSUM_BYTES),
     ("offset", INTEGER_BYTES),
     ("length", INTEGER_BYTES),

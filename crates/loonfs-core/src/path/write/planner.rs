@@ -1155,6 +1155,7 @@ mod tests {
             extents: vec![loonfs_types::ContentExtent {
                 content_id: content_id.clone(),
                 object: loonfs_types::ExtentObject::Whole,
+                object_bytes: 11,
                 object_checksum: checksum.clone(),
                 offset: 0,
                 length: 11,
