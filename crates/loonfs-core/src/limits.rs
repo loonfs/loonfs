@@ -259,8 +259,8 @@ const _: () = assert!(GC_SAFETY_MARGIN_MS >= 1000);
 /// objects that a late WAL put collides with. The grace window is at least
 /// this long. Collection roots only the
 /// current manifest and the manifests that snapshots keep. A read whose
-/// manifest a newer one replaced can find a segment collected; it returns
-/// `stale_head` and is read again. A read that must outlive the current
+/// manifest a newer one replaced can find a segment collected, and then the
+/// read runs again on the current manifest. A read that must outlive the current
 /// manifest takes a snapshot.
 pub const PUBLICATION_COMPLETION_BOUND_MS: u64 =
     METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS;

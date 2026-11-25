@@ -221,9 +221,10 @@ pub enum CoreError {
     /// The namespace's head moved while an operation that needs a fixed
     /// basis ran: a snapshot's manifest stopped being current before the
     /// snapshot was verified, or a fork's source kept a WAL tail too old to
-    /// fork from after every fold that the fork ran. The code is
-    /// `stale_head`, whose remedy is to retry against fresh state, and the
-    /// runtime's retry loops take a snapshot again from a fresh basis.
+    /// fork from after every fold that the fork ran. The runtime's retry
+    /// loops take a snapshot again from a fresh basis. The code is
+    /// `store_contention`, with the cause `lost_race`, because nothing was
+    /// published and the same request can succeed when it's sent again.
     #[error("{0}")]
     HeadMoved(String),
     /// A snapshot record exists, but the manifest that it keeps is gone. The
@@ -321,11 +322,10 @@ pub enum CoreError {
     },
     #[error("the outcome of the write to `{object_key}` is unknown: {message}")]
     OutcomeUnknown { object_key: String, message: String },
-    /// An operation on a control object used every attempt it was allowed.
-    /// Concurrent writers changed the object, a read found a newer manifest,
-    /// or, on snapshot renewal, a
-    /// transport failure left an attempt's outcome unconfirmed. Retrying can
-    /// succeed.
+    /// An operation on a control object used every attempt it was allowed,
+    /// because another publication changed the object first on every
+    /// attempt, or a read found a newer manifest on every attempt. The code is
+    /// `store_contention`, with the cause `lost_race`. Retrying can succeed.
     #[error("the operation on `{object_key}` used every attempt it was allowed")]
     StoreContention { object_key: String },
     #[error("namespace `{namespace_id}` does not exist")]
@@ -340,9 +340,8 @@ pub enum CoreError {
     Forbidden { inode_id: InodeId },
     /// A caller-supplied `expected_head_seq` did not match the current head.
     ///
-    /// Unlike [`WalPublishError::NumberTaken`], this error reports a failed
-    /// explicit precondition. It includes both sequence numbers so the caller can
-    /// choose whether to retry. Both errors use the `stale_head` code.
+    /// This is the one error with the `stale_head` code. It includes both
+    /// sequence numbers so the caller can choose whether to retry.
     #[error("expected head sequence {expected}, found {actual}")]
     StaleHeadPrecondition {
         expected: CommitSeq,
@@ -353,10 +352,10 @@ pub enum CoreError {
     /// collection keeps the current manifest and the manifests that
     /// snapshots keep, with their segments, so it can delete a replaced
     /// manifest and that manifest's segments. A read runs again at the
-    /// current manifest, and the publisher plans the commit again on it. The
-    /// code is `stale_head`, which a client sees when a publication raced the
-    /// head on every attempt. A read that found its manifest replaced on every
-    /// attempt returns `store_contention` instead. `namespace_id` is the
+    /// current manifest, and the publisher plans the commit again on it. A
+    /// client sees this error when every attempt found its manifest replaced.
+    /// The code is `store_contention`, with the cause `lost_race`, for a
+    /// read view and an ordinary read alike. `namespace_id` is the
     /// namespace whose manifest was replaced, which can differ from the
     /// namespace that the read started from, such as a merge's fork.
     #[error(
@@ -529,9 +528,12 @@ impl CoreError {
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::Forbidden { .. } => ErrorCode::Forbidden,
-            CoreError::StaleHeadPrecondition { .. }
-            | CoreError::ManifestReplaced { .. }
-            | CoreError::HeadMoved(_) => ErrorCode::StaleHead,
+            CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
+            // LoonFS lost its own race on every attempt and published
+            // nothing, so the same request can succeed when it's sent again.
+            CoreError::ManifestReplaced { .. } | CoreError::HeadMoved(_) => {
+                ErrorCode::StoreContention
+            }
             CoreError::BindingVersionMismatch { .. } => ErrorCode::BindingVersionMismatch,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
             CoreError::MergeRangeConflict { .. } => ErrorCode::MergeRangeConflict,
@@ -571,6 +573,65 @@ impl CoreError {
             CoreError::FailedOperation { error, .. }
             | CoreError::FailedPrecondition { error, .. } => error.code(),
         }
+    }
+
+    /// Returns the failure that this error reports: the error that a failed
+    /// operation or precondition wraps, or this error itself.
+    pub fn failure(&self) -> &CoreError {
+        match self {
+            CoreError::FailedOperation { error, .. }
+            | CoreError::FailedPrecondition { error, .. } => error.failure(),
+            error => error,
+        }
+    }
+
+    /// Returns whether the head or the manifest that an operation planned on
+    /// is no longer the namespace's current one. Either the caller stated a
+    /// head that isn't the head, or another publication changed the namespace
+    /// first on every attempt. A runtime that keeps a view of the namespace
+    /// drops it after one of these errors, so its next attempt starts from the
+    /// store.
+    pub fn is_stale_basis(&self) -> bool {
+        matches!(
+            self.failure(),
+            CoreError::StaleHeadPrecondition { .. }
+                | CoreError::ManifestReplaced { .. }
+                | CoreError::HeadMoved(_)
+                | CoreError::WalPublish(WalPublishError::NumberTaken)
+        )
+    }
+
+    /// Returns whether a merge or a replay commit that failed with this error
+    /// failed because the namespace that it commits into changed between the
+    /// plan and the commit, so that a later plan reads the change.
+    ///
+    /// The commit's preconditions fail on a stale basis (see
+    /// [`Self::is_stale_basis`]), a stale file, attribute, or access revision,
+    /// or a stale binding version. The commit fails with
+    /// [`CoreError::DestinationExists`] or a binding precondition when another
+    /// inode took a name that a create, move, or restore needs, with
+    /// [`CoreError::InodeNotFound`] when a deletion hid an inode that the merge
+    /// changes or the directory that an inode goes into, and with a restore
+    /// error when another writer restored an inode that the merge restores. A
+    /// later plan reports a changed row that isn't the fork's own as
+    /// `merge_conflict`. The plan checks a subject's rights as the commit
+    /// does, so the commit's `InodeNotFound` isn't a subject's missing rights.
+    pub fn is_stale_plan(&self) -> bool {
+        self.is_stale_basis()
+            || matches!(
+                self.failure(),
+                CoreError::CommitValidation(
+                    CommitValidationError::BaseRevisionMismatch { .. }
+                        | CommitValidationError::UpdateAttributesBaseRevisionMismatch { .. }
+                        | CommitValidationError::UpdateAccessBaseRevisionMismatch { .. }
+                        | CommitValidationError::BindingPreconditionMismatch { .. }
+                        | CommitValidationError::RestoreDeletedTargetNotDeleted { .. }
+                        | CommitValidationError::RestoreDeletedTargetsCurrentCommit { .. }
+                        | CommitValidationError::RestoreDeletedSequenceMismatch { .. }
+                ) | CoreError::BindingVersionMismatch { .. }
+                    | CoreError::DestinationExists { .. }
+                    | CoreError::InodeNotFound(_)
+            )
     }
 
     /// Returns this error with the index of the commit operation that failed
@@ -781,6 +842,13 @@ impl CoreError {
             }),
             CoreError::MetadataPublicationBudgetExceeded { .. } => Some(ErrorDetails {
                 cause: Some(ErrorCause::PublicationBudget),
+                ..ErrorDetails::default()
+            }),
+            CoreError::StoreContention { .. }
+            | CoreError::HeadMoved(_)
+            | CoreError::ManifestReplaced { .. }
+            | CoreError::WalPublish(WalPublishError::NumberTaken) => Some(ErrorDetails {
+                cause: Some(ErrorCause::LostRace),
                 ..ErrorDetails::default()
             }),
             CoreError::OutcomeUnknown { .. }
@@ -1163,8 +1231,27 @@ mod tests {
             ),
             (
                 CoreError::HeadMoved("the manifest was replaced".to_owned()),
-                ErrorCode::StaleHead,
-                None,
+                ErrorCode::StoreContention,
+                Some(ErrorCause::LostRace),
+            ),
+            (
+                CoreError::WalPublish(WalPublishError::NumberTaken),
+                ErrorCode::StoreContention,
+                Some(ErrorCause::LostRace),
+            ),
+            (
+                CoreError::ManifestReplaced {
+                    namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+                    replaced_manifest_no: loonfs_types::ManifestNo(1),
+                    current_manifest_no: loonfs_types::ManifestNo(2),
+                },
+                ErrorCode::StoreContention,
+                Some(ErrorCause::LostRace),
+            ),
+            (
+                CoreError::contention_exhausted("namespaces/demo/manifests/3"),
+                ErrorCode::StoreContention,
+                Some(ErrorCause::LostRace),
             ),
         ];
         for (error, code, cause) in cases {
@@ -1179,6 +1266,36 @@ mod tests {
             assert_eq!(wrapped.code(), code);
             assert_eq!(wrapped.details().and_then(|details| details.cause), cause);
         }
+    }
+
+    /// Checks that a stale basis is decided from the variant, so a lost race
+    /// and a stated head that isn't the head both count, through the index of
+    /// a failed precondition, while a compare-and-swap that used every
+    /// attempt, which shares the lost race's code, doesn't.
+    #[test]
+    fn a_stale_basis_is_decided_from_the_variant() {
+        use crate::wal::WalPublishError;
+
+        let stated = CoreError::StaleHeadPrecondition {
+            expected: CommitSeq(41),
+            actual: CommitSeq(45),
+        }
+        .at_precondition(0);
+        let lost = CoreError::WalPublish(WalPublishError::NumberTaken);
+        let contended = CoreError::contention_exhausted("namespaces/demo/manifests/2");
+        assert_eq!(lost.code(), contended.code());
+        for (error, stale) in [(stated, true), (lost, true), (contended, false)] {
+            assert_eq!(error.is_stale_basis(), stale, "{error:?}");
+            assert_eq!(error.is_stale_plan(), stale, "{error:?}");
+        }
+        let revision = CoreError::CommitValidation(CommitValidationError::BaseRevisionMismatch {
+            inode_id: InodeId(7),
+            expected: RevisionNo(2),
+            actual: Some(RevisionNo(5)),
+        })
+        .at_operation(0);
+        assert!(!revision.is_stale_basis());
+        assert!(revision.is_stale_plan());
     }
 
     #[test]

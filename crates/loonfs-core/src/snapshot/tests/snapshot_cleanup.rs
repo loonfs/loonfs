@@ -232,7 +232,7 @@ async fn an_unverified_snapshot_left_without_its_manifest_is_deleted_at_the_grac
     );
     assert_eq!(
         creation.expect_err("verification failed").code(),
-        ErrorCode::StaleHead,
+        ErrorCode::StoreContention,
         "a failed cleanup keeps the verification error"
     );
     assert_eq!(store.inner().attempts(), MAX_CONTENTION_ATTEMPTS);

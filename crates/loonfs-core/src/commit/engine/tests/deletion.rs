@@ -129,7 +129,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
         assert_eq!(
             error.code(),
             if attempt == 0 {
-                loonfs_types::ErrorCode::StaleHead
+                loonfs_types::ErrorCode::StoreContention
             } else {
                 loonfs_types::ErrorCode::WriterFenced
             }

@@ -126,7 +126,7 @@ fn panicking() -> CommitCandidate {
 fn assert_preparation_panicked(result: &Result<Commit>) {
     let error = result.as_ref().expect_err("the preparation panicked");
     assert_eq!(error.code(), ErrorCode::ServerError);
-    assert!(!error.code().is_stale_plan());
+    assert!(!error.is_stale_plan());
     assert!(!is_retryable_wal_publish(result));
     assert_matches!(
         error,

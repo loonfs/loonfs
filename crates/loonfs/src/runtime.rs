@@ -511,7 +511,7 @@ impl LoonFs<Writable> {
     /// `fork` writes nothing, and the call releases its permit, folds the
     /// source through the namespace's one fold path, and runs `fork` again,
     /// up to `MAX_CONTENTION_ATTEMPTS` times in all, and then returns
-    /// `stale_head`. The fold runs without the fork's permit, so
+    /// `store_contention`. The fold runs without the fork's permit, so
     /// the two folds never hold permits at the same time.
     pub(crate) async fn install_fork<Fork>(
         &self,

@@ -24,7 +24,9 @@ pub enum WalPublishError {
 impl WalPublishError {
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::NumberTaken => ErrorCode::StaleHead,
+            // Another publication took the number on every attempt, and the
+            // same request can succeed when it's sent again.
+            Self::NumberTaken => ErrorCode::StoreContention,
             Self::OutcomeUnknown(_) => ErrorCode::OutcomeUnknown,
             Self::Write { kind, .. } => crate::error::classify_store_failure(*kind),
         }

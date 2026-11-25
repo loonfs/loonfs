@@ -202,12 +202,16 @@ async fn read_during_compaction_and_collection(
 }
 
 #[tokio::test]
-async fn head_read_view_returns_stale_head_after_compaction_and_collection() {
+async fn head_read_view_returns_store_contention_after_compaction_and_collection() {
     let error = read_during_compaction_and_collection(false, true)
         .await
         .0
         .expect_err("captured segments were collected");
-    assert_eq!(error.code(), ErrorCode::StaleHead);
+    assert_eq!(error.code(), ErrorCode::StoreContention);
+    assert_eq!(
+        error.details().and_then(|details| details.cause),
+        Some(loonfs_types::ErrorCause::LostRace)
+    );
 }
 
 #[tokio::test]

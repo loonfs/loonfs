@@ -464,7 +464,7 @@ fn wal_publication_conflict_recovers_and_moves_the_writer_position() {
     raw_store.fail_wal_publish();
     assert_core_error_kind(
         fs.create_directory_blocking(&namespace_id, "/stale", &loonfs_test_support::test_actor()),
-        ErrorCode::StaleHead,
+        ErrorCode::StoreContention,
     );
 
     raw_store.allow_wal_publish();

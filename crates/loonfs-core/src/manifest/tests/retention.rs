@@ -1196,7 +1196,7 @@ async fn a_session_that_collides_with_a_floor_object_replays_it_and_isnt_fenced(
     let collided = publish_one(&mut writer, restore_deleted())
         .await
         .expect_err("the put collides with the floor object");
-    assert_eq!(collided.code(), ErrorCode::StaleHead, "{collided:?}");
+    assert_eq!(collided.code(), ErrorCode::StoreContention, "{collided:?}");
     let refused = publish_one(&mut writer, restore_deleted())
         .await
         .expect_err("the restore is below the replayed floor");
@@ -1745,7 +1745,7 @@ async fn snapshot_creation_deletes_its_snapshot_when_the_floor_passed_its_manife
         .await
         .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect_err("floor passed snapshot");
-    assert_eq!(error.code(), ErrorCode::StaleHead);
+    assert_eq!(error.code(), ErrorCode::StoreContention);
     let counts = store.counts();
     assert_eq!(
         (

@@ -25,7 +25,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// Every call generates a fresh `SnapshotId`, and `name` is an optional
     /// label, not a key. A manifest that stopped being current before the
-    /// snapshot's verification returns `stale_head`, so the caller folds and
+    /// snapshot's verification returns `store_contention`, so the caller folds and
     /// snapshots again. A snapshot with `expires_at_ms` can't be read
     /// after that time, and it stays listed until collection deletes it.
     /// `None` keeps the snapshot until it's deleted. `administrator` proves
@@ -81,7 +81,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// The manifest comes from the segment cache or from the store. If a
     /// collection deleted the manifest before the load, or the manifest
     /// stopped being current before the snapshot's verification, the call
-    /// returns `stale_head`, and the caller reads the namespace's head again
+    /// returns `store_contention`, and the caller reads the namespace's head again
     /// and takes another snapshot.
     ///
     /// A merge calls this function to snapshot a fork that needs no fold, so
@@ -154,7 +154,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// current, or, for a snapshot without a fold, the manifest of the
     /// namespace's head. `kept` is the manifest boundary as the caller last
     /// read it (format spec, "Creating and verifying a snapshot"). The call
-    /// returns `stale_head` when the manifest stopped being current before
+    /// returns `store_contention` when the manifest stopped being current before
     /// the snapshot's verification, so the caller can read a fresh basis and
     /// take a snapshot again. Returns the snapshot record, and the newest
     /// manifest with the manifest boundary that the verification read,

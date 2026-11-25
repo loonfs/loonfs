@@ -438,7 +438,7 @@ Every replayed WAL object MUST satisfy:
 
 If discovery encounters a missing or invalid WAL object (including one with a higher epoch than the loaded manifest, which can occur after a concurrent writer claim), it reloads the current manifest and restarts if the manifest advanced (reporting corruption if unchanged). A deleted manifest ends discovery immediately without probing WAL or successors.
 
-If an ordinary read on a replaced manifest hits a GC-deleted segment, it retries from the current manifest (returning `store_contention` after `MAX_CONTENTION_ATTEMPTS` = 8 retries in the reference runtime). A pinned `ReadView` returns `stale_head` ([Reference roots](#112-reference-roots)). In the reference runtime, the load that finds the segment missing checks whether a newer manifest replaced the manifest, so every operation that reads a manifest's rows (a read, a commit, a fold, a retention advance, or a compaction unit) makes the same check, and a missing segment of the current manifest is corruption.
+If an ordinary read on a replaced manifest hits a GC-deleted segment, it retries from the current manifest (returning `store_contention` after `MAX_CONTENTION_ATTEMPTS` = 8 retries in the reference runtime). A pinned `ReadView` returns `store_contention` at once, without a retry ([Reference roots](#112-reference-roots)). In the reference runtime, the load that finds the segment missing checks whether a newer manifest replaced the manifest, so every operation that reads a manifest's rows (a read, a commit, a fold, a retention advance, or a compaction unit) makes the same check, and a missing segment of the current manifest is corruption.
 
 #### Checking an in-memory manifest
 
@@ -659,7 +659,7 @@ To publish a batch ("group commit" bundles multiple requests at contiguous seque
 1. Resolve retained `commit_id` receipts, then validate remaining requests sequentially against the current view and earlier accepted requests in the batch.
 2. If the unfolded WAL is at a write-stop threshold (bytes or objects, counting fences and floor objects), pause new commits in the queue until a fold frees room. Requests waiting past the [write-stop wait](#73-recovery-material-and-maintenance-policy) fail with `maintenance_required`.
 3. Assign contiguous sequences and build WAL object `tip + 1`.
-4. Re-verify content-admission evidence immediately before put-if-absent. If any request's evidence expired, return that request's error, return `stale_head` to the other requests for re-planning, and write nothing.
+4. Re-verify content-admission evidence immediately before put-if-absent. If any request's evidence expired, return that request's error, write nothing, and re-plan the other requests as after a precondition failure.
 5. On put-if-absent success, advance the [writer position](glossary.md#writer-position) and acknowledge.
 
 On a confirmed precondition failure, the writer writes nothing, discovers the winning object, checks for fencing, and re-plans. If the collision was a [floor object](glossary.md#floor-object) (which adds no epoch increase), the writer isn't fenced and re-plans cleanly against the new floor.

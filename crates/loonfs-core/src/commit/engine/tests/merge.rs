@@ -979,7 +979,7 @@ async fn a_merge_whose_inode_ids_dont_match_its_creates_is_refused() {
                 .await
                 .expect_err(attempt);
             assert_eq!(error.code(), ErrorCode::ServerError, "{attempt}");
-            assert!(!error.code().is_stale_plan(), "{attempt}");
+            assert!(!error.is_stale_plan(), "{attempt}");
             assert_matches!(
                 &error,
                 CoreError::CommitPreparationPanicked(panic) if panic.contains(message),

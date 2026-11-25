@@ -313,7 +313,7 @@ pub(crate) async fn publish<S: ObjectStore>(
 }
 
 /// Checks that a commit whose WAL put finds its number taken returns
-/// `stale_head` after that one put, and that a retry replays the object at
+/// `store_contention` after that one put, and that a retry replays the object at
 /// that number and commits at the next number. The test writes the object
 /// at that number itself, as a floor object through the namespace store,
 /// in the same process and outside the session.
@@ -344,7 +344,7 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
             .await
             .expect_err("collision")
             .code(),
-        ErrorCode::StaleHead
+        ErrorCode::StoreContention
     );
     assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(
@@ -389,7 +389,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
         .await
         .expect("takeover fence");
     store.reset();
-    for expected in [ErrorCode::StaleHead, ErrorCode::WriterFenced] {
+    for expected in [ErrorCode::StoreContention, ErrorCode::WriterFenced] {
         assert_eq!(
             publish(&mut stale, "stale")
                 .await
@@ -1046,7 +1046,7 @@ async fn a_writer_resuming_after_a_collection_collides_with_the_kept_fence() {
             .remove(0)
             .expect_err("the late put collides with the kept fence")
             .code(),
-        ErrorCode::StaleHead,
+        ErrorCode::StoreContention,
     );
     let fence = decode_wal_object_envelope_zstd(
         &blocked

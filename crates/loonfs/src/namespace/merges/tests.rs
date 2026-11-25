@@ -934,9 +934,10 @@ async fn a_merge_plans_again_after_another_writer_takes_its_name() {
 }
 
 /// Checks that a merge whose head moves before each of its commits returns
-/// `stale_head` after four plans.
+/// `store_contention`, with the cause `lost_race`, after four plans,
+/// although each commit failed on the head precondition that the merge set.
 #[tokio::test]
-async fn a_merge_returns_stale_head_after_four_plans() {
+async fn a_merge_returns_store_contention_after_four_plans() {
     let family = family().await;
     family.delete_d_in_the_fork().await;
     let request = family.request("stale");
@@ -956,7 +957,11 @@ async fn a_merge_returns_stale_head_after_four_plans() {
         })
         .await
         .expect_err("every plan is stale");
-    assert_eq!(error.code(), ErrorCode::StaleHead);
+    assert_eq!(error.code(), ErrorCode::StoreContention);
+    assert_eq!(
+        error.details().and_then(|details| details.cause),
+        Some(loonfs_types::ErrorCause::LostRace)
+    );
     assert_eq!(plans, 4);
 }
 

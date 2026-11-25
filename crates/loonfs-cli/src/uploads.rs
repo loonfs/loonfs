@@ -707,6 +707,26 @@ mod tests {
         assert_eq!(error, refused);
     }
 
+    /// Checks that a prepared commit whose WAL number other commits took on
+    /// every attempt keeps its record, because nothing was committed and
+    /// sending the same request again can succeed.
+    #[test]
+    fn a_commit_that_lost_its_wal_number_keeps_the_prepared_request() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("upload.json");
+        let journal = open(&path);
+        journal
+            .commit_prepared(&request(&journal), &journal.actor_id(), None)
+            .expect("prepared request");
+        let prepared = std::fs::read(&path).expect("prepared record");
+        let lost = CliError::from(loonfs::Error::from(loonfs::CoreError::WalPublish(
+            loonfs_core::publish::WalPublishError::NumberTaken,
+        )));
+        assert_eq!(lost.code, ErrorCode::StoreContention.as_str());
+        assert_eq!(journal.finish(Err(lost.clone())), Err(lost));
+        assert_eq!(std::fs::read(&path).expect("preserved request"), prepared);
+    }
+
     #[test]
     fn explicit_commit_ids_keep_the_request_after_acknowledgement() {
         let dir = tempfile::tempdir().expect("directory");

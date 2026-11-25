@@ -240,6 +240,11 @@ pub enum ErrorCause {
     /// For `store_contention`: a metadata publication stopped at its time budget before it
     /// published.
     PublicationBudget,
+    /// For `store_contention`: another publication changed the namespace first on every attempt
+    /// that LoonFS made. For example, another commit took the WAL number, or a newer manifest
+    /// replaced the one that the request read, and garbage collection deleted the older
+    /// manifest's segments.
+    LostRace,
     /// For `outcome_unknown`: the server cancelled the request at its `request_deadline_ms`.
     Deadline,
     /// For `outcome_unknown`: the server didn't observe whether its write to object storage took
@@ -256,6 +261,7 @@ impl ErrorCause {
         match self {
             Self::ManifestMissing => "manifest_missing",
             Self::PublicationBudget => "publication_budget",
+            Self::LostRace => "lost_race",
             Self::Deadline => "deadline",
             Self::Unconfirmed => "unconfirmed",
             Self::Unknown => "unknown",
