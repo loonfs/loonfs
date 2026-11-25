@@ -75,7 +75,7 @@ pub struct ExecutionBudget {
 
 struct ExecutionBudgetInner {
     admission: AdmittedTotals,
-    reads: Permits,
+    reads: Arc<Permits>,
     publications: Permits,
     folds: Permits,
     compactions: Permits,
@@ -204,6 +204,12 @@ impl ExecutionBudget {
 
     pub(crate) async fn read_permit(&self) -> BudgetPermit<'_> {
         self.inner.reads.acquire().await
+    }
+
+    /// Waits for a read permit, as [`Self::read_permit`] does, in a form
+    /// that read views can share.
+    pub(crate) async fn owned_read_permit(&self) -> loonfs_core::OwnedBudgetPermit {
+        self.inner.reads.acquire_owned().await
     }
 
     /// Waits for a publication permit. A namespace's worker has one while
@@ -391,7 +397,7 @@ impl ExecutionBudgetBuilder {
                     admitted: Mutex::default(),
                     instruments: admission,
                 },
-                reads: Permits::new(self.max_concurrent_reads, Some(reads)),
+                reads: Arc::new(Permits::new(self.max_concurrent_reads, Some(reads))),
                 publications: Permits::new(self.max_concurrent_publications, Some(publications)),
                 folds: Permits::new(self.max_concurrent_folds, Some(folds)),
                 compactions: Permits::new(self.max_concurrent_compactions, Some(compactions)),

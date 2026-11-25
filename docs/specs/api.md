@@ -349,6 +349,7 @@ In the embedded runtime, every public read acquires one slot from the runtime's 
 
 - Each pager page acquires and releases its own slot.
 - Capturing a `ReadView` takes one slot and releases it immediately, and each read through the view takes its own slot.
+- `Namespace::read_at_snapshot` takes one slot for the capture of a snapshot's view and every read through that view, and keeps it when the read runs again after a replaced manifest. An HTTP read of a snapshot runs this way, so it takes one slot, as a read of the live head does.
 - A buffered content read keeps its slot until it finishes.
 - A streamed or ranged content read releases its slot after metadata and content lookup, before returning the body (transfer limits bound body consumption).
 - Internal reads inside mutations and maintenance don't take a read slot.
@@ -925,7 +926,7 @@ Path stat, inode stat, path and inode directory listings, path and inode revisio
 - A snapshot change feed stops at `captured_seq`, and `after_seq` can't exceed `captured_seq`.
 - Read routes also accept any of the namespace's fork snapshots as `snapshot_id` (unlike snapshot management routes and `POST /forks`, which refuse them with `snapshot_not_found`). In particular, every fork's `fork_basis.fork_point_snapshot_id` pins the fork's state at the fork point (identical to the source at that sequence) and never expires, so clients can read historical revisions from the fork even after the source's retention floor advances past the fork point ([`POST /forks`](#613-post-forks)).
 - Snapshot reads never fall back to live state. Missing, deleted, or expired snapshots always return `snapshot_not_found`.
-- In the embedded runtime, a snapshot is read through `Namespace::read_view_at_snapshot`, which captures a `ReadView` of the snapshot. Directory and revision cursors from a snapshot view are bound to that snapshot (resuming them on a live listing or another view returns `invalid_request`). The view checks the snapshot once, when it's captured, so a page can still be read through the view after the snapshot is deleted or expires. That page still returns the snapshot's state, because LoonFS keeps the snapshot's manifest and segments for a grace window after the snapshot is deleted or expires ([Snapshots](format.md#8-snapshots)). Over HTTP, each page is a separate request that checks the snapshot again, so a page after the deletion returns `snapshot_not_found`.
+- In the embedded runtime, a snapshot is read through `Namespace::read_view_at_snapshot`, which captures a `ReadView` of the snapshot for several reads, or through `Namespace::read_at_snapshot`, which captures the view, runs one read on it, and runs again after a replaced manifest. Directory and revision cursors from a snapshot view are bound to that snapshot (resuming them on a live listing or another view returns `invalid_request`). The view checks the snapshot once, when it's captured, so a page can still be read through the view after the snapshot is deleted or expires. That page still returns the snapshot's state, because LoonFS keeps the snapshot's manifest and segments for a grace window after the snapshot is deleted or expires ([Snapshots](format.md#8-snapshots)). Over HTTP, each page is a separate request that checks the snapshot again, so a page after the deletion returns `snapshot_not_found`.
 
 ### Snapshot inventory
 

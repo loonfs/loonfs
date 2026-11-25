@@ -65,11 +65,9 @@ pub(super) fn read_through(
 
 impl ReadThrough {
     /// Runs `head` on the namespace handle, or `snapshot` on a view of the
-    /// snapshot. A snapshot read checks the request's rights at the live
-    /// head, so the view is captured inside
-    /// [`Namespace::read_through_views`], which runs it again when a newer
-    /// manifest replaced that head's manifest, as a read through the handle
-    /// runs again.
+    /// snapshot through [`Namespace::read_at_snapshot`]. Either read takes
+    /// one read slot, and runs again when a newer manifest replaced the live
+    /// head's manifest.
     pub(super) async fn read<T, Head, HeadFuture, Snapshot, SnapshotFuture>(
         self,
         head: Head,
@@ -87,10 +85,7 @@ impl ReadThrough {
         match self {
             Self::Head(namespace) => Box::pin(head(namespace)).await,
             Self::Snapshot(namespace, snapshot_id) => {
-                Box::pin(namespace.read_through_views(|| async {
-                    snapshot(namespace.read_view_at_snapshot(&snapshot_id).await?).await
-                }))
-                .await
+                Box::pin(namespace.read_at_snapshot(&snapshot_id, snapshot)).await
             }
         }
     }

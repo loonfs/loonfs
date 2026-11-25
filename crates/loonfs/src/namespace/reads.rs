@@ -7,7 +7,7 @@ use crate::pagers::{
     PathEntriesPager, TrashPager,
 };
 use crate::pinned_read::PinnedRead;
-use crate::read_view::{ReadSource, ReadView, SnapshotBoundCursor};
+use crate::read_view::{ReadAdmission, ReadSource, ReadView, SnapshotBoundCursor};
 use crate::trace::{self, operation_span};
 use crate::{
     CommitSeq, ContentRef, CoreError, DiffOptions, DownloadOptions, FileBytes, FileContentStream,
@@ -20,6 +20,7 @@ use loonfs_types::{
     AbsolutePath, ChangeFeedPosition, EffectiveLimit, ListPageCursor, PageRequest, TrashPageCursor,
 };
 use std::future::Future;
+use std::sync::Arc;
 
 #[cfg(test)]
 mod tests;
@@ -85,7 +86,12 @@ impl<M: crate::Mode> Namespace<M> {
                     .core
                     .pinned_read(&self.namespace_id, self.consistency)
                     .await?;
-                Ok(ReadView::new(self.core.clone(), pinned, ReadSource::Head))
+                Ok(ReadView::new(
+                    self.core.clone(),
+                    pinned,
+                    ReadSource::Head,
+                    ReadAdmission::EachRead,
+                ))
             },
         )
         .await
@@ -117,6 +123,12 @@ impl<M: crate::Mode> Namespace<M> {
     /// namespace's fork snapshots, preserves. A missing snapshot or an expired snapshot
     /// returns `snapshot_not_found`.
     ///
+    /// The view is for several reads of one moment: capturing it takes a
+    /// read slot and returns it, and each read through it takes a slot of
+    /// its own, so a caller can keep the view for as long as it needs it. To
+    /// read a snapshot once, use [`Self::read_at_snapshot`], which takes one
+    /// slot for the capture and the read.
+    ///
     /// Reads through the view check the subject's rights at the live head,
     /// which this method confirms as a `strong` read does, whatever this
     /// handle's consistency. A view has no rerun of its own, so a caller
@@ -140,7 +152,63 @@ impl<M: crate::Mode> Namespace<M> {
                 self.core.clone(),
                 pinned,
                 ReadSource::Snapshot(snapshot_id.clone()),
+                ReadAdmission::EachRead,
             ))
+        })
+        .await
+    }
+
+    /// Reads the snapshot `snapshot_id`, or one of the namespace's fork
+    /// snapshots, once: captures a view of it and runs `read` on the view,
+    /// under one read slot for the whole call.
+    ///
+    /// The slot is taken before the capture and returned when the call
+    /// ends, so a read that waits for the budget waits once, before it
+    /// captures anything. Each time `read` returns
+    /// `ManifestReplaced`, because a newer manifest replaced the live head's
+    /// manifest that the read checks rights at and a collection removed its
+    /// segments, the call captures the view again and runs `read` again,
+    /// under the same slot, as [`Self::read_through_views`] does. A missing
+    /// or expired snapshot returns `snapshot_not_found`.
+    ///
+    /// Reads through the view take no slot of their own. A read through this
+    /// handle inside `read` waits for a slot of its own while the call keeps
+    /// one, so `read` reads only through the view. A copy of the view that
+    /// `read` keeps, or returns, keeps the slot taken until the last copy is
+    /// dropped. Use [`Self::read_view_at_snapshot`] for a view that serves
+    /// several reads over time.
+    pub async fn read_at_snapshot<T, F, Fut>(&self, snapshot_id: &SnapshotId, read: F) -> Result<T>
+    where
+        F: Fn(ReadView) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let span = operation_span!(
+            self.core,
+            "read_at_snapshot",
+            self.namespace_id,
+            snapshot_id = %snapshot_id
+        );
+        trace::in_operation(span, async {
+            let permit = Arc::new(self.core.owned_read_permit().await);
+            // Boxed for the same reason as `RuntimeCore::read_at_least`:
+            // without the box, a crate that awaits a read fails to compile
+            // with "queries overflow the depth limit!".
+            Box::pin(self.core.run_again_after_replaced_manifest(|| async {
+                let pinned = self
+                    .core
+                    .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
+                    .await?;
+                read(ReadView::new(
+                    self.core.clone(),
+                    pinned,
+                    ReadSource::Snapshot(snapshot_id.clone()),
+                    ReadAdmission::Shared {
+                        _slot: Arc::clone(&permit),
+                    },
+                ))
+                .await
+            }))
+            .await
         })
         .await
     }

@@ -433,6 +433,14 @@ async fn an_expired_snapshot_is_not_found_and_not_listed_but_stays_in_the_invent
         ErrorCode::SnapshotNotFound,
     );
     assert_core_error_kind(
+        reader
+            .read_at_snapshot(&snapshot.snapshot_id, |view| async move {
+                view.stat("/file").await
+            })
+            .await,
+        ErrorCode::SnapshotNotFound,
+    );
+    assert_core_error_kind(
         writer
             .fork_namespace_with_options(
                 &source,

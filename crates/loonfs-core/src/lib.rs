@@ -229,7 +229,7 @@ pub use path::read::{
     CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
     FileRevisionsPage, ObjectRange, RetainedRevisionsPage, RetainedRevisionsPageCursor,
 };
-pub use permits::{BudgetPermit, PermitCounts, PermitObserver, Permits};
+pub use permits::{BudgetPermit, OwnedBudgetPermit, PermitCounts, PermitObserver, Permits};
 pub use phase::Phase;
 pub use pool_store::PoolStore;
 pub use segment::{MetadataFamilyGroup, MetadataRunPolicy};

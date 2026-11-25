@@ -1850,9 +1850,9 @@ async fn a_strong_read_from_a_collected_manifest_reads_the_newest_manifest() {
 /// Checks that the reads of a subject's administrator rights succeed
 /// from a cached head whose manifest a collection deleted, when neither the
 /// segment cache nor the store has the manifest: a deletion, a lookup of a
-/// snapshot, and a listing of a snapshot's files and a stat through a view
-/// of a snapshot, which run inside `read_through_views` as an HTTP read of a
-/// snapshot does.
+/// snapshot, and a listing of a snapshot's files and a stat through
+/// `read_at_snapshot`, which an HTTP read of a snapshot runs. Those two run
+/// again under the call's one read slot.
 ///
 /// The writer session closes, so its position becomes the cached head. Each
 /// check reads the root's access row at a `strong` head, whose manifest check
@@ -1893,17 +1893,16 @@ async fn administrator_checks_from_a_collected_position_succeed() {
                 .map(drop),
             "get-snapshot" => reader.get_snapshot(&snapshot_id).await.map(drop),
             "snapshot-files" => reader
-                .read_through_views(|| async {
-                    let view = reader.read_view_at_snapshot(&snapshot_id).await?;
+                .read_at_snapshot(&snapshot_id, |view| async move {
                     view.list_files().page().await
                 })
                 .await
                 .map(drop),
             _ => reader
-                .read_through_views(|| async {
-                    let view = reader.read_view_at_snapshot(&snapshot_id).await?;
-                    view.stat("/small.txt").await
-                })
+                .read_at_snapshot(
+                    &snapshot_id,
+                    |view| async move { view.stat("/small.txt").await },
+                )
                 .await
                 .map(drop),
         };

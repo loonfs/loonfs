@@ -158,6 +158,11 @@ impl RuntimeCore {
         self.inner.execution_budget.read_permit().await
     }
 
+    /// Waits for a read permit that read views can share.
+    pub(crate) async fn owned_read_permit(&self) -> loonfs_core::OwnedBudgetPermit {
+        self.inner.execution_budget.owned_read_permit().await
+    }
+
     /// Waits for a fold permit from the execution budget.
     pub(crate) async fn fold_permit(&self) -> BudgetPermit<'_> {
         self.inner.execution_budget.fold_permit().await
