@@ -3,7 +3,7 @@
 
 use crate::trace::TraceMode;
 use crate::RetentionWindow;
-use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
+use loonfs_core::limits::{DEFAULT_INLINE_TAIL_LIMIT_BYTES, READ_REVALIDATION_BOUND_MS};
 use loonfs_types::config::ConfigFieldError;
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -80,9 +80,9 @@ impl Default for PublicationPolicy {
 /// the commit receipt is retained. See `docs/specs/api.md`, section 5.2.
 ///
 /// The bytes an append adds always travel in the WAL and never stage. They
-/// count toward the WAL object budget and the unfolded tail, but neither
-/// limit keeps an append back: a commit whose appends pass the budget
-/// publishes in a WAL object of its own.
+/// count toward the WAL object budget and the inline tail limit. The budget
+/// doesn't keep an append back, because a commit whose appends pass the
+/// budget publishes in a WAL object of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InlineContentPolicy {
@@ -92,13 +92,19 @@ pub struct InlineContentPolicy {
     pub inline_content_threshold_bytes: Option<usize>,
     /// Maximum inline bytes in one WAL object; defaults to 1 MiB.
     pub inline_content_wal_object_budget_bytes: usize,
-    /// Limit on unfolded and admitted inline bytes; defaults to 32 MiB.
-    /// A session without a position (before its first publish, or after its
-    /// position is dropped) admits at most the WAL object budget until its
-    /// next publish reads the tail, so the tail can exceed the limit by the
-    /// WAL object budget each time the position is dropped before a fold.
-    /// The write stop, in unfolded WAL bytes or WAL objects, stops new
-    /// commits regardless of this limit.
+    /// The inline content bytes of an unfolded WAL tail at which the commit
+    /// engine stops new commits, as it does at the write stop in unfolded
+    /// WAL bytes or WAL objects. A fold is due once the tail has a quarter of
+    /// the limit (see
+    /// [`fold_at_inline_bytes`](loonfs_core::limits::fold_at_inline_bytes)).
+    /// Defaults to [`DEFAULT_INLINE_TAIL_LIMIT_BYTES`], 32 MiB, and can't be
+    /// smaller than the inline bytes of one WAL object, 4 MiB.
+    ///
+    /// Below the limit, the publisher stages a new inline value as a content
+    /// object when the value would bring the unfolded and admitted inline
+    /// bytes past the limit. A session without a position (before its first
+    /// publish, or after its position is dropped) admits at most the WAL
+    /// object budget until its next publish reads the tail.
     pub inline_content_tail_limit_bytes: usize,
 }
 
@@ -107,7 +113,7 @@ impl Default for InlineContentPolicy {
         Self {
             inline_content_threshold_bytes: Some(64 * 1024),
             inline_content_wal_object_budget_bytes: 1024 * 1024,
-            inline_content_tail_limit_bytes: 32 * 1024 * 1024,
+            inline_content_tail_limit_bytes: DEFAULT_INLINE_TAIL_LIMIT_BYTES,
         }
     }
 }
@@ -169,10 +175,12 @@ impl InlineContentPolicy {
                 reason: format!("must be between 1 and {MAX_WAL_OBJECT_INLINE_CONTENT_BYTES}"),
             });
         }
-        if self.inline_content_tail_limit_bytes == 0 {
+        if self.inline_content_tail_limit_bytes < MAX_WAL_OBJECT_INLINE_CONTENT_BYTES {
             return Err(ConfigFieldError::Invalid {
                 field: "inline_content.inline_content_tail_limit_bytes",
-                reason: "must be greater than zero".to_owned(),
+                reason: format!(
+                    "must be at least {MAX_WAL_OBJECT_INLINE_CONTENT_BYTES}, the inline bytes of one WAL object"
+                ),
             });
         }
         Ok(())

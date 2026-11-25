@@ -657,7 +657,7 @@ acknowledge
 To publish a batch ("group commit" bundles multiple requests at contiguous sequences inside one WAL object while keeping each request a separate commit):
 
 1. Resolve retained `commit_id` receipts, then validate remaining requests sequentially against the current view and earlier accepted requests in the batch.
-2. If the unfolded WAL is at a write-stop threshold (bytes or objects, counting fences and floor objects), pause new commits in the queue until a fold frees room. Requests waiting past the [write-stop wait](#73-recovery-material-and-maintenance-policy) fail with `maintenance_required`.
+2. If the unfolded WAL is at a write-stop threshold (bytes, objects counting fences and floor objects, or inline content bytes), pause new commits in the queue until a fold frees room. Requests waiting past the [write-stop wait](#73-recovery-material-and-maintenance-policy) fail with `maintenance_required`.
 3. Assign contiguous sequences and build WAL object `tip + 1`.
 4. Re-verify content-admission evidence immediately before put-if-absent. If any request's evidence expired, return that request's error, write nothing, and re-plan the other requests as after a precondition failure.
 5. On put-if-absent success, advance the [writer position](glossary.md#writer-position) and acknowledge.
@@ -826,12 +826,12 @@ Reference implementation folding defaults (not format requirements):
 
 | Trigger | Reference default |
 | --- | --- |
-| Request a fold | 8 MiB unfolded WAL bytes, or 256 unfolded WAL objects |
-| Stall new commits waiting for a fold (write-stop) | 64 MiB unfolded WAL bytes, or 1,024 unfolded WAL objects |
+| Request a fold | 8 MiB unfolded WAL bytes, 256 unfolded WAL objects, or 8 MiB of unfolded inline content bytes (a quarter of the inline write stop) |
+| Stall new commits waiting for a fold (write-stop) | 64 MiB unfolded WAL bytes, 1,024 unfolded WAL objects, or 32 MiB of unfolded inline content bytes |
 | Reject stalled commit with `maintenance_required` (write-stop wait) | 30 s from queue entry |
 | Idle tail fold | Tail has a commit and newest `committed_at_ms` is >= 15 min old on maintenance clock |
 
-Fences and [floor objects](glossary.md#floor-object) count toward WAL object counts (not byte counts or idleness). The commit crossing a threshold may finish first, and reads plus retained-receipt replays continue during write-stop. Folding never advances retention on its own beyond floor objects already in the tail. See [Appendix C](#appendix-c-timing-and-size-reference) for sizing defaults.
+Fences and [floor objects](glossary.md#floor-object) count toward WAL object counts (not byte counts or idleness). Inline content bytes are the decoded bytes of the tail's [pieces](glossary.md#piece), which a writer keeps in memory, so those thresholds bound the memory of a tail whose pieces compress well. Each fold threshold sits well below its write stop, so a fold starts early and commits reach the stop only when folds fall behind. The commit crossing a threshold may finish first, and reads plus retained-receipt replays continue during write-stop. Folding never advances retention on its own beyond floor objects already in the tail. See [Appendix C](#appendix-c-timing-and-size-reference) for sizing defaults.
 
 ### 7.4 Statistics
 
@@ -2254,9 +2254,9 @@ These defaults configure the reference producer and runtime without changing the
 | Target segment rows | 65,536 |
 | Target decoded segment size | 8 MiB |
 | Maximum decoded input one compaction keeps in memory | 64 MiB |
-| Automatic WAL-fold threshold | 8 MiB of WAL bytes, or 256 WAL objects |
+| Automatic WAL-fold threshold | 8 MiB of WAL bytes, 256 WAL objects, or 8 MiB of inline content bytes (a quarter of the inline tail limit) |
 | Idle WAL-fold period | 15 minutes |
-| Unfolded-tail write stop (new commits wait for a fold) | 64 MiB of WAL bytes, or 1,024 WAL objects |
+| Unfolded-tail write stop (new commits wait for a fold) | 64 MiB of WAL bytes, 1,024 WAL objects, or 32 MiB of inline content bytes (`InlineContentPolicy::inline_content_tail_limit_bytes`) |
 | `PublicationPolicy::write_stop_wait_budget_ms` | 30,000 ms |
 | `RuntimeConfig::manifest_revalidation_interval_ms` | 1,000 ms |
 | `RuntimeConfig::max_staleness_ms` | 1,000 ms |

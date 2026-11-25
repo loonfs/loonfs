@@ -347,6 +347,7 @@ pub fn namespace_store<S>(store: S, namespace_id: &NamespaceId) -> NamespaceStor
         std_timer(),
         Arc::new(content_writes()),
         MetadataRunPolicy::default(),
+        crate::limits::DEFAULT_INLINE_TAIL_LIMIT_BYTES,
     )
 }
 
@@ -363,6 +364,7 @@ pub fn pool_store<S>(store: S, pool_id: &PoolId) -> crate::PoolStore<S> {
         std_timer(),
         Arc::new(content_writes()),
         MetadataRunPolicy::default(),
+        crate::limits::DEFAULT_INLINE_TAIL_LIMIT_BYTES,
     )
 }
 

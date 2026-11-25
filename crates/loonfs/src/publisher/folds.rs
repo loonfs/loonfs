@@ -8,7 +8,7 @@ use super::{NamespacePublisher, PublisherRegistry};
 use crate::trace::phase_span;
 use crate::{CoreError, Error, FoldWalOutcome, NamespaceId, Result};
 use loonfs_core::control::{Held, LoadedManifest, NamespaceStorageDiagnostics};
-use loonfs_core::limits::{FOLD_AT_WAL_BYTES, MAX_CONTENTION_ATTEMPTS};
+use loonfs_core::limits::{fold_at_inline_bytes, FOLD_AT_WAL_BYTES, MAX_CONTENTION_ATTEMPTS};
 use loonfs_core::publish::WriterPosition;
 use loonfs_core::time::OperationClock;
 use loonfs_core::{FoldedWalTail, MetadataCompactionCancellation, Phase};
@@ -84,20 +84,27 @@ pub(crate) enum FoldWhen {
     /// which then returns that fold's result and folds nothing.
     Always,
     /// A tail of at least `max_wal_tail_objects` WAL objects, a tail of at
-    /// least `FOLD_AT_WAL_BYTES` unfolded WAL bytes, or a tail whose newest
-    /// commit has reached the runtime's idle fold age.
+    /// least `FOLD_AT_WAL_BYTES` unfolded WAL bytes, a tail of at least
+    /// `fold_at_inline_bytes` of the inline tail limit in inline content
+    /// bytes, or a tail whose newest commit has reached the runtime's idle
+    /// fold age.
     Due { max_wal_tail_objects: u64 },
 }
 
-/// Returns whether a tail of `objects` WAL objects and `wal_bytes` unfolded
-/// WAL bytes has reached `max_wal_tail_objects` WAL objects or
-/// `FOLD_AT_WAL_BYTES`.
+/// Returns whether a tail of `objects` WAL objects, `wal_bytes` unfolded WAL
+/// bytes, and `inline_bytes` inline content bytes has reached
+/// `max_wal_tail_objects` WAL objects, `FOLD_AT_WAL_BYTES`, or the inline
+/// fold trigger of `inline_tail_limit_bytes` (see `fold_at_inline_bytes`).
 pub(super) fn wal_tail_reached_fold_size(
     max_wal_tail_objects: u64,
+    inline_tail_limit_bytes: usize,
     objects: u64,
     wal_bytes: usize,
+    inline_bytes: usize,
 ) -> bool {
-    objects >= max_wal_tail_objects || wal_bytes >= FOLD_AT_WAL_BYTES
+    objects >= max_wal_tail_objects
+        || wal_bytes >= FOLD_AT_WAL_BYTES
+        || inline_bytes >= fold_at_inline_bytes(inline_tail_limit_bytes)
 }
 
 /// What one [`PublisherRegistry::fold_namespace`] call did.
@@ -343,35 +350,43 @@ impl PublisherRegistry {
         };
         let core = &self.shared.context.runtime_core;
         let position = session.and_then(NamespacePublisher::current_position);
-        let (objects, wal_bytes, newest_commit_at_ms, now_ms, observed) = match position {
-            Some(position) => (
-                position.wal_tail_objects(),
-                position.wal_tail_bytes(),
-                session.and_then(NamespacePublisher::last_published_at_ms),
-                core.timer().monotonic_now_ms(),
-                None,
-            ),
-            None => {
-                let anchor = core
-                    .namespace_store(namespace_id)
-                    .load_live_read_anchor(core.observation())
-                    .await?;
-                let status = NamespaceStorageDiagnostics::from(&anchor);
-                (
-                    status.wal_tail_objects,
-                    anchor.wal_tail_bytes(),
-                    status.wal_tail_newest_commit_at_ms,
-                    core.now_ms(),
-                    Some(anchor.held().clone()),
-                )
-            }
-        };
+        let (objects, wal_bytes, inline_bytes, newest_commit_at_ms, now_ms, observed) =
+            match position {
+                Some(position) => (
+                    position.wal_tail_objects(),
+                    position.wal_tail_bytes(),
+                    position.wal_tail_inline_bytes(),
+                    session.and_then(NamespacePublisher::last_published_at_ms),
+                    core.timer().monotonic_now_ms(),
+                    None,
+                ),
+                None => {
+                    let anchor = core
+                        .namespace_store(namespace_id)
+                        .load_live_read_anchor(core.observation())
+                        .await?;
+                    let status = NamespaceStorageDiagnostics::from(&anchor);
+                    (
+                        status.wal_tail_objects,
+                        anchor.wal_tail_bytes(),
+                        anchor.wal_tail_inline_bytes(),
+                        status.wal_tail_newest_commit_at_ms,
+                        core.now_ms(),
+                        Some(anchor.held().clone()),
+                    )
+                }
+            };
         let idle_fold_due_at_ms = newest_commit_at_ms
             .filter(|_| objects > 0)
             .zip(core.config().idle_fold_after_ms)
             .map(|(committed_at_ms, after_ms)| committed_at_ms.saturating_add(after_ms.get()));
-        if wal_tail_reached_fold_size(max_wal_tail_objects, objects, wal_bytes)
-            || idle_fold_due_at_ms.is_some_and(|due_at_ms| now_ms >= due_at_ms)
+        if wal_tail_reached_fold_size(
+            max_wal_tail_objects,
+            core.config().inline_content.inline_content_tail_limit_bytes,
+            objects,
+            wal_bytes,
+            inline_bytes,
+        ) || idle_fold_due_at_ms.is_some_and(|due_at_ms| now_ms >= due_at_ms)
         {
             return Ok(None);
         }

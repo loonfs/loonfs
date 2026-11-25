@@ -191,6 +191,16 @@ pub const FOLD_AT_WAL_BYTES: usize = 8 * 1024 * 1024;
 /// Each unfolded WAL object costs a reader one GET to replay the tail.
 pub const FOLD_AT_WAL_OBJECTS: NonZeroU64 = NonZeroU64::new(256).unwrap();
 
+/// Returns the inline content bytes that make a WAL fold due for a namespace
+/// whose inline tail limit is `inline_tail_limit_bytes`: a quarter of the
+/// limit, so 8 MiB at the default limit.
+///
+/// Each fold trigger sits well below its write stop, so a fold starts early
+/// and commits reach the stop only when folds fall behind.
+pub const fn fold_at_inline_bytes(inline_tail_limit_bytes: usize) -> usize {
+    inline_tail_limit_bytes / 4
+}
+
 /// Unfolded WAL bytes at which the commit engine refuses new commits.
 ///
 /// This write stop bounds the bytes that a reader downloads to replay the
@@ -209,6 +219,19 @@ pub const MAX_UNFOLDED_WAL_BYTES: usize = 64 * 1024 * 1024;
 /// room, and returns `maintenance_required` to a commit that's still waiting
 /// when the write-stop wait passes.
 pub const MAX_UNFOLDED_WAL_OBJECTS: u64 = 1_024;
+
+/// Default of the runtime setting `inline_content_tail_limit_bytes` (32 MiB).
+/// Once an unfolded tail has this many inline content bytes, the commit
+/// engine refuses new commits.
+///
+/// This write stop counts the decoded bytes of the tail's inline pieces,
+/// which a writer session keeps in memory, so it bounds that memory when the
+/// pieces compress well and the stored WAL bytes stay far below
+/// `MAX_UNFOLDED_WAL_BYTES`. One commit can still pass the limit, because the
+/// stop applies to the commits after the tail reaches it. The setting can't
+/// be smaller than the inline bytes of one WAL object
+/// (`MAX_WAL_OBJECT_INLINE_CONTENT_BYTES`, 4 MiB).
+pub const DEFAULT_INLINE_TAIL_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 const _: () = assert!(FOLD_AT_WAL_BYTES < MAX_UNFOLDED_WAL_BYTES);
 const _: () = assert!(FOLD_AT_WAL_OBJECTS.get() < MAX_UNFOLDED_WAL_OBJECTS);

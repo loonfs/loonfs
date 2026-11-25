@@ -1,5 +1,5 @@
 //! [`PoolStore`]: one pool's object store with the caches, clocks, content
-//! write permits, and run policy that reading the pool's members uses.
+//! write permits, run policy, and inline tail limit that its members use.
 
 use crate::namespace::head_cache::HeadAndWalTailCache;
 use crate::namespace::store::NamespaceStore;
@@ -24,6 +24,7 @@ pub struct PoolStore<S> {
     pub(crate) timer: Arc<dyn MonotonicTimer>,
     pub(crate) content_writes: Arc<Permits>,
     pub(crate) run_policy: MetadataRunPolicy,
+    pub(crate) inline_tail_limit_bytes: usize,
 }
 
 impl<S> PoolStore<S> {
@@ -42,6 +43,7 @@ impl<S> PoolStore<S> {
         timer: Arc<dyn MonotonicTimer>,
         content_writes: Arc<Permits>,
         run_policy: MetadataRunPolicy,
+        inline_tail_limit_bytes: usize,
     ) -> Self {
         Self {
             store,
@@ -53,6 +55,7 @@ impl<S> PoolStore<S> {
             timer,
             content_writes,
             run_policy,
+            inline_tail_limit_bytes,
         }
     }
 
@@ -69,6 +72,7 @@ impl<S> PoolStore<S> {
             Arc::clone(&self.timer),
             Arc::clone(&self.content_writes),
             self.run_policy,
+            self.inline_tail_limit_bytes,
         )
     }
 

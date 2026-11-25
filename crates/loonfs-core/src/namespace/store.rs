@@ -1,6 +1,7 @@
 //! [`NamespaceStore`]: one namespace's object store with the caches, clocks,
-//! content write permits, and run policy that its operations use. Each
-//! operation is a method in the module that implements it.
+//! content write permits, run policy, and inline tail limit that its
+//! operations use. Each operation is a method in the module that implements
+//! it.
 
 use crate::engine::RuntimeReadContext;
 use crate::namespace::basis::ReadBasis;
@@ -14,7 +15,8 @@ use loonfs_types::{MonotonicTimer, NamespaceId, WallClock};
 use std::sync::Arc;
 
 /// One namespace's object store, with the segment cache, clocks, content
-/// write permits, and run policy that the namespace's operations use.
+/// write permits, run policy, and inline tail limit that the namespace's
+/// operations use.
 #[derive(Debug, Clone)]
 pub struct NamespaceStore<S> {
     pub(crate) store: S,
@@ -34,6 +36,11 @@ pub struct NamespaceStore<S> {
     pub(crate) content_writes: Arc<Permits>,
     /// The budgets that folds and compactions run under.
     pub(crate) run_policy: MetadataRunPolicy,
+    /// The inline content bytes of an unfolded tail at which publications
+    /// stop (see [`DEFAULT_INLINE_TAIL_LIMIT_BYTES`]).
+    ///
+    /// [`DEFAULT_INLINE_TAIL_LIMIT_BYTES`]: crate::limits::DEFAULT_INLINE_TAIL_LIMIT_BYTES
+    pub(crate) inline_tail_limit_bytes: usize,
 }
 
 impl<S> NamespaceStore<S> {
@@ -52,6 +59,7 @@ impl<S> NamespaceStore<S> {
         timer: Arc<dyn MonotonicTimer>,
         content_writes: Arc<Permits>,
         run_policy: MetadataRunPolicy,
+        inline_tail_limit_bytes: usize,
     ) -> Self {
         Self {
             store,
@@ -63,6 +71,7 @@ impl<S> NamespaceStore<S> {
             timer,
             content_writes,
             run_policy,
+            inline_tail_limit_bytes,
         }
     }
 
@@ -79,6 +88,7 @@ impl<S> NamespaceStore<S> {
             timer: Arc::clone(&self.timer),
             content_writes: Arc::clone(&self.content_writes),
             run_policy: self.run_policy,
+            inline_tail_limit_bytes: self.inline_tail_limit_bytes,
         }
     }
 
