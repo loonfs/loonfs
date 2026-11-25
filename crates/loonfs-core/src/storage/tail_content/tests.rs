@@ -708,9 +708,10 @@ async fn a_read_of_a_whole_span_object_checks_the_extents_object_checksum() {
         .expect("location");
     assert_eq!(
         location
-            .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, 0, 10)
+            .read_range(&store, None, 0, 10)
             .await
-            .expect("read"),
+            .expect("read")
+            .0,
         Bytes::from_static(b"aaaaaabbbb")
     );
     layout.0.layout.extents[1].object_checksum = Checksum::crc64nvme(b"cccc");
@@ -720,7 +721,7 @@ async fn a_read_of_a_whole_span_object_checks_the_extents_object_checksum() {
         .expect("location");
     for (start, end) in [(0, 10), (6, 10)] {
         let error = location
-            .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, start, end)
+            .read_range(&store, None, start, end)
             .await
             .expect_err("a whole object that doesn't match its recorded checksum");
         assert_matches!(
@@ -732,7 +733,7 @@ async fn a_read_of_a_whole_span_object_checks_the_extents_object_checksum() {
     }
     for (start, end) in [(0, 6), (0, 9), (7, 10)] {
         location
-            .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, start, end)
+            .read_range(&store, None, start, end)
             .await
             .expect("a read of part of an object isn't checked against its checksum");
     }
@@ -759,7 +760,7 @@ async fn a_ranged_read_of_a_whole_object_detects_a_corrupted_object() {
         .expect("location");
     for (start, end) in [(0, 10), (6, 10)] {
         let error = location
-            .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, start, end)
+            .read_range(&store, None, start, end)
             .await
             .expect_err("a whole object that doesn't match its recorded checksum");
         assert_matches!(
@@ -771,7 +772,7 @@ async fn a_ranged_read_of_a_whole_object_detects_a_corrupted_object() {
     }
     for (start, end) in [(6, 9), (7, 10)] {
         location
-            .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, start, end)
+            .read_range(&store, None, start, end)
             .await
             .expect("a read of part of an object isn't checked against its checksum");
     }
@@ -783,15 +784,15 @@ async fn a_ranged_read_of_a_whole_object_detects_a_corrupted_object() {
     ContentLocation::resolve(&layout, &HEAD.pool_id, None, &truncated)
         .await
         .expect("truncated location")
-        .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, 0, 9)
+        .read_range(&store, None, 0, 9)
         .await
         .expect("a truncated revision's read isn't checked against the object checksum");
 }
 
-/// Checks that a whole-file read compares the combined checksum of its parts
-/// with the reference, so a layout whose extents each read a valid object
-/// fails the read when it lists the objects in the wrong order or takes the
-/// wrong bytes of an object.
+/// Checks that a whole-file read compares the bytes of all its parts with
+/// the reference, so a layout whose extents each read a valid object fails
+/// the read when it lists the objects in the wrong order or takes the wrong
+/// bytes of an object.
 #[tokio::test]
 async fn a_whole_read_of_valid_objects_in_the_wrong_order_fails_the_reference_check() {
     let directory = tempfile::tempdir().expect("directory");
@@ -813,9 +814,10 @@ async fn a_whole_read_of_valid_objects_in_the_wrong_order_fails_the_reference_ch
             .expect("location");
         assert_eq!(
             location
-                .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, 0, 10)
+                .read_range(&store, None, 0, 10)
                 .await
-                .expect("every whole object matches its object checksum"),
+                .expect("every whole object matches its object checksum")
+                .0,
             read
         );
         let error = location
@@ -851,7 +853,7 @@ async fn a_whole_read_detects_a_corrupted_byte_inside_a_slice() {
         .await
         .expect("location");
     location
-        .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, 0, 10)
+        .read_range(&store, None, 0, 10)
         .await
         .expect("a part of an object isn't checked against the object checksum");
     let error = location
@@ -865,6 +867,58 @@ async fn a_whole_read_detects_a_corrupted_byte_inside_a_slice() {
             expected: describe_checksum(&reference.checksum),
             actual: describe_checksum(&Checksum::crc64nvme(b"aaaXaabbbb")),
         }
+    );
+}
+
+/// Checks that a file that is one whole object, whose object check passes,
+/// fails the reference check when the reference's checksum is another, in a
+/// whole-file read and in a streamed read of one chunk, which both compare the
+/// object check's checksum with the reference.
+#[tokio::test]
+async fn a_file_that_is_one_whole_object_is_checked_against_its_reference() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (layout, _, mut reference) = fixture(&store, &[10], false, 0).await;
+    reference.checksum = Checksum::crc64nvme(b"other bytes");
+    let location = ContentLocation::resolve(&layout, &HEAD.pool_id, None, &reference)
+        .await
+        .expect("location");
+    let expected = DurableContentValidationError::ContentChecksumMismatch {
+        object_key: content_object_key_for_ref(&HEAD.pool_id, &reference),
+        expected: describe_checksum(&reference.checksum),
+        actual: describe_checksum(&Checksum::crc64nvme(b"aaaaaaaaaa")),
+    };
+    assert_eq!(
+        location
+            .read_bytes(&store, None, &reference)
+            .await
+            .expect_err("the object is not the reference's"),
+        expected
+    );
+    let mut stream = crate::storage::content_stream::FileContentStream::open(
+        &store,
+        location,
+        None,
+        reference.clone(),
+        std::num::NonZeroU64::new(16).expect("chunk size"),
+        crate::storage::content_stream::StreamRange::Whole { start_offset: 0 },
+        std::sync::Arc::new(crate::object_cache::ObjectCache::unshared(0, 0)),
+    )
+    .await
+    .expect("open stream");
+    assert_eq!(
+        stream
+            .next_verified_chunk()
+            .await
+            .expect("the whole file in one chunk"),
+        Some(Bytes::from_static(b"aaaaaaaaaa"))
+    );
+    assert_eq!(
+        stream
+            .next_verified_chunk()
+            .await
+            .expect_err("the mismatch at the end of the stream"),
+        expected
     );
 }
 
