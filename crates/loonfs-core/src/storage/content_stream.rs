@@ -2,10 +2,8 @@
 
 use crate::error::{CoreError, Result};
 use crate::object_cache::ObjectCache;
-use crate::storage::content::{
-    describe_checksum, validate_loaded_content_bytes, DurableContentValidationError,
-};
-use crate::storage::content_location::ContentLocation;
+use crate::storage::content::{describe_checksum, DurableContentValidationError};
+use crate::storage::content_location::{object_checksum_for_reference, ContentLocation};
 use bytes::Bytes;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::options::ReadRange;
@@ -104,22 +102,10 @@ impl<S: ObjectStore> FileContentStream<S> {
         object_cache: Arc<ObjectCache>,
     ) -> std::result::Result<Self, DurableContentValidationError> {
         let (start_offset, check) = match range {
-            StreamRange::Whole { start_offset } => {
-                if location.is_resident() {
-                    let bytes = location
-                        .read_range(&store, None, 0, content_ref.size_bytes)
-                        .await?;
-                    validate_loaded_content_bytes(
-                        location.object_key().to_owned(),
-                        &content_ref,
-                        &bytes,
-                    )?;
-                }
-                (
-                    start_offset,
-                    StreamCheck::Whole(ContentVerifier::new(&content_ref, start_offset)),
-                )
-            }
+            StreamRange::Whole { start_offset } => (
+                start_offset,
+                StreamCheck::Whole(ContentVerifier::new(&content_ref, start_offset)),
+            ),
             StreamRange::Range(range) => {
                 let end_offset = range
                     .end_offset(content_ref.size_bytes)
@@ -229,7 +215,7 @@ impl<S: ObjectStore> FileContentStream<S> {
             .next_offset
             .saturating_add(self.chunk_bytes.get())
             .min(end_offset);
-        let bytes = self
+        let (bytes, object_checksum) = self
             .location
             .read_range(
                 &self.store,
@@ -248,10 +234,19 @@ impl<S: ObjectStore> FileContentStream<S> {
             });
         }
         if let StreamCheck::Whole(verifier) = &mut self.check {
-            verifier.update(&bytes).expect(
-                "a chunk below the content size arrives before `completion` finishes the verifier",
-            );
-            if self.next_offset == 0 && end_exclusive == self.content_ref.size_bytes {
+            let whole_content =
+                self.next_offset == 0 && end_exclusive == self.content_ref.size_bytes;
+            // A chunk that is the whole file and one whole object was hashed
+            // by its object check, so the verifier takes that checksum.
+            match object_checksum_for_reference(object_checksum, &self.content_ref)
+                .filter(|_| whole_content)
+            {
+                Some(checksum) => verifier.update_whole(checksum, bytes.len() as u64),
+                None => verifier.update(&bytes).expect(
+                    "a chunk below the content size arrives before `completion` finishes the verifier",
+                ),
+            }
+            if whole_content {
                 self.unverified_object = Some(bytes.clone());
             }
         }

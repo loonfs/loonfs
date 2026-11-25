@@ -373,6 +373,26 @@ impl ContentVerifier {
         Ok(())
     }
 
+    /// Takes the checksum of the whole content in place of its bytes, for a
+    /// read that fetched all of the content in one chunk and has already
+    /// hashed it. [`Self::finish`] then returns the comparison with the
+    /// reference, and a later chunk is refused.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a resumed prefix or a chunk was folded in before.
+    pub fn update_whole(&mut self, checksum: Checksum, content_bytes: u64) {
+        assert!(
+            self.prefix_bytes == 0 && self.fetched_bytes == 0 && self.digest().is_some(),
+            "the checksum of the whole content should be the verifier's only input"
+        );
+        self.fetched_bytes = content_bytes;
+        self.status = match self.compare(checksum) {
+            Ok(()) => ContentVerificationStatus::Verified,
+            Err(mismatch) => ContentVerificationStatus::Failed(mismatch),
+        };
+    }
+
     /// Compares everything folded in with the reference the first time it's
     /// called, and returns the same result on every later call.
     pub fn finish(&mut self) -> Result<(), ContentMismatchError> {
@@ -518,7 +538,7 @@ impl ContentRef {
 mod tests {
     use super::{
         Checksum, ChecksumAlgorithm, ChecksumDigest, ChecksumHex, ChecksumValidationError,
-        ContentRef, ContentRefKind,
+        ChunkAfterEndError, ContentRef, ContentRefKind, ContentVerifier,
     };
     use crate::ids::ContentId;
     use std::assert_matches;
@@ -654,6 +674,26 @@ mod tests {
             }
             assert_eq!(streaming.finish(), expected);
         }
+    }
+
+    /// Checks that a verifier given the checksum of the whole content
+    /// compares it with the reference and refuses a later chunk.
+    #[test]
+    fn a_verifier_compares_the_checksum_of_the_whole_content() {
+        let bytes = b"whole content";
+        let reference = ContentRef::blob_v1(content_id(), bytes, ChecksumAlgorithm::Crc64nvme);
+        let mut verifier = ContentVerifier::new(&reference, 0);
+        verifier.update_whole(Checksum::crc64nvme(bytes), bytes.len() as u64);
+        assert_eq!(verifier.finish(), Ok(()));
+        assert_eq!(verifier.update(b"more"), Err(ChunkAfterEndError));
+
+        let other = Checksum::crc64nvme(b"other content");
+        let mut verifier = ContentVerifier::new(&reference, 0);
+        verifier.update_whole(other.clone(), bytes.len() as u64);
+        let mismatch = verifier.finish().expect_err("another checksum");
+        assert_eq!(mismatch.actual, other);
+        assert_eq!(mismatch.expected, reference.checksum);
+        assert_eq!(verifier.finish(), Err(mismatch));
     }
 
     #[test]

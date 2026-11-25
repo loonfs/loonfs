@@ -710,7 +710,8 @@ async fn a_read_of_a_whole_span_object_checks_the_extents_object_checksum() {
         location
             .read_range(&store, None, 0, 10)
             .await
-            .expect("read"),
+            .expect("read")
+            .0,
         Bytes::from_static(b"aaaaaabbbb")
     );
     layout.0.layout.extents[1].object_checksum = Checksum::crc64nvme(b"cccc");
@@ -786,6 +787,180 @@ async fn a_ranged_read_of_a_whole_object_detects_a_corrupted_object() {
         .read_range(&store, None, 0, 9)
         .await
         .expect("a truncated revision's read isn't checked against the object checksum");
+}
+
+/// Checks that a whole-file read compares the bytes of all its parts with
+/// the reference, so a layout whose extents each read a valid object fails
+/// the read when it lists the objects in the wrong order or takes the wrong
+/// bytes of an object.
+#[tokio::test]
+async fn a_whole_read_of_valid_objects_in_the_wrong_order_fails_the_reference_check() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    // Two whole objects, listed in the wrong order.
+    let (mut swapped, _, swapped_reference) = fixture(&store, &[6, 4], false, 0).await;
+    swapped.0.layout.extents.swap(0, 1);
+    // A slice of an object, taken from the wrong offset.
+    let extents = [(6, Source::SharedSlice { extra: 2 }), (4, Source::Own)];
+    let (mut shifted, _, shifted_reference) = fixture_of(&store, &extents, 0).await;
+    shifted.0.layout.extents[0].offset = 2;
+    for (layout, reference, read) in [
+        (swapped, swapped_reference, &b"bbbbaaaaaa"[..]),
+        (shifted, shifted_reference, b"aaaa##bbbb"),
+    ] {
+        let reference_key = content_object_key_for_ref(&HEAD.pool_id, &reference);
+        let location = ContentLocation::resolve(&layout, &HEAD.pool_id, None, &reference)
+            .await
+            .expect("location");
+        assert_eq!(
+            location
+                .read_range(&store, None, 0, 10)
+                .await
+                .expect("every whole object matches its object checksum")
+                .0,
+            read
+        );
+        let error = location
+            .read_bytes(&store, None, &reference)
+            .await
+            .expect_err("the bytes are not the reference's");
+        assert_eq!(
+            error,
+            DurableContentValidationError::ContentChecksumMismatch {
+                object_key: reference_key,
+                expected: describe_checksum(&reference.checksum),
+                actual: describe_checksum(&Checksum::crc64nvme(read)),
+            }
+        );
+    }
+}
+
+/// Checks that a flipped byte in the part of an object that an extent takes
+/// fails a whole-file read, although the part has no object check.
+#[tokio::test]
+async fn a_whole_read_detects_a_corrupted_byte_inside_a_slice() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let extents = [(6, Source::SharedSlice { extra: 2 }), (4, Source::Own)];
+    let (layout, _, reference) = fixture_of(&store, &extents, 0).await;
+    let object_key = extent_object_key(&HEAD.pool_id, &layout.0.layout.extents[0]);
+    store.delete(&object_key).await.expect("delete");
+    store
+        .put_immutable_verified(&object_key, Bytes::from_static(b"aaaXaa##"))
+        .await
+        .expect("corrupted object");
+    let location = ContentLocation::resolve(&layout, &HEAD.pool_id, None, &reference)
+        .await
+        .expect("location");
+    location
+        .read_range(&store, None, 0, 10)
+        .await
+        .expect("a part of an object isn't checked against the object checksum");
+    let error = location
+        .read_bytes(&store, None, &reference)
+        .await
+        .expect_err("a corrupted byte inside a slice");
+    assert_eq!(
+        error,
+        DurableContentValidationError::ContentChecksumMismatch {
+            object_key: content_object_key_for_ref(&HEAD.pool_id, &reference),
+            expected: describe_checksum(&reference.checksum),
+            actual: describe_checksum(&Checksum::crc64nvme(b"aaaXaabbbb")),
+        }
+    );
+}
+
+/// Checks that a file that is one whole object, whose object check passes,
+/// fails the reference check when the reference's checksum is another, in a
+/// whole-file read and in a streamed read of one chunk, which both compare the
+/// object check's checksum with the reference.
+#[tokio::test]
+async fn a_file_that_is_one_whole_object_is_checked_against_its_reference() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (layout, _, mut reference) = fixture(&store, &[10], false, 0).await;
+    reference.checksum = Checksum::crc64nvme(b"other bytes");
+    let location = ContentLocation::resolve(&layout, &HEAD.pool_id, None, &reference)
+        .await
+        .expect("location");
+    let expected = DurableContentValidationError::ContentChecksumMismatch {
+        object_key: content_object_key_for_ref(&HEAD.pool_id, &reference),
+        expected: describe_checksum(&reference.checksum),
+        actual: describe_checksum(&Checksum::crc64nvme(b"aaaaaaaaaa")),
+    };
+    assert_eq!(
+        location
+            .read_bytes(&store, None, &reference)
+            .await
+            .expect_err("the object is not the reference's"),
+        expected
+    );
+    let mut stream = crate::storage::content_stream::FileContentStream::open(
+        &store,
+        location,
+        None,
+        reference.clone(),
+        std::num::NonZeroU64::new(16).expect("chunk size"),
+        crate::storage::content_stream::StreamRange::Whole { start_offset: 0 },
+        std::sync::Arc::new(crate::object_cache::ObjectCache::unshared(0, 0)),
+    )
+    .await
+    .expect("open stream");
+    assert_eq!(
+        stream
+            .next_verified_chunk()
+            .await
+            .expect("the whole file in one chunk"),
+        Some(Bytes::from_static(b"aaaaaaaaaa"))
+    );
+    assert_eq!(
+        stream
+            .next_verified_chunk()
+            .await
+            .expect_err("the mismatch at the end of the stream"),
+        expected
+    );
+}
+
+/// Checks that a file that is one whole object whose object checksum uses
+/// another algorithm than its reference is hashed in the reference's
+/// algorithm, so it reads like every other layout, in a whole-file read and
+/// in a streamed read of one chunk.
+#[tokio::test]
+async fn a_one_object_file_checked_in_another_algorithm_reads() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (layout, _, mut reference) = fixture(&store, &[10], false, 0).await;
+    reference.checksum = Checksum::crc32c(b"aaaaaaaaaa");
+    let location = ContentLocation::resolve(&layout, &HEAD.pool_id, None, &reference)
+        .await
+        .expect("location");
+    assert_eq!(
+        location
+            .read_bytes(&store, None, &reference)
+            .await
+            .expect("a whole-file read"),
+        b"aaaaaaaaaa"
+    );
+    let mut stream = crate::storage::content_stream::FileContentStream::open(
+        &store,
+        location,
+        None,
+        reference.clone(),
+        std::num::NonZeroU64::new(16).expect("chunk size"),
+        crate::storage::content_stream::StreamRange::Whole { start_offset: 0 },
+        std::sync::Arc::new(crate::object_cache::ObjectCache::unshared(0, 0)),
+    )
+    .await
+    .expect("open stream");
+    assert_eq!(
+        stream.next_verified_chunk().await.expect("one chunk"),
+        Some(Bytes::from_static(b"aaaaaaaaaa"))
+    );
+    assert_eq!(
+        stream.next_verified_chunk().await.expect("verified end"),
+        None
+    );
 }
 
 #[tokio::test]

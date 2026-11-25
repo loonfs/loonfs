@@ -197,13 +197,18 @@ impl ContentLocation {
 
     /// Reads `[start, end)` of the reference, from `object_cache` where it
     /// has the first bytes of an object and from the store otherwise.
+    ///
+    /// When those bytes are one whole object that one GET fetched, the read
+    /// also returns their checksum, which it computed to check them against
+    /// the object checksum, so a caller can compare that checksum with a
+    /// reference instead of hashing the bytes again.
     pub(crate) async fn read_range<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
         object_cache: Option<&ObjectCache>,
         start: u64,
         end: u64,
-    ) -> std::result::Result<Bytes, DurableContentValidationError> {
+    ) -> std::result::Result<(Bytes, Option<Checksum>), DurableContentValidationError> {
         let mut requests = Vec::new();
         let mut offset = 0;
         for located in &self.extents {
@@ -223,15 +228,16 @@ impl ContentLocation {
         }
         // `buffered` keeps the parts in extent order, which is the byte order
         // of the requested range.
-        let mut parts: Vec<Bytes> = stream::iter(requests)
+        let mut parts: Vec<(Bytes, Option<Checksum>)> = stream::iter(requests)
             .map(|(object_key, range, object_checksum)| async move {
                 if let Some(cached) = object_cache
                     .and_then(|cache| cache.get_content(&object_key, range.end_exclusive))
                 {
-                    return Ok(cached.slice(
+                    let part = cached.slice(
                         loonfs_types::usize_from_u64(range.start_inclusive)
                             ..loonfs_types::usize_from_u64(range.end_exclusive),
-                    ));
+                    );
+                    return Ok((part, None));
                 }
                 let expected = range.end_exclusive - range.start_inclusive;
                 let bytes = store
@@ -252,10 +258,10 @@ impl ContentLocation {
                         actual: bytes.len() as u64,
                     });
                 }
-                if let Some(object_checksum) = object_checksum {
-                    verify_object_checksum(object_key, &object_checksum, &bytes)?;
-                }
-                Ok(bytes)
+                let checksum = object_checksum
+                    .map(|expected| verify_object_checksum(object_key, &expected, &bytes))
+                    .transpose()?;
+                Ok((bytes, checksum))
             })
             .buffered(STORE_READS_IN_FLIGHT)
             .try_collect()
@@ -265,37 +271,66 @@ impl ContentLocation {
             if offset < end && piece_end > start {
                 let first = loonfs_types::usize_from_u64(start.max(offset) - offset);
                 let last = loonfs_types::usize_from_u64(end.min(piece_end) - offset);
-                parts.push(piece.slice(first..last));
+                parts.push((piece.slice(first..last), None));
             }
             offset = piece_end;
         }
         Ok(match parts.len() {
             1 => parts.remove(0),
-            _ => parts.concat().into(),
+            _ => {
+                let parts: Vec<Bytes> = parts.into_iter().map(|(part, _)| part).collect();
+                (parts.concat().into(), None)
+            }
         })
     }
 
     /// Reads and verifies the whole reference. When the reference is the
     /// first bytes of one object, `object_cache` keeps the verified bytes.
+    ///
+    /// A reference that is one whole object fetched in one GET is hashed
+    /// once, by the object check, and that checksum is compared with the
+    /// reference. Every other layout is hashed again as a whole.
     pub(crate) async fn read_bytes<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
         object_cache: Option<&ObjectCache>,
         content_ref: &ContentRef,
     ) -> std::result::Result<Vec<u8>, DurableContentValidationError> {
-        let bytes = self
+        let (bytes, object_checksum) = self
             .read_range(store, object_cache, 0, content_ref.size_bytes)
             .await?;
-        super::content::validate_loaded_content_bytes(
-            self.object_key.clone(),
-            content_ref,
-            &bytes,
-        )?;
+        if bytes.len() as u64 != content_ref.size_bytes {
+            return Err(DurableContentValidationError::ContentLengthMismatch {
+                object_key: self.object_key.clone(),
+                expected: content_ref.size_bytes,
+                actual: bytes.len() as u64,
+            });
+        }
+        let expected = &content_ref.checksum;
+        let actual = object_checksum_for_reference(object_checksum, content_ref)
+            .unwrap_or_else(|| Checksum::compute(expected.algorithm(), &bytes));
+        if actual != *expected {
+            return Err(DurableContentValidationError::ContentChecksumMismatch {
+                object_key: self.object_key.clone(),
+                expected: describe_checksum(expected),
+                actual: describe_checksum(&actual),
+            });
+        }
         if let Some((object_cache, object_key)) = object_cache.zip(self.single_object_key()) {
             object_cache.insert_content(object_key, &bytes);
         }
         Ok(bytes.to_vec())
     }
+}
+
+/// Returns the checksum that a read's object check computed, when it can
+/// stand for the check of the same bytes against `content_ref`: when it uses
+/// the reference's algorithm. Otherwise the caller hashes the bytes.
+pub(crate) fn object_checksum_for_reference(
+    object_checksum: Option<Checksum>,
+    content_ref: &ContentRef,
+) -> Option<Checksum> {
+    object_checksum.filter(|checksum| checksum.algorithm() == content_ref.checksum.algorithm())
 }
 
 /// Returns whether `range` of the object that `extent` lies in is the whole
@@ -305,12 +340,12 @@ fn reads_whole_object(extent: &ContentExtent, range: &ByteRange) -> bool {
 }
 
 /// Checks the bytes of a whole content object against the stored checksum
-/// that the extents listing the object record.
+/// that the extents listing the object record, and returns that checksum.
 fn verify_object_checksum(
     object_key: String,
     expected: &Checksum,
     bytes: &[u8],
-) -> std::result::Result<(), DurableContentValidationError> {
+) -> std::result::Result<Checksum, DurableContentValidationError> {
     let actual = Checksum::compute(expected.algorithm(), bytes);
     if actual != *expected {
         return Err(DurableContentValidationError::ContentChecksumMismatch {
@@ -319,5 +354,5 @@ fn verify_object_checksum(
             actual: describe_checksum(&actual),
         });
     }
-    Ok(())
+    Ok(actual)
 }

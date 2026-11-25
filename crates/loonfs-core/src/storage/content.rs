@@ -173,37 +173,6 @@ pub(crate) fn content_object_key_for_ref(pool_id: &PoolId, content_ref: &Content
     content_blob(pool_id, &content_ref.content_id)
 }
 
-/// Checks fetched bytes against everything the reference claims about them.
-///
-/// The reference's checksum is recomputed over the complete payload for every
-/// supported algorithm.
-pub(crate) fn validate_loaded_content_bytes(
-    object_key: String,
-    content_ref: &ContentRef,
-    bytes: &[u8],
-) -> std::result::Result<(), DurableContentValidationError> {
-    let actual_size = bytes.len() as u64;
-    if actual_size != content_ref.size_bytes {
-        return Err(DurableContentValidationError::ContentLengthMismatch {
-            object_key,
-            expected: content_ref.size_bytes,
-            actual: actual_size,
-        });
-    }
-
-    let expected = &content_ref.checksum;
-    if !expected.matches(bytes) {
-        let actual = Checksum::compute(expected.algorithm(), bytes);
-        return Err(DurableContentValidationError::ContentChecksumMismatch {
-            object_key,
-            expected: describe_checksum(expected),
-            actual: describe_checksum(&actual),
-        });
-    }
-
-    Ok(())
-}
-
 pub(super) fn describe_checksum(checksum: &Checksum) -> String {
     format!("{}:{}", checksum.algorithm(), checksum.value())
 }
@@ -211,8 +180,8 @@ pub(super) fn describe_checksum(checksum: &Checksum) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        validate_durable_content_reference, verify_durable_content_checksum, ContentLocation,
-        DurableContentValidationError,
+        describe_checksum, validate_durable_content_reference, verify_durable_content_checksum,
+        ContentLocation, DurableContentValidationError,
     };
     use bytes::Bytes;
     use loonfs_objectstore::keys::content_blob;
@@ -316,6 +285,34 @@ pub(crate) mod tests {
         assert_matches!(
             err,
             DurableContentValidationError::ContentChecksumMismatch { .. }
+        );
+    }
+
+    /// Checks that a whole-file read of one uploaded object reports a
+    /// corrupted object with the object's key, the reference's checksum, and
+    /// the checksum of the bytes it read.
+    #[tokio::test]
+    async fn a_whole_read_of_one_uploaded_object_detects_a_corrupted_object() {
+        let (_temp_dir, store) = test_store();
+        let bytes = b"uploaded file bytes";
+        let content_ref = content_ref(bytes);
+        let mut corrupted = bytes.to_vec();
+        corrupted[3] ^= 0x01;
+        put_content_object(&store, &content_ref, &corrupted).await;
+
+        let error = get_durable_content_bytes(&store, &content_ref)
+            .await
+            .expect_err("a corrupted object");
+        assert_eq!(
+            error,
+            DurableContentValidationError::ContentChecksumMismatch {
+                object_key: content_blob(&pool_id(), &content_ref.content_id),
+                expected: describe_checksum(&content_ref.checksum),
+                actual: describe_checksum(&Checksum::compute(
+                    content_ref.checksum.algorithm(),
+                    &corrupted
+                )),
+            }
         );
     }
 
