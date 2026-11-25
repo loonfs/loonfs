@@ -9,7 +9,7 @@ use super::net_change::range_commits;
 use super::net_change::{fork_layout_extents, inode_change, Changed, InodeChange};
 use super::operations::{
     access_update, attributes_update, create_plan, delete_change, move_change, restore_change,
-    revision_update, BindingChange, InodePlan,
+    revision_update, BindingChange, InodePlan, Skip,
 };
 use super::replay::Replay;
 use super::state::{InodeState, StateReader};
@@ -39,6 +39,8 @@ pub(super) struct SubtreeCheck {
     pub(super) path: AbsolutePath,
     ours: InodeState,
     theirs: Option<MergeConflictVersion>,
+    /// What a `subtree` conflict skips: the whole delete, or the move.
+    skip: Skip,
 }
 
 /// The reads and the results of one merge's classification.
@@ -76,8 +78,14 @@ pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
     /// conflict, which [`Self::check_subtrees`] checks after the inodes are
     /// classified.
     pub(super) subtree_checks: Vec<SubtreeCheck>,
-    /// The inodes whose change conflicts, each counted once.
+    /// The inodes whose change conflicts, each counted once. A merge counts
+    /// an inode whose only conflict is an update, which `skipped` doesn't
+    /// list.
     pub(super) conflicted: HashSet<InodeId>,
+    /// What a replay commit leaves out of each inode whose move or whole
+    /// change a conflict skips (see [`InodePlan::skip`]). A conflicting
+    /// update of a visible inode is left out of the plan where it's found.
+    pub(super) skipped: HashMap<InodeId, Skip>,
     /// The conflicting inode with the smallest ID.
     pub(super) first_conflict: Option<MergeConflict>,
     /// What a rebase's replay commit reads and reports beyond a merge, or
@@ -134,8 +142,9 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     }
 
     /// Plans the change of an inode that the merged-into namespace has, and
-    /// records a conflict when a row that the change replaces isn't the
-    /// fork's own (see [`Self::is_own`]).
+    /// records a conflict for each part of the change whose replaced row
+    /// isn't the fork's own (see [`Self::is_own`]). The move or delete and
+    /// each update conflict separately.
     ///
     /// The plan applies the inode's state at the range's end in the fork.
     /// Whether the inode and its destination are reachable after the merge
@@ -155,6 +164,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             kind: ours.kind,
             binding: None,
             updates: Vec::new(),
+            hidden: !theirs.is_visible(),
         };
         let mut conflict = None;
         if !ours.is_visible() {
@@ -183,26 +193,27 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             // since undone, is undone by this merge too, while the deletion
             // is in the trash here. Any other deletion conflicts.
             let Some(deletion_seq) = self.restored_deletion(inode_id).await? else {
+                self.skip(inode_id, Skip::Whole);
                 self.conflict(inode_id, MergeConflictKind::Visibility, ours, None)
                     .await?;
                 return Ok(());
             };
             plan.binding = restore_change(deletion_seq, ours)?;
-            conflict = self.plan_updates(&mut plan, ours, theirs, changed).await?;
-        } else {
-            if changed.binding {
-                plan.binding = move_change(namespace_id, ours, theirs)?;
-                if let Some(binding) = &plan.binding {
-                    conflict = self
-                        .binding_conflict(inode_id, ours, theirs, binding)
-                        .await?;
-                }
+        } else if changed.binding {
+            plan.binding = move_change(namespace_id, ours, theirs)?;
+            if let Some(binding) = &plan.binding {
+                conflict = self
+                    .binding_conflict(inode_id, ours, theirs, binding)
+                    .await?;
             }
-            conflict = conflict.or(self.plan_updates(&mut plan, ours, theirs, changed).await?);
         }
         if let Some(kind) = conflict {
+            self.skip(inode_id, plan.skip());
             self.conflict(inode_id, kind, ours, theirs.conflict_version())
                 .await?;
+        }
+        if ours.is_visible() {
+            self.plan_updates(&mut plan, ours, theirs, changed).await?;
         }
         self.add_plan(plan).await
     }
@@ -244,6 +255,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 path: path.clone(),
                 ours: ours.clone(),
                 theirs: theirs.conflict_version(),
+                skip: if deletes { Skip::Whole } else { Skip::Binding },
             });
         }
         Ok(conflict)
@@ -274,44 +286,55 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     }
 
     /// Plans the revision, attribute, and access updates of a visible inode
-    /// whose components the fork changed, and returns the kind of the first
-    /// conflict.
+    /// whose components the fork changed. An update whose replaced row isn't
+    /// the fork's own is left out of the plan, with a conflict of its kind,
+    /// and so is the whole change of an inode that isn't visible at the
+    /// merged-into namespace's head.
     async fn plan_updates(
         &mut self,
         plan: &mut InodePlan,
         ours: &InodeState,
         theirs: &InodeState,
         changed: &Changed,
-    ) -> Result<Option<MergeConflictKind>> {
+    ) -> Result<()> {
         let inode_id = plan.inode_id;
-        let mut conflict = None;
+        let mut updates = Vec::new();
         if changed.content && !ours.same_content(theirs) {
             if let (Some(row), Some(their_row)) = (&ours.revision, &theirs.revision) {
-                if !self.is_own(their_row.committed_seq).await? {
-                    conflict = conflict.or(Some(MergeConflictKind::Content));
-                }
-                plan.updates.push(revision_update(inode_id, row, their_row));
+                updates.push((
+                    MergeConflictKind::Content,
+                    Some(their_row.committed_seq),
+                    revision_update(inode_id, row, their_row),
+                ));
             }
         }
         if changed.attributes && !ours.same_attributes(theirs) {
-            if let Some(row) = &theirs.attributes {
-                if !self.is_own(row.committed_seq).await? {
-                    conflict = conflict.or(Some(MergeConflictKind::Attributes));
-                }
-            }
-            plan.updates
-                .push(attributes_update(inode_id, ours, Some(theirs)));
+            updates.push((
+                MergeConflictKind::Attributes,
+                theirs.attributes.as_ref().map(|row| row.committed_seq),
+                attributes_update(inode_id, ours, Some(theirs)),
+            ));
         }
         if changed.access && !ours.same_access(theirs) {
-            if let Some(row) = &theirs.access {
-                if !self.is_own(row.committed_seq).await? {
-                    conflict = conflict.or(Some(MergeConflictKind::Access));
-                }
-            }
-            plan.updates
-                .push(access_update(inode_id, ours, Some(theirs)));
+            updates.push((
+                MergeConflictKind::Access,
+                theirs.access.as_ref().map(|row| row.committed_seq),
+                access_update(inode_id, ours, Some(theirs)),
+            ));
         }
-        Ok(conflict)
+        for (kind, replaced_seq, update) in updates {
+            match replaced_seq {
+                Some(seq) if !self.is_own(seq).await? => {
+                    if plan.skip() == Skip::Whole {
+                        self.skip(inode_id, Skip::Whole);
+                    }
+                    self.conflict(inode_id, kind, ours, theirs.conflict_version())
+                        .await?;
+                }
+                _ => plan.updates.push(update),
+            }
+        }
+        Ok(())
     }
 
     /// Adds an inode's plan, and adds its operations and the layouts that
@@ -443,6 +466,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         }
         for (check, changed) in checks.into_iter().zip(changed) {
             if changed {
+                self.skip(check.directory, check.skip);
                 self.conflict(
                     check.directory,
                     MergeConflictKind::Subtree,
@@ -491,12 +515,24 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         Ok(false)
     }
 
-    /// Counts a conflict, keeps it as the first when its inode has the
-    /// smallest ID so far, and adds it to a replay commit's report, with its
-    /// bytes checked against the allowance as a plan's are, because the
-    /// replay commit's merge record stores the report. `theirs` is the
-    /// merged-into namespace's version
-    /// that the conflict reports. An inode's later conflicts change nothing.
+    /// Records that a replay commit leaves `skip` out of `inode_id`'s plan,
+    /// and returns false when that's already left out.
+    pub(super) fn skip(&mut self, inode_id: InodeId, skip: Skip) -> bool {
+        match self.skipped.get(&inode_id) {
+            Some(skipped) if *skipped >= skip => false,
+            _ => {
+                self.skipped.insert(inode_id, skip);
+                true
+            }
+        }
+    }
+
+    /// Counts a conflicting inode once, keeps its first conflict as the
+    /// merge's first when the inode has the smallest ID so far, and adds
+    /// every conflict to a replay commit's report, with its bytes checked
+    /// against the allowance as a plan's are, because the replay commit's
+    /// merge record stores the report. `theirs` is the merged-into
+    /// namespace's version that the conflict reports.
     pub(super) async fn conflict(
         &mut self,
         inode_id: InodeId,
@@ -504,13 +540,11 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         ours: &InodeState,
         theirs: Option<MergeConflictVersion>,
     ) -> Result<()> {
-        if !self.conflicted.insert(inode_id) {
-            return Ok(());
-        }
-        let first = self
-            .first_conflict
-            .as_ref()
-            .is_none_or(|first| inode_id < first.inode_id);
+        let first = self.conflicted.insert(inode_id)
+            && self
+                .first_conflict
+                .as_ref()
+                .is_none_or(|first| inode_id < first.inode_id);
         if !first && self.replay.is_none() {
             return Ok(());
         }

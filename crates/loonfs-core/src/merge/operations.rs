@@ -19,9 +19,34 @@ pub(super) struct InodePlan {
     pub(super) binding: Option<BindingChange>,
     /// The revision, attribute, and access updates, in that order.
     pub(super) updates: Vec<FilesystemOperation>,
+    /// Whether the inode isn't visible at the merged-into namespace's head:
+    /// the namespace doesn't have it, or a deletion hides it.
+    pub(super) hidden: bool,
+}
+
+/// What a replay commit leaves out of an inode's plan because of a conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Skip {
+    /// The move. The replay commit applies the inode's updates where the
+    /// inode is.
+    Binding,
+    /// The whole change.
+    Whole,
 }
 
 impl InodePlan {
+    /// Returns what a conflict on this plan's inode skips: the whole change
+    /// of a delete or of an inode that isn't visible at the merged-into
+    /// namespace's head, which includes a create and a restore, and only the
+    /// move of any other inode.
+    pub(super) fn skip(&self) -> Skip {
+        if self.hidden || matches!(self.binding, Some(BindingChange::Delete { .. })) {
+            Skip::Whole
+        } else {
+            Skip::Binding
+        }
+    }
+
     /// Returns the plan's operations: the binding change, then the updates.
     pub(super) fn operations(&self) -> Vec<FilesystemOperation> {
         self.binding
@@ -63,6 +88,7 @@ pub(super) fn create_plan(inode_id: InodeId, ours: &InodeState) -> Result<Option
         kind: ours.kind,
         binding: Some(binding),
         updates,
+        hidden: true,
     }))
 }
 

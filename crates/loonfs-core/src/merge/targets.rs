@@ -7,7 +7,7 @@
 //! dropped.
 
 use super::classify::Classifier;
-use super::operations::BindingChange;
+use super::operations::{BindingChange, InodePlan, Skip};
 use crate::error::{CoreError, Result};
 use crate::metadata::AncestorWalk;
 use loonfs_objectstore::ObjectStore;
@@ -74,7 +74,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 Ok(Some(holder)) => {
                     targets.holders.insert(inode_id, holder);
                 }
-                Err((kind, theirs)) => self.target_conflict(inode_id, kind, theirs).await?,
+                Err((kind, theirs)) => {
+                    let skip = self.plans[index].skip();
+                    self.target_conflict(inode_id, skip, kind, theirs).await?;
+                }
             }
             if !directories.is_empty() {
                 targets.depends_on.insert(inode_id, directories);
@@ -243,9 +246,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     }
 
     /// Records a `name` conflict for each inode in `holders` that takes the
-    /// name of a conflicting inode, and returns how many it recorded. The
-    /// commit can't free a name when the change of the inode that has the
-    /// name conflicts, so the inode that takes the name conflicts too.
+    /// name of an inode whose move or delete is skipped, and returns how many
+    /// it recorded. The commit can't free a name when the move or delete of
+    /// the inode that has the name is skipped, so the inode that takes the
+    /// name conflicts too.
     ///
     /// Each pass records at least one conflict, so the loop runs at most
     /// once for each inode in `holders`.
@@ -260,7 +264,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             let blocked: BTreeMap<_, _> = holders
                 .iter()
                 .filter(|(taker, holder)| {
-                    self.conflicted.contains(*holder) && !self.conflicted.contains(*taker)
+                    self.skipped.contains_key(*holder) && !self.skipped.contains_key(*taker)
                 })
                 .map(|(taker, holder)| (*taker, *holder))
                 .collect();
@@ -273,20 +277,32 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                     .state(holder)
                     .await?
                     .and_then(|state| state.conflict_version());
-                self.target_conflict(taker, MergeConflictKind::Name, theirs)
+                // Takers are rare, because each one's holder had its move or
+                // delete skipped, so a scan finds the taker's plan.
+                let skip = self
+                    .plans
+                    .iter()
+                    .find(|plan| plan.inode_id == taker)
+                    .map_or(Skip::Whole, InodePlan::skip);
+                self.target_conflict(taker, skip, MergeConflictKind::Name, theirs)
                     .await?;
                 recorded += 1;
             }
         }
     }
 
-    /// Records the conflict of the plan of `inode_id`.
+    /// Records the conflict of the plan of `inode_id`, which skips `skip`
+    /// (see [`InodePlan::skip`]), or nothing when that's already skipped.
     pub(super) async fn target_conflict(
         &mut self,
         inode_id: InodeId,
+        skip: Skip,
         kind: MergeConflictKind,
         theirs: Option<MergeConflictVersion>,
     ) -> Result<()> {
+        if !self.skip(inode_id, skip) {
+            return Ok(());
+        }
         let ours = self.ours.state(inode_id).await?.ok_or_else(|| {
             CoreError::NamespaceCorrupt(format!(
                 "fork `{}` doesn't have inode `{inode_id}`, which it touched",

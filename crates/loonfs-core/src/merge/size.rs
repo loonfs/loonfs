@@ -15,6 +15,7 @@ use crate::error::{CoreError, MergeBound, Result};
 use crate::metadata::MetadataView;
 use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::FilesystemOperation;
 use loonfs_types::{CommitSeq, InodeId, NamespaceId};
 
 /// How many times the split hint bisects the fork's commit sequences. With
@@ -195,11 +196,11 @@ async fn measure_net_change<S: ObjectStore + ?Sized>(
     // bytes are checked before the loop as well as with each inode.
     memory.check_planned(planned_bytes)?;
     for inode_id in commits.touched {
-        let plan = match inode_change(&mut ours, &mut before, fork, inode_id).await? {
-            Some(change) => net_change_plan(start, fork, inode_id, &change).await?,
-            None => None,
+        let operations = match inode_change(&mut ours, &mut before, fork, inode_id).await? {
+            Some(change) => net_change_operations(start, fork, inode_id, &change).await?,
+            None => Vec::new(),
         };
-        for operation in plan.iter().flat_map(InodePlan::operations) {
+        for operation in operations {
             let layout_extents = match operation.content_ref() {
                 Some(content_ref) => {
                     Some(fork_layout_extents(end, &fork_view.wal_tail, pool_id, content_ref).await?)
@@ -214,28 +215,31 @@ async fn measure_net_change<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-/// Returns the plan of a merge of the fork's change to one inode into a
-/// namespace whose rows are the fork's own at the range's start, which
+/// Returns the operations of a merge of the fork's change to one inode into
+/// a namespace whose rows are the fork's own at the range's start, which
 /// `start` reads: the create of an inode that the fork created in the range,
 /// or the inode's move, delete, or restore, as the planner chooses them, then
 /// its revision, attribute, and access updates. A hidden end state plans the
 /// inode's delete where the start has it bound, and an end state that's
 /// visible where the start had the inode's own row unbound plans the restore
-/// of the deletion that unbound it. The plan's preconditions are the rows of
-/// `fork` at the range's start.
-async fn net_change_plan<S: ObjectStore + ?Sized>(
+/// of the deletion that unbound it. The operations' preconditions are the
+/// rows of `fork` at the range's start.
+async fn net_change_operations<S: ObjectStore + ?Sized>(
     start: MetadataView<'_, '_, S>,
     fork: &NamespaceId,
     inode_id: InodeId,
     change: &InodeChange,
-) -> Result<Option<InodePlan>> {
+) -> Result<Vec<FilesystemOperation>> {
     let InodeChange {
         ours,
         before,
         changed,
     } = change;
     let Some(before) = before else {
-        return create_plan(inode_id, ours);
+        return Ok(create_plan(inode_id, ours)?
+            .as_ref()
+            .map(InodePlan::operations)
+            .unwrap_or_default());
     };
     let binding = if !ours.is_visible() {
         before.edge().map(|from| delete_change(fork, before, from))
@@ -261,12 +265,11 @@ async fn net_change_plan<S: ObjectStore + ?Sized>(
             updates.push(access_update(inode_id, ours, Some(before)));
         }
     }
-    Ok(Some(InodePlan {
-        inode_id,
-        kind: ours.kind,
-        binding,
-        updates,
-    }))
+    Ok(binding
+        .map(|binding| binding.operation(inode_id, ours.kind))
+        .into_iter()
+        .chain(updates)
+        .collect())
 }
 
 #[cfg(test)]
