@@ -1,7 +1,7 @@
 //! Recovering a merge session whose state was lost, from the store.
 
 use crate::refusal::is_gone;
-use crate::session::{new_fork_id, status_after_range};
+use crate::session::{new_fork_id, status_after_range, status_with_nothing_left};
 use crate::{
     Mechanics, MergeError, MergeFailure, MergeSession, MergeSessionOptions, MergeSessionState,
     MergeSessionStatus, PendingCommit, Resolver, Result, MAX_NEW_FORKS,
@@ -36,18 +36,15 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     /// that it found once it's `merged` or `abandoned`.
     ///
     /// The session merges the original fork through `options.through_seq`,
-    /// or through its head, and a new fork through its head. The session
-    /// starts `merged` only when the namespace's merge index has the original
-    /// fork's commits through the original fork's sequence: the original
-    /// fork's next merge would start at or after it, or a merge of a rebase's
-    /// new fork wrote the original fork's row through it. A merged new fork
-    /// isn't enough, so when the last fork that the lost session continued
-    /// with is merged, the session reads the original fork's row as well.
-    /// When a retention floor refuses a merge, when a new fork's merge wrote
-    /// the original fork's row through an earlier sequence, or when the
-    /// next-range query returns an outcome that this crate doesn't know, the
-    /// session starts `failed` and keeps its new forks. With no new forks,
-    /// the session merges the original fork.
+    /// or through the original fork's head when the session starts, and it
+    /// stores that sequence in its state. It merges a new fork through the
+    /// new fork's head. When the last fork that the lost session continued
+    /// with has nothing left to merge, the session's status comes from the
+    /// original fork's row, as it does after the session's own last merge
+    /// (see [`MergeSessionState::through_seq`]). When a retention floor
+    /// refuses a merge, or when the next-range query returns an outcome that
+    /// this crate doesn't know, the session starts `failed` and keeps its new
+    /// forks. With no new forks, the session merges the original fork.
     pub async fn recover(
         mechanics: M,
         resolver: R,
@@ -56,6 +53,12 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
         actor_id: ActorId,
         options: &MergeSessionOptions,
     ) -> Result<Self> {
+        let original_range = mechanics
+            .next_merge_range(&namespace_id, &original_fork_id)
+            .await?;
+        let through_seq = options
+            .through_seq
+            .unwrap_or(original_range.source_head_seq);
         let rebased = find_rebased_forks(&mechanics, &namespace_id, &original_fork_id).await?;
         let mut new_fork_ids: Vec<NamespaceId> = rebased
             .iter()
@@ -110,44 +113,51 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
                 fork_id = continued_id;
                 continue;
             }
-            let range = mechanics.next_merge_range(&namespace_id, &fork_id).await?;
-            let mut through_seq = match options.through_seq {
-                Some(through_seq) if fork_id == original_fork_id => through_seq,
-                _ => range.source_head_seq,
+            let status = if fork_id == original_fork_id {
+                status_after_range(&fork_id, through_seq, &original_range.outcome, &[])
+            } else {
+                let range = mechanics.next_merge_range(&namespace_id, &fork_id).await?;
+                status_after_range(&fork_id, range.source_head_seq, &range.outcome, &[])
             };
-            let mut status = status_after_range(&fork_id, through_seq, &range.outcome, &[]);
-            // A merged new fork doesn't show that the namespace has the
-            // original fork's commits through the session's sequence, so the
-            // session reads the original fork's row and goes on as it would
-            // for the original fork, which rebases made new forks from.
-            if fork_id != original_fork_id && status == MergeSessionStatus::Merged {
-                let range = mechanics
-                    .next_merge_range(&namespace_id, &original_fork_id)
-                    .await?;
-                through_seq = options.through_seq.unwrap_or(range.source_head_seq);
-                fork_id = original_fork_id.clone();
-                was_rebased = true;
-                status = status_after_range(&fork_id, through_seq, &range.outcome, &[]);
-            }
-            // The session is `merged` when nothing of the fork is left to
-            // merge, and only a fork with commits left to merge is rebased
-            // again.
-            if !was_rebased || !matches!(status, MergeSessionStatus::Merging { .. }) {
+            let status = match status {
+                MergeSessionStatus::Merged => {
+                    status_with_nothing_left(
+                        &mechanics,
+                        &namespace_id,
+                        &original_fork_id,
+                        through_seq,
+                        &fork_id,
+                    )
+                    .await?
+                }
+                status => status,
+            };
+            // A fork that was rebased into new forks that never merged is
+            // rebased again, if it has commits left to merge.
+            if !was_rebased {
                 break status;
             }
+            let MergeSessionStatus::Merging {
+                fork_id,
+                through_seq: fork_through_seq,
+                ..
+            } = &status
+            else {
+                break status;
+            };
             let Some(new_fork_id) = new_fork_id(&new_fork_ids) else {
                 break MergeSessionStatus::Failed {
-                    fork_id,
+                    fork_id: fork_id.clone(),
                     failure: MergeFailure::NewForkLimit,
                     reports: Vec::new(),
                 };
             };
             new_fork_ids.push(new_fork_id.clone());
             break MergeSessionStatus::Rebasing {
-                fork_id,
-                through_seq,
+                fork_id: fork_id.clone(),
+                through_seq: *fork_through_seq,
                 new_fork_id,
-                replay: PendingCommit::new(through_seq),
+                replay: PendingCommit::new(*fork_through_seq),
                 reports: Vec::new(),
             };
         };
@@ -157,6 +167,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
             MergeSessionState {
                 namespace_id,
                 original_fork_id,
+                through_seq,
                 actor_id,
                 new_fork_ids,
                 status,

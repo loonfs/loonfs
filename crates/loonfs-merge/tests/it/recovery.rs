@@ -2,19 +2,24 @@
 //! merge index that the store records.
 
 use crate::scripted_mechanics::{
-    main, merges, recover, run_to_end, sandbox, Answer, ScriptedMechanics, Sent,
+    covered, main, merges, recover, run_to_end, sandbox, Answer, ScriptedMechanics, Sent,
 };
 use loonfs_merge::{
     DefaultResolver, MergeFailure, MergeSession, MergeSessionOptions, MergeSessionStatus,
 };
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::{CommitSeq, Merge, NextMergeRangeOutcome};
+use loonfs_types::{CommitSeq, NextMergeRangeOutcome};
 
 #[tokio::test]
 async fn a_lost_state_recovers_the_new_fork_that_was_merging_and_merges_the_rest() {
     let other = namespace_id("other");
     let rebased = namespace_id("rebase-1");
+    let original_row = || Answer::RangeOutcome {
+        source_head_seq: 20,
+        outcome: covered("rebase-1", 20),
+    };
     let mechanics = ScriptedMechanics::new([
+        original_row(),
         Answer::ForkSnapshots(vec![other.clone(), sandbox(), rebased.clone()]),
         Answer::Namespace { rebased_from: None },
         Answer::Namespace {
@@ -32,11 +37,13 @@ async fn a_lost_state_recovers_the_new_fork_that_was_merging_and_merges_the_rest
             merged: true,
         },
         Answer::Committed(60),
+        original_row(),
         Answer::Deleted,
     ]);
 
     let session = recover(&mechanics, DefaultResolver).await;
 
+    assert_eq!(session.state().through_seq, CommitSeq(20));
     assert_eq!(session.state().new_fork_ids, std::slice::from_ref(&rebased));
     assert!(matches!(
         &session.state().status,
@@ -58,6 +65,7 @@ async fn a_lost_state_recovers_the_new_fork_that_was_merging_and_merges_the_rest
 async fn a_lost_state_rebases_again_when_the_new_fork_never_merged() {
     let rebased = namespace_id("rebase-1");
     let mechanics = ScriptedMechanics::new([
+        Answer::range(10, 20),
         Answer::ForkSnapshots(vec![rebased.clone()]),
         Answer::Namespace {
             rebased_from: Some(sandbox()),
@@ -65,7 +73,6 @@ async fn a_lost_state_rebases_again_when_the_new_fork_never_merged() {
         // The new fork never merged, and the lost state had the commit IDs
         // of its replay commits, so the session rebases again.
         Answer::range(10, 12),
-        Answer::range(10, 20),
     ]);
 
     let session = recover(&mechanics, DefaultResolver).await;
@@ -95,7 +102,7 @@ async fn a_lost_state_rebases_again_when_the_new_fork_never_merged() {
         "both new forks are deleted at the end"
     );
     assert_eq!(
-        mechanics.sent().last(),
+        mechanics.sent().first(),
         Some(&Sent::NextMergeRange { fork_id: sandbox() })
     );
 }
@@ -104,6 +111,7 @@ async fn a_lost_state_rebases_again_when_the_new_fork_never_merged() {
 async fn a_lost_state_fails_when_a_new_forks_next_range_is_unknown() {
     let rebased = namespace_id("rebase-1");
     let mechanics = ScriptedMechanics::new([
+        Answer::range(10, 20),
         Answer::ForkSnapshots(vec![rebased.clone()]),
         Answer::Namespace {
             rebased_from: Some(sandbox()),
@@ -129,19 +137,6 @@ async fn a_lost_state_fails_when_a_new_forks_next_range_is_unknown() {
     assert_eq!(session.state().new_fork_ids, [rebased]);
 }
 
-/// Returns the next-range outcome of the original fork after the merge of
-/// `new_fork` covered the fork's commits through `through_seq`.
-fn covered(new_fork: &str, through_seq: u64) -> NextMergeRangeOutcome {
-    NextMergeRangeOutcome::Covered {
-        merge: Merge {
-            source_namespace_id: sandbox(),
-            source_after_seq: CommitSeq(5),
-            source_through_seq: CommitSeq(through_seq),
-        },
-        covered_by_namespace_id: namespace_id(new_fork),
-    }
-}
-
 /// Checks that a lost state after a `merged` session deleted its new forks
 /// recovers as `merged` when the next-range query says that a new fork's
 /// merge wrote the original fork's row through the fork's head, and sends no
@@ -149,11 +144,11 @@ fn covered(new_fork: &str, through_seq: u64) -> NextMergeRangeOutcome {
 #[tokio::test]
 async fn a_lost_state_after_the_new_forks_were_deleted_recovers_as_merged() {
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkSnapshots(Vec::new()),
         Answer::RangeOutcome {
             source_head_seq: 20,
             outcome: covered("rebase-1", 20),
         },
+        Answer::ForkSnapshots(Vec::new()),
     ]);
 
     let session = recover(&mechanics, DefaultResolver).await;
@@ -173,11 +168,11 @@ async fn a_lost_state_after_the_new_forks_were_deleted_recovers_as_merged() {
 #[tokio::test]
 async fn a_lost_state_fails_when_the_fork_has_commits_after_a_new_forks_merge() {
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkSnapshots(Vec::new()),
         Answer::RangeOutcome {
             source_head_seq: 25,
             outcome: covered("rebase-1", 20),
         },
+        Answer::ForkSnapshots(Vec::new()),
     ]);
 
     let session = recover(&mechanics, DefaultResolver).await;
@@ -206,16 +201,16 @@ async fn a_lost_state_fails_when_the_fork_has_commits_after_a_new_forks_merge() 
 async fn a_lost_state_recovers_as_merged_when_another_merge_covered_the_rebased_fork() {
     let rebased = namespace_id("rebase-1");
     let mechanics = ScriptedMechanics::new([
+        Answer::RangeOutcome {
+            source_head_seq: 20,
+            outcome: covered("rebase-2", 20),
+        },
         Answer::ForkSnapshots(vec![rebased.clone()]),
         Answer::Namespace {
             rebased_from: Some(sandbox()),
         },
         // The new fork never merged.
         Answer::range(10, 12),
-        Answer::RangeOutcome {
-            source_head_seq: 20,
-            outcome: covered("rebase-2", 20),
-        },
         Answer::Deleted,
     ]);
 
@@ -246,7 +241,12 @@ async fn a_lost_state_recovers_as_merged_when_another_merge_covered_the_rebased_
 async fn a_lost_state_whose_new_fork_merged_checks_the_original_forks_row() {
     let rebased = namespace_id("rebase-1");
     for (through_seq, merged) in [(25, false), (20, true)] {
+        let original_row = || Answer::RangeOutcome {
+            source_head_seq: 25,
+            outcome: covered("rebase-1", 20),
+        };
         let mut script = vec![
+            original_row(),
             Answer::ForkSnapshots(vec![rebased.clone()]),
             Answer::Namespace {
                 rebased_from: Some(sandbox()),
@@ -262,10 +262,7 @@ async fn a_lost_state_whose_new_fork_merged_checks_the_original_forks_row() {
                 source_head_seq: 35,
                 merged: true,
             },
-            Answer::RangeOutcome {
-                source_head_seq: 25,
-                outcome: covered("rebase-1", 20),
-            },
+            original_row(),
         ];
         if merged {
             script.push(Answer::Deleted);
@@ -311,6 +308,98 @@ async fn a_lost_state_whose_new_fork_merged_checks_the_original_forks_row() {
                     .iter()
                     .any(|sent| matches!(sent, Sent::Delete { .. })),
                 "a failed session keeps its new fork"
+            );
+        }
+    }
+}
+
+/// Checks that a lost state whose new fork has a piece left to merge reads
+/// the original fork's row after the session merges that piece. The new fork
+/// replayed the original fork through 20, and its last piece (through its
+/// head, 40) contains only the resolver's changes, so merging it leaves the
+/// original fork's row at 20. Asked to merge through 25, or through the
+/// original fork's head, 25, the session is `failed` with the new fork and
+/// 20, and keeps the new fork. Asked to merge through 20, the session is
+/// `merged` and deletes the new fork.
+#[tokio::test]
+async fn a_lost_state_whose_new_fork_has_a_piece_left_checks_the_original_forks_row() {
+    let rebased = namespace_id("rebase-1");
+    for (through_seq, merged) in [(Some(25), false), (None, false), (Some(20), true)] {
+        let original_row = || Answer::RangeOutcome {
+            source_head_seq: 25,
+            outcome: covered("rebase-1", 20),
+        };
+        let new_fork_range = || Answer::Range {
+            next_after_seq: 35,
+            source_head_seq: 40,
+            merged: true,
+        };
+        let mut script = vec![
+            original_row(),
+            Answer::ForkSnapshots(vec![rebased.clone()]),
+            Answer::Namespace {
+                rebased_from: Some(sandbox()),
+            },
+            new_fork_range(),
+            new_fork_range(),
+            Answer::Committed(60),
+            original_row(),
+        ];
+        if merged {
+            script.push(Answer::Deleted);
+        }
+        let mechanics = ScriptedMechanics::new(script);
+        let options = MergeSessionOptions {
+            through_seq: through_seq.map(CommitSeq),
+        };
+        let session = MergeSession::recover(
+            mechanics.clone(),
+            DefaultResolver,
+            main(),
+            sandbox(),
+            loonfs_test_support::test_actor(),
+            &options,
+        )
+        .await
+        .expect("recover the session");
+        let case = format!("{through_seq:?}");
+        assert!(
+            matches!(
+                &session.state().status,
+                MergeSessionStatus::Merging { fork_id, through_seq: CommitSeq(40), .. }
+                    if *fork_id == rebased
+            ),
+            "{case}"
+        );
+
+        let (_, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+
+        let merges = merges(&mechanics.sent());
+        assert_eq!(merges.len(), 1, "{case}");
+        assert_eq!(merges[0].0, rebased, "{case}");
+        if merged {
+            assert_eq!(state.status, MergeSessionStatus::Merged, "{case}");
+            assert!(state.new_fork_ids.is_empty(), "{case}");
+        } else {
+            assert_eq!(
+                state.status,
+                MergeSessionStatus::Failed {
+                    fork_id: sandbox(),
+                    failure: MergeFailure::Covered {
+                        covered_by_namespace_id: rebased.clone(),
+                        source_through_seq: CommitSeq(20),
+                    },
+                    reports: Vec::new(),
+                },
+                "{case}"
+            );
+            assert_eq!(state.new_fork_ids, std::slice::from_ref(&rebased), "{case}");
+            assert!(
+                !mechanics
+                    .sent()
+                    .iter()
+                    .any(|sent| matches!(sent, Sent::Delete { .. })),
+                "{case}: a failed session keeps its new fork"
             );
         }
     }
