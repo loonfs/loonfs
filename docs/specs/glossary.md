@@ -187,7 +187,7 @@ A short-lived URL (15 minutes in the reference implementation) signed by the ser
 
 ### Admission evidence
 
-Short-lived proof tied to a namespace and exact content reference showing that an upload's bytes were verified. Commits require it before referencing uploaded content, and the HTTP server represents it as a signed content token. See [Admission proofs](format.md#55-admission-proofs).
+Short-lived proof tied to a namespace and exact content reference showing that an upload's bytes were verified, or that the runtime committing them wrote them itself. Commits require it before referencing uploaded content, and the HTTP server represents it as a signed content token. See [Admission proofs](format.md#55-admission-proofs).
 
 ### Content root
 

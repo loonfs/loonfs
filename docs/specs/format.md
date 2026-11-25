@@ -131,7 +131,7 @@ File bytes become durable no later than the commit referencing them through one 
 
 | Path | Durability mechanism |
 | --- | --- |
-| Uploaded | An upload session writes and verifies the content object before the commit ([Uploading content](#5-uploading-content)). |
+| Uploaded | Before the commit, either an upload session writes and verifies the content object, or an embedded runtime writes the content object itself with one put and no upload session ([Uploading content](#5-uploading-content)). [Admission proofs](#55-admission-proofs) says how long each kind of object can wait for its commit. |
 | Inline | The committing WAL object stores raw bytes as "pieces" ([WAL records](#a5-wal-records)), either a full small file or appended bytes. Before a fold publishes a manifest covering that WAL object, it writes all pieces to content objects as extents ([Publishing a manifest](#72-publishing-a-manifest)). |
 
 Because GC deletes a commit WAL object only after a manifest covers it, bytes never disappear while only in the WAL. Only the chain's "creator" (the namespace that created it, stored in its layout) extends a chain in place. An append by another pool member starts a new chain sharing the original extents ([Operations and WAL deltas](#66-operations-and-wal-deltas)). LoonFS does not deduplicate across separate uploads (retries within one session reuse that session's content ID).
