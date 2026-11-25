@@ -848,6 +848,40 @@ async fn a_subtree_change_on_main_before_the_rebase_is_found_through_the_snapsho
     );
 }
 
+/// Checks that a replay reports the same conflicts for the fork's delete of
+/// `/docs` before and after a base compaction of the new fork removes the
+/// rows of `/docs/a.txt`. Main deletes the file after the fork point and
+/// before the rebase. A new fork's retention floor starts at its fork point,
+/// so that deletion has expired in the new fork, and the replay returns the
+/// same report at both stages.
+#[tokio::test]
+async fn a_replay_at_an_inherited_deletion_reports_the_same_before_and_after_compaction() {
+    let mut reports = Vec::new();
+    for compact in [false, true] {
+        let family = Family::new().await;
+        family
+            .fixture(&family.main)
+            .delete_path("/docs/a.txt", None)
+            .await
+            .expect("delete /docs/a.txt");
+        family
+            .fixture(&family.fork)
+            .delete_path("/docs", None)
+            .await
+            .expect("delete /docs");
+        family.create_rebase().await;
+        family.write(&family.rebase, "/own.txt", b"own").await;
+        if compact {
+            family.compact_rebase().await;
+        }
+
+        let replay = family.replay("replay-1", None).await.expect("replay");
+        assert!(family.entry(&family.rebase, "/docs").await.is_none());
+        reports.push(replay.conflicts);
+    }
+    assert_eq!(reports, [Vec::new(), Vec::new()]);
+}
+
 /// Checks that a new fork whose first merge covered only a prefix of the
 /// fork replays the rest of the fork and merges again, and that its second
 /// merge covers the rest, which continues the row that its first merge

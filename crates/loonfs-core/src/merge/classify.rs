@@ -16,6 +16,7 @@ use super::state::{InodeState, StateReader};
 use crate::authorize::{require, Absence, Authorizer};
 use crate::commit::wal_size::{conflict_bytes, merge_operation_bytes};
 use crate::error::{CoreError, Result};
+use crate::metadata::ancestry_allows_read;
 use crate::path::mutation_path::name_keys;
 use crate::path::read::LoadedMetadataView;
 use crate::wal::ProjectedWalTail;
@@ -458,7 +459,15 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// namespace isn't the fork's own (see [`Self::is_own`]): its binding, its
     /// deletion, or its revision,
     /// attribute, or access row.
+    ///
+    /// Returns false for an inode at or below an expired deletion, because
+    /// base compactions remove that inode's rows at different times, so
+    /// reading the rows would return a different answer depending on which
+    /// rows had been compacted.
     async fn has_foreign_row(&mut self, inode_id: InodeId) -> Result<bool> {
+        if !ancestry_allows_read(self.theirs.session(), inode_id).await? {
+            return Ok(false);
+        }
         let Some(state) = self.theirs.state(inode_id).await? else {
             return Ok(false);
         };
