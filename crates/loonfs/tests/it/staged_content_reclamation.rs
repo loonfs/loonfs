@@ -33,7 +33,7 @@ async fn open_staged_runtime(store: SharedObjectStore, writer_id: &str) -> TestR
     open_runtime_with_async(store, writer_id, |builder| {
         builder.config(loonfs::RuntimeConfig {
             inline_content: loonfs::InlineContentPolicy {
-                inline_content_threshold_bytes: None,
+                inline_content_threshold_bytes: 0,
                 ..Default::default()
             },
             ..loonfs::RuntimeConfig::default()

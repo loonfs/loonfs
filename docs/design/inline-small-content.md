@@ -109,7 +109,7 @@ Inline content has these costs:
 - A WAL object stores a second copy of small content until it's folded and collected.
 - A direct download, copy, restore, or fresh chain can write pending bytes before the fold. Same-chain appends write only the WAL.
 - The fingerprint contract has a second content form, with its own pinned test vectors.
-- Inlining is a writer policy, so a deployment that must keep file bytes out of its metadata store turns inline writes off.
+- Inlining is a writer policy. With a threshold of 0, LoonFS uploads every nonempty file, and appended bytes stay in the WAL until a fold.
 
 ## Threshold measurements
 

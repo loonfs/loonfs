@@ -92,9 +92,9 @@ pub struct ServerConfig {
     /// request at its deadline with `outcome_unknown`.
     #[serde(default)]
     pub publication: loonfs::PublicationPolicy,
-    /// The inline content policy of the server's runtime. Inline writes are
-    /// on with a 64 KiB threshold by default, and
-    /// `inline_content_threshold_bytes = false` turns them off.
+    /// The inline content policy of the server's runtime. The inline
+    /// threshold is 64 KiB by default. With a threshold of 0, LoonFS uploads
+    /// every nonempty file, and appended bytes stay in the WAL until a fold.
     #[serde(default)]
     pub inline_content: loonfs::InlineContentPolicy,
     /// Limits of the one metadata cache the server's runtime reads through.

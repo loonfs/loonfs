@@ -160,7 +160,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .writer_id(loonfs_test_support::ids::writer_id("grams-thousand-writer"))
         .config(loonfs::RuntimeConfig {
             inline_content: loonfs::InlineContentPolicy {
-                inline_content_threshold_bytes: None,
+                inline_content_threshold_bytes: 0,
                 ..Default::default()
             },
             min_publish_interval_ms: 0,
@@ -523,7 +523,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .writer_id(loonfs_test_support::ids::writer_id("grams-fault-writer"))
         .config(loonfs::RuntimeConfig {
             inline_content: loonfs::InlineContentPolicy {
-                inline_content_threshold_bytes: None,
+                inline_content_threshold_bytes: 0,
                 ..Default::default()
             },
             min_publish_interval_ms: 0,

@@ -89,7 +89,7 @@ A fold stores a qualifying chain as a bytes row when the chain's size is at most
 | --- | --- | --- |
 | `inline_content_row_threshold_bytes` (new) | The inline threshold, 64 KiB | A fold stores a whole value at or under this size as a bytes row. `None` in the embedded policy, `false` in the server TOML, or 0 turns bytes rows off, and a fold then writes a content object for every file, as it does today. |
 
-The threshold can't exceed 256 KiB, the piece limit. `InlineContentPolicy::default()` sets both thresholds to 64 KiB. In the server TOML, an unset row threshold takes the value of `inline_content_threshold_bytes`, so a server with inline writes off has bytes rows off too. A deployment that keeps every file in its own object turns the row threshold off, and it can keep inline writes on. Commits then still include small files' bytes, and every fold writes them to content objects.
+The threshold can't exceed 256 KiB, the piece limit. `InlineContentPolicy::default()` sets both thresholds to 64 KiB. In the server TOML, an unset row threshold takes the value of `inline_content_threshold_bytes`, so a server whose inline threshold is zero has bytes rows off too. A deployment that keeps every file in its own object turns the row threshold off, and it can keep inline writes on. Commits then still include small files' bytes, and every fold writes them to content objects.
 
 Changing the threshold doesn't move any file's bytes:
 

@@ -528,13 +528,13 @@ These are the defaults without a memory limit. With sizing, `max_admitted_bytes`
 
 The `[publication]` table is the runtime's `PublicationPolicy`, and an embedded host sets the per-namespace limits and the write-stop wait in `RuntimeConfig::publication`. It sets `max_admitted_requests`, `max_admitted_bytes`, `max_merge_bytes`, and `max_concurrent_publications` on the execution budget, with the `ExecutionBudgetBuilder` methods of the same names. Runtimes that share one budget share these four limits, so their merges share one merge allowance, but each runtime keeps its own per-namespace limits.
 
-A hosted server configures [inline content](../../../docs/specs/glossary.md#inline-content) (a small file's bytes, included in the commit itself) in the `[inline_content]` table, with the settings below. Inline writes are enabled by default, with a 64 KiB threshold. To disable them, set `inline_content_threshold_bytes = false`. By default, capability discovery advertises `filesystem.commits.inline_content` and `commit.max_inline_content_bytes_per_operation`, and it leaves out both when inline writes are disabled.
+A hosted server configures [inline content](../../../docs/specs/glossary.md#inline-content) (a small file's bytes, included in the commit itself) in the `[inline_content]` table, with the settings below. The inline threshold is 64 KiB by default. With a threshold of 0, LoonFS uploads every nonempty file, and appended bytes stay in the WAL until a fold. HTTP commits then refuse nonempty inline values with `content_too_large`. Capability discovery always advertises `filesystem.commits.inline_content`, and it advertises the threshold as `commit.max_inline_content_bytes_per_operation`.
 
 The `[inline_content]` table is the runtime's `InlineContentPolicy`, which an embedded host sets in `RuntimeConfig::inline_content`. These settings don't change the format limits that readers apply.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `inline_content_threshold_bytes` | 64 KiB | Content at or under this size is prepared inline. `None` in the embedded policy, or `false` in the server TOML, disables inline writes. |
+| `inline_content_threshold_bytes` | 64 KiB | Content at or under this size is prepared inline. With a threshold of 0, LoonFS uploads every nonempty file, and appended bytes stay in the WAL until a fold. |
 | `inline_content_wal_object_budget_bytes` | 1 MiB | Limits the inline bytes that a batch of commits shares in one WAL object. A commit with more inline bytes publishes in a WAL object of its own. |
 | `inline_content_tail_limit_bytes` | 32 MiB | New commits wait for a fold once the unfolded WAL tail has this many inline content bytes. A fold is due at a quarter of this size. The limit can't be smaller than 4 MiB, the inline bytes of one WAL object. |
 

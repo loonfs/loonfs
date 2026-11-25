@@ -472,7 +472,7 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
     let runtime = open_runtime_with_async(store(temp_dir.path()), "writer-a", |builder| {
         builder.config(loonfs::RuntimeConfig {
             inline_content: loonfs::InlineContentPolicy {
-                inline_content_threshold_bytes: None,
+                inline_content_threshold_bytes: 0,
                 ..Default::default()
             },
             ..loonfs::RuntimeConfig::default()

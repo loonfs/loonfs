@@ -55,7 +55,7 @@ impl ContentFixture {
             .wall_clock(clock.clone())
             .config(loonfs::RuntimeConfig {
                 inline_content: loonfs::InlineContentPolicy {
-                    inline_content_threshold_bytes: None,
+                    inline_content_threshold_bytes: 0,
                     ..Default::default()
                 },
                 min_publish_interval_ms: 0,

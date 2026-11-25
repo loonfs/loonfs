@@ -87,10 +87,10 @@ impl Default for PublicationPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InlineContentPolicy {
-    /// Maximum size prepared inline; defaults to 64 KiB. `None` disables
-    /// inline preparation, and serializes as `false`.
-    #[serde(with = "inline_content_threshold")]
-    pub inline_content_threshold_bytes: Option<usize>,
+    /// Largest content prepared inline; defaults to 64 KiB. With a
+    /// threshold of 0, LoonFS uploads every nonempty file, and appended
+    /// bytes stay in the WAL until a fold.
+    pub inline_content_threshold_bytes: usize,
     /// Inline bytes at which the publisher stops adding commits to a batch's
     /// WAL object; defaults to 1 MiB.
     pub inline_content_wal_object_budget_bytes: usize,
@@ -107,44 +107,9 @@ pub struct InlineContentPolicy {
 impl Default for InlineContentPolicy {
     fn default() -> Self {
         Self {
-            inline_content_threshold_bytes: Some(64 * 1024),
+            inline_content_threshold_bytes: 64 * 1024,
             inline_content_wal_object_budget_bytes: 1024 * 1024,
             inline_content_tail_limit_bytes: DEFAULT_INLINE_TAIL_LIMIT_BYTES,
-        }
-    }
-}
-
-/// The serde form of `inline_content_threshold_bytes`: a byte count, or
-/// `false` for no inline preparation.
-mod inline_content_threshold {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub(super) fn serialize<S: Serializer>(
-        threshold: &Option<usize>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        match threshold {
-            Some(bytes) => bytes.serialize(serializer),
-            None => serializer.serialize_bool(false),
-        }
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<usize>, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Threshold {
-            Bytes(usize),
-            Enabled(bool),
-        }
-
-        match Threshold::deserialize(deserializer)? {
-            Threshold::Bytes(bytes) => Ok(Some(bytes)),
-            Threshold::Enabled(false) => Ok(None),
-            Threshold::Enabled(true) => Err(serde::de::Error::custom(
-                "`inline_content_threshold_bytes` must be a byte count or false",
-            )),
         }
     }
 }
@@ -154,10 +119,7 @@ impl InlineContentPolicy {
         use loonfs_types::format::wal::{
             MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
         };
-        if self
-            .inline_content_threshold_bytes
-            .is_some_and(|value| value > MAX_WAL_INLINE_CONTENT_BYTES)
-        {
+        if self.inline_content_threshold_bytes > MAX_WAL_INLINE_CONTENT_BYTES {
             return Err(ConfigFieldError::Invalid {
                 field: "inline_content.inline_content_threshold_bytes",
                 reason: format!("must not exceed {MAX_WAL_INLINE_CONTENT_BYTES}"),
