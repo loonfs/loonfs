@@ -345,10 +345,6 @@ A manifest publication incrementing the writer epoch by 1. The claim must be fol
 
 A commitless WAL object written by a new writer session at the next WAL number to block commits from older writer epochs. Fences are never deleted (even after retirement), ensuring stale WAL writes always collide. (A [floor object](#floor-object) is also commitless, but copies the current epoch and fences no writer.)
 
-### Owes a fence
-
-The state of a [writer session](#writer-session) from the moment it sends a commit's WAL put until it learns the put's outcome. A session that owes a fence writes a [fence](#fence) with its own [writer epoch](#writer-epoch) before it plans another commit, because the put may still be written at the next WAL number. For example, if a session's put at WAL 31 loses its acknowledgment, the session's next publication writes a fence at the tip it discovers, 31 or above, before it commits anything. See [Writer ownership](format.md#61-writer-ownership).
-
 ### Floor object
 
 A commitless WAL object recording a new `retention_floor_seq` at the next WAL number so retention advances are ordered against restores in the WAL. Any process can write one using the current manifest's writer epoch without fencing the active writer (a colliding writer simply rediscovers and re-validates against the new floor). Floor objects are never deleted, and the next fold copies the floor into a manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).

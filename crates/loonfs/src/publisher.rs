@@ -311,9 +311,9 @@ impl NamespacePublisher {
         match *self.session.lock() {
             WriterSessionStatus::Fenced(_) => NamespaceSessionStatus::Fenced,
             WriterSessionStatus::NamespaceGone => NamespaceSessionStatus::Closed,
-            WriterSessionStatus::Unacquired
-            | WriterSessionStatus::Acquired(_)
-            | WriterSessionStatus::HoldsEpochOwesFence(_) => NamespaceSessionStatus::Open,
+            WriterSessionStatus::Unacquired | WriterSessionStatus::Acquired(_) => {
+                NamespaceSessionStatus::Open
+            }
         }
     }
 
@@ -383,15 +383,6 @@ impl NamespacePublisher {
         matches!(*self.session.lock(), WriterSessionStatus::Fenced(_))
     }
 
-    /// Whether the session sent a WAL put whose outcome it hasn't learned,
-    /// and so must write a fence before its next commit.
-    fn owes_fence(&self) -> bool {
-        matches!(
-            *self.session.lock(),
-            WriterSessionStatus::HoldsEpochOwesFence(_)
-        )
-    }
-
     /// Drops the engine's position once no other task has the engine
     /// locked.
     ///
@@ -438,14 +429,10 @@ impl NamespacePublisher {
             None => {
                 // When the slot had a position, the engine found a change it
                 // can't follow, such as another writer's claim, so the position
-                // that just became the cached head may be out of date. A
-                // session that owes a fence sent a WAL put whose outcome it
-                // hasn't learned, so the put may have committed and the cached
-                // head may be older than a commit that this runtime made. It
-                // keeps its position, but the release drops the head even when
-                // the slot had no position.
-                let cleared = self.read_position.clear();
-                if cleared || self.owes_fence() {
+                // that just became the cached head may be out of date. (After
+                // a commit's WAL put whose outcome the session didn't learn,
+                // the publish path drops the head itself.)
+                if self.read_position.clear() {
                     self.context
                         .runtime_core
                         .invalidate_namespace_read_cache(&self.namespace_id);
