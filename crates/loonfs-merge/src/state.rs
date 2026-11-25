@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 /// through the fork that it was rebased from, so if the state is lost after
 /// a `merged` session deleted some of its new forks, recovery can't connect
 /// the remaining new forks to the original fork, and nothing deletes them.
-/// The merge of the last new fork wrote the original fork's row, so the
-/// next-range query of the original fork returns `covered`, and the
-/// recovered session is `merged` when that row reaches the original fork's
-/// head, or `failed` when the original fork has later commits.
+/// The merge of the last new fork wrote the original fork's row, and the
+/// recovered session is `merged` only when that row reaches the sequence
+/// that the session merges the original fork through, or `failed` when the
+/// original fork has later commits up to that sequence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeSessionState {
