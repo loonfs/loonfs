@@ -226,7 +226,6 @@ async fn assert_shared_file(
             SHARED_FILE,
             &loonfs::StatOptions {
                 include_attributes: loonfs_types::options::AttributeInclusion::Include,
-                ..Default::default()
             },
         )
         .await

@@ -530,9 +530,8 @@ async fn an_advance_without_a_session_folds_its_floor_object_after_a_session_ope
 /// returns.
 async fn listed_deletions(namespace: &crate::Namespace<crate::Writable>) -> Vec<CommitSeq> {
     namespace
-        .list_trash_with_options(&crate::ListTrashOptions {
-            consistency: crate::Consistency::Strong,
-        })
+        .strong()
+        .list_trash()
         .page()
         .await
         .expect("list the trash")

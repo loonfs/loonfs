@@ -6,16 +6,20 @@
 //! `pinned.engine.read_file(path, &pinned.context, Some(max_bytes))`. The
 //! methods here are the reads that do more than that one call: the change
 //! feed maps the core's cursor error to the request's parameter, and the
-//! directory listings build the response and its next cursor.
+//! directory and revision listings build the response and its next cursor.
 
-use crate::pagers::encode_next_list_cursor;
+use crate::pagers::{encode_next_list_cursor, file_revisions_page_response};
 use crate::{
-    CommitSeq, CoreError, Error, InodeId, ListChangesResponse, ListInodeChildrenResponse,
-    ListOptions, ListPathEntriesResponse, NamespaceId, Result, SharedObjectStore, SnapshotId,
+    CommitSeq, CoreError, Error, InodeId, ListChangesResponse, ListFileRevisionsResponse,
+    ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse, NamespaceId, Result,
+    SharedObjectStore, SnapshotId,
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 use loonfs_types::options::CommitSplitting;
-use loonfs_types::{AbsolutePath, ChangeFeedPosition, EffectiveLimit, ListPageCursor, PageRequest};
+use loonfs_types::{
+    AbsolutePath, ChangeFeedPosition, EffectiveLimit, FileRevisionsPageCursor, ListPageCursor,
+    PageRequest,
+};
 
 /// A reader engine and the read context it reads at.
 pub(crate) struct PinnedRead {
@@ -103,5 +107,53 @@ impl PinnedRead {
             entries: page.items,
             next_cursor: encode_next_list_cursor(page.next_cursor.as_ref())?,
         })
+    }
+
+    /// Lists one page of the revisions of the file at `absolute_path`, and
+    /// marks the next cursor with `snapshot_id`, the snapshot that the read
+    /// reads.
+    pub(crate) async fn file_revisions_page(
+        &self,
+        absolute_path: &AbsolutePath,
+        request: PageRequest<FileRevisionsPageCursor>,
+        snapshot_id: Option<&SnapshotId>,
+    ) -> Result<ListFileRevisionsResponse> {
+        let mut revisions = self
+            .engine
+            .list_file_revisions_page(absolute_path.as_str(), request, &self.context)
+            .await?;
+        if let Some(cursor) = revisions.page.next_cursor.as_mut() {
+            cursor.snapshot_id = snapshot_id.cloned();
+        }
+        Ok(file_revisions_page_response(
+            self.namespace_id().clone(),
+            self.head_seq(),
+            revisions.page,
+            revisions.inode_id,
+        )?)
+    }
+
+    /// Lists one page of the revisions of the file inode `inode_id`, and
+    /// marks the next cursor with `snapshot_id`, the snapshot that the read
+    /// reads.
+    pub(crate) async fn file_revisions_by_inode_page(
+        &self,
+        inode_id: InodeId,
+        request: PageRequest<FileRevisionsPageCursor>,
+        snapshot_id: Option<&SnapshotId>,
+    ) -> Result<ListFileRevisionsResponse> {
+        let mut page = self
+            .engine
+            .list_file_revisions_by_inode_page(inode_id, request, &self.context)
+            .await?;
+        if let Some(cursor) = page.next_cursor.as_mut() {
+            cursor.snapshot_id = snapshot_id.cloned();
+        }
+        Ok(file_revisions_page_response(
+            self.namespace_id().clone(),
+            self.head_seq(),
+            page,
+            inode_id,
+        )?)
     }
 }

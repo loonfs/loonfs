@@ -368,7 +368,6 @@ impl TestRuntime {
                 absolute_path,
                 &loonfs::StatOptions {
                     include_attributes: loonfs_types::options::AttributeInclusion::Include,
-                    ..Default::default()
                 },
             )
             .await

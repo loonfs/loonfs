@@ -3,7 +3,6 @@
 use crate::operations;
 use crate::transport::QueryBuilder;
 use crate::{Client, ClientError, Result};
-use loonfs_types::options::ReadAt;
 use loonfs_types::{GrepRequest, GrepResponse, GrepScope, NamespaceId, PageRequest, Pager};
 
 /// A pager over grep matches.
@@ -11,6 +10,8 @@ pub type GrepPager = Pager<GrepResponse, ClientError>;
 
 impl Client {
     /// Searches content through the namespace's grep index (query API group).
+    /// The first page confirms the head at this client's consistency, and a
+    /// later page reads at the first page's head, which its cursor records.
     ///
     /// Gate on the `query.grep` capability before calling against unknown
     /// deployments; the namespace must also have a built, active grep
@@ -44,7 +45,7 @@ impl Client {
         }
         query.push("allow_scan", request.allow_scan);
         query.push("allow_stale", request.allow_stale);
-        crate::reads::push_read_at(&mut query, &ReadAt::Live(request.consistency));
+        self.head_fields().push(&mut query);
         query.page(&page);
         self.send_json(self.request(operations::GREP, &query.build()))
             .await
@@ -81,7 +82,6 @@ mod tests {
             scope: GrepScope::Namespace,
             allow_stale: false,
             allow_scan: false,
-            consistency: loonfs_types::options::Consistency::Eventual,
         };
         let mut pager = client
             .grep(&NamespaceId::parse("demo").expect("namespace id"), &request)

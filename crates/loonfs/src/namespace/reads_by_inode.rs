@@ -2,13 +2,13 @@
 //! listings, file bytes, and download targets by inode ID.
 
 use crate::downloads::DirectDownloadByInodeTarget;
-use crate::namespace::reads::{reject_snapshot_cursor, validate_snapshot_cursor};
+use crate::namespace::reads::reject_snapshot_cursor;
 use crate::pagers::{decode_list_page_request, InodeChildrenPager};
 use crate::trace::{self, operation_span};
 use crate::{
     CurrentFileState, DownloadOptions, FileBytes, FileContentStream, InodeId,
-    ListInodeChildrenResponse, ListOptions, Namespace, PathEntry, ReadAt, ReadFileOptions,
-    ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore, StatOptions,
+    ListInodeChildrenResponse, ListOptions, Namespace, PathEntry, ReadFileStreamOptions, Result,
+    RevisionNo, SharedObjectStore, StatOptions,
 };
 use loonfs_types::{ListPageCursor, PageRequest};
 
@@ -30,7 +30,7 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "stat_by_inode", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                self.read_at(&options.at, |pinned, _| async move {
+                self.read_head(|pinned| async move {
                     Ok(pinned
                         .engine
                         .stat_inode(inode_id, options.clone(), &pinned.context)
@@ -78,22 +78,19 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "list_by_inode", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                if matches!(options.at, ReadAt::Live(_)) {
-                    reject_snapshot_cursor(request.cursor.as_ref())?;
-                }
+                reject_snapshot_cursor(request.cursor.as_ref())?;
                 let cursor_head_seq = request.cursor.as_ref().map(ListPageCursor::head_seq);
-                self.read_at_least(&options.at, cursor_head_seq, |pinned, source| {
+                self.read_head_at_least(cursor_head_seq, |pinned| {
                     let request = request.clone();
                     let options = options.clone();
                     async move {
-                        validate_snapshot_cursor(&request, &pinned, &source)?;
                         // Give awakened validation waiters a turn before
                         // synchronous page work. The head is already
                         // captured and the validation guard has been
                         // released.
                         tokio::task::yield_now().await;
                         pinned
-                            .inode_children_page(inode_id, request, options, source.snapshot_id())
+                            .inode_children_page(inode_id, request, options, None)
                             .await
                     }
                 })
@@ -134,7 +131,7 @@ impl<M: crate::Mode> Namespace<M> {
         options: &DownloadOptions,
     ) -> Result<DirectDownloadByInodeTarget> {
         let _permit = self.core.read_permit().await;
-        self.read_at(&options.at, |pinned, _| async move {
+        self.read_head(|pinned| async move {
             Ok(pinned
                 .engine
                 .direct_download_target_by_inode(
@@ -164,18 +161,13 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "stat_current_files_by_inode", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                self.core
-                    .read(
-                        &self.namespace_id,
-                        crate::Consistency::Eventual,
-                        |pinned| async move {
-                            Ok(pinned
-                                .engine
-                                .stat_current_files_by_inode(inode_ids, &pinned.context)
-                                .await?)
-                        },
-                    )
-                    .await
+                self.read_head(|pinned| async move {
+                    Ok(pinned
+                        .engine
+                        .stat_current_files_by_inode(inode_ids, &pinned.context)
+                        .await?)
+                })
+                .await
             },
         )
         .await
@@ -184,23 +176,12 @@ impl<M: crate::Mode> Namespace<M> {
     /// Reads the current content of a visible file inode, wherever it is
     /// bound, plus the metadata entry it came from.
     pub async fn read_file_by_inode(&self, inode_id: InodeId) -> Result<FileBytes> {
-        self.read_file_by_inode_with_options(inode_id, &ReadFileOptions::default())
-            .await
-    }
-
-    /// Reads the current content of a visible file inode, wherever it is
-    /// bound, plus the metadata entry it came from, as `options` asks.
-    pub async fn read_file_by_inode_with_options(
-        &self,
-        inode_id: InodeId,
-        options: &ReadFileOptions,
-    ) -> Result<FileBytes> {
         trace::in_operation(
             operation_span!(self.core, "read_file_by_inode", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
                 let max_bytes = self.core.max_read_content_bytes();
-                self.read_at(&options.at, |pinned, _| async move {
+                self.read_head(|pinned| async move {
                     Ok(pinned
                         .engine
                         .read_file_by_inode(inode_id, &pinned.context, Some(max_bytes))
@@ -244,7 +225,7 @@ impl<M: crate::Mode> Namespace<M> {
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.read_permit().await;
-        self.read_at(&options.at, |pinned, _| async move {
+        self.read_head(|pinned| async move {
             Ok(pinned
                 .engine
                 .read_file_stream_by_inode(

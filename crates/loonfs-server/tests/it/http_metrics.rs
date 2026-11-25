@@ -104,12 +104,8 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     // with object-store calls of its own.
     harness
         .client
-        .get_namespace_with_options(
-            &namespace,
-            &loonfs_client::LiveReadOptions {
-                consistency: loonfs_client::Consistency::Strong,
-            },
-        )
+        .strong()
+        .get_namespace(&namespace)
         .await
         .expect("read status again");
     let second = scrape(&harness.server_url, Some("test-token")).expect("second scrape");

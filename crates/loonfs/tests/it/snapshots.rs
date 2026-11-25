@@ -3,14 +3,13 @@
 use crate::common::*;
 use loonfs::{
     CommitSeq, CreateSnapshotOptions, DownloadOptions, ErrorCode, ForkNamespaceOptions,
-    ListChangesOptions, ListSnapshotsResponse, LoonFs, NamespaceId, ReadAt, ReadFileOptions,
-    ReadOnly, RevisionNo, SharedObjectStore, SnapshotRecordOwner,
+    ListChangesOptions, ListSnapshotsResponse, LoonFs, NamespaceId, ReadOnly, RevisionNo,
+    SharedObjectStore, SnapshotRecordOwner,
 };
 use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationSelector};
-use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -435,13 +434,9 @@ async fn an_expired_snapshot_is_not_found_and_not_listed_but_stays_in_the_invent
     );
     assert_core_error_kind(
         reader
-            .stat_with_options(
-                "/file",
-                &loonfs::StatOptions {
-                    at: loonfs::ReadAt::Snapshot(snapshot.snapshot_id.clone()),
-                    ..Default::default()
-                },
-            )
+            .read_at_snapshot(&snapshot.snapshot_id, |view| async move {
+                view.stat("/file").await
+            })
             .await,
         ErrorCode::SnapshotNotFound,
     );
@@ -539,43 +534,20 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .delete_path("/file", &loonfs_test_support::test_actor())
         .await
         .expect("delete");
-    let options = loonfs::StatOptions {
-        at: loonfs::ReadAt::Snapshot(snapshot.snapshot_id.clone()),
-        ..Default::default()
-    };
+    let view = namespace_reader
+        .read_view_at_snapshot(&snapshot.snapshot_id)
+        .await
+        .expect("a view of the snapshot");
+    assert_eq!(view.stat("/file").await.expect("snapshot path"), before);
     assert_eq!(
-        namespace_reader
-            .stat_with_options("/file", &options)
-            .await
-            .expect("snapshot path"),
-        before
-    );
-    assert_eq!(
-        namespace_reader
-            .stat_by_inode_with_options(before.inode_id, &options)
+        view.stat_by_inode(before.inode_id)
             .await
             .expect("snapshot inode"),
         before
     );
-    let paths = namespace_reader
-        .list_with_options(
-            "/",
-            &loonfs::ListOptions {
-                at: loonfs::ReadAt::Snapshot(snapshot.snapshot_id.clone()),
-                ..Default::default()
-            },
-        )
-        .page()
-        .await
-        .expect("snapshot paths");
-    let inodes = namespace_reader
-        .list_by_inode_with_options(
-            root.inode_id,
-            &loonfs::ListOptions {
-                at: loonfs::ReadAt::Snapshot(snapshot.snapshot_id),
-                ..Default::default()
-            },
-        )
+    let paths = view.list("/").page().await.expect("snapshot paths");
+    let inodes = view
+        .list_by_inode(root.inode_id)
         .page()
         .await
         .expect("snapshot children");
@@ -586,11 +558,12 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
     assert_eq!(paths.head_seq, snapshot.captured_seq);
 }
 
-/// Checks that the shared file read, change feed, and download options read
-/// the state that a snapshot captured through the namespace handle, and that
-/// a download of a numbered revision refuses a snapshot.
+/// Checks that file reads, the change feed with options, and downloads
+/// through a view of a snapshot read the state that the snapshot captured,
+/// and that a revision download by inode finds its revision in the
+/// snapshot.
 #[tokio::test]
-async fn shared_file_and_download_options_select_the_snapshot() {
+async fn reads_through_a_snapshot_view_read_the_captured_state() {
     let directory = tempdir().expect("directory");
     let writer = LoonFs::builder_with_store(
         Arc::new(LocalFsStore::new(directory.path()).expect("store")),
@@ -626,27 +599,20 @@ async fn shared_file_and_download_options_select_the_snapshot() {
     let live = reader.read_file("/file").await.expect("live read");
     assert_eq!(live.bytes, b"before and after");
 
-    let at = ReadAt::Snapshot(snapshot.snapshot_id.clone());
-    let file = ReadFileOptions { at: at.clone() };
-    let captured = reader
-        .read_file_with_options("/file", &file)
+    let view = reader
+        .read_view_at_snapshot(&snapshot.snapshot_id)
         .await
-        .expect("snapshot read");
+        .expect("a view of the snapshot");
+    let captured = view.read_file("/file").await.expect("snapshot read");
     assert_eq!(captured.bytes, b"before");
     let inode_id = live.entry.inode_id;
-    let by_inode = reader
-        .read_file_by_inode_with_options(inode_id, &file)
+    let by_inode = view
+        .read_file_by_inode(inode_id)
         .await
         .expect("snapshot read by inode");
     assert_eq!(by_inode.bytes, b"before");
-    let feed = reader
-        .list_changes_with_options(
-            CommitSeq(0),
-            &ListChangesOptions {
-                at: at.clone(),
-                ..ListChangesOptions::default()
-            },
-        )
+    let feed = view
+        .list_changes_with_options(CommitSeq(0), &ListChangesOptions::default())
         .page()
         .await
         .expect("snapshot feed");
@@ -656,16 +622,13 @@ async fn shared_file_and_download_options_select_the_snapshot() {
         Some(snapshot.captured_seq)
     );
 
-    let download = DownloadOptions {
-        at,
-        ..DownloadOptions::default()
-    };
-    let grant = reader
+    let download = DownloadOptions::default();
+    let grant = view
         .create_download_with_options("/file", &download)
         .await
         .expect("snapshot grant");
     assert_eq!(grant.revision_no, RevisionNo(1));
-    let grant = reader
+    let grant = view
         .create_download_by_inode_with_options(inode_id, &download)
         .await
         .expect("snapshot grant by inode");
@@ -673,29 +636,16 @@ async fn shared_file_and_download_options_select_the_snapshot() {
     // The inode revision download finds its revision in the snapshot, as the
     // inode revision content read does, so a revision committed after the
     // snapshot isn't found there.
-    let grant = reader
+    let grant = view
         .create_revision_download_by_inode_with_options(inode_id, RevisionNo(1), &download)
         .await
         .expect("snapshot revision grant by inode");
     assert_eq!(grant.revision_no, RevisionNo(1));
-    let later = reader
+    let later = view
         .create_revision_download_by_inode_with_options(inode_id, RevisionNo(2), &download)
         .await
         .expect_err("a revision after the snapshot");
     assert_eq!(later.code(), loonfs::ErrorCode::RevisionNotFound);
-    // The path form selects its revision by the snapshot, so it refuses a
-    // revision number with a snapshot.
-    let error = reader
-        .create_revision_download_with_options("/file", RevisionNo(1), &download)
-        .await
-        .err();
-    assert_matches!(
-        error,
-        Some(loonfs::Error::InvalidRequest {
-            param: "snapshot_id",
-            ..
-        })
-    );
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -775,13 +725,16 @@ async fn a_fork_point_snapshot_reads_a_revision_that_the_sources_tail_replaced()
             .map(drop),
         ErrorCode::RevisionNotFound,
     );
-    let snapshot_options = loonfs::ReadFileStreamOptions {
-        at: ReadAt::Snapshot(snapshot_id.clone()),
-        ..Default::default()
-    };
     let mut stream = reader
         .namespace(&fork)
-        .read_file_revision_stream_by_inode_with_options(inode_id, RevisionNo(1), &snapshot_options)
+        .read_view_at_snapshot(&snapshot_id)
+        .await
+        .expect("a view of the fork point snapshot")
+        .read_file_revision_stream_by_inode_with_options(
+            inode_id,
+            RevisionNo(1),
+            &loonfs::ReadFileStreamOptions::default(),
+        )
         .await
         .expect("read the revision through the fork point snapshot");
     let mut bytes = Vec::new();

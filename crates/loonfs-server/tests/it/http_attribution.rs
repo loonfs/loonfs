@@ -17,7 +17,6 @@ fn actor(id: &str) -> ActorId {
 fn with_attributes() -> loonfs_client::StatOptions {
     loonfs_client::StatOptions {
         include_attributes: loonfs_types::options::AttributeInclusion::Include,
-        ..Default::default()
     }
 }
 

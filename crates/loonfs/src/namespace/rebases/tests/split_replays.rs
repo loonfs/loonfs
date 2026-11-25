@@ -233,7 +233,6 @@ async fn tree(namespace: &Namespace<Writable>) -> Tree {
             &ListOptions {
                 include_attributes: AttributeInclusion::Include,
                 recursive: true,
-                ..ListOptions::default()
             },
         )
         .collect_up_to(10_000)

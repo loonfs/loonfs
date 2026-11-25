@@ -12,7 +12,7 @@ use crate::args::{
 };
 use crate::backend::StepBudget;
 use crate::error::Result;
-use loonfs_client::{ListChangesOptions, ReadAt};
+use loonfs_client::ListChangesOptions;
 use loonfs_types::{
     AdvanceRetentionRequest, CommitSeq, GrepIndexStatus, MetadataMaintenanceRequest,
     RunMaintenanceJobResponse, RunPoolMaintenanceJobResponse,
@@ -243,15 +243,16 @@ pub(crate) async fn run_changes(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = NamespaceContext::resolve(invocation, None).await?;
     let after_seq = args.after.unwrap_or(CommitSeq(0));
+    let client = &context.profile.target.client;
+    let options = ListChangesOptions::default();
+    let pages = match args.snapshot_id {
+        Some(snapshot_id) => client
+            .snapshot_reader(snapshot_id)
+            .list_changes_with_options(context.namespace(), after_seq, &options),
+        None => client.list_changes_with_options(context.namespace(), after_seq, &options),
+    };
     let listing = collect_or_stream_pages(
-        context.profile.target.client.list_changes_with_options(
-            context.namespace(),
-            after_seq,
-            &ListChangesOptions {
-                at: ReadAt::from(args.snapshot_id),
-                ..ListChangesOptions::default()
-            },
-        ),
+        pages,
         &args.page_limits,
         |_: &loonfs_types::ListChangesResponse| {},
     )

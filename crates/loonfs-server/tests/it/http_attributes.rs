@@ -225,7 +225,6 @@ async fn the_client_round_trips_the_read_options() {
             &path("/docs/report.txt"),
             &StatOptions {
                 include_attributes: loonfs_types::options::AttributeInclusion::Include,
-                ..Default::default()
             },
         )
         .await

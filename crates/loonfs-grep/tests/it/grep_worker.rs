@@ -1719,7 +1719,8 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
         ("prn_root", vec!["/team/file", "/team/secret/file"]),
     ] {
         let reads = NamespaceReads::new(host.reader.clone(), &namespace_id)
-            .with_subject(subject(principal));
+            .with_subject(subject(principal))
+            .strong();
         let response = host
             .service
             .query(&request("needle"), first_page(), &reads, &store)
@@ -1730,8 +1731,9 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     let mut scan = request("ee");
     scan.allow_scan = true;
     scan.scope = GrepScope::Path(AbsolutePath::parse("/team").expect("path"));
-    let reads =
-        NamespaceReads::new(host.reader.clone(), &namespace_id).with_subject(subject("viewer"));
+    let reads = NamespaceReads::new(host.reader.clone(), &namespace_id)
+        .with_subject(subject("viewer"))
+        .strong();
     let scanned = host
         .service
         .query(&scan, first_page(), &reads, &store)
@@ -1850,7 +1852,8 @@ async fn a_subject_without_history_follows_a_cursor_over_unchanged_files() {
     host.enable_grep_index(&namespace_id).await.expect("index");
     let page = |principal: &'static str, cursor: Option<String>| {
         let reads = NamespaceReads::new(host.reader.clone(), &namespace_id)
-            .with_subject(subject(principal));
+            .with_subject(subject(principal))
+            .strong();
         let store = store.clone();
         let service = &host.service;
         async move {

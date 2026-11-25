@@ -10,8 +10,8 @@ use super::{remote_spec, FileJob, NamespaceContext};
 use crate::error::{CliError, Result};
 use crate::render::write_stderr_warning;
 use futures::Stream;
-use loonfs_client::{ListOptions, ReadAt};
-use loonfs_types::{AbsolutePath, DisplayName, InodeId};
+use loonfs_client::ListOptions;
+use loonfs_types::{AbsolutePath, DisplayName, InodeId, SnapshotId};
 use loonfs_types::{CommitSeq, ListPathEntriesResponse, PathEntry, PathEntryKind};
 use std::ffi::OsStr;
 use std::fs::ReadDir;
@@ -209,7 +209,7 @@ struct ListedDirectory<Destination> {
 struct RemoteTree<'a, Destination> {
     context: &'a NamespaceContext,
     param: &'a str,
-    at: &'a ReadAt,
+    snapshot_id: Option<&'a SnapshotId>,
     /// The root's listing, then a listing of each directory that the listing
     /// before it returned without the entries below it.
     ///
@@ -229,13 +229,13 @@ pub(super) async fn remote_tree<'a, Destination: TreePath + 'a>(
     context: &'a NamespaceContext,
     root: &AbsolutePath,
     param: &'a str,
-    at: &'a ReadAt,
+    snapshot_id: Option<&'a SnapshotId>,
     destination: Destination,
 ) -> Result<impl Stream<Item = TreeEntry<AbsolutePath, Destination>> + 'a> {
     let mut state = RemoteTree {
         context,
         param,
-        at,
+        snapshot_id,
         listings: Vec::new(),
         last_directory: None,
         first_head: None,
@@ -372,22 +372,18 @@ impl<Destination: TreePath> RemoteTree<'_, Destination> {
         cursor: Option<String>,
     ) -> Result<ListPathEntriesResponse> {
         let spec = remote_spec(self.context, source, self.param)?;
-        Ok(self
-            .context
-            .profile
-            .target
-            .client
-            .list_with_options(
-                &spec,
-                &ListOptions {
-                    recursive: true,
-                    at: self.at.clone(),
-                    ..ListOptions::default()
-                },
-            )
-            .cursor(cursor)
-            .page()
-            .await?)
+        let client = &self.context.profile.target.client;
+        let options = ListOptions {
+            recursive: true,
+            ..ListOptions::default()
+        };
+        let pages = match self.snapshot_id {
+            Some(snapshot_id) => client
+                .snapshot_reader(snapshot_id.clone())
+                .list_with_options(&spec, &options),
+            None => client.list_with_options(&spec, &options),
+        };
+        Ok(pages.cursor(cursor).page().await?)
     }
 }
 

@@ -3,7 +3,7 @@
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, PoisonError};
-use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};
 
 /// Receives the running and waiting counts of one set of permits after
 /// every change.
@@ -16,7 +16,7 @@ pub trait PermitObserver: Send + Sync {
 ///
 /// Waits are first come, first served.
 pub struct Permits {
-    permits: Semaphore,
+    permits: Arc<Semaphore>,
     counts: Mutex<PermitCounts>,
     observer: Option<Arc<dyn PermitObserver>>,
 }
@@ -42,7 +42,7 @@ impl Permits {
     /// Creates `limit` permits whose counts are reported to `observer`.
     pub fn new(limit: NonZeroUsize, observer: Option<Arc<dyn PermitObserver>>) -> Self {
         Self {
-            permits: Semaphore::new(limit.get().min(Semaphore::MAX_PERMITS)),
+            permits: Arc::new(Semaphore::new(limit.get().min(Semaphore::MAX_PERMITS))),
             counts: Mutex::default(),
             observer,
         }
@@ -66,6 +66,45 @@ impl Permits {
             counts.running += 1;
         });
         permit
+    }
+
+    /// Waits for a permit, as [`Self::acquire`] does, and returns it in a
+    /// form that keeps these permits alive, so it can outlive the borrow
+    /// and be shared.
+    pub async fn acquire_owned(self: &Arc<Self>) -> OwnedBudgetPermit {
+        self.update(|counts| counts.waiting += 1);
+        let mut permit = OwnedBudgetPermit {
+            permits: Arc::clone(self),
+            permit: None,
+        };
+        let acquired = Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .expect("the permits should remain open");
+        permit.permit = Some(acquired);
+        self.update(|counts| {
+            counts.waiting -= 1;
+            counts.running += 1;
+        });
+        permit
+    }
+
+    /// Takes a permit's work out of the counts, as running when it has the
+    /// permit and as waiting otherwise, and reports the counts.
+    fn release(&self, running: bool) {
+        // A drop can run while a panic unwinds, and a second panic then
+        // aborts the process, so this recovers a poisoned lock instead of
+        // panicking. The critical section only updates two counts.
+        let counts = {
+            let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+            if running {
+                counts.running -= 1;
+            } else {
+                counts.waiting -= 1;
+            }
+            *counts
+        };
+        self.report(counts);
     }
 
     /// Snapshots the work that has a permit and the work that waits for
@@ -119,26 +158,27 @@ pub struct BudgetPermit<'a> {
 impl Drop for BudgetPermit<'_> {
     fn drop(&mut self) {
         let permit = self.permit.take();
-        let running = permit.is_some();
-        // A drop can run while a panic unwinds, and a second panic then
-        // aborts the process, so this recovers a poisoned lock instead of
-        // panicking. The critical section only updates two counts.
-        let counts = {
-            let mut counts = self
-                .permits
-                .counts
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if running {
-                counts.running -= 1;
-            } else {
-                counts.waiting -= 1;
-            }
-            *counts
-        };
-        self.permits.report(counts);
+        self.permits.release(permit.is_some());
         // The count falls before the permit returns, so the running count
         // never passes the limit.
+        drop(permit);
+    }
+}
+
+/// A permit from a [`Permits`] that keeps the permits alive, from
+/// [`Permits::acquire_owned`], or a place in the queue for one. Dropping it
+/// returns the permit, or leaves the queue.
+pub struct OwnedBudgetPermit {
+    permits: Arc<Permits>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+impl Drop for OwnedBudgetPermit {
+    fn drop(&mut self) {
+        let permit = self.permit.take();
+        self.permits.release(permit.is_some());
+        // The count falls before the permit returns, as for a
+        // `BudgetPermit`.
         drop(permit);
     }
 }

@@ -128,9 +128,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// Creates a view containing only one manifest, at its folded head.
     ///
     /// Unlike [`Self::from_loaded_head`], this view does not replay the current
-    /// WAL tail. It is used for the manifests that snapshots keep, so later
-    /// commits cannot affect the result, and its retention floor is the
-    /// manifest's.
+    /// WAL tail, so later commits can't affect the result, and its retention
+    /// floor is the manifest's. Tests use it to read one manifest's rows at a
+    /// sequence.
+    #[cfg(test)]
     pub(crate) fn over_manifest_segments(
         segments: &'a VerifiedMetadataSegments<'store, S>,
         folded_head_seq: CommitSeq,

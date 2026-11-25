@@ -437,3 +437,560 @@ async fn a_strong_read_sees_a_write_through_another_runtime_and_an_eventual_read
         }
     }
 }
+
+/// A read's form, its label, and the status, error code, `param` and store
+/// request count of its response.
+type Outcome = (
+    &'static str,
+    &'static str,
+    u16,
+    &'static str,
+    Option<&'static str>,
+    usize,
+);
+
+/// Checks the response and the store request count of every route that
+/// reads a snapshot, with a bad value in one request parameter, in three
+/// forms: with a `snapshot_id` that doesn't exist, as a live read, and as a
+/// `strong` live read. A malformed path or cursor is refused before the read
+/// looks up a snapshot or sends a store request, in every form.
+#[tokio::test]
+async fn a_bad_parameter_on_a_snapshot_read_route_is_refused_in_each_form() {
+    let fixture = fixture("bad-parameters", READ_REVALIDATION_BOUND_MS).await;
+    let namespace = "/v0/namespaces/demo";
+    let file = fixture.file_inode.clone();
+    let root = "ino_00000000000000000000000000";
+    let reads = [
+        (
+            "entries bad path",
+            LiveRead::get(
+                format!("{namespace}/filesystem/entries?path=relative"),
+                true,
+            ),
+        ),
+        (
+            "entries bad cursor",
+            LiveRead::get(
+                format!("{namespace}/filesystem/entries?path=/&cursor=garbage"),
+                true,
+            ),
+        ),
+        (
+            "entries missing dir",
+            LiveRead::get(
+                format!("{namespace}/filesystem/entries?path=/missing"),
+                true,
+            ),
+        ),
+        (
+            "entry bad path",
+            LiveRead::get(format!("{namespace}/filesystem/entry?path=relative"), true),
+        ),
+        (
+            "content bad path",
+            LiveRead::get(
+                format!("{namespace}/filesystem/content?path=relative"),
+                true,
+            ),
+        ),
+        (
+            "revisions bad path",
+            LiveRead::get(
+                format!("{namespace}/filesystem/revisions?path=relative"),
+                true,
+            ),
+        ),
+        (
+            "revisions bad cursor",
+            LiveRead::get(
+                format!("{namespace}/filesystem/revisions?path=/file.txt&cursor=garbage"),
+                true,
+            ),
+        ),
+        (
+            "changes event_index",
+            LiveRead::get(
+                format!("{namespace}/changes?after_seq=0&event_index=5"),
+                true,
+            ),
+        ),
+        (
+            "changes after head",
+            LiveRead::get(format!("{namespace}/changes?after_seq=999"), true),
+        ),
+        (
+            "inode children bad cursor",
+            LiveRead::get(
+                format!("{namespace}/inodes/{root}/children?cursor=garbage"),
+                true,
+            ),
+        ),
+        (
+            "inode revisions bad cursor",
+            LiveRead::get(
+                format!("{namespace}/inodes/{file}/revisions?cursor=garbage"),
+                true,
+            ),
+        ),
+        (
+            "inode revision content missing",
+            LiveRead::get(
+                format!("{namespace}/inodes/{file}/revisions/9/content"),
+                true,
+            ),
+        ),
+        (
+            "download bad path",
+            LiveRead::download(
+                format!("{namespace}/filesystem/downloads"),
+                json!({"path": "relative"}),
+                true,
+            ),
+        ),
+        (
+            "download past end",
+            LiveRead::download(
+                format!("{namespace}/filesystem/downloads"),
+                json!({"path": "/file.txt", "start_offset": 999}),
+                true,
+            ),
+        ),
+        (
+            "inode download past end",
+            LiveRead::download(
+                format!("{namespace}/inodes/{file}/downloads"),
+                json!({"start_offset": 999}),
+                true,
+            ),
+        ),
+        (
+            "inode revision download missing",
+            LiveRead::download(
+                format!("{namespace}/inodes/{file}/revisions/9/downloads"),
+                json!({}),
+                true,
+            ),
+        ),
+    ];
+    let mut actual = Vec::new();
+    for (form, parameters) in [
+        ("snapshot", vec![("snapshot_id", json!(SNAPSHOT_ID))]),
+        ("live", vec![]),
+        ("strong", vec![("consistency", json!("strong"))]),
+    ] {
+        for (label, read) in &reads {
+            fixture.recording.reset();
+            let (status, body) = fixture.send(read.request(&parameters)).await;
+            let error: ErrorResponse = serde_json::from_slice(&body).expect("error body");
+            let requests = fixture.recording.take().len();
+            actual.push((
+                form,
+                *label,
+                status.as_u16(),
+                error.code,
+                error.param,
+                requests,
+            ));
+        }
+    }
+    let expected: [Outcome; 48] = [
+        (
+            "snapshot",
+            "entries bad path",
+            400,
+            "invalid_request",
+            Some("path"),
+            0,
+        ),
+        (
+            "snapshot",
+            "entries bad cursor",
+            400,
+            "invalid_request",
+            Some("cursor"),
+            0,
+        ),
+        (
+            "snapshot",
+            "entries missing dir",
+            404,
+            "snapshot_not_found",
+            None,
+            10,
+        ),
+        (
+            "snapshot",
+            "entry bad path",
+            404,
+            "snapshot_not_found",
+            None,
+            2,
+        ),
+        (
+            "snapshot",
+            "content bad path",
+            404,
+            "snapshot_not_found",
+            None,
+            2,
+        ),
+        (
+            "snapshot",
+            "revisions bad path",
+            400,
+            "invalid_request",
+            Some("path"),
+            0,
+        ),
+        (
+            "snapshot",
+            "revisions bad cursor",
+            400,
+            "invalid_request",
+            Some("cursor"),
+            0,
+        ),
+        (
+            "snapshot",
+            "changes event_index",
+            404,
+            "snapshot_not_found",
+            None,
+            2,
+        ),
+        (
+            "snapshot",
+            "changes after head",
+            404,
+            "snapshot_not_found",
+            None,
+            2,
+        ),
+        (
+            "snapshot",
+            "inode children bad cursor",
+            400,
+            "invalid_request",
+            Some("cursor"),
+            0,
+        ),
+        (
+            "snapshot",
+            "inode revisions bad cursor",
+            400,
+            "invalid_request",
+            Some("cursor"),
+            0,
+        ),
+        (
+            "snapshot",
+            "inode revision content missing",
+            404,
+            "snapshot_not_found",
+            None,
+            2,
+        ),
+        (
+            "snapshot",
+            "download bad path",
+            400,
+            "invalid_request",
+            Some("/path"),
+            0,
+        ),
+        (
+            "snapshot",
+            "download past end",
+            404,
+            "snapshot_not_found",
+            None,
+            2,
+        ),
+        (
+            "snapshot",
+            "inode download past end",
+            404,
+            "snapshot_not_found",
+            None,
+            2,
+        ),
+        (
+            "snapshot",
+            "inode revision download missing",
+            404,
+            "snapshot_not_found",
+            None,
+            2,
+        ),
+        (
+            "live",
+            "entries bad path",
+            400,
+            "invalid_request",
+            Some("path"),
+            0,
+        ),
+        (
+            "live",
+            "entries bad cursor",
+            400,
+            "invalid_request",
+            Some("cursor"),
+            0,
+        ),
+        (
+            "live",
+            "entries missing dir",
+            404,
+            "path_not_found",
+            None,
+            0,
+        ),
+        (
+            "live",
+            "entry bad path",
+            400,
+            "invalid_request",
+            Some("path"),
+            0,
+        ),
+        (
+            "live",
+            "content bad path",
+            400,
+            "invalid_request",
+            Some("path"),
+            0,
+        ),
+        (
+            "live",
+            "revisions bad path",
+            400,
+            "invalid_request",
+            Some("path"),
+            0,
+        ),
+        (
+            "live",
+            "revisions bad cursor",
+            400,
+            "invalid_request",
+            Some("cursor"),
+            0,
+        ),
+        (
+            "live",
+            "changes event_index",
+            409,
+            "below_retention_floor",
+            None,
+            0,
+        ),
+        (
+            "live",
+            "changes after head",
+            400,
+            "invalid_request",
+            Some("after_seq"),
+            1,
+        ),
+        (
+            "live",
+            "inode children bad cursor",
+            400,
+            "invalid_request",
+            Some("cursor"),
+            0,
+        ),
+        (
+            "live",
+            "inode revisions bad cursor",
+            400,
+            "invalid_request",
+            Some("cursor"),
+            0,
+        ),
+        (
+            "live",
+            "inode revision content missing",
+            404,
+            "revision_not_found",
+            None,
+            0,
+        ),
+        (
+            "live",
+            "download bad path",
+            400,
+            "invalid_request",
+            Some("/path"),
+            0,
+        ),
+        (
+            "live",
+            "download past end",
+            400,
+            "invalid_request",
+            Some("/start_offset"),
+            0,
+        ),
+        (
+            "live",
+            "inode download past end",
+            400,
+            "invalid_request",
+            Some("/start_offset"),
+            0,
+        ),
+        (
+            "live",
+            "inode revision download missing",
+            404,
+            "revision_not_found",
+            None,
+            0,
+        ),
+        (
+            "strong",
+            "entries bad path",
+            400,
+            "invalid_request",
+            Some("path"),
+            0,
+        ),
+        (
+            "strong",
+            "entries bad cursor",
+            400,
+            "invalid_request",
+            Some("cursor"),
+            0,
+        ),
+        (
+            "strong",
+            "entries missing dir",
+            404,
+            "path_not_found",
+            None,
+            1,
+        ),
+        (
+            "strong",
+            "entry bad path",
+            400,
+            "invalid_request",
+            Some("path"),
+            1,
+        ),
+        (
+            "strong",
+            "content bad path",
+            400,
+            "invalid_request",
+            Some("path"),
+            1,
+        ),
+        (
+            "strong",
+            "revisions bad path",
+            400,
+            "invalid_request",
+            Some("path"),
+            0,
+        ),
+        (
+            "strong",
+            "revisions bad cursor",
+            400,
+            "invalid_request",
+            Some("cursor"),
+            0,
+        ),
+        (
+            "strong",
+            "changes event_index",
+            409,
+            "below_retention_floor",
+            None,
+            1,
+        ),
+        (
+            "strong",
+            "changes after head",
+            400,
+            "invalid_request",
+            Some("after_seq"),
+            1,
+        ),
+        (
+            "strong",
+            "inode children bad cursor",
+            400,
+            "invalid_request",
+            Some("cursor"),
+            0,
+        ),
+        (
+            "strong",
+            "inode revisions bad cursor",
+            400,
+            "invalid_request",
+            Some("cursor"),
+            0,
+        ),
+        (
+            "strong",
+            "inode revision content missing",
+            404,
+            "revision_not_found",
+            None,
+            1,
+        ),
+        (
+            "strong",
+            "download bad path",
+            400,
+            "invalid_request",
+            Some("/path"),
+            0,
+        ),
+        (
+            "strong",
+            "download past end",
+            400,
+            "invalid_request",
+            Some("/start_offset"),
+            1,
+        ),
+        (
+            "strong",
+            "inode download past end",
+            400,
+            "invalid_request",
+            Some("/start_offset"),
+            1,
+        ),
+        (
+            "strong",
+            "inode revision download missing",
+            404,
+            "revision_not_found",
+            None,
+            1,
+        ),
+    ];
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert_eq!(
+            (
+                actual.0,
+                actual.1,
+                actual.2,
+                actual.3.as_str(),
+                actual.4.as_deref(),
+                actual.5
+            ),
+            expected
+        );
+    }
+    assert_eq!(actual.len(), expected.len());
+}

@@ -307,7 +307,6 @@ async fn a_resumed_inode_stream_reads_only_the_rest_in_the_asked_chunks() {
                 range: StreamRange::Whole {
                     start_offset: held as u64,
                 },
-                ..ReadFileStreamOptions::default()
             },
         )
         .await

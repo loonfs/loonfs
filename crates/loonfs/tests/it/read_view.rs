@@ -6,7 +6,7 @@ use crate::common::{
 };
 use loonfs::{
     CommitSeq, CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, ListOptions,
-    LoonFs, NamespaceId, PutFileOptions, ReadAt, RevisionNo,
+    LoonFs, NamespaceId, PutFileOptions, RevisionNo,
 };
 use std::assert_matches;
 use tempfile::tempdir;
@@ -491,13 +491,21 @@ async fn a_namespace_listing_at_a_snapshot_resumes_only_a_cursor_of_that_snapsho
         })
         .await
         .expect("create later snapshot");
-    let at = |snapshot: &loonfs::Snapshot| ListOptions {
-        at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
-        ..ListOptions::default()
+    let view = |snapshot: &loonfs::Snapshot| {
+        let snapshot_id = snapshot.snapshot_id.clone();
+        let namespace = namespace.clone();
+        async move {
+            namespace
+                .read_view_at_snapshot(&snapshot_id)
+                .await
+                .expect("a view of the snapshot")
+        }
     };
+    let list = ListOptions::default();
     let limit = loonfs_types::EffectiveLimit::from_requested(Some(2)).expect("page limit");
-    let first_page = namespace
-        .list_with_options("/", &at(&first))
+    let first_page = view(&first)
+        .await
+        .list_with_options("/", &list)
         .page_limit(limit)
         .page()
         .await
@@ -509,9 +517,10 @@ async fn a_namespace_listing_at_a_snapshot_resumes_only_a_cursor_of_that_snapsho
         (&twin, "does not match requested snapshot"),
         (&later, "does not match the read view head"),
     ] {
+        let snapshot = view(snapshot).await;
         assert_cursor_rejected(
-            namespace
-                .list_with_options("/", &at(snapshot))
+            snapshot
+                .list_with_options("/", &list)
                 .page_limit(limit)
                 .cursor(Some(cursor.clone()))
                 .page()
@@ -519,8 +528,8 @@ async fn a_namespace_listing_at_a_snapshot_resumes_only_a_cursor_of_that_snapsho
             reason,
         );
         assert_cursor_rejected(
-            namespace
-                .list_by_inode_with_options(root, &at(snapshot))
+            snapshot
+                .list_by_inode_with_options(root, &list)
                 .page_limit(limit)
                 .cursor(Some(cursor.clone()))
                 .page()
@@ -529,15 +538,16 @@ async fn a_namespace_listing_at_a_snapshot_resumes_only_a_cursor_of_that_snapsho
         );
     }
 
-    let resumed = namespace
-        .list_with_options("/", &at(&first))
+    let first = view(&first).await;
+    let resumed = first
+        .list_with_options("/", &list)
         .page_limit(limit)
         .cursor(Some(cursor.clone()))
         .page()
         .await
         .expect("resume the first snapshot by path");
-    let by_inode = namespace
-        .list_by_inode_with_options(root, &at(&first))
+    let by_inode = first
+        .list_by_inode_with_options(root, &list)
         .page_limit(limit)
         .cursor(Some(cursor))
         .page()
@@ -1079,17 +1089,6 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         })
         .await
         .expect("create snapshot");
-    let snapshot_options = loonfs::StatOptions {
-        at: loonfs::ReadAt::Snapshot(snapshot.snapshot_id.clone()),
-        ..Default::default()
-    };
-    assert_eq!(
-        namespace
-            .stat_with_options("/pinned.txt", &snapshot_options)
-            .await
-            .expect("read with snapshot options"),
-        captured,
-    );
 
     runtime
         .put_file_with_options(
@@ -1109,9 +1108,9 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         .await
         .expect("view live snapshot");
     assert_eq!(
-        view.stat_with_options("/pinned.txt", &snapshot_options)
+        view.stat("/pinned.txt")
             .await
-            .expect("read view entry with snapshot options"),
+            .expect("read the view's entry"),
         captured,
     );
     assert_eq!(view.head_seq(), snapshot.captured_seq);
@@ -1221,106 +1220,6 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
             ErrorCode::SnapshotNotFound,
         );
     }
-}
-
-#[tokio::test]
-async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
-    let temp_dir = tempdir().expect("tempdir");
-    let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-mismatch-read-test").await;
-    let namespace_id = NamespaceId::parse("snapshot-mismatch-reads").expect("namespace id");
-    let namespace = runtime.reader.namespace(&namespace_id);
-    runtime
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace_writer = runtime
-        .writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    runtime
-        .put_file(
-            &namespace_id,
-            "/pinned.txt",
-            b"captured",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("create captured file");
-    let mut snapshots = Vec::new();
-    for name in ["first", "second"] {
-        snapshots.push(
-            namespace_writer
-                .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
-                    name: Some(name.to_owned()),
-                    ..loonfs::CreateSnapshotOptions::default()
-                })
-                .await
-                .expect("create snapshot"),
-        );
-    }
-    let view = namespace
-        .read_view_at_snapshot(&snapshots[0].snapshot_id)
-        .await
-        .expect("view the first snapshot");
-    let other = snapshots[1].snapshot_id.clone();
-    let limit = loonfs_types::EffectiveLimit::DEFAULT;
-    let root = view.stat("/").await.expect("root entry").inode_id;
-
-    let assert_rejected = |result: loonfs::Result<()>| {
-        let error = result
-            .expect_err("naming another snapshot is rejected")
-            .to_error_response();
-        assert_eq!(error.code, "invalid_request");
-        assert_eq!(error.param.as_deref(), Some("snapshot_id"));
-    };
-    assert_rejected(
-        view.stat_with_options(
-            "/pinned.txt",
-            &loonfs::StatOptions {
-                at: loonfs::ReadAt::Snapshot(other.clone()),
-                ..Default::default()
-            },
-        )
-        .await
-        .map(drop),
-    );
-    assert_rejected(
-        view.stat_by_inode_with_options(
-            root,
-            &loonfs::StatOptions {
-                at: loonfs::ReadAt::Snapshot(other.clone()),
-                ..Default::default()
-            },
-        )
-        .await
-        .map(drop),
-    );
-    assert_rejected(
-        view.list_with_options(
-            "/",
-            &loonfs::ListOptions {
-                at: loonfs::ReadAt::Snapshot(other.clone()),
-                ..Default::default()
-            },
-        )
-        .page_limit(limit)
-        .page()
-        .await
-        .map(drop),
-    );
-    assert_rejected(
-        view.list_by_inode_with_options(
-            root,
-            &loonfs::ListOptions {
-                at: loonfs::ReadAt::Snapshot(other),
-                ..Default::default()
-            },
-        )
-        .page_limit(limit)
-        .page()
-        .await
-        .map(drop),
-    );
 }
 
 #[tokio::test]

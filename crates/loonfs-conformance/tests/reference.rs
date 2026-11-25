@@ -5,9 +5,9 @@
 use bytes::Bytes;
 use loonfs_client::{
     AppendFileOptions, AttributeChanges, Client, ClientConfig, ClientError, CommitOptions,
-    Consistency, CreateDirectoryOptions, DeleteOptions, DownloadOptions, ListFileRevisionsOptions,
-    ListTrashOptions, MoveOptions, NamespacePath, PutFileOptions, ReadAt,
-    RestoreDeletedDestination, RestoreDeletedOptions, UpdateAttributesByInodeOptions,
+    CreateDirectoryOptions, DeleteOptions, DownloadOptions, MoveOptions, NamespacePath,
+    PutFileOptions, RestoreDeletedDestination, RestoreDeletedOptions,
+    UpdateAttributesByInodeOptions,
 };
 use loonfs_conformance::server::{start_server, ConformanceServer, StoreShape, AUTH_TOKEN};
 use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
@@ -909,27 +909,21 @@ async fn run_read_consistency(harness: &Harness, case: &Case) {
     let inode_id = client.stat(&spec).await.expect("stat file").inode_id;
     let revision_no = RevisionNo(expected.revision_no);
 
-    for consistency in [Consistency::Strong, Consistency::Eventual] {
+    for client in [client.strong(), client.clone()] {
         let trash = client
-            .list_trash_with_options(&namespace, &ListTrashOptions { consistency })
+            .list_trash(&namespace)
             .page()
             .await
             .expect("list trash");
         assert_eq!(trash.entries.len(), expected.trash_entry_count);
-        let revisions = ListFileRevisionsOptions {
-            at: ReadAt::Live(consistency),
-        };
         for listing in [
-            client.list_file_revisions_with_options(&spec, &revisions),
-            client.list_file_revisions_by_inode_with_options(&namespace, inode_id, &revisions),
+            client.list_file_revisions(&spec),
+            client.list_file_revisions_by_inode(&namespace, inode_id),
         ] {
             let page = listing.page().await.expect("list revisions");
             assert_eq!(page.revisions[0].revision_no, revision_no);
         }
-        let download = DownloadOptions {
-            at: ReadAt::Live(consistency),
-            ..DownloadOptions::default()
-        };
+        let download = DownloadOptions::default();
         let path_grant = client
             .create_download_with_options(&spec, &download)
             .await
@@ -964,18 +958,13 @@ async fn run_read_consistency(harness: &Harness, case: &Case) {
         .await
         .expect("create snapshot");
     let captured = client
-        .create_download_with_options(
-            &spec,
-            &DownloadOptions {
-                at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
-                ..DownloadOptions::default()
-            },
-        )
+        .snapshot_reader(snapshot.snapshot_id.clone())
+        .create_download_with_options(&spec, &DownloadOptions::default())
         .await
         .expect("grant at the snapshot");
     assert_eq!(captured.revision_no, revision_no);
-    // `ReadAt` can't combine a snapshot with a consistency, so the typed
-    // client can't send that request, and the raw client sends it instead.
+    // The typed client can't combine a snapshot with a consistency, so the
+    // raw client sends that request instead.
     let response = harness
         .raw_client
         .post(format!(
@@ -1076,7 +1065,6 @@ async fn run_append(harness: &Harness, case: &Case) {
             &spec,
             &DownloadOptions {
                 start_offset: expected.resume_offset,
-                ..Default::default()
             },
         )
         .await
@@ -1837,7 +1825,6 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
             &copy_path,
             &loonfs_client::StatOptions {
                 include_attributes: loonfs_types::options::AttributeInclusion::Include,
-                ..Default::default()
             },
         )
         .await

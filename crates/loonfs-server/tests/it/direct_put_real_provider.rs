@@ -211,7 +211,6 @@ async fn assert_direct_get_capability_serves_only_its_range(
             target,
             &DownloadOptions {
                 start_offset: split as u64,
-                ..DownloadOptions::default()
             },
         )
         .await

@@ -427,7 +427,6 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     "/docs/renamed.txt",
                     &loonfs::StatOptions {
                         include_attributes: loonfs_types::options::AttributeInclusion::Include,
-                        ..Default::default()
                     },
                 )
                 .await

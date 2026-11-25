@@ -5,8 +5,7 @@ use crate::read_at_fields::ReadAtFields;
 use crate::transport::QueryBuilder;
 use crate::{Client, ClientError, NamespacePath, PayloadStream, Result};
 use loonfs_types::options::{
-    CommitSplitting, Consistency, DiffOptions, ListChangesOptions, ListFileRevisionsOptions,
-    ListOptions, ListTrashOptions, ReadAt, ReadFileOptions, StatOptions,
+    CommitSplitting, DiffOptions, ListChangesOptions, ListOptions, StatOptions,
 };
 use loonfs_types::{ChangeFeedPosition, ListChangesResponse, ListDiffResponse};
 use loonfs_types::{
@@ -14,23 +13,6 @@ use loonfs_types::{
     ListPathEntriesResponse, ListTrashResponse, NamespaceId, PageRequest, Pager, PathEntry,
     RevisionNo,
 };
-
-/// Adds the query parameters that say what a read reads at.
-pub(crate) fn push_read_at(query: &mut QueryBuilder, at: &ReadAt) {
-    let fields = ReadAtFields::from(at);
-    if let Some(snapshot_id) = &fields.snapshot_id {
-        query.push("snapshot_id", snapshot_id.as_str());
-    }
-    if let Some(consistency) = fields.consistency {
-        query.push(
-            "consistency",
-            match consistency {
-                Consistency::Eventual => "eventual",
-                Consistency::Strong => "strong",
-            },
-        );
-    }
-}
 
 /// Adds `split_commits` and `event_index` to a change feed or diff request
 /// that sets them. A request for whole commits from a commit boundary sends
@@ -67,10 +49,21 @@ impl Client {
         spec: &NamespacePath,
         options: &ListOptions,
     ) -> PathEntriesPager {
+        self.list_at(spec, options, self.head_fields())
+    }
+
+    pub(crate) fn list_at(
+        &self,
+        spec: &NamespacePath,
+        options: &ListOptions,
+        at: ReadAtFields,
+    ) -> PathEntriesPager {
         Pager::with_state(
-            (self.clone(), spec.clone(), options.clone()),
-            |(client, spec, options), request| async move {
-                client.path_entries_page(&spec, request, &options).await
+            (self.clone(), spec.clone(), options.clone(), at),
+            |(client, spec, options, at), request| async move {
+                client
+                    .path_entries_page(&spec, request, &options, &at)
+                    .await
             },
         )
     }
@@ -80,6 +73,7 @@ impl Client {
         spec: &NamespacePath,
         request: PageRequest<String>,
         options: &ListOptions,
+        at: &ReadAtFields,
     ) -> Result<ListPathEntriesResponse> {
         let mut query =
             QueryBuilder::new(self.namespace_url(spec.namespace(), "/filesystem/entries"));
@@ -87,7 +81,7 @@ impl Client {
         query.page(&request);
         query.push("include_attributes", options.include_attributes);
         query.push("recursive", options.recursive);
-        push_read_at(&mut query, &options.at);
+        at.push(&mut query);
         self.send_json(self.request(operations::LIST_PATH_ENTRIES, &query.build()))
             .await
     }
@@ -103,11 +97,20 @@ impl Client {
         spec: &NamespacePath,
         options: &StatOptions,
     ) -> Result<PathEntry> {
+        self.stat_at(spec, options, &self.head_fields()).await
+    }
+
+    pub(crate) async fn stat_at(
+        &self,
+        spec: &NamespacePath,
+        options: &StatOptions,
+        at: &ReadAtFields,
+    ) -> Result<PathEntry> {
         let mut query =
             QueryBuilder::new(self.namespace_url(spec.namespace(), "/filesystem/entry"));
         query.push("path", spec.absolute_path().as_str());
         query.push("include_attributes", options.include_attributes);
-        push_read_at(&mut query, &options.at);
+        at.push(&mut query);
         self.send_json(self.request(operations::GET_PATH_ENTRY, &query.build()))
             .await
     }
@@ -130,11 +133,22 @@ impl Client {
         inode_id: InodeId,
         options: &StatOptions,
     ) -> Result<PathEntry> {
+        self.stat_by_inode_at(namespace_id, inode_id, options, &self.head_fields())
+            .await
+    }
+
+    pub(crate) async fn stat_by_inode_at(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        options: &StatOptions,
+        at: &ReadAtFields,
+    ) -> Result<PathEntry> {
         let inode_id = inode_id.to_string();
         let mut query =
             QueryBuilder::new(self.namespace_url(namespace_id, &format!("/inodes/{inode_id}")));
         query.push("include_attributes", options.include_attributes);
-        push_read_at(&mut query, &options.at);
+        at.push(&mut query);
         self.send_json(self.request(operations::GET_INODE, &query.build()))
             .await
     }
@@ -155,16 +169,27 @@ impl Client {
         inode_id: InodeId,
         options: &ListOptions,
     ) -> InodeChildrenPager {
+        self.list_by_inode_at(namespace_id, inode_id, options, self.head_fields())
+    }
+
+    pub(crate) fn list_by_inode_at(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        options: &ListOptions,
+        at: ReadAtFields,
+    ) -> InodeChildrenPager {
         Pager::with_state(
             (
                 self.clone(),
                 namespace_id.clone(),
                 inode_id,
                 options.clone(),
+                at,
             ),
-            |(client, namespace_id, inode_id, options), request| async move {
+            |(client, namespace_id, inode_id, options, at), request| async move {
                 client
-                    .inode_children_page(&namespace_id, inode_id, request, &options)
+                    .inode_children_page(&namespace_id, inode_id, request, &options, &at)
                     .await
             },
         )
@@ -176,6 +201,7 @@ impl Client {
         inode_id: InodeId,
         request: PageRequest<String>,
         options: &ListOptions,
+        at: &ReadAtFields,
     ) -> Result<ListInodeChildrenResponse> {
         let inode_id = inode_id.to_string();
         let mut query = QueryBuilder::new(
@@ -184,26 +210,25 @@ impl Client {
         query.page(&request);
         query.push("include_attributes", options.include_attributes);
         query.push("recursive", options.recursive);
-        push_read_at(&mut query, &options.at);
+        at.push(&mut query);
         self.send_json(self.request(operations::LIST_INODE_CHILDREN, &query.build()))
             .await
     }
 
     /// Lists a file's revisions by path.
     pub fn list_file_revisions(&self, spec: &NamespacePath) -> FileRevisionsPager {
-        self.list_file_revisions_with_options(spec, &ListFileRevisionsOptions::default())
+        self.list_file_revisions_at(spec, self.head_fields())
     }
 
-    /// Lists a file's revisions by path, as `options` asks.
-    pub fn list_file_revisions_with_options(
+    pub(crate) fn list_file_revisions_at(
         &self,
         spec: &NamespacePath,
-        options: &ListFileRevisionsOptions,
+        at: ReadAtFields,
     ) -> FileRevisionsPager {
         Pager::with_state(
-            (self.clone(), spec.clone(), options.clone()),
-            |(client, spec, options), request| async move {
-                client.file_revisions_page(&spec, request, &options).await
+            (self.clone(), spec.clone(), at),
+            |(client, spec, at), request| async move {
+                client.file_revisions_page(&spec, request, &at).await
             },
         )
     }
@@ -212,13 +237,13 @@ impl Client {
         &self,
         spec: &NamespacePath,
         request: PageRequest<String>,
-        options: &ListFileRevisionsOptions,
+        at: &ReadAtFields,
     ) -> Result<ListFileRevisionsResponse> {
         let mut query =
             QueryBuilder::new(self.namespace_url(spec.namespace(), "/filesystem/revisions"));
         query.push("path", spec.absolute_path().as_str());
         query.page(&request);
-        push_read_at(&mut query, &options.at);
+        at.push(&mut query);
         self.send_json(self.request(operations::LIST_FILE_REVISIONS, &query.build()))
             .await
     }
@@ -229,30 +254,20 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
     ) -> FileRevisionsPager {
-        self.list_file_revisions_by_inode_with_options(
-            namespace_id,
-            inode_id,
-            &ListFileRevisionsOptions::default(),
-        )
+        self.list_file_revisions_by_inode_at(namespace_id, inode_id, self.head_fields())
     }
 
-    /// Lists the retained revisions of a file inode, as `options` asks.
-    pub fn list_file_revisions_by_inode_with_options(
+    pub(crate) fn list_file_revisions_by_inode_at(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        options: &ListFileRevisionsOptions,
+        at: ReadAtFields,
     ) -> FileRevisionsPager {
         Pager::with_state(
-            (
-                self.clone(),
-                namespace_id.clone(),
-                inode_id,
-                options.clone(),
-            ),
-            |(client, namespace_id, inode_id, options), request| async move {
+            (self.clone(), namespace_id.clone(), inode_id, at),
+            |(client, namespace_id, inode_id, at), request| async move {
                 client
-                    .file_revisions_by_inode_page(&namespace_id, inode_id, request, &options)
+                    .file_revisions_by_inode_page(&namespace_id, inode_id, request, &at)
                     .await
             },
         )
@@ -263,33 +278,24 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         request: PageRequest<String>,
-        options: &ListFileRevisionsOptions,
+        at: &ReadAtFields,
     ) -> Result<ListFileRevisionsResponse> {
         let inode_id = inode_id.to_string();
         let mut query = QueryBuilder::new(
             self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/revisions")),
         );
         query.page(&request);
-        push_read_at(&mut query, &options.at);
+        at.push(&mut query);
         self.send_json(self.request(operations::LIST_FILE_REVISIONS_BY_INODE, &query.build()))
             .await
     }
 
     /// Lists the namespace's trash.
     pub fn list_trash(&self, namespace_id: &NamespaceId) -> TrashPager {
-        self.list_trash_with_options(namespace_id, &ListTrashOptions::default())
-    }
-
-    /// Lists the namespace's trash, as `options` asks.
-    pub fn list_trash_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        options: &ListTrashOptions,
-    ) -> TrashPager {
         Pager::with_state(
-            (self.clone(), namespace_id.clone(), *options),
-            |(client, namespace_id, options), request| async move {
-                client.trash_page(&namespace_id, request, &options).await
+            (self.clone(), namespace_id.clone()),
+            |(client, namespace_id), request| async move {
+                client.trash_page(&namespace_id, request).await
             },
         )
     }
@@ -298,11 +304,10 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         request: PageRequest<String>,
-        options: &ListTrashOptions,
     ) -> Result<ListTrashResponse> {
         let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/filesystem/trash"));
         query.page(&request);
-        push_read_at(&mut query, &ReadAt::Live(options.consistency));
+        self.head_fields().push(&mut query);
         self.send_json(self.request(operations::LIST_TRASH, &query.build()))
             .await
     }
@@ -312,27 +317,44 @@ impl Client {
         self.list_changes_with_options(namespace_id, after_seq, &ListChangesOptions::default())
     }
 
-    /// Lists committed changes after `after_seq`, bounded by the requested
-    /// snapshot.
+    /// Lists committed changes after `after_seq`, as `options` asks.
     pub fn list_changes_with_options(
         &self,
         namespace_id: &NamespaceId,
         after_seq: CommitSeq,
         options: &ListChangesOptions,
     ) -> ChangesPager {
+        self.list_changes_at(namespace_id, after_seq, options, self.head_fields())
+    }
+
+    pub(crate) fn list_changes_at(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: CommitSeq,
+        options: &ListChangesOptions,
+        at: ReadAtFields,
+    ) -> ChangesPager {
         let start = ChangeFeedPosition {
             after_seq,
             event_index: options.event_index,
         };
         Pager::with_state(
-            (self.clone(), namespace_id.clone(), start, options.clone()),
-            |(client, namespace_id, start, options), request: PageRequest<ChangeFeedPosition>| async move {
+            (
+                self.clone(),
+                namespace_id.clone(),
+                start,
+                options.commit_splitting,
+                at,
+            ),
+            |(client, namespace_id, start, splitting, at),
+             request: PageRequest<ChangeFeedPosition>| async move {
                 client
                     .changes_page(
                         &namespace_id,
                         request.cursor.unwrap_or(start),
                         request.limit,
-                        &options,
+                        splitting,
+                        &at,
                     )
                     .await
             },
@@ -344,13 +366,14 @@ impl Client {
         namespace_id: &NamespaceId,
         position: ChangeFeedPosition,
         limit: EffectiveLimit,
-        options: &ListChangesOptions,
+        splitting: CommitSplitting,
+        at: &ReadAtFields,
     ) -> Result<ListChangesResponse> {
         let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/changes"));
         query.push("after_seq", position.after_seq.0);
-        push_commit_splitting(&mut query, options.commit_splitting, position.event_index);
+        push_commit_splitting(&mut query, splitting, position.event_index);
         query.push("limit", limit.get());
-        push_read_at(&mut query, &options.at);
+        at.push(&mut query);
         self.send_json(self.request(operations::LIST_CHANGES, &query.build()))
             .await
     }
@@ -386,25 +409,14 @@ impl Client {
         }
         push_commit_splitting(&mut query, options.commit_splitting, options.event_index);
         query.push("limit", options.limit.get());
-        push_read_at(&mut query, &ReadAt::Live(options.consistency));
+        self.head_fields().push(&mut query);
         self.send_json(self.request(operations::LIST_DIFF, &query.build()))
             .await
     }
 
     /// Returns a file's current bytes.
     pub async fn read_file(&self, spec: &NamespacePath) -> Result<Vec<u8>> {
-        self.read_file_with_options(spec, &ReadFileOptions::default())
-            .await
-    }
-
-    /// Returns a file's bytes: the current revision, or the revision a
-    /// snapshot captured when the options name one.
-    pub async fn read_file_with_options(
-        &self,
-        spec: &NamespacePath,
-        options: &ReadFileOptions,
-    ) -> Result<Vec<u8>> {
-        let url = self.file_content_url(spec, None, options);
+        let url = self.file_content_url(spec, None, &self.head_fields());
         Ok(self
             .call(&self.request(operations::GET_FILE_CONTENT, &url))
             .await?
@@ -412,29 +424,12 @@ impl Client {
     }
 
     /// Returns the bytes of one retained revision of a file.
-    ///
-    /// See [`Self::read_file_revision_with_options`].
     pub async fn read_file_revision(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        self.read_file_revision_with_options(spec, revision_no, &ReadFileOptions::default())
-            .await
-    }
-
-    /// Returns the bytes of one retained revision of a file, at the
-    /// consistency that `options` sets.
-    ///
-    /// A snapshot captures one revision of each file, so options that read a
-    /// snapshot return `invalid_request`.
-    pub async fn read_file_revision_with_options(
-        &self,
-        spec: &NamespacePath,
-        revision_no: RevisionNo,
-        options: &ReadFileOptions,
-    ) -> Result<Vec<u8>> {
-        let url = self.file_content_url(spec, Some(revision_no), options);
+        let url = self.file_content_url(spec, Some(revision_no), &self.head_fields());
         Ok(self
             .call(&self.request(operations::GET_FILE_CONTENT, &url))
             .await?
@@ -443,56 +438,36 @@ impl Client {
 
     /// Streams a file's current content through the server.
     ///
-    /// See [`Self::read_file_stream_with_options`].
-    pub async fn read_file_stream(&self, spec: &NamespacePath) -> Result<PayloadStream> {
-        self.read_file_stream_with_options(spec, &ReadFileOptions::default())
-            .await
-    }
-
-    /// Streams content through the server.
-    ///
     /// Successful completion means the server verified the whole object; a late
     /// verification failure aborts the body. Bytes already consumed remain
     /// provisional until the stream ends cleanly.
-    pub async fn read_file_stream_with_options(
+    pub async fn read_file_stream(&self, spec: &NamespacePath) -> Result<PayloadStream> {
+        self.read_file_stream_at(spec, &self.head_fields()).await
+    }
+
+    pub(crate) async fn read_file_stream_at(
         &self,
         spec: &NamespacePath,
-        options: &ReadFileOptions,
+        at: &ReadAtFields,
     ) -> Result<PayloadStream> {
         self.read_content_stream(
             operations::GET_FILE_CONTENT,
-            &self.file_content_url(spec, None, options),
+            &self.file_content_url(spec, None, at),
         )
         .await
     }
 
     /// Streams one retained revision of a file through the server.
     ///
-    /// See [`Self::read_file_revision_stream_with_options`].
+    /// See [`Self::read_file_stream`] for when the bytes are verified.
     pub async fn read_file_revision_stream(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<PayloadStream> {
-        self.read_file_revision_stream_with_options(spec, revision_no, &ReadFileOptions::default())
-            .await
-    }
-
-    /// Streams one retained revision of a file through the server, at the
-    /// consistency that `options` sets.
-    ///
-    /// See [`Self::read_file_stream_with_options`] for when the bytes are
-    /// verified. A snapshot captures one revision of each file, so options
-    /// that read a snapshot return `invalid_request`.
-    pub async fn read_file_revision_stream_with_options(
-        &self,
-        spec: &NamespacePath,
-        revision_no: RevisionNo,
-        options: &ReadFileOptions,
-    ) -> Result<PayloadStream> {
         self.read_content_stream(
             operations::GET_FILE_CONTENT,
-            &self.file_content_url(spec, Some(revision_no), options),
+            &self.file_content_url(spec, Some(revision_no), &self.head_fields()),
         )
         .await
     }
@@ -501,7 +476,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
-        options: &ReadFileOptions,
+        at: &ReadAtFields,
     ) -> String {
         let mut query =
             QueryBuilder::new(self.namespace_url(spec.namespace(), "/filesystem/content"));
@@ -509,7 +484,7 @@ impl Client {
         if let Some(revision_no) = revision_no {
             query.push("revision_no", revision_no.0);
         }
-        push_read_at(&mut query, &options.at);
+        at.push(&mut query);
         query.build()
     }
 
@@ -519,20 +494,7 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
     ) -> Result<Vec<u8>> {
-        self.read_file_by_inode_with_options(namespace_id, inode_id, &ReadFileOptions::default())
-            .await
-    }
-
-    /// Returns the bytes of a visible file inode, wherever it is bound: the
-    /// current revision, or the revision a snapshot captured when the options
-    /// name one.
-    pub async fn read_file_by_inode_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        options: &ReadFileOptions,
-    ) -> Result<Vec<u8>> {
-        let url = self.inode_content_url(namespace_id, inode_id, options);
+        let url = self.inode_content_url(namespace_id, inode_id, &self.head_fields());
         Ok(self
             .call(&self.request(operations::GET_FILE_CONTENT_BY_INODE, &url))
             .await?
@@ -542,71 +504,42 @@ impl Client {
     /// Streams the current content of a visible file inode through the server,
     /// wherever it is bound.
     ///
-    /// See [`Self::read_file_stream_with_options`] for when the bytes are
-    /// verified.
+    /// See [`Self::read_file_stream`] for when the bytes are verified.
     pub async fn read_file_stream_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
     ) -> Result<PayloadStream> {
-        self.read_file_stream_by_inode_with_options(
-            namespace_id,
-            inode_id,
-            &ReadFileOptions::default(),
-        )
-        .await
+        self.read_file_stream_by_inode_at(namespace_id, inode_id, &self.head_fields())
+            .await
     }
 
-    /// Streams the content of a visible file inode through the server, wherever
-    /// it is bound: the current revision, or the revision a snapshot captured
-    /// when the options name one.
-    ///
-    /// See [`Self::read_file_stream_with_options`] for when the bytes are
-    /// verified.
-    pub async fn read_file_stream_by_inode_with_options(
+    pub(crate) async fn read_file_stream_by_inode_at(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        options: &ReadFileOptions,
+        at: &ReadAtFields,
     ) -> Result<PayloadStream> {
         self.read_content_stream(
             operations::GET_FILE_CONTENT_BY_INODE,
-            &self.inode_content_url(namespace_id, inode_id, options),
+            &self.inode_content_url(namespace_id, inode_id, at),
         )
         .await
     }
 
     /// Reads and verifies one retained file revision by inode identity.
-    ///
-    /// See [`Self::read_file_revision_by_inode_with_options`].
     pub async fn read_file_revision_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        self.read_file_revision_by_inode_with_options(
+        let url = self.inode_revision_content_url(
             namespace_id,
             inode_id,
             revision_no,
-            &ReadFileOptions::default(),
-        )
-        .await
-    }
-
-    /// Reads and verifies one retained file revision by inode identity, at
-    /// the consistency or the snapshot that `options` sets.
-    ///
-    /// Options that read a snapshot, or one of the namespace's fork
-    /// snapshots, read the revision that the snapshot's manifest keeps.
-    pub async fn read_file_revision_by_inode_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        options: &ReadFileOptions,
-    ) -> Result<Vec<u8>> {
-        let url = self.inode_revision_content_url(namespace_id, inode_id, revision_no, options);
+            &self.head_fields(),
+        );
         Ok(self
             .call(&self.request(operations::GET_FILE_REVISION_CONTENT_BY_INODE, &url))
             .await?
@@ -615,38 +548,32 @@ impl Client {
 
     /// Streams one retained file revision by inode identity through the server.
     ///
-    /// See [`Self::read_file_revision_stream_by_inode_with_options`].
+    /// See [`Self::read_file_stream`] for when the bytes are verified.
     pub async fn read_file_revision_stream_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<PayloadStream> {
-        self.read_file_revision_stream_by_inode_with_options(
+        self.read_file_revision_stream_by_inode_at(
             namespace_id,
             inode_id,
             revision_no,
-            &ReadFileOptions::default(),
+            &self.head_fields(),
         )
         .await
     }
 
-    /// Streams one retained file revision by inode identity through the
-    /// server, at the consistency or the snapshot that `options` sets.
-    ///
-    /// See [`Self::read_file_stream_with_options`] for when the bytes are
-    /// verified. Options that read a snapshot, or one of the namespace's fork
-    /// snapshots, read the revision that the snapshot's manifest keeps.
-    pub async fn read_file_revision_stream_by_inode_with_options(
+    pub(crate) async fn read_file_revision_stream_by_inode_at(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
-        options: &ReadFileOptions,
+        at: &ReadAtFields,
     ) -> Result<PayloadStream> {
         self.read_content_stream(
             operations::GET_FILE_REVISION_CONTENT_BY_INODE,
-            &self.inode_revision_content_url(namespace_id, inode_id, revision_no, options),
+            &self.inode_revision_content_url(namespace_id, inode_id, revision_no, at),
         )
         .await
     }
@@ -662,13 +589,13 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        options: &ReadFileOptions,
+        at: &ReadAtFields,
     ) -> String {
         let inode_id = inode_id.to_string();
         let mut query = QueryBuilder::new(
             self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/content")),
         );
-        push_read_at(&mut query, &options.at);
+        at.push(&mut query);
         query.build()
     }
 
@@ -677,14 +604,14 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
-        options: &ReadFileOptions,
+        at: &ReadAtFields,
     ) -> String {
         let inode_id = inode_id.to_string();
         let mut query = QueryBuilder::new(self.namespace_url(
             namespace_id,
             &format!("/inodes/{inode_id}/revisions/{revision_no}/content"),
         ));
-        push_read_at(&mut query, &options.at);
+        at.push(&mut query);
         query.build()
     }
 }
@@ -796,10 +723,10 @@ mod tests {
         assert_eq!(trash.entries[0].inode_kind, EntryInodeKind::Unknown);
     }
 
-    /// Checks that an `eventual` live read sends no consistency parameter,
-    /// because a live read without one is `eventual`, that a `strong` live
-    /// read sends `consistency=strong`, and that a snapshot read sends only
-    /// `snapshot_id`.
+    /// Checks that an `eventual` client's read sends no consistency
+    /// parameter, because a live read without one is `eventual`, that a
+    /// `strong` copy's read sends `consistency=strong`, and that a snapshot
+    /// reader's read sends only `snapshot_id`.
     #[tokio::test]
     async fn reads_send_only_the_parameters_of_what_they_read_at() {
         let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
@@ -810,16 +737,15 @@ mod tests {
             Outcome::Success(b"file".to_vec()),
         ]);
         let client = scripted_transport::client(&transport);
-        for at in [
-            ReadAt::Live(Consistency::Eventual),
-            ReadAt::Live(Consistency::Strong),
-            ReadAt::Snapshot(snapshot_id.clone()),
-        ] {
-            client
-                .read_file_with_options(&spec, &ReadFileOptions { at })
-                .await
-                .expect("read file");
+        for client in [client.clone(), client.strong()] {
+            client.read_file(&spec).await.expect("read file");
         }
+        let stream = client
+            .snapshot_reader(snapshot_id.clone())
+            .read_file_stream(&spec)
+            .await
+            .expect("read file");
+        drop(stream);
         let urls: Vec<_> = transport
             .sent()
             .into_iter()
@@ -838,7 +764,7 @@ mod tests {
     }
 
     /// Checks that the trash and revision listings send `consistency` only
-    /// for a `strong` listing.
+    /// through a `strong` copy of the client.
     #[tokio::test]
     async fn listings_send_the_consistency_parameter_only_when_strong() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -850,8 +776,7 @@ mod tests {
             "head_seq": 1,
             "revisions": []
         });
-        let consistencies = [Consistency::Eventual, Consistency::Strong];
-        let transport = scripted_transport::script(consistencies.iter().flat_map(|_| {
+        let transport = scripted_transport::script((0..2).flat_map(|_| {
             [
                 Outcome::Success(trash.to_string().into_bytes()),
                 Outcome::Success(revisions.to_string().into_bytes()),
@@ -859,24 +784,21 @@ mod tests {
             ]
         }));
         let client = scripted_transport::client(&transport);
-        for consistency in consistencies {
+        for client in [client.clone(), client.strong()] {
             client
-                .list_trash_with_options(&namespace_id, &ListTrashOptions { consistency })
+                .list_trash(&namespace_id)
                 .next()
                 .await
                 .expect("a page")
                 .expect("trash");
-            let options = ListFileRevisionsOptions {
-                at: ReadAt::Live(consistency),
-            };
             client
-                .list_file_revisions_with_options(&spec, &options)
+                .list_file_revisions(&spec)
                 .next()
                 .await
                 .expect("a page")
                 .expect("revisions");
             client
-                .list_file_revisions_by_inode_with_options(&namespace_id, InodeId(2), &options)
+                .list_file_revisions_by_inode(&namespace_id, InodeId(2))
                 .next()
                 .await
                 .expect("a page")

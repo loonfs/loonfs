@@ -64,33 +64,6 @@ pub enum Consistency {
     Strong,
 }
 
-/// The state that a read reads: the namespace's live head, or a snapshot.
-///
-/// A snapshot selects the state that a read of it sees, so only a live read
-/// has a consistency.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReadAt {
-    /// The live head, confirmed as the consistency asks.
-    Live(Consistency),
-    /// The state that this snapshot, or this fork snapshot of the namespace,
-    /// captured.
-    Snapshot(SnapshotId),
-}
-
-impl Default for ReadAt {
-    fn default() -> Self {
-        Self::Live(Consistency::Eventual)
-    }
-}
-
-impl From<Option<SnapshotId>> for ReadAt {
-    /// Returns a read of the snapshot, or an `eventual` read of the live head
-    /// when there's no snapshot.
-    fn from(snapshot_id: Option<SnapshotId>) -> Self {
-        snapshot_id.map_or_else(Self::default, Self::Snapshot)
-    }
-}
-
 /// Commit settings shared by every filesystem mutation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommitOptions {
@@ -115,9 +88,6 @@ impl CommitOptions {
 pub struct StatOptions {
     /// Whether to include the inode's attribute map and revision, disabled by default.
     pub include_attributes: AttributeInclusion,
-    /// The live head or the snapshot that the read reads, by default an `eventual`
-    /// read of the live head.
-    pub at: ReadAt,
 }
 
 /// Options for listing a directory by path or by inode.
@@ -128,18 +98,6 @@ pub struct ListOptions {
     /// Whether to list the directory's whole subtree, depth first in name-key
     /// order, instead of its children only, disabled by default.
     pub recursive: bool,
-    /// The live head or the snapshot that each page reads, by default an
-    /// `eventual` read of the live head.
-    pub at: ReadAt,
-}
-
-/// Options for a read of a file's content by path or by inode.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ReadFileOptions {
-    /// The live head or the snapshot that the read reads, by default an
-    /// `eventual` read of the live head. A snapshot read
-    /// returns the file revision that the snapshot captured.
-    pub at: ReadAt,
 }
 
 /// A byte range of a file that a ranged read returns.
@@ -222,11 +180,6 @@ fn parse_range_offset(digits: &str) -> Option<u64> {
 /// Options for a direct download of a file's content by path or by inode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DownloadOptions {
-    /// The live head or the snapshot that the download reads, by default an
-    /// `eventual` read of the live head. A snapshot download
-    /// returns the file revision that the snapshot captured, and a download
-    /// of a numbered revision can't read a snapshot.
-    pub at: ReadAt,
     /// The first byte that the download reads, for a caller that already has
     /// the bytes below it. The download covers `[start_offset, size_bytes)`,
     /// so a caller that resumes a download asks for a new one. An offset at
@@ -252,10 +205,6 @@ pub enum CommitSplitting {
 /// Options for listing the change feed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListChangesOptions {
-    /// The live head or the snapshot that each page reads, by default an
-    /// `eventual` read of the live head. A snapshot's feed ends
-    /// at the sequence that the snapshot captured.
-    pub at: ReadAt,
     /// Whether a page can end inside a commit. By default, it can't.
     pub commit_splitting: CommitSplitting,
     /// The event of the commit at the feed's `after_seq` that the first page
@@ -289,8 +238,6 @@ pub struct DiffOptions {
     pub limit: EffectiveLimit,
     /// Whether the page can end inside a commit. By default, it can't.
     pub commit_splitting: CommitSplitting,
-    /// How recently the page confirms the live head, by default `eventual`.
-    pub consistency: Consistency,
 }
 
 impl Default for DiffOptions {
@@ -302,35 +249,8 @@ impl Default for DiffOptions {
             event_index: 0,
             limit: EffectiveLimit::DEFAULT,
             commit_splitting: CommitSplitting::Whole,
-            consistency: Consistency::Eventual,
         }
     }
-}
-
-/// Options for listing a file's revisions by path or by inode.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ListFileRevisionsOptions {
-    /// The live head or the snapshot that each page reads, by default an
-    /// `eventual` read of the live head. A listing of a
-    /// snapshot returns the revisions that the snapshot's manifest keeps,
-    /// newest first from the revision that the snapshot captured, and every
-    /// page reads the same captured head.
-    pub at: ReadAt,
-}
-
-/// Options for a read of the live head that has no other options: a read of a namespace's
-/// metadata, a read view, or a fork's next merge range.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LiveReadOptions {
-    /// How recently the read confirms the live head, by default `eventual`.
-    pub consistency: Consistency,
-}
-
-/// Options for listing the namespace's trash.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ListTrashOptions {
-    /// How recently each page confirms the live head, by default `eventual`.
-    pub consistency: Consistency,
 }
 
 /// The attribute writes and removals one update applies.
@@ -675,28 +595,6 @@ mod tests {
         assert_eq!(range(999, 1).end_offset(1000), Some(1000));
         assert_eq!(range(1000, 1).end_offset(1000), None);
         assert_eq!(range(0, 0).end_offset(0), None);
-    }
-
-    #[test]
-    fn read_options_read_the_live_head_eventually_by_default() {
-        let eventual = ReadAt::Live(Consistency::Eventual);
-        assert_eq!(StatOptions::default().at, eventual);
-        assert_eq!(ListOptions::default().at, eventual);
-        assert_eq!(ReadAt::from(None), eventual);
-        assert_eq!(ReadFileOptions::default().at, eventual);
-        assert_eq!(DownloadOptions::default().at, eventual);
-        assert_eq!(DownloadOptions::default().start_offset, 0);
-        assert_eq!(ListChangesOptions::default().at, eventual);
-        assert_eq!(ListFileRevisionsOptions::default().at, eventual);
-        assert_eq!(DiffOptions::default().consistency, Consistency::Eventual);
-        assert_eq!(
-            ListTrashOptions::default().consistency,
-            Consistency::Eventual
-        );
-        assert_eq!(
-            LiveReadOptions::default().consistency,
-            Consistency::Eventual
-        );
     }
 
     #[test]

@@ -5,8 +5,8 @@ use crate::metrics::{
     CounterHandle, DefaultMetricsRecorder, GaugeHandle, HistogramHandle, MetricsRecorder,
 };
 use crate::{
-    InlineContentPolicy, ListOptions, LoonFs, Namespace, ReadAt, ReadFileStreamOptions, ReadRange,
-    StatOptions, StreamRange, Writable,
+    InlineContentPolicy, ListOptions, LoonFs, Namespace, ReadFileStreamOptions, ReadRange,
+    StreamRange, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
@@ -407,8 +407,10 @@ async fn dropping_waiting_and_running_reads_clears_the_counts() {
     fixture.runtime.shutdown().await.expect("shutdown");
 }
 
+/// Checks that a public capture of a snapshot view takes one slot, and that
+/// each read through the view takes one of its own.
 #[tokio::test]
-async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
+async fn a_snapshot_view_takes_one_slot_to_capture_and_one_per_read() {
     let fixture = Fixture::new(KeyPredicate::any()).await;
     let snapshot = fixture
         .namespace
@@ -418,42 +420,7 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
         })
         .await
         .expect("snapshot");
-    let stat = StatOptions {
-        at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
-        ..StatOptions::default()
-    };
-    let list = ListOptions {
-        at: stat.at.clone(),
-        ..ListOptions::default()
-    };
-    let root = fixture
-        .one_read(fixture.namespace.stat_with_options("/", &stat))
-        .await;
-    fixture
-        .one_read(
-            fixture
-                .namespace
-                .stat_by_inode_with_options(root.inode_id, &stat),
-        )
-        .await;
-    fixture
-        .one_read(
-            fixture
-                .namespace
-                .list_with_options("/", &list)
-                .page_limit(one_entry())
-                .page(),
-        )
-        .await;
-    fixture
-        .one_read(
-            fixture
-                .namespace
-                .list_by_inode_with_options(root.inode_id, &list)
-                .page_limit(one_entry())
-                .page(),
-        )
-        .await;
+    let list = ListOptions::default();
     let view = fixture
         .one_read(
             fixture
@@ -461,7 +428,7 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
                 .read_view_at_snapshot(&snapshot.snapshot_id),
         )
         .await;
-    fixture.one_read(view.stat("/")).await;
+    let root = fixture.one_read(view.stat("/")).await;
     fixture.one_read(view.stat_by_inode(root.inode_id)).await;
     fixture
         .one_read(
@@ -477,5 +444,194 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
                 .page(),
         )
         .await;
+    fixture.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that one read of a snapshot through `read_at_snapshot`, the read
+/// that an HTTP snapshot request runs, takes exactly one slot for the
+/// capture and the stat or the page.
+#[tokio::test]
+async fn a_read_at_a_snapshot_takes_exactly_one_slot_per_stat_or_page() {
+    let fixture = Fixture::new(KeyPredicate::any()).await;
+    let snapshot = fixture
+        .namespace
+        .create_snapshot_with_options(&crate::CreateSnapshotOptions {
+            name: Some("snapshot".to_owned()),
+            ..crate::CreateSnapshotOptions::default()
+        })
+        .await
+        .expect("snapshot");
+    let snapshot_id = &snapshot.snapshot_id;
+    let namespace = &fixture.namespace;
+    let root = fixture
+        .one_read(
+            namespace.read_at_snapshot(snapshot_id, |view| async move { view.stat("/").await }),
+        )
+        .await;
+    fixture
+        .one_read(namespace.read_at_snapshot(snapshot_id, |view| async move {
+            view.stat_by_inode(root.inode_id).await
+        }))
+        .await;
+    fixture
+        .one_read(namespace.read_at_snapshot(snapshot_id, |view| async move {
+            view.list("/").page_limit(one_entry()).page().await
+        }))
+        .await;
+    fixture
+        .one_read(namespace.read_at_snapshot(snapshot_id, |view| async move {
+            view.list_by_inode(root.inode_id)
+                .page_limit(one_entry())
+                .page()
+                .await
+        }))
+        .await;
+    fixture.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that one slot admits one running read: inside a `read_at_snapshot`
+/// call, a second read through the call's view waits while the first read
+/// is paused in the store, and the budget reports one running read and none
+/// waiting until both end.
+#[tokio::test]
+async fn reads_through_a_shared_slot_run_one_at_a_time() {
+    let fixture = Fixture::new(KeyPredicate::any()).await;
+    let snapshot = fixture
+        .namespace
+        .create_snapshot_with_options(&crate::CreateSnapshotOptions {
+            name: Some("snapshot".to_owned()),
+            ..crate::CreateSnapshotOptions::default()
+        })
+        .await
+        .expect("snapshot");
+    let fixture = &fixture;
+    let (first, second) = finish(fixture.namespace.read_at_snapshot(
+        &snapshot.snapshot_id,
+        |view| async move {
+            fixture.store.block_next();
+            let mut first = std::pin::pin!(view.read_file("/a"));
+            tokio::select! {
+                _ = first.as_mut() => panic!("the first read waits in the store"),
+                () = fixture.store.wait_until_blocked() => {}
+            }
+            let mut second = std::pin::pin!(view.read_file("/b"));
+            assert!(futures::poll!(second.as_mut()).is_pending());
+            fixture.assert_counts(1, 0);
+            fixture.store.release();
+            let (first, second) = futures::future::join(first, second).await;
+            Ok((first?, second?))
+        },
+    ))
+    .await
+    .expect("both reads");
+    assert_eq!(
+        (first.bytes, second.bytes),
+        (b"body".to_vec(), b"body".to_vec())
+    );
+    fixture.assert_counts(0, 0);
+    fixture.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a copy of a `read_at_snapshot` call's view, kept after the
+/// call returns, keeps the call's slot, and that reads through the copy and
+/// through a copy of the copy still run one at a time.
+#[tokio::test]
+async fn a_kept_copy_of_a_shared_view_reads_one_at_a_time() {
+    let fixture = Fixture::new(KeyPredicate::any()).await;
+    let snapshot = fixture
+        .namespace
+        .create_snapshot_with_options(&crate::CreateSnapshotOptions {
+            name: Some("snapshot".to_owned()),
+            ..crate::CreateSnapshotOptions::default()
+        })
+        .await
+        .expect("snapshot");
+    let kept = finish(fixture.namespace.read_at_snapshot(
+        &snapshot.snapshot_id,
+        |view| async move {
+            view.read_file("/a").await?;
+            Ok(view)
+        },
+    ))
+    .await
+    .expect("the kept view");
+    fixture.assert_counts(1, 0);
+    let copy = kept.clone();
+    {
+        fixture.store.block_next();
+        let mut first = std::pin::pin!(kept.read_file("/b"));
+        tokio::select! {
+            _ = first.as_mut() => panic!("the first read waits in the store"),
+            () = fixture.store.wait_until_blocked() => {}
+        }
+        let mut second = std::pin::pin!(copy.read_file("/c"));
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        fixture.assert_counts(1, 0);
+        fixture.store.release();
+        let (first, second) = finish(futures::future::join(first, second)).await;
+        first.expect("the first read");
+        second.expect("the second read");
+    }
+    fixture.assert_counts(1, 0);
+    drop(copy);
+    drop(kept);
+    fixture.assert_counts(0, 0);
+    fixture.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that with one read slot, a second read of a snapshot doesn't
+/// capture its view between the first read's capture and the first read's
+/// stat: the second read waits for the slot before it captures anything, so
+/// it captures after the first read ends.
+#[tokio::test]
+async fn a_second_read_at_a_snapshot_captures_after_the_first_read_ends() {
+    let fixture = Fixture::new(KeyPredicate::any()).await;
+    let snapshot = fixture
+        .namespace
+        .create_snapshot_with_options(&crate::CreateSnapshotOptions {
+            name: Some("snapshot".to_owned()),
+            ..crate::CreateSnapshotOptions::default()
+        })
+        .await
+        .expect("snapshot");
+    let snapshot_id = &snapshot.snapshot_id;
+    let namespace = &fixture.namespace;
+    let events = Mutex::new(Vec::new());
+    let captured = tokio::sync::Notify::new();
+    let release = tokio::sync::Notify::new();
+    let first = namespace.read_at_snapshot(snapshot_id, |view| {
+        let (events, captured, release) = (&events, &captured, &release);
+        async move {
+            events.lock().expect("events").push("first captured");
+            captured.notify_one();
+            release.notified().await;
+            let entry = view.stat("/a").await;
+            events.lock().expect("events").push("first read");
+            entry
+        }
+    });
+    let second = namespace.read_at_snapshot(snapshot_id, |view| {
+        let events = &events;
+        async move {
+            events.lock().expect("events").push("second captured");
+            view.stat("/a").await
+        }
+    });
+    let mut first = std::pin::pin!(first);
+    let mut second = std::pin::pin!(second);
+    tokio::select! {
+        _ = first.as_mut() => panic!("the first read waits for its release"),
+        () = captured.notified() => {}
+    }
+    assert!(futures::poll!(second.as_mut()).is_pending());
+    fixture.assert_counts(1, 1);
+    release.notify_one();
+    let (first, second) = finish(futures::future::join(first, second)).await;
+    first.expect("the first read");
+    second.expect("the second read");
+    assert_eq!(
+        *events.lock().expect("events"),
+        ["first captured", "first read", "second captured"]
+    );
     fixture.runtime.shutdown().await.expect("shutdown");
 }

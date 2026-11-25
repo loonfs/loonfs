@@ -3,15 +3,16 @@
 use crate::error::{CliError, Result};
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_client::{DirectDownloadStream, PayloadStream, ReadAt};
+use loonfs_client::{DirectDownloadStream, PayloadStream};
 use loonfs_types::{RevisionNo, SnapshotId};
 
 /// Which revision of a file a download reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileVersion {
-    /// The current revision at the live head, or the revision that a
-    /// snapshot captured.
-    At(ReadAt),
+    /// The current revision at the live head.
+    Current,
+    /// The revision that a snapshot captured.
+    Snapshot(SnapshotId),
     /// One retained revision.
     Revision(RevisionNo),
 }
@@ -23,9 +24,10 @@ impl FileVersion {
         revision_no: Option<RevisionNo>,
         snapshot_id: Option<SnapshotId>,
     ) -> Self {
-        match revision_no {
-            Some(revision_no) => Self::Revision(revision_no),
-            None => Self::At(ReadAt::from(snapshot_id)),
+        match (revision_no, snapshot_id) {
+            (Some(revision_no), _) => Self::Revision(revision_no),
+            (None, Some(snapshot_id)) => Self::Snapshot(snapshot_id),
+            (None, None) => Self::Current,
         }
     }
 }

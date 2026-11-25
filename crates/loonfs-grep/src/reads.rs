@@ -7,10 +7,9 @@
 use crate::entry::{grep_extension_name, GrepEntry};
 use crate::{GrepError, Result};
 use loonfs::{
-    Consistency, CoreError, CurrentFileState, ListChangesOptions, ListSnapshotFilesOptions,
-    LiveReadOptions, LoonFs, Namespace, NamespaceMetadata, ReadAt, ReadOnly, ReadView,
-    RetainedRevisionsPage, RetainedRevisionsPageCursor, SnapshotFilesPager, StatOptions,
-    MAX_CURRENT_FILES_PER_STAT,
+    CoreError, CurrentFileState, ListSnapshotFilesOptions, LoonFs, Namespace, NamespaceMetadata,
+    ReadOnly, ReadView, RetainedRevisionsPage, RetainedRevisionsPageCursor, SnapshotFilesPager,
+    StatOptions, MAX_CURRENT_FILES_PER_STAT,
 };
 use loonfs_types::{
     AbsolutePath, CommitSeq, ContentRef, EffectiveLimit, InodeId, NamespaceId, Page, PathEntry,
@@ -18,41 +17,50 @@ use loonfs_types::{
 };
 use loonfs_types::{FilesystemEvent, ListChangesResponse};
 
-/// The options of the views that read at a sequence that the worker or an
-/// earlier page already saw, or that the worker builds the index from. These
-/// views confirm the head as a `strong` read does, so the head is at or above
-/// that sequence and includes the worker's own publications.
-const STRONG: LiveReadOptions = LiveReadOptions {
-    consistency: Consistency::Strong,
-};
-
 /// Filesystem reads for one namespace.
 ///
 /// Each call reads one consistent state, but consecutive calls may observe
 /// different heads. Query execution takes one read view so every metadata
 /// phase in one response uses the same head.
+///
+/// The views that read at a sequence that the worker or an earlier page
+/// already saw, or that the worker builds the index from, confirm the head
+/// as a `strong` read does, so the head is at or above that sequence and
+/// includes the worker's own publications.
 pub struct NamespaceReads {
     /// The runtime that a fork's source is read through.
     runtime: LoonFs<ReadOnly>,
     namespace: Namespace<ReadOnly>,
-    subject_namespace: Option<Namespace<ReadOnly>>,
+    /// The handle that a query captures its first view through: the
+    /// service's handle, or the subject's from [`Self::with_subject`], at the
+    /// query's consistency.
+    query: Namespace<ReadOnly>,
 }
 
 impl NamespaceReads {
     /// Reads `namespace_id`, and a fork's source, through `runtime`, a
     /// read-only runtime for the service. Performs no I/O.
     pub fn new(runtime: LoonFs<ReadOnly>, namespace_id: &NamespaceId) -> Self {
+        let namespace = runtime.namespace(namespace_id);
         Self {
-            namespace: runtime.namespace(namespace_id),
+            query: namespace.clone(),
+            namespace,
             runtime,
-            subject_namespace: None,
         }
     }
 
     /// Verifies candidates and reads their content as `subject`. The index
     /// and the change feed still read as the service.
     pub fn with_subject(mut self, subject: Subject) -> Self {
-        self.subject_namespace = Some(self.namespace.with_context(subject.into()));
+        self.query = self.query.with_context(subject.into());
+        self
+    }
+
+    /// Confirms the head that a query's first page reads as a `strong` read
+    /// does. A later page reads at the first page's head, which its cursor
+    /// records.
+    pub fn strong(mut self) -> Self {
+        self.query = self.query.strong();
         self
     }
 
@@ -66,16 +74,18 @@ impl NamespaceReads {
         &self.namespace
     }
 
-    /// Captures one read view for a query, at the head that `consistency`
-    /// confirms.
-    pub(crate) async fn read_view(
-        &self,
-        consistency: Consistency,
-    ) -> Result<NamespaceReadView<'_>> {
-        let namespace = self.subject_namespace.as_ref().unwrap_or(&self.namespace);
-        let view = namespace
-            .read_view_with_options(&LiveReadOptions { consistency })
-            .await?;
+    /// Captures one read view for a query's first page, at the query's
+    /// consistency.
+    pub(crate) async fn read_view(&self) -> Result<NamespaceReadView<'_>> {
+        let view = self.query.read_view().await?;
+        Ok(NamespaceReadView { reads: self, view })
+    }
+
+    /// Captures one read view for a query whose cursor came from a head above
+    /// the one that [`Self::read_view`] captured, at the head that a `strong`
+    /// read confirms.
+    pub(crate) async fn strong_read_view(&self) -> Result<NamespaceReadView<'_>> {
+        let view = self.query.strong().read_view().await?;
         Ok(NamespaceReadView { reads: self, view })
     }
 
@@ -85,7 +95,7 @@ impl NamespaceReads {
     pub(crate) async fn service_view(&self) -> Result<NamespaceReadView<'_>> {
         Ok(NamespaceReadView {
             reads: self,
-            view: self.namespace.read_view_with_options(&STRONG).await?,
+            view: self.namespace.strong().read_view().await?,
         })
     }
 
@@ -96,7 +106,8 @@ impl NamespaceReads {
     pub(crate) async fn membership_view(&self, seq: CommitSeq) -> Result<NamespaceReadView<'_>> {
         let view = self
             .namespace
-            .read_view_with_options(&STRONG)
+            .strong()
+            .read_view()
             .await?
             .at_seq(seq)
             .await?
@@ -119,7 +130,8 @@ impl NamespaceReads {
     pub async fn list_files_at(&self, seq: CommitSeq) -> Result<SnapshotFilesPager> {
         let view = self
             .namespace
-            .read_view_with_options(&STRONG)
+            .strong()
+            .read_view()
             .await?
             .at_seq(seq)
             .await?;
@@ -142,13 +154,10 @@ impl NamespaceReads {
         after_seq: CommitSeq,
         limit: usize,
     ) -> Result<ListChangesResponse> {
-        let options = ListChangesOptions {
-            at: ReadAt::Live(Consistency::Strong),
-            ..ListChangesOptions::default()
-        };
         match self
             .namespace
-            .list_changes_with_options(after_seq, &options)
+            .strong()
+            .list_changes(after_seq)
             .page_limit(page_limit(limit))
             .page()
             .await
@@ -209,16 +218,18 @@ impl NamespaceReads {
         else {
             return Err(error.into());
         };
-        let options = ListChangesOptions {
-            at: ReadAt::Snapshot(basis.fork_point_snapshot_id),
-            ..ListChangesOptions::default()
-        };
-        match self
-            .runtime
-            .namespace(&metadata.namespace_id)
-            .list_changes_with_options(after_seq, &options)
-            .page_limit(page_limit(limit))
-            .page()
+        let namespace = self.runtime.namespace(&metadata.namespace_id);
+        let snapshot_id = &basis.fork_point_snapshot_id;
+        match namespace
+            .read_through_views(|| async {
+                namespace
+                    .read_view_at_snapshot(snapshot_id)
+                    .await?
+                    .list_changes(after_seq)
+                    .page_limit(page_limit(limit))
+                    .page()
+                    .await
+            })
             .await
         {
             Ok(mut page) => {
@@ -378,7 +389,6 @@ impl NamespaceReadView<'_> {
                 absolute_path.as_str(),
                 &StatOptions {
                     include_attributes: loonfs_types::options::AttributeInclusion::Omit,
-                    ..Default::default()
                 },
             )
             .await?)
@@ -392,7 +402,6 @@ impl NamespaceReadView<'_> {
                 inode_id,
                 &StatOptions {
                     include_attributes: loonfs_types::options::AttributeInclusion::Omit,
-                    ..Default::default()
                 },
             )
             .await?)

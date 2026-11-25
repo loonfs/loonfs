@@ -4,7 +4,7 @@
 use crate::publisher::{NamespaceSession, NamespaceSessionStatus};
 use crate::runtime_core::RuntimeCore;
 use crate::trace::{self, operation_span};
-use crate::{CommitSeq, LoonFs, Mode, NamespaceId, ReadOnly, Result, Writable};
+use crate::{CommitSeq, Consistency, LoonFs, Mode, NamespaceId, ReadOnly, Result, Writable};
 use loonfs_core::NamespaceWriterEngine;
 use loonfs_types::Context;
 use std::fmt;
@@ -17,7 +17,6 @@ mod reads;
 mod reads_by_inode;
 mod rebases;
 mod revisions;
-mod snapshot_files;
 mod snapshots;
 mod uploads;
 mod writes;
@@ -53,11 +52,19 @@ mod writes_by_inode;
 /// A fenced session stays dead through every clone. Opening again returns
 /// the session's `writer_fenced` while its work ends, then starts a new
 /// session even if clones of the dead session still exist.
+///
+/// A read through a handle reads the live head at the handle's
+/// consistency, which is `eventual` on a new handle. [`Self::strong`] returns
+/// a copy of the handle whose reads are `strong`, and a read view from that
+/// copy confirms the head before it captures it. A snapshot is read through
+/// [`Self::read_view_at_snapshot`].
 #[derive(Clone)]
 pub struct Namespace<M: Mode> {
     pub(crate) core: RuntimeCore,
     pub(crate) namespace_id: NamespaceId,
     pub(crate) mode: M,
+    /// How recently each read through this handle confirms the live head.
+    pub(crate) consistency: Consistency,
     /// The writer session in the writable mode. The mode type is shared with
     /// [`LoonFs`], which has no session, so the session lives here.
     session: M::Session,
@@ -97,12 +104,29 @@ impl<M: Mode> Namespace<M> {
         }
     }
 
+    /// Returns a copy of this handle whose reads confirm the live head
+    /// before they read, as a `strong` read does.
+    ///
+    /// A copy of a writable handle shares its writer session.
+    pub fn strong(&self) -> Self
+    where
+        M: Clone,
+    {
+        Self {
+            consistency: Consistency::Strong,
+            ..self.clone()
+        }
+    }
+
     /// Returns a handle on the same namespace, for the same subject, that has
-    /// no writer session.
+    /// no writer session and reads at this handle's consistency.
     ///
     /// Keeping it does not keep a session open.
     pub fn read_only(&self) -> Namespace<ReadOnly> {
-        Namespace::new(self.core.clone(), self.namespace_id.clone())
+        Namespace {
+            consistency: self.consistency,
+            ..Namespace::new(self.core.clone(), self.namespace_id.clone())
+        }
     }
 }
 
@@ -112,6 +136,7 @@ impl Namespace<ReadOnly> {
             core,
             namespace_id,
             mode: ReadOnly,
+            consistency: Consistency::Eventual,
             session: (),
         }
     }
@@ -123,6 +148,7 @@ impl Namespace<Writable> {
             core: runtime.core.clone(),
             namespace_id: session.namespace_id().clone(),
             mode: runtime.mode.clone(),
+            consistency: Consistency::Eventual,
             session,
         }
     }

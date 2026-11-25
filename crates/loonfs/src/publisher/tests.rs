@@ -2529,9 +2529,8 @@ async fn a_deletion_that_panics_after_its_tombstone_put_acknowledges_no_later_co
         .expect_err("a commit queued behind the tombstone");
     assert_eq!(queued_error.code(), ErrorCode::NamespaceDeleted);
     let strong = namespace
-        .metadata_with_options(&crate::LiveReadOptions {
-            consistency: crate::Consistency::Strong,
-        })
+        .strong()
+        .head_metadata()
         .await
         .expect_err("a strong read after the tombstone");
     assert_eq!(strong.code(), ErrorCode::NamespaceDeleted);

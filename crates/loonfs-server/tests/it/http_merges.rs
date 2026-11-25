@@ -353,13 +353,8 @@ async fn the_next_range_query_reports_where_the_next_merge_starts() {
     let floor = family.advance_floor(&family.main).await;
     assert!(floor > fork_point);
     let range = client
-        .next_merge_range_with_options(
-            &family.main,
-            &family.fork,
-            &loonfs_client::LiveReadOptions {
-                consistency: loonfs_client::Consistency::Strong,
-            },
-        )
+        .strong()
+        .next_merge_range(&family.main, &family.fork)
         .await
         .expect("the range below main's floor");
     assert_eq!(

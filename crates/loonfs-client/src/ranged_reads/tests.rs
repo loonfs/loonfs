@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::scripted_transport::{self, Outcome};
-use loonfs_types::options::ReadAt;
 use loonfs_types::SnapshotId;
 use std::assert_matches;
 use std::num::NonZeroU64;
@@ -24,12 +23,14 @@ async fn body_bytes(body: PayloadStream) -> std::io::Result<Vec<u8>> {
 }
 
 /// Checks that a ranged read by path and by inode sends the `Range` header
-/// beside the read's usual query, and returns the range that the server's
-/// `Content-Range` header describes.
+/// beside the read's usual query (`consistency` through a `strong` copy, and
+/// `snapshot_id` through a snapshot reader), and returns the range that the
+/// server's `Content-Range` header describes.
 #[tokio::test]
 async fn a_ranged_read_sends_one_range_and_returns_what_the_server_sent() {
     let transport = scripted_transport::script([
         Outcome::PartialContent("bytes 2-5/10".to_owned(), b"cdef".to_vec()),
+        Outcome::PartialContent("bytes 7-9/10".to_owned(), b"hij".to_vec()),
         Outcome::PartialContent("bytes 7-9/10".to_owned(), b"hij".to_vec()),
     ]);
     let client = scripted_transport::client(&transport);
@@ -46,14 +47,8 @@ async fn a_ranged_read_sends_one_range_and_returns_what_the_server_sent() {
     );
     assert_eq!(body_bytes(by_path.body).await.expect("body"), b"cdef");
     let by_inode = client
-        .read_file_range_stream_by_inode_with_options(
-            spec.namespace(),
-            InodeId(42),
-            range(7, None),
-            &ReadFileOptions {
-                at: ReadAt::Snapshot(snapshot_id.clone()),
-            },
-        )
+        .strong()
+        .read_file_range_stream_by_inode(spec.namespace(), InodeId(42), range(7, None))
         .await
         .expect("ranged read by inode");
     assert_eq!(
@@ -61,6 +56,12 @@ async fn a_ranged_read_sends_one_range_and_returns_what_the_server_sent() {
         (7, 3, 10)
     );
     assert_eq!(body_bytes(by_inode.body).await.expect("body"), b"hij");
+    let at_snapshot = client
+        .snapshot_reader(snapshot_id.clone())
+        .read_file_range_stream_by_inode(spec.namespace(), InodeId(42), range(7, None))
+        .await
+        .expect("ranged read by inode at a snapshot");
+    assert_eq!(body_bytes(at_snapshot.body).await.expect("body"), b"hij");
 
     let sent = transport.sent();
     assert_eq!(
@@ -70,11 +71,16 @@ async fn a_ranged_read_sends_one_range_and_returns_what_the_server_sent() {
     assert_eq!(sent[0].header("range"), Some("bytes=2-5"));
     assert_eq!(
         sent[1].url,
+        "http://example.invalid/v0/namespaces/demo/inodes/ino_0000000000000000000000001a/content?consistency=strong"
+    );
+    assert_eq!(sent[1].header("range"), Some("bytes=7-"));
+    assert_eq!(
+        sent[2].url,
         format!(
             "http://example.invalid/v0/namespaces/demo/inodes/ino_0000000000000000000000001a/content?snapshot_id={snapshot_id}"
         )
     );
-    assert_eq!(sent[1].header("range"), Some("bytes=7-"));
+    assert_eq!(sent[2].header("range"), Some("bytes=7-"));
 }
 
 /// Checks that a ranged read of a numbered revision, by path and by inode,

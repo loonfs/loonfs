@@ -325,7 +325,6 @@ fn read_options_project_grouped_attributes_or_none() {
         "/docs/report.txt",
         &StatOptions {
             include_attributes: loonfs_types::options::AttributeInclusion::Include,
-            ..Default::default()
         },
     ))
     .expect("stat with attributes");

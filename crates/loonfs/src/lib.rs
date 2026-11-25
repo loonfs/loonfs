@@ -245,11 +245,10 @@ pub use options::{
     AttributeChanges, CommitOptions, Consistency, CopyOptions, CreateDirectoryOptions,
     CreateSnapshotOptions, DeleteByInodeOptions, DeleteOptions, DiffOptions,
     DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
-    ListFileRevisionsOptions, ListOptions, ListTrashOptions, LiveReadOptions,
-    MaintainMetadataOptions, MergeForkOptions, MoveOptions, PutFileOptions, ReadAt,
-    ReadFileOptions, ReadFileStreamOptions, ReadRange, RestoreDeletedDestination,
-    RestoreDeletedOptions, StatOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
-    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    ListOptions, MaintainMetadataOptions, MergeForkOptions, MoveOptions, PutFileOptions,
+    ReadFileStreamOptions, ReadRange, RestoreDeletedDestination, RestoreDeletedOptions,
+    StatOptions, UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
+    UpdateAttributesOptions,
 };
 pub use pagers::{
     ChangesPager, FileRevisionsPager, InodeChildrenPager, NamespacesPager, PathEntriesPager,

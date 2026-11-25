@@ -6,9 +6,7 @@ use crate::payload::LocalPayload;
 use crate::progress::ProgressReporter;
 use crate::resolve::ResolvedTarget;
 use crate::uploads::UploadJournal;
-use loonfs_client::{
-    DownloadOptions, NamespacePath, PutFileOptions, ReadAt, ReadFileOptions, StatOptions,
-};
+use loonfs_client::{DownloadOptions, NamespacePath, PutFileOptions, StatOptions};
 use loonfs_types::{Commit, PathEntry, SnapshotId};
 use std::sync::Arc;
 
@@ -22,16 +20,18 @@ impl ResolvedTarget {
         spec: &NamespacePath,
         snapshot_id: Option<&SnapshotId>,
     ) -> Result<PathEntry> {
-        Ok(self
-            .client
-            .stat_with_options(
-                spec,
-                &StatOptions {
-                    include_attributes: loonfs_types::options::AttributeInclusion::Omit,
-                    at: ReadAt::from(snapshot_id.cloned()),
-                },
-            )
-            .await?)
+        let options = StatOptions {
+            include_attributes: loonfs_types::options::AttributeInclusion::Omit,
+        };
+        Ok(match snapshot_id {
+            Some(snapshot_id) => {
+                self.client
+                    .snapshot_reader(snapshot_id.clone())
+                    .stat_with_options(spec, &options)
+                    .await?
+            }
+            None => self.client.stat_with_options(spec, &options).await?,
+        })
     }
 
     pub(crate) async fn open_file_download(
@@ -46,15 +46,11 @@ impl ResolvedTarget {
                         .create_revision_download(spec, *revision_no)
                         .await?
                 }
-                FileVersion::At(at) => {
+                FileVersion::Current => self.client.create_download(spec).await?,
+                FileVersion::Snapshot(snapshot_id) => {
                     self.client
-                        .create_download_with_options(
-                            spec,
-                            &DownloadOptions {
-                                at: at.clone(),
-                                ..DownloadOptions::default()
-                            },
-                        )
+                        .snapshot_reader(snapshot_id.clone())
+                        .create_download_with_options(spec, &DownloadOptions::default())
                         .await?
                 }
             };
@@ -68,9 +64,11 @@ impl ResolvedTarget {
                     .read_file_revision_stream(spec, *revision_no)
                     .await?
             }
-            FileVersion::At(at) => {
+            FileVersion::Current => self.client.read_file_stream(spec).await?,
+            FileVersion::Snapshot(snapshot_id) => {
                 self.client
-                    .read_file_stream_with_options(spec, &ReadFileOptions { at: at.clone() })
+                    .snapshot_reader(snapshot_id.clone())
+                    .read_file_stream(spec)
                     .await?
             }
         };

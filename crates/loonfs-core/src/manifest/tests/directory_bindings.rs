@@ -130,14 +130,24 @@ async fn a_cold_snapshot_files_page_bounds_its_parent_binding_reads() {
         inner,
         KeyPredicate::new(move |key| binding_segments.contains(key)),
     );
-    let page = crate::test_support::namespace_store(&store, &namespace_id)
-        .list_snapshot_files_page(
-            &snapshot.snapshot_id,
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let live = namespace
+        .load_manifest_context()
+        .await
+        .expect("the namespace's context");
+    let basis = namespace
+        .load_snapshot_read_basis(live.read_basis().head(), &snapshot.snapshot_id)
+        .await
+        .expect("the snapshot's basis");
+    let context = crate::RuntimeReadContext::at_snapshot(basis, live);
+    let page = crate::NamespaceEngine::reader(namespace)
+        .list_files_page(
             PageRequest {
                 cursor: None,
                 limit: EffectiveLimit::new(NonZeroU32::new(1000).expect("nonzero limit")),
             },
             crate::snapshot::ListSnapshotFilesOptions::default(),
+            &context,
         )
         .await
         .expect("snapshot files page");
