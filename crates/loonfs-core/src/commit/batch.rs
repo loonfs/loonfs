@@ -46,9 +46,9 @@ pub(crate) enum PublishViewEffect {
     /// account for, so that projection must be dropped.
     Invalidated,
     /// The WAL put's outcome is unknown, so the put may still be written at
-    /// the number it was sent to. The session drops the projection and still
-    /// owes a fence, which its next publication writes with the epoch it
-    /// holds (format spec, "Failed and unknown outcomes").
+    /// the number it was sent to. The session drops the projection and stays
+    /// without its epoch, so its next publication claims a new epoch and
+    /// writes a fence (format spec, "Failed and unknown outcomes").
     OutcomeUnknown,
     Advanced {
         body: WalObjectBody,

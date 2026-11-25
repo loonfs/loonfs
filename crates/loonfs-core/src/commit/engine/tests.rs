@@ -308,12 +308,11 @@ async fn a_commit_that_cannot_check_its_manifest_returns_the_load_error() {
 /// Checks that a writer session that loads a stored manifest with a writer
 /// epoch below its own returns `namespace_corrupt`, at each entry that loads
 /// the session's writer anchor: a commit, a retention advance through the
-/// session, a deletion, and the fence that a session owes after a WAL put
-/// with an unknown outcome. A lower epoch can't follow the session's own
+/// session, and a deletion. A lower epoch can't follow the session's own
 /// claim in a correct store, so the error doesn't mark the session fenced.
 #[tokio::test]
 async fn a_stored_manifest_below_the_sessions_writer_epoch_is_corrupt() {
-    for entry in ["commit", "retention advance", "deletion", "fence"] {
+    for entry in ["commit", "retention advance", "deletion"] {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -360,10 +359,6 @@ async fn a_stored_manifest_below_the_sessions_writer_epoch_is_corrupt() {
         // Without a position, the session's next unit loads its writer
         // anchor from the store.
         engine.invalidate_projection();
-        if entry == "fence" {
-            *engine.position.lock_session() =
-                WriterSessionStatus::HoldsEpochOwesFence(acquired.clone());
-        }
         let error = match entry {
             "retention advance" => engine
                 .publish_floor_object(&current, CommitSeq(1), &writer.clock())

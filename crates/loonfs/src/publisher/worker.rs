@@ -268,6 +268,20 @@ impl NamespacePublisher {
         let publish = Box::pin(engine.publish_batch(candidates, clock)).await;
         let fold_start = self.record_publication(&publish);
         drop(engine);
+        // A WAL put whose outcome the session didn't learn may have
+        // committed, so the cached head may be older than a commit that this
+        // runtime made. A panic after the put drops the head when the engine
+        // is released.
+        if publish.results.iter().any(|result| {
+            matches!(
+                result,
+                Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(_)))
+            )
+        }) {
+            self.context
+                .runtime_core
+                .invalidate_namespace_read_cache(&self.namespace_id);
+        }
         if let Some(start) = fold_start {
             let _ = start.send(());
         }

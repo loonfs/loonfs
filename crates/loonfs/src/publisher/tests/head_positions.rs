@@ -559,3 +559,35 @@ async fn a_read_during_a_session_fold_keeps_the_read_position() {
     assert_eq!(after.read_basis().head().seq, committed.committed_seq);
     writer.shutdown().await.expect("shutdown");
 }
+
+/// Checks that an open session that hasn't committed keeps the cached head
+/// across a fold in its runtime that finds the manifest current, so the next
+/// read sends no request.
+#[tokio::test]
+async fn a_fold_that_finds_the_manifest_current_keeps_an_unused_sessions_cached_head() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let writer = test_writer_with_interval(recording.clone() as SharedStore, 0).await;
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let folded = writer
+        .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold");
+    assert_eq!(folded.outcome, FoldWalOutcome::AlreadyCurrent);
+
+    recording.reset();
+    namespace.stat("/").await.expect("stat the root");
+    assert_eq!(recording.take(), [], "the read starts from the cached head");
+    writer.shutdown().await.expect("shutdown");
+}

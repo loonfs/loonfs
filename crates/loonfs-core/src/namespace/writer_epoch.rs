@@ -127,19 +127,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
-    /// Writes a fence with `held`, the writer epoch that a writer session
-    /// already holds, at the next WAL number, as the second step of an
-    /// acquisition does, and returns the read anchor whose tip is the fence
-    /// (format spec, "Failed and unknown outcomes"). A session owes such a
-    /// fence after a WAL put of its own whose outcome it doesn't know. The
-    /// load before the put checks the writer epoch and the namespace's
-    /// status, as every load of a writer anchor does (see [`WriterAnchor`]).
-    pub(crate) async fn fence_writer(&self, held: &AcquiredWriter) -> Result<WriterAnchor> {
-        let clock = self.start_clock();
-        let anchor = self.load_writer_read_anchor(held, clock.observe()).await?;
-        self.put_fence(held, anchor, &clock).await
-    }
-
     /// Puts a fence with `acquired`'s epoch at the tip of `anchor`, as
     /// [`Self::put_fence_or_floor_object`] describes. Every anchor that the
     /// put starts from or loads is a writer anchor, so the anchor it returns

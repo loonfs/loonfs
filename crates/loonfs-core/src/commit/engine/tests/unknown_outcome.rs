@@ -50,19 +50,20 @@ fn holding_store(
     (store, last)
 }
 
-/// Checks that a writer session whose WAL put has an unknown outcome writes
-/// a fence with its epoch at its next publication, so its own put can't
-/// leave an emptied number at the session's next WAL number (format spec,
-/// "Publication and group commit").
+/// Checks that a writer session whose WAL put has an unknown outcome claims
+/// a new epoch and writes a fence at its next publication, so its own put
+/// can't leave an emptied number at the session's next WAL number (format
+/// spec, "Publication and group commit").
 ///
 /// The put of `beta` at WAL 3 loses its acknowledgment and stays in flight
-/// at the provider. The session's next publication, of `gamma`, stalls before
-/// its first WAL put. Meanwhile the put of `beta` is written at 3, a fold covers
-/// 3, and a collection that runs after the grace window deletes the commit
-/// object at 3. A session that planned `gamma` from a fresh discovery would
-/// plan it at 3, and its put there would succeed and acknowledge a commit
-/// that no reader replays. A session that owes a fence puts the fence first,
-/// and the check after that put finds the number emptied.
+/// at the provider. The session's next publication, of `gamma`, claims and
+/// then stalls before its first WAL put, the fence. Meanwhile the put of
+/// `beta` is written at 3, a fold covers 3, and a collection that runs after
+/// the grace window deletes the commit object at 3. A session that planned
+/// `gamma` from a fresh discovery would plan it at 3, and its put there
+/// would succeed and acknowledge a commit that no reader replays. A session
+/// without its epoch puts the fence first, and the check after that put
+/// finds the number emptied.
 #[tokio::test]
 async fn a_stalled_put_after_an_unknown_outcome_is_never_written_at_an_emptied_number() {
     let directory = tempdir().expect("tempdir");
@@ -179,17 +180,17 @@ async fn assert_readable(local: &LocalFsStore, namespace_id: &NamespaceId, names
 }
 
 /// Checks that a caller that drops the session's publish future while its
-/// WAL put is in flight leaves the session owing a fence, so the put can't
-/// be written at a number that the session's next commit uses after a
+/// WAL put is in flight leaves the session without its epoch, so the put
+/// can't be written at a number that the session's next commit uses after a
 /// collection empties it.
 ///
 /// The put of `beta` is held before the store sees it, and the caller drops
-/// the future. The session's next publication, of `gamma`, stalls before its
-/// first WAL put while the put of `beta` is written at 3, folded and
-/// collected. A session that didn't owe a fence would plan `gamma` at 3 and
-/// acknowledge a commit that no reader replays.
+/// the future. The session's next publication, of `gamma`, claims and then
+/// stalls before its fence put while the put of `beta` is written at 3,
+/// folded and collected. A session that kept its epoch would plan `gamma`
+/// at 3 and acknowledge a commit that no reader replays.
 #[tokio::test]
-async fn a_dropped_publish_future_leaves_the_session_owing_a_fence() {
+async fn a_dropped_publish_future_leaves_the_session_without_its_epoch() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let local = LocalFsStore::new(directory.path()).expect("store");
@@ -236,7 +237,7 @@ async fn a_dropped_publish_future_leaves_the_session_owing_a_fence() {
 
 /// Checks that a caller that drops the session's publish future while the
 /// batch is still planning, before the session sends a WAL put, leaves the
-/// session owing no fence (format spec, "Failed and unknown outcomes").
+/// session with its epoch (format spec, "Failed and unknown outcomes").
 ///
 /// A fold moves `alpha` into a metadata segment, so planning `beta`, which
 /// goes under `alpha`, reads that segment from the store. The read is held,
@@ -244,7 +245,7 @@ async fn a_dropped_publish_future_leaves_the_session_owing_a_fence() {
 /// written at the number after the tip, and the store has no other WAL
 /// object after the tip.
 #[tokio::test]
-async fn a_publish_future_dropped_while_planning_leaves_the_session_owing_no_fence() {
+async fn a_publish_future_dropped_while_planning_leaves_the_session_acquired() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let local = LocalFsStore::new(directory.path()).expect("store");
@@ -332,7 +333,7 @@ async fn commit_ids_after(
 
 /// Checks that a lone writer session whose fence put after an unknown
 /// outcome also loses its acknowledgment isn't fenced by itself. Its next
-/// publication puts a fence again, and its commit is readable.
+/// publication claims again and puts a fence, and its commit is readable.
 #[tokio::test]
 async fn a_lost_fence_acknowledgment_never_fences_a_lone_writer() {
     let directory = tempdir().expect("tempdir");
@@ -382,12 +383,12 @@ async fn a_lost_fence_acknowledgment_never_fences_a_lone_writer() {
 }
 
 /// Checks that a session's floor object put with an unknown outcome leaves
-/// the session owing no fence, because collection never empties a floor
+/// the session with its epoch, because collection never empties a floor
 /// object's number. The put drops the position, and the session's next
 /// commit loads the namespace from the store and succeeds (format spec,
 /// "Advancing the retention floor").
 #[tokio::test]
-async fn an_unknown_floor_object_put_leaves_the_session_owing_no_fence() {
+async fn an_unknown_floor_object_put_leaves_the_session_acquired() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let local = LocalFsStore::new(directory.path()).expect("store");
@@ -424,13 +425,13 @@ async fn an_unknown_floor_object_put_leaves_the_session_owing_no_fence() {
     assert_readable(&local, &namespace_id, &["alpha", "beta"]).await;
 }
 
-/// Checks that a session whose WAL put had an unknown outcome is fenced by a
-/// writer that took the namespace over in the meantime. The tail read of
-/// its fence finds the higher epoch, and its next publication returns
-/// `writer_fenced` and writes no manifest and no WAL object (format spec,
-/// "Writer ownership").
+/// Checks that a session whose WAL put had an unknown outcome takes the
+/// namespace back from a writer that took it over in the meantime. The
+/// session has no epoch after the unknown outcome, so its next publication
+/// claims the epoch after the takeover's, writes a fence and commits, and
+/// the other writer is fenced (format spec, "Writer ownership").
 #[tokio::test]
-async fn a_session_whose_put_was_unknown_is_fenced_by_a_takeover() {
+async fn a_session_whose_put_was_unknown_claims_past_a_takeover() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let local = LocalFsStore::new(directory.path()).expect("store");
@@ -456,32 +457,102 @@ async fn a_session_whose_put_was_unknown_is_fenced_by_a_takeover() {
             _
         )))]
     );
-    let namespace = crate::test_support::namespace_store(&local, &namespace_id);
-    namespace
-        .acquire_writer_epoch(&context("writer-b").writer_id)
+    let writer_b = context("writer-b");
+    let takeover = crate::test_support::namespace_store(&local, &namespace_id)
+        .acquire_writer_epoch(&writer_b.writer_id)
         .await
         .expect("writer b takes over");
-    let manifest_no = namespace
-        .load_current_manifest()
-        .await
-        .expect("the takeover's manifest")
-        .payload()
-        .manifest_no;
-    let wal_objects = wal_object_count(&local, &namespace_id).await;
 
-    let fenced = engine
-        .publish_batch(vec![create_dir("gamma", "gamma")], &writer.clock())
+    publish_one(&mut engine, &writer, "gamma").await;
+    let reclaimed = match &*engine.position.lock_session() {
+        WriterSessionStatus::Acquired(acquired) => acquired.writer_epoch,
+        other => panic!("the session claims the namespace back: {other:?}"),
+    };
+    assert!(reclaimed > takeover.writer_epoch, "{reclaimed:?}");
+    assert_readable(&local, &namespace_id, &["alpha", "gamma"]).await;
+
+    let mut engine_b = NamespaceCommitEngine::with_acquired_session(
+        crate::test_support::namespace_store(&local, &namespace_id),
+        writer_b.writer_id.clone(),
+        takeover,
+    );
+    let fenced = engine_b
+        .publish_batch(vec![create_dir("delta", "delta")], &writer_b.clock())
         .await;
     assert_eq!(
         fenced.results[0]
             .as_ref()
-            .expect_err("writer b holds the namespace")
+            .expect_err("writer a has the namespace again")
+            .code(),
+        ErrorCode::WriterFenced
+    );
+}
+
+/// Checks that a session whose acquisition finds another writer's claim
+/// after its own is recorded as fenced. The session's fence put is held
+/// while writer b claims and writes its fence, so the session's acquisition
+/// returns `writer_fenced`, and its next publication returns
+/// `writer_fenced` without claiming again (format spec, "Writer ownership").
+#[tokio::test]
+async fn an_acquisition_that_finds_a_later_claim_fences_the_session() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let local = LocalFsStore::new(directory.path()).expect("store");
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    let writer = context("writer-a");
+    crate::test_support::NamespaceFixture::new(&local, &namespace_id, &writer)
+        .create()
+        .await
+        .expect("bootstrap");
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        writer.writer_id.clone(),
+    );
+    let namespace = crate::test_support::namespace_store(&local, &namespace_id);
+
+    store.block_next();
+    let clock = writer.clock();
+    let first = engine.publish_batch(vec![create_dir("alpha", "alpha")], &clock);
+    let takeover = async {
+        store.wait_until_blocked().await;
+        namespace
+            .acquire_writer_epoch(&context("writer-b").writer_id)
+            .await
+            .expect("writer b takes over");
+        store.release();
+    };
+    let (first, ()) = tokio::join!(first, takeover);
+    assert_eq!(
+        first.results[0]
+            .as_ref()
+            .expect_err("writer b claimed after the session")
             .code(),
         ErrorCode::WriterFenced
     );
     assert_matches!(
         *engine.position.lock_session(),
         WriterSessionStatus::Fenced(_)
+    );
+    let manifest_no = namespace
+        .load_current_manifest()
+        .await
+        .expect("writer b's manifest")
+        .payload()
+        .manifest_no;
+
+    let second = engine
+        .publish_batch(vec![create_dir("beta", "beta")], &writer.clock())
+        .await;
+    assert_eq!(
+        second.results[0]
+            .as_ref()
+            .expect_err("the session stays fenced")
+            .code(),
+        ErrorCode::WriterFenced
     );
     assert_eq!(
         namespace
@@ -491,11 +562,6 @@ async fn a_session_whose_put_was_unknown_is_fenced_by_a_takeover() {
             .payload()
             .manifest_no,
         manifest_no,
-        "the session publishes no manifest"
-    );
-    assert_eq!(
-        wal_object_count(&local, &namespace_id).await,
-        wal_objects,
-        "the session writes no WAL object"
+        "the fenced session claims nothing"
     );
 }

@@ -69,32 +69,15 @@ pub enum TailSource {
 /// status through a [`WriterSessionStatusView`].
 #[derive(Debug, Default)]
 pub enum WriterSessionStatus {
-    /// No epoch yet: the session's first publish acquires one.
+    /// No epoch: the session's next publish acquires one with a claim and a
+    /// fence. A new session starts here, and so does a session from the
+    /// moment it sends a commit's WAL put until it learns the put's outcome
+    /// (format spec, "Failed and unknown outcomes").
     #[default]
     Unacquired,
-    /// Writer epoch acquired on the first publish and reused for the rest of
-    /// the session.
+    /// Writer epoch acquired by a claim and a fence, and reused for the
+    /// session's later publishes.
     Acquired(AcquiredWriter),
-    /// The session holds this writer epoch and owes a fence. The session
-    /// records that it owes one immediately before it sends a commit's WAL
-    /// put (a floor object's put owes none, because collection never deletes
-    /// a fence or a floor object, format spec, "Advancing the retention
-    /// floor") and
-    /// clears the record once it learns the put's outcome, so the session
-    /// still owes a fence after an unknown outcome, or after a publish future
-    /// that was dropped or panicked while its put was in flight. A future
-    /// dropped while the batch is still planning leaves no record, because
-    /// the session sent no put. A put in flight may still be written at the
-    /// number the session would put next, so the session's next publication
-    /// writes a fence with this epoch before it plans a commit (format spec,
-    /// "Failed and unknown outcomes").
-    ///
-    /// The record that the session owes a fence is one record for the
-    /// session, which relies on the rule that a session publishes one WAL
-    /// object at a time. The session's engine publishes one unit at a time,
-    /// so a known outcome of one put can't clear a record that another put
-    /// of the session set.
-    HoldsEpochOwesFence(AcquiredWriter),
     /// Permanent fencing record for this session. Later publishes return
     /// `writer_fenced` without accessing the store. Acquiring a new writer epoch
     /// requires an explicit caller action.
@@ -355,15 +338,9 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             .delete_namespace(options, acquired_writer, self.writer_position(), &clock)
             .await;
         self.position.invalidate_projection();
-        match deleted {
-            Ok(report) => Ok(report.response),
-            Err(error) => {
-                if let CoreError::WriterFenced(fence) = &error {
-                    *self.position.lock_session() = WriterSessionStatus::Fenced(fence.clone());
-                }
-                Err(error)
-            }
-        }
+        deleted
+            .map(|report| report.response)
+            .inspect_err(|error| self.position.record_session_error(error))
     }
 
     /// Advances the retention floor to `target` with a floor object, as one
@@ -476,71 +453,51 @@ impl PositionState {
         self.acquired_anchor = None;
     }
 
-    /// Records, immediately before the session sends a commit's WAL put, that
-    /// it owes a fence until it learns the put's outcome (see
-    /// [`WriterSessionStatus::HoldsEpochOwesFence`]).
-    fn owe_fence(&self) {
+    /// Records that the session was fenced, or found its namespace deleted
+    /// or missing, when `error` says so. Every caller passes an error from a
+    /// read of the session's own namespace, so an error about another
+    /// namespace, such as a merge's fork, is never recorded. A fence stays
+    /// recorded.
+    fn record_session_error(&self, error: &CoreError) {
         let mut session = self.lock_session();
-        if let WriterSessionStatus::Acquired(acquired_writer) = &*session {
-            *session = WriterSessionStatus::HoldsEpochOwesFence(acquired_writer.clone());
-        }
-    }
-
-    /// Records that the session found its namespace deleted or missing, when
-    /// `error` says so. Every caller passes an error from a read of the
-    /// session's own namespace, so an error about another namespace, such as
-    /// a merge's fork, is never recorded. A fence stays recorded.
-    fn record_namespace_gone(&self, error: &CoreError) {
-        if matches!(
-            error,
+        match error {
+            CoreError::WriterFenced(fence) => {
+                *session = WriterSessionStatus::Fenced(fence.clone());
+            }
             CoreError::NamespaceDeleted { .. } | CoreError::NamespaceNotFound { .. }
-        ) {
-            let mut session = self.lock_session();
-            if !matches!(*session, WriterSessionStatus::Fenced(_)) {
+                if !matches!(*session, WriterSessionStatus::Fenced(_)) =>
+            {
                 *session = WriterSessionStatus::NamespaceGone;
             }
+            _ => {}
         }
     }
 
-    /// Returns the session's writer epoch, acquiring it on first use. A
-    /// session that owes a fence writes it with the epoch it holds first. A
+    /// Returns the session's writer epoch, and acquires one with a claim and
+    /// a fence when the session has none. The claim doesn't compare the
+    /// newest manifest's epoch with the epoch the session used before. A
     /// fenced session fails immediately without accessing the store or
-    /// acquiring a new epoch, and a session whose fence's tail read finds a
-    /// higher epoch is recorded as fenced.
+    /// acquiring a new epoch, and an acquisition that returns
+    /// `writer_fenced` records the session as fenced.
     async fn session_writer_epoch<S: ObjectStore>(
         &mut self,
         namespace: &NamespaceStore<S>,
         writer_id: &WriterId,
     ) -> Result<AcquiredWriter> {
-        let owes_fence = match &*self.lock_session() {
+        match &*self.lock_session() {
             WriterSessionStatus::Fenced(fence) => {
                 return Err(CoreError::WriterFenced(fence.clone()))
             }
             WriterSessionStatus::Acquired(acquired_writer) => return Ok(acquired_writer.clone()),
-            WriterSessionStatus::HoldsEpochOwesFence(held) => Some(held.clone()),
-            WriterSessionStatus::Unacquired | WriterSessionStatus::NamespaceGone => None,
-        };
-        let (acquired_writer, anchor) = match owes_fence {
-            None => {
-                let acquisition = namespace
-                    .acquire_writer(writer_id)
-                    .await
-                    .inspect_err(|error| self.record_namespace_gone(error))?;
-                (acquisition.writer, acquisition.anchor)
-            }
-            Some(held) => {
-                let anchor = namespace.fence_writer(&held).await.inspect_err(|error| {
-                    if let CoreError::WriterFenced(fence) = error {
-                        *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
-                    }
-                    self.record_namespace_gone(error);
-                })?;
-                (held, anchor)
-            }
-        };
-        self.acquired_anchor = Some(anchor);
-        *self.lock_session() = WriterSessionStatus::Acquired(acquired_writer.clone());
-        Ok(acquired_writer)
+            WriterSessionStatus::Unacquired | WriterSessionStatus::NamespaceGone => {}
+        }
+        let acquisition = namespace
+            .acquire_writer(writer_id)
+            .await
+            .inspect_err(|error| self.record_session_error(error))?;
+        self.acquired_anchor = Some(acquisition.anchor);
+        *self.lock_session() = WriterSessionStatus::Acquired(acquisition.writer.clone());
+        Ok(acquisition.writer)
     }
 
     /// Loads the view that one publication unit plans against: the
@@ -578,10 +535,7 @@ impl PositionState {
             Ok(value) => value,
             Err(error) => {
                 self.invalidate_projection();
-                if let CoreError::WriterFenced(fence) = &error {
-                    *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
-                }
-                self.record_namespace_gone(&error);
+                self.record_session_error(&error);
                 return Err(error);
             }
         };
@@ -602,6 +556,13 @@ impl PositionState {
             attempt,
         } = loaded;
         let wal_tail_discovered = publish_view.tail_discovered;
+        let acquired_writer = publish_view.acquired_writer.clone();
+        // The session releases its epoch immediately before it sends the
+        // put, so a publish future that is dropped or panics while the put
+        // is in flight leaves the session unacquired, and its next publish
+        // claims a new epoch (format spec, "Failed and unknown outcomes"). A
+        // future dropped while the batch is still planning sent no put, so
+        // the session keeps its epoch.
         let published = super::batch::publish_namespace_commits_batch_against_publish_view(
             candidates,
             &publish_view,
@@ -609,21 +570,15 @@ impl PositionState {
                 batch: clock,
                 attempt,
             },
-            || self.owe_fence(),
+            || *self.lock_session() = WriterSessionStatus::Unacquired,
         )
         .await;
         let position = publish_view.into_position();
         let published = drop_replaced_basis(published);
-        // An unknown outcome leaves the session owing a fence. Every other
-        // effect means that the session knows its put's outcome, or sent no
-        // put, so it owes none.
-        if matches!(published.effect, PublishViewEffect::OutcomeUnknown) {
-            self.owe_fence();
-        } else {
-            let mut session = self.lock_session();
-            if let WriterSessionStatus::HoldsEpochOwesFence(held) = &*session {
-                *session = WriterSessionStatus::Acquired(held.clone());
-            }
+        // Every effect but an unknown outcome means that the session knows
+        // its put's outcome, or sent no put, so it takes its epoch back.
+        if !matches!(published.effect, PublishViewEffect::OutcomeUnknown) {
+            *self.lock_session() = WriterSessionStatus::Acquired(acquired_writer);
         }
         let update = self.update_publish_tail_projection(
             &namespace.namespace_id,
@@ -671,11 +626,11 @@ impl PositionState {
                 retention_floor_seq: target,
             },
         )?;
-        // The put leaves the session's status alone, so an unknown outcome
-        // doesn't make the session owe a fence, because collection never
-        // deletes a fence or a floor object (collection recognizes them by
-        // their size and keeps them, see `gc/families.rs`). The format spec,
-        // "Advancing the retention floor", gives the reason.
+        // Unlike a commit's put, this put leaves the session's epoch alone,
+        // because collection never deletes a fence or a floor object
+        // (collection recognizes them by their size and keeps them, see
+        // `gc/families.rs`). The format spec, "Advancing the retention
+        // floor", explains why that is enough.
         let published = publish_wal_object(view.store(), &floor_object).await;
         let position = view.into_position();
         if let Err(error) = published {
@@ -777,7 +732,7 @@ fn drop_replaced_basis(mut report: PublishBatchReport) -> PublishBatchReport {
         .iter()
         .any(|result| matches!(result, Err(CoreError::ManifestReplaced { .. })));
     // A put with an unknown outcome in the same batch still leaves the
-    // session owing a fence.
+    // session without its epoch.
     if replaced && !matches!(report.effect, PublishViewEffect::OutcomeUnknown) {
         report.effect = PublishViewEffect::Invalidated;
     }
