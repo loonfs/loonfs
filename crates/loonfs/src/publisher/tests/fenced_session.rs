@@ -187,7 +187,6 @@ async fn a_candidate_charged_before_fencing_is_refused_at_queue_insertion() {
         .admission
         .acquire_candidate(old.id(), &candidate)
         .expect("admit before fencing");
-    assert_eq!(permit.reserve_inline([4].into_iter(), 0, 4), 1);
     discover_fence(&old).await;
     writer.drain().await.expect("fenced work ends");
     let _replacement = writer.open_namespace(old.id()).expect("replacement");
@@ -204,7 +203,7 @@ async fn a_candidate_charged_before_fencing_is_refused_at_queue_insertion() {
     assert_no_work(publisher);
     assert_eq!(
         publisher.context.admission.namespace_usage(old.id()),
-        (0, 0, 0)
+        (0, 0)
     );
     assert_eq!(
         writer.execution_budget().stats(),
@@ -294,7 +293,7 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
     assert_eq!(store.counts(), requests);
     assert_eq!(
         publisher.context.admission.namespace_usage(old.id()),
-        (0, 0, 0)
+        (0, 0)
     );
     assert_eq!(
         writer.execution_budget().stats(),

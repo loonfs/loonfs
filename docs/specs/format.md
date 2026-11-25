@@ -2082,7 +2082,7 @@ Inline content has no pre-assigned object, so `content_ref` hashes the complete 
 {"kind":"inline_v1","sha256":"<64 lowercase hex>","size_bytes":15}
 ```
 
-The form reflects how the request sent the content, not where the writer stored it: inline content uses `inline_v1` even if staged to an object, and uploaded content uses `blob_v1`.
+The form reflects how the request sent the content: inline content uses `inline_v1`, and uploaded content uses `blob_v1`.
 
 Appended bytes in `append_file` and `append_file_by_inode` use a third form hashing only the appended bytes and their length:
 
@@ -2238,6 +2238,7 @@ Direct multipart uploads also follow provider limits (in the reference implement
 | `MAX_ATTRIBUTE_ENTRIES` | 100 |
 | `MAX_ATTRIBUTES_TOTAL_BYTES` | 65,536 logical UTF-8 bytes |
 | A merge's planned WAL record | 536,870,912 bytes (`MAX_WAL_OBJECT_BYTES`) |
+| Inline and appended bytes in one commit (a larger commit returns `invalid_request`) | 4,194,304 bytes (`MAX_WAL_OBJECT_INLINE_CONTENT_BYTES`) |
 
 Attribute limits count raw UTF-8 bytes before JSON escaping or CBOR encoding. Path limits apply to canonical request paths.
 

@@ -713,8 +713,14 @@ async fn a_published_fold_moves_the_position_with_its_tail() {
     assert_eq!(moved.tail.chunks().len(), 1);
     assert_eq!(engine.wal_tail_objects(), Some(1));
     assert_eq!(engine.wal_tail_inline_bytes(), Some(kept.bytes().len()));
-    let receipt =
-        |commit_id| engine.retains_commit_receipt(&CommitId::parse(commit_id).expect("id"));
+    let receipt = |commit_id| {
+        engine.writer_position().is_some_and(|position| {
+            position
+                .tail
+                .find_commit_receipt(&CommitId::parse(commit_id).expect("id"))
+                .is_some()
+        })
+    };
     assert!(receipt("kept") && !receipt("folded"));
     assert!(
         Arc::ptr_eq(

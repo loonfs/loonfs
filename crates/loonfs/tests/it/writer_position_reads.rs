@@ -1867,48 +1867,6 @@ async fn a_strong_read_from_a_collected_manifest_reads_the_newest_manifest() {
     );
 }
 
-/// Checks that a commit whose inline content is too large for a WAL object
-/// commits from a writer position whose manifest a collection deleted, when
-/// neither the segment cache nor the store has the manifest. The receipt
-/// check before the content is staged finds the manifest missing at or below
-/// the manifest boundary, and runs again from the newest manifest.
-#[tokio::test]
-async fn a_commit_that_stages_content_from_a_collected_position_succeeds() {
-    use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation, InlineContent};
-    let (fixture, _, _) =
-        position_on_a_collected_manifest("collected-staging", false, History::Files).await;
-    let value = InlineContent::new(
-        loonfs_types::ContentId::generate(),
-        bytes::Bytes::from(vec![
-            b'l';
-            loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES
-                + 1
-        ]),
-        ChecksumAlgorithm::Crc64nvme,
-    );
-    let intent = CommitIntent::single(
-        loonfs_types::CommitId::generate(),
-        loonfs_test_support::test_actor(),
-        None,
-        FilesystemOperation::PutFile {
-            path: loonfs_types::AbsolutePath::parse("/staged.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
-            behavior: loonfs_types::DestinationBehavior::Replace,
-            expected_inode_id: None,
-            expected_revision_no: None,
-        },
-    );
-    fixture
-        .namespace
-        .commit_candidate(CommitCandidate::with_inline_content(
-            intent,
-            Vec::new(),
-            vec![value],
-        ))
-        .await
-        .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
-}
-
 /// Checks that the reads of a subject's administrator rights succeed
 /// from a cached head whose manifest a collection deleted, when neither the
 /// segment cache nor the store has the manifest: a deletion, a lookup of a

@@ -19,7 +19,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::options::DeleteNamespaceOptions;
-use loonfs_types::{Commit, CommitId, CommitSeq, DeleteNamespaceResponse, NamespaceId, WriterId};
+use loonfs_types::{Commit, CommitSeq, DeleteNamespaceResponse, NamespaceId, WriterId};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 mod candidate;
@@ -207,15 +207,6 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// not reset.
     pub fn invalidate_projection(&mut self) {
         self.position.invalidate_projection();
-    }
-
-    /// Checks the position's WAL tail for the commit's receipt, without
-    /// store reads or writer acquisition.
-    pub fn retains_commit_receipt(&self, commit_id: &CommitId) -> bool {
-        self.position
-            .current
-            .as_ref()
-            .is_some_and(|position| position.tail.find_commit_receipt(commit_id).is_some())
     }
 
     /// Unfolded WAL objects as of the last publication unit, or `None` when

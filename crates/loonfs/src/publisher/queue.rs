@@ -76,25 +76,6 @@ impl PreparedCandidate {
             candidate,
         }
     }
-
-    pub(super) fn with_inline_placement(
-        candidate: CommitCandidate,
-        retained_inline_content: &[loonfs_core::publish::InlineContent],
-        staged_inline_content: &[loonfs_core::publish::InlineContent],
-    ) -> Self {
-        Self {
-            estimated_retained_bytes: candidate
-                .estimated_retained_bytes_after_inline_staging(staged_inline_content),
-            wal_record_bytes_upper_bound: candidate
-                .wal_record_bytes_upper_bound_with_inline_content(retained_inline_content),
-            inline_content_bytes: retained_inline_content
-                .iter()
-                .fold(candidate.appended_bytes(), |total, value| {
-                    total.saturating_add(value.bytes().len())
-                }),
-            candidate,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -144,16 +125,14 @@ pub(super) struct AdmittedSubmission {
 }
 
 impl NamespacePublisher {
-    /// Places the candidate's inline content, then admits it before awaiting
-    /// its result.
+    /// Admits the candidate before awaiting its result.
     ///
     /// Once the candidate enters the queue, cancelling the caller only drops
     /// result delivery; the worker still owns and publishes the request.
     pub(super) async fn submit_candidate(&self, candidate: CommitCandidate) -> Result<Commit> {
         drop(self.admitted_session(&self.lock_state())?);
-        let plan = self.plan_inline_candidate(candidate)?;
-        let permit = self.acquire_candidate(&plan.candidate)?;
-        let candidate = self.stage_inline_candidate(plan, &permit).await?;
+        let candidate = PreparedCandidate::new(candidate);
+        let permit = self.acquire_candidate(&candidate)?;
         PublicationAdmission::validate_candidate(&candidate)?;
         self.submit_admitted(candidate, &permit).await
     }

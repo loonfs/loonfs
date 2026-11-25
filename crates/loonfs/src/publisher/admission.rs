@@ -10,7 +10,6 @@ use loonfs_core::{MergeAllowance, MergeReservation, MERGE_COMMITS_PAGE_BYTES};
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::NamespaceId;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::oneshot;
 
@@ -51,7 +50,6 @@ pub(super) struct PublicationAdmission {
 struct RequestWeight {
     requests: usize,
     estimated_bytes: usize,
-    inline_bytes: usize,
 }
 
 impl PublicationAdmission {
@@ -78,10 +76,10 @@ impl PublicationAdmission {
     }
 
     #[cfg(test)]
-    pub(super) fn namespace_usage(&self, namespace_id: &NamespaceId) -> (usize, usize, usize) {
+    pub(super) fn namespace_usage(&self, namespace_id: &NamespaceId) -> (usize, usize) {
         self.lock_namespaces()
             .get(namespace_id)
-            .map(|usage| (usage.requests, usage.estimated_bytes, usage.inline_bytes))
+            .map(|usage| (usage.requests, usage.estimated_bytes))
             .unwrap_or_default()
     }
 
@@ -210,7 +208,6 @@ impl PublicationAdmission {
             admission: Arc::clone(self),
             namespace_id: namespace_id.clone(),
             charge: Mutex::new(charge),
-            inline_bytes: AtomicUsize::new(0),
         }))
     }
 }
@@ -233,65 +230,11 @@ pub(super) struct AdmissionPermit {
     admission: Arc<PublicationAdmission>,
     namespace_id: NamespaceId,
     /// What the request is charged, to its namespace's limits and to the
-    /// budget's totals alike. Only [`Self::reweigh`] changes the charge, under
-    /// the admission's namespace lock.
+    /// budget's totals alike.
     charge: Mutex<AdmissionCharge>,
-    inline_bytes: AtomicUsize,
 }
 
 impl AdmissionPermit {
-    /// Moves a request's charge to the admission bytes of
-    /// `estimated_request_bytes`, the weight of the candidate that the queue
-    /// retains once its inline values are staged. A growth past the
-    /// namespace's byte limit or the budget's byte total fails with
-    /// `commit_queue_full` and leaves the charge as it was, for the permit's
-    /// drop to refund. A merge's charge stays as it is.
-    pub(super) fn reweigh(&self, estimated_request_bytes: usize) -> Result<(), CoreError> {
-        let estimated_bytes =
-            estimated_admission_bytes(&self.namespace_id, estimated_request_bytes);
-        let change = {
-            let mut namespaces = self.admission.lock_namespaces();
-            let mut charge = self
-                .charge
-                .lock()
-                .expect("the admission charge lock should not be poisoned");
-            let AdmissionCharge::Request {
-                estimated_bytes: charged_bytes,
-            } = *charge
-            else {
-                return Ok(());
-            };
-            let namespace = namespaces
-                .get_mut(&self.namespace_id)
-                .expect("admitted namespace should have usage");
-            let others = namespace.estimated_bytes - charged_bytes;
-            if estimated_bytes
-                > self
-                    .admission
-                    .limits
-                    .max_estimated_bytes_per_namespace
-                    .get()
-                    .saturating_sub(others)
-            {
-                return Err(CoreError::CommitQueueFull);
-            }
-            let change = self
-                .admission
-                .budget
-                .reweigh_admission(charged_bytes, estimated_bytes);
-            if matches!(change, AdmissionChange::Admitted(_)) {
-                namespace.estimated_bytes = others + estimated_bytes;
-                *charge = AdmissionCharge::Request { estimated_bytes };
-            }
-            change
-        };
-        self.admission.budget.report_admission(change);
-        if !matches!(change, AdmissionChange::Admitted(_)) {
-            return Err(CoreError::CommitQueueFull);
-        }
-        Ok(())
-    }
-
     /// Returns the budget's merge allowance, with the reservation of the
     /// merge that this permit admits, which the merge planner and admission
     /// check.
@@ -300,42 +243,6 @@ impl AdmissionPermit {
             max_bytes: self.admission.budget.max_merge_bytes(),
             peak_per_planned_byte: MERGE_PEAK_PER_PLANNED_BYTE,
             reservation: Arc::clone(self) as Arc<dyn MergeReservation>,
-        }
-    }
-
-    pub(super) fn reserve_inline(
-        &self,
-        sizes: impl Iterator<Item = usize>,
-        unfolded_bytes: usize,
-        limit: usize,
-    ) -> usize {
-        let mut namespaces = self.admission.lock_namespaces();
-        let namespace = namespaces
-            .get_mut(&self.namespace_id)
-            .expect("admitted namespace should have usage");
-        let mut remaining = limit
-            .saturating_sub(unfolded_bytes)
-            .saturating_sub(namespace.inline_bytes);
-        let mut kept = 0;
-        let mut reserved = 0;
-        for size in sizes {
-            if size > remaining {
-                break;
-            }
-            remaining -= size;
-            reserved += size;
-            kept += 1;
-        }
-        namespace.inline_bytes += reserved;
-        self.inline_bytes.store(reserved, Ordering::Relaxed);
-        kept
-    }
-
-    pub(super) fn release_inline(&self) {
-        let mut namespaces = self.admission.lock_namespaces();
-        let bytes = self.inline_bytes.swap(0, Ordering::Relaxed);
-        if let Some(namespace) = namespaces.get_mut(&self.namespace_id) {
-            namespace.inline_bytes -= bytes;
         }
     }
 }
@@ -389,7 +296,6 @@ impl Drop for AdmissionPermit {
             if let Some(namespace) = namespaces.get_mut(&self.namespace_id) {
                 namespace.requests -= 1;
                 namespace.estimated_bytes -= charge.estimated_bytes();
-                namespace.inline_bytes -= self.inline_bytes.load(Ordering::Relaxed);
                 if namespace.requests == 0 {
                     namespaces.remove(&self.namespace_id);
                 }
@@ -529,8 +435,7 @@ mod tests {
     /// reserves the whole allowance, which is smaller than
     /// [`MIN_MERGE_RESERVED_BYTES`], and no byte limit is charged for it, so
     /// an ordinary request still fits the byte total beside it. The merge's
-    /// permit keeps the inline reservation calls working, and it refunds
-    /// exactly what it charged.
+    /// permit refunds exactly what it charged.
     #[test]
     fn a_merge_is_held_to_the_merge_allowance_and_to_no_byte_limit() {
         let namespace_id = NamespaceId::parse("main").expect("namespace");
@@ -567,14 +472,12 @@ mod tests {
             ..ExecutionBudgetStats::default()
         };
         assert_eq!(budget.stats(), merge_only);
-        assert_eq!(admission.namespace_usage(&namespace_id), (1, 0, 0));
+        assert_eq!(admission.namespace_usage(&namespace_id), (1, 0));
         let beside = admission
             .acquire(&namespace_id, 0)
             .expect("an ordinary request beside the merge");
         assert_eq!(admitted(&budget), (2, overhead));
         drop(beside);
-        assert_eq!(permit.reserve_inline(std::iter::empty(), 0, 1024), 0);
-        permit.release_inline();
         drop(permit);
         assert!(admission.lock_namespaces().is_empty());
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());

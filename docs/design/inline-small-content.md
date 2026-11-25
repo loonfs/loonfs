@@ -38,7 +38,7 @@ The writer draws the content ID at random before publication, as it does for sta
 Two rules follow from this:
 
 - **One content ID has one lifecycle.** A content ID belongs to exactly one staged upload or one committed inline value, and a later attempt never reuses the ID of an earlier one, even for the same bytes. The store's verified immutable write is safe to retry only because every writer that can write a given key supplies the same bytes for the same prefix. Cleaning up an expired open upload session also deletes its content without checking whether it was published, so if a staged attempt and an inline attempt shared an ID, the content could be deleted after it was committed.
-- **An inline value's content ID isn't its retry identity.** The server draws the ID for a hosted write, and a write that falls back to staging draws another one. So the fingerprint identifies inline content by its bytes instead.
+- **An inline value's content ID isn't its retry identity.** The server draws a new content ID for each attempt of a hosted write, so the fingerprint identifies inline content by its bytes.
 
 ## Retry identity
 
@@ -46,19 +46,18 @@ This section describes how LoonFS recognizes a retried write that includes inlin
 
 An uploaded put is identified by the content object that it references. A caller retries it by preparing the content once, and publishing the same prepared value on every attempt.
 
-Inline content has no object to refer to. For a hosted write, the server draws the content ID, so a client that loses the response has nothing stable to resend except the bytes. For an embedded write, a fallback to staging draws a second ID, so a fingerprint built on the ID would turn a valid retry into a conflict. For both reasons, the fingerprint hashes the inline request bytes with SHA-256 and records their size, separately from the content checksum.
+Inline content has no object to refer to. For a hosted write, the server draws the content ID, so a client that loses the response has nothing stable to resend except the bytes. An embedded caller that prepares the same bytes again also draws a new ID, so a fingerprint built on the ID would turn a valid retry into a conflict. For both reasons, the fingerprint hashes the inline request bytes with SHA-256 and records their size, separately from the content checksum.
 
-The identity is set when the content is prepared. Preparing content at or under the writer's threshold creates an inline prepared value, and that value keeps the inline form even if it falls back to staging. If the same bytes are sent once inline and once as an uploaded object under one commit ID, they're different requests, and they conflict. A writer whose threshold changed between two attempts can run into this case.
+The identity is set when the content is prepared. Preparing content at or under the writer's threshold creates an inline prepared value, and that value keeps the inline form. If the same bytes are sent once inline and once as an uploaded object under one commit ID, they're different requests, and they conflict. A writer whose threshold changed between two attempts can run into this case.
 
 `put_file` prepares the content and then publishes it. So if `put_file` runs again under the same commit ID, it replays the original result for content that's small enough to be inline, and it conflicts for larger content. The failure is safe in both directions, because it's a conflict, never a replay of the wrong bytes. At every size, a caller should retry with the prepared content.
 
 ## Where the writer chooses the path
 
-The per-object budget and the per-value limit are preferences. When one is reached, the writer stages that content through an upload session under its own content ID, so neither limit causes a write error. Uploads are never staged inside the publication loop, but validation can materialize pending pieces for a copy, a restore, or a fresh chain. The writer chooses the path at three points:
+The writer chooses the path once, when the content is prepared: content at or under the threshold is inline, and larger content is uploaded. Every inline value then travels in its commit's WAL object. Validation can still materialize pending pieces for a copy, a restore, or a fresh chain. Two limits shape publication, and [Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy) in the format spec states the current rules:
 
-- **Building the commit candidate.** A commit must fit in one WAL object. If a commit's inline total would exceed the per-object budget, the writer keeps values inline in operation order until the budget is reached, and stages the rest. The commit stays atomic.
-- **Admission.** The writer chooses based on the unfolded inline bytes that the publisher knows about. [Resource sizing](../../crates/loonfs-server/docs/self-hosting.md#resource-sizing) describes how that count is kept. Once the unfolded tail reaches the inline tail limit, new commits wait for a fold at the [write stop](write-stop-wait.md), as [Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy) in the format spec describes.
-- **Publishing.** When a WAL object's inline budget is full, the publisher closes that object, and the next commit starts the next object. One commit is never split.
+- **The per-object budget.** The publisher stops adding commits to a WAL object once their inline bytes reach the budget, and the next commit starts the next object. A commit over the budget publishes in a WAL object of its own, and one commit is never split. A commit whose inline and appended bytes total more than the format's limit for one WAL object (4 MiB) is refused with `invalid_request`, as an append is.
+- **The inline tail limit.** Once the unfolded tail reaches it, new commits wait for a fold at the [write stop](write-stop-wait.md).
 
 ## Reading
 

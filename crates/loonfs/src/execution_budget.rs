@@ -162,14 +162,6 @@ impl ExecutionBudget {
         self.inner.admission.charge(charge)
     }
 
-    /// Moves an admitted request's charge from `from` bytes to `to` bytes. A
-    /// growth past the byte total is refused, and the change says so and
-    /// leaves the totals as they were. Pass the change to
-    /// [`Self::report_admission`] once the caller has unlocked every lock.
-    pub(crate) fn reweigh_admission(&self, from: usize, to: usize) -> AdmissionChange {
-        self.inner.admission.reweigh(from, to)
-    }
-
     /// Grows an admitted merge's reservation of the merge allowance from
     /// `from` bytes to `to` bytes. A growth past the allowance is refused,
     /// and the change says so and leaves the totals as they were. Pass the
@@ -556,16 +548,6 @@ impl AdmittedTotals {
             return AdmissionChange::MergeAllowanceInUse;
         }
         admitted.merge_bytes = others + to;
-        AdmissionChange::Admitted(*admitted)
-    }
-
-    fn reweigh(&self, from: usize, to: usize) -> AdmissionChange {
-        let mut admitted = self.lock();
-        let others = admitted.bytes - from;
-        if to > self.max_bytes.get().saturating_sub(others) {
-            return AdmissionChange::Rejected;
-        }
-        admitted.bytes = others + to;
         AdmissionChange::Admitted(*admitted)
     }
 

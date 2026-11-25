@@ -76,13 +76,14 @@ impl Default for PublicationPolicy {
 
 /// Writer policy for content stored in WAL objects.
 ///
-/// Retrying a completed inline commit does not upload its content again while
-/// the commit receipt is retained. See `docs/specs/api.md`, section 5.2.
-///
-/// The bytes an append adds always travel in the WAL and never stage. They
-/// count toward the WAL object budget and the inline tail limit. The budget
-/// doesn't keep an append back, because a commit whose appends pass the
-/// budget publishes in a WAL object of its own.
+/// A commit's inline values and appended bytes always travel in its WAL
+/// object. They count toward the WAL object budget and the inline tail
+/// limit. The publisher stops adding commits to a WAL object once their
+/// inline bytes reach the budget, so a commit whose inline and appended bytes
+/// pass it publishes in a WAL object of its own. A commit whose inline and
+/// appended bytes total more than `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES`
+/// (4 MiB) is refused with `invalid_request`. See `docs/specs/api.md`,
+/// section 5.2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InlineContentPolicy {
@@ -90,7 +91,8 @@ pub struct InlineContentPolicy {
     /// inline preparation, and serializes as `false`.
     #[serde(with = "inline_content_threshold")]
     pub inline_content_threshold_bytes: Option<usize>,
-    /// Maximum inline bytes in one WAL object; defaults to 1 MiB.
+    /// Inline bytes at which the publisher stops adding commits to a batch's
+    /// WAL object; defaults to 1 MiB.
     pub inline_content_wal_object_budget_bytes: usize,
     /// The inline content bytes of an unfolded WAL tail at which the commit
     /// engine stops new commits, as it does at the write stop in unfolded
@@ -99,12 +101,6 @@ pub struct InlineContentPolicy {
     /// [`fold_at_inline_bytes`](loonfs_core::limits::fold_at_inline_bytes)).
     /// Defaults to [`DEFAULT_INLINE_TAIL_LIMIT_BYTES`], 32 MiB, and can't be
     /// smaller than the inline bytes of one WAL object, 4 MiB.
-    ///
-    /// Below the limit, the publisher stages a new inline value as a content
-    /// object when the value would bring the unfolded and admitted inline
-    /// bytes past the limit. A session without a position (before its first
-    /// publish, or after its position is dropped) admits at most the WAL
-    /// object budget until its next publish reads the tail.
     pub inline_content_tail_limit_bytes: usize,
 }
 

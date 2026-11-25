@@ -12,7 +12,7 @@ use loonfs::{
     ByteStream, CompleteUploadBody, LoonFs, Namespace, NamespaceId, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{ObjectStore as _, ObjectStoreExtension};
+use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationSelector};
@@ -33,11 +33,10 @@ struct Harness {
 }
 
 /// Returns the inline content policy of a runtime that prepares no content
-/// inline and stages every inline value that a commit includes.
+/// inline.
 fn staging_policy() -> loonfs::InlineContentPolicy {
     loonfs::InlineContentPolicy {
         inline_content_threshold_bytes: None,
-        inline_content_wal_object_budget_bytes: 1,
         ..Default::default()
     }
 }
@@ -76,15 +75,6 @@ async fn open(failing_keys: KeyPredicate, inline_content: loonfs::InlineContentP
 
 fn streamed(bytes: &'static [u8]) -> ByteStream {
     futures::stream::iter([Ok(Bytes::from_static(bytes))]).boxed()
-}
-
-/// Returns inline content that the publisher stages before the commit,
-/// because the content is larger than the WAL object budget.
-fn inline(harness: &Harness) -> PreparedContent {
-    PreparedContent::inline(
-        Bytes::from_static(BYTES),
-        harness.store.checksum_algorithm(),
-    )
 }
 
 /// Interrupts a create of `namespace_id` on the store of `harness`, whose
@@ -188,13 +178,6 @@ async fn assert_every_staging_is_refused(
                 .await
                 .err(),
         ),
-        (
-            "put_file_prepared with inline content",
-            namespace
-                .put_file_prepared("/f", inline(harness), &actor)
-                .await
-                .err(),
-        ),
     ];
     for (operation, error) in results {
         let error = error.unwrap_or_else(|| panic!("{operation} should be refused"));
@@ -234,7 +217,7 @@ async fn assert_every_staging_commits(harness: &Harness, namespace_id: &Namespac
         .await
         .expect("put a file by inode");
     let token = issue_token(harness, &namespace).await;
-    let prepared: [(&str, PreparedContent); 4] = [
+    let prepared: [(&str, PreparedContent); 3] = [
         (
             "/bytes",
             namespace
@@ -257,7 +240,6 @@ async fn assert_every_staging_commits(harness: &Harness, namespace_id: &Namespac
                 .expect("load the namespace's head")
                 .expect("verify the token"),
         ),
-        ("/inline", inline(harness)),
     ];
     for (path, content) in prepared {
         namespace
@@ -272,7 +254,6 @@ async fn assert_every_staging_commits(harness: &Harness, namespace_id: &Namespac
         "/bytes",
         "/stream",
         "/token",
-        "/inline",
     ] {
         let read = harness
             .writer

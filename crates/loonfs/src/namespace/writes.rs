@@ -134,8 +134,7 @@ impl Namespace<Writable> {
 
     /// Publishes a file revision from already-prepared content.
     ///
-    /// Inline content may stage before submission when a policy limit is reached.
-    /// `options.behavior`
+    /// Inline content travels in the commit's WAL object. `options.behavior`
     /// selects create-only or replace semantics. Retry with a clone of the
     /// prepared content, the same explicit `options.commit.commit_id`, and
     /// unchanged options. A missing commit ID generates a new one on each call.
@@ -537,7 +536,9 @@ impl Namespace<Writable> {
 
     /// Applies one commit request with prepared content proofs.
     ///
-    /// Inline content may stage before submission when a policy limit is reached.
+    /// Inline content travels in the commit's WAL object, and a commit whose
+    /// inline and appended bytes total more than 4 MiB is refused with
+    /// `invalid_request`.
     /// One prepared value covers every operation that uses its content ref.
     pub async fn commit_prepared(
         &self,

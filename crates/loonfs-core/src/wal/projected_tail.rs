@@ -2,15 +2,13 @@
 
 use super::frame::WalObjectError;
 use crate::heap_bytes::{arc_bytes, hash_map_table_bytes, HeapBytes};
-use crate::metadata::{
-    CommitReceiptRecord, ContentLayoutRecord, MetadataState, RevisionRecord, RowOrders,
-};
+use crate::metadata::{ContentLayoutRecord, MetadataState, RevisionRecord, RowOrders};
 use bytes::Bytes;
 use loonfs_types::format::manifest::ManifestActivity;
 use loonfs_types::format::wal::{
     committed_activity, WalCommitPayload, WalCommits, WalDelta, WalInlineContent, WalObjectBody,
 };
-use loonfs_types::{CommitId, CommitSeq, ContentId, ContentRef, NamespaceId};
+use loonfs_types::{CommitSeq, ContentId, ContentRef, NamespaceId};
 use std::collections::{hash_map::Entry, HashMap};
 use std::mem::size_of;
 use std::sync::Arc;
@@ -291,7 +289,11 @@ impl ProjectedWalTail {
             .flat_map(|chunk| chunk.rows.content_layouts())
     }
 
-    pub(crate) fn find_commit_receipt(&self, commit_id: &CommitId) -> Option<&CommitReceiptRecord> {
+    #[cfg(test)]
+    pub(crate) fn find_commit_receipt(
+        &self,
+        commit_id: &loonfs_types::CommitId,
+    ) -> Option<&crate::metadata::CommitReceiptRecord> {
         self.chunks
             .iter()
             .rev()

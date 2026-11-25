@@ -15,8 +15,7 @@ use loonfs_types::format::wal::{
     MergeRecord, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
 use loonfs_types::{
-    CommitId, CommitSeq, ContentId, ContentRef, FileContent, InlineContentIdentity, InodeId,
-    NamespaceId,
+    CommitId, CommitSeq, ContentId, ContentRef, InlineContentIdentity, InodeId, NamespaceId,
 };
 use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
@@ -239,63 +238,9 @@ impl CommitCandidate {
         candidate
     }
 
-    /// Returns values that publication still needs to write in the WAL.
+    /// Returns the inline values that the commit writes in its WAL object.
     pub fn inline_content(&self) -> &[InlineContent] {
         &self.inline_content
-    }
-
-    /// Lists inline values in the order their operations first name them.
-    pub fn ordered_inline_content(&self) -> Result<Vec<InlineContent>> {
-        let intent = self.intent();
-        super::super::candidates::validate_inline_content_references(intent, &self.inline_content)?;
-        let mut values: std::collections::HashMap<_, _> = self
-            .inline_content
-            .iter()
-            .map(|value| (&value.content_ref().content_id, value))
-            .collect();
-        Ok(intent
-            .operations
-            .iter()
-            .filter_map(FilesystemOperation::content_ref)
-            .filter_map(|reference| values.remove(&reference.content_id).cloned())
-            .collect())
-    }
-
-    /// Replaces an inline value with a staged proof without changing its identity form.
-    pub fn stage_inline_content(&mut self, content_id: &ContentId, proof: PreparedContent) {
-        let reference = proof.content_ref();
-        for operation in &mut self.intent.operations {
-            match operation {
-                FilesystemOperation::PutFile {
-                    content: FileContent::Ref(content_ref),
-                    ..
-                }
-                | FilesystemOperation::CreateFileByInode {
-                    content: FileContent::Ref(content_ref),
-                    ..
-                }
-                | FilesystemOperation::PutFileRevisionByInode {
-                    content: FileContent::Ref(content_ref),
-                    ..
-                } if &content_ref.content_id == content_id => *content_ref = reference.clone(),
-                _ => {}
-            }
-        }
-        if let Some(value) = self
-            .inline_content
-            .iter()
-            .find(|value| &value.content_ref().content_id == content_id)
-        {
-            self.inline_content_identities.insert(
-                reference.content_id.clone(),
-                InlineContentIdentity::from_bytes(value.bytes()),
-            );
-        }
-        self.inline_content
-            .retain(|value| &value.content_ref().content_id != content_id);
-        if let ContentPreparation::Ready(proofs) = &mut self.content {
-            proofs.push(proof);
-        }
     }
 
     /// Indexes the proofs that prepared the candidate's references by
@@ -409,53 +354,13 @@ impl CommitCandidate {
         std::mem::size_of_val(self) + self.heap_bytes()
     }
 
-    /// Weighs the candidate as [`Self::estimated_retained_bytes`] does once
-    /// the publisher stages `staged_inline_content`. Staging a value replaces
-    /// the value's heap with a prepared proof and records the value's
-    /// identity, and the inline vector keeps its capacity. This is the weight
-    /// that admission guesses before staging; once the values are staged, the
-    /// charge moves to the staged candidate's
-    /// [`Self::estimated_retained_bytes`].
-    pub fn estimated_retained_bytes_after_inline_staging(
-        &self,
-        staged_inline_content: &[InlineContent],
-    ) -> usize {
-        let proof_bytes = match &self.content {
-            ContentPreparation::Ready(_) => std::mem::size_of::<PreparedContent>(),
-            ContentPreparation::Rejected(_) => 0,
-        };
-        let staged_bytes = staged_inline_content
-            .iter()
-            .map(|value| {
-                let content_id = &value.content_ref().content_id;
-                proof_bytes
-                    + value.content_ref().heap_bytes()
-                    + std::mem::size_of::<(ContentId, InlineContentIdentity)>()
-                    + content_id.heap_bytes()
-            })
-            .sum::<usize>();
-        let left_bytes = staged_inline_content
-            .iter()
-            .map(HeapBytes::heap_bytes)
-            .sum::<usize>();
-        self.estimated_retained_bytes() - left_bytes + staged_bytes
-    }
-
     /// Bounds the request's WAL bytes before planning adds carried layouts.
     /// Publication adds their extent bounds before accepting the plan.
-    pub fn wal_record_bytes_upper_bound(&self) -> usize {
-        self.wal_record_bytes_upper_bound_with_inline_content(&self.inline_content)
-    }
-
-    /// Bounds the request after inline selection, before carried layouts.
     /// A merge's bound includes the layout that each of its revision deltas
     /// records, from the merge's proofs, so it's the merge's planned WAL
     /// bytes. One WAL object stores the merge alone, and the merge allowance
     /// is charged a multiple of these bytes.
-    pub fn wal_record_bytes_upper_bound_with_inline_content(
-        &self,
-        inline_content: &[InlineContent],
-    ) -> usize {
+    pub fn wal_record_bytes_upper_bound(&self) -> usize {
         let intent = self.intent();
         match &self.merge {
             Some(merge) => {
@@ -470,9 +375,11 @@ impl CommitCandidate {
                     },
                 )
             }
-            None => {
-                super::super::wal_size::estimated_wal_record_bytes(intent, None, inline_content)
-            }
+            None => super::super::wal_size::estimated_wal_record_bytes(
+                intent,
+                None,
+                &self.inline_content,
+            ),
         }
     }
 
