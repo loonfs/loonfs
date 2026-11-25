@@ -1,0 +1,138 @@
+# A window for replaced manifests
+
+This note proposes two rules that keep a replaced manifest readable for a while after it's replaced. A [collection](../specs/glossary.md#collection) would keep every manifest that a newer manifest replaced less than 45 minutes ago, with the segments that the manifest lists and the WAL objects above its `folded_wal_no`. A [writer position](../specs/glossary.md#writer-position) whose last check is at least the [revalidation bound](../specs/glossary.md#revalidation-bound) old (20 minutes) would be checked before it's used as the basis of a publication. Together, the two rules mean that a process that checked its manifest recently finds the segments and WAL objects it needs, so the code that runs a read or a publication again after it finds a segment missing can be deleted. Nothing in this note is implemented yet, and the [format spec](../specs/format.md) describes today's rule.
+
+## The problem
+
+This section describes what a collection keeps today, and an example in which a process loses a segment a second after it checked its manifest.
+
+### What a collection keeps today
+
+A namespace's collection keeps the current manifest (or the tombstone), the manifests that snapshots keep, and every segment that those manifests list. It keeps every manifest numbered above the newest one it found, and in an active namespace, every data WAL object above the current manifest's `folded_wal_no` (see [Reference roots](../specs/format.md#112-reference-roots)). A manifest below the newest one isn't a root unless a snapshot keeps it, however recently it was replaced.
+
+Everything else is a candidate. A segment that no root lists is deleted once its provider age is at least the [grace window](../specs/glossary.md#grace-window) `T` (24 hours), and so is a data WAL object at or below the current manifest's `folded_wal_no`. In a deleted namespace, every data WAL object is deleted once it's `T` old (see [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules)). The age is measured from when the object was written, not from when the last manifest that listed it was replaced. So a segment that's older than `T` when a compaction drops it is deleted by the next collection, however recently the compaction published.
+
+Segments younger than `T` are safe for `T` whatever happens, and most compaction output is young. The objects at risk are segments that were older than `T` when a manifest stopped listing them (the inputs of a compaction of old runs), and WAL objects that stayed unfolded for more than `T`. A maintained namespace folds its tail once the tail's newest commit is 15 minutes old, so an unfolded tail that old needs a namespace that nothing maintained for a day, for example while its maintaining server was down.
+
+### An example that loses a segment and a WAL object
+
+For example, the namespace `main` has a manifest boundary of 38:
+
+1. Manifest 40 has been current for two days. It lists segment `S`, written three days ago, and its `folded_wal_no` is 300. WAL objects 301 to 305 were written 30 hours ago, while the server that maintains `main` was down, so nothing has folded them.
+2. At 10:00:00, a reader process checks manifest 40. The HEAD of manifest 41 finds nothing, and the boundary is still 38. A read starts from that view.
+3. At 10:00:01, the maintaining server starts again, and its first sweep runs `main`'s metadata step. The step folds the tail into manifest 41 (`folded_wal_no` 305), and a compaction unit publishes manifest 42, which replaces `S` with a new segment.
+4. At 10:00:02, the same sweep collects `main`. The collection finds manifest 42 as the newest. No root lists `S`, which is three days old, so the collection deletes it. WAL objects 301 to 305 are at or below 305 and 30 hours old, so the collection deletes them too.
+5. At 10:00:03, the read loads rows from `S` and finds it missing. A process that evicted its copy of the tail and replays WAL objects 301 to 305 finds them missing too.
+
+Today, the load that finds `S` missing runs a discovery to learn whether manifest 40 was replaced. It was, so an ordinary read runs again from manifest 42, up to eight attempts in all, and then returns `store_contention`. A read view returns `store_contention` at once. A fold, a compaction unit, a commit batch, and a retention advance each have a branch of their own for the same error (see [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal)).
+
+A writer position is exposed for longer. A publish doesn't check the position's manifest (see [Read freshness](read-freshness.md#one-view-per-process)), and a check doesn't run because of the position's age. Other processes publish manifests at the session's writer epoch (the maintaining server's compactions, a grep index publication, a snapshot's fold on another host), and the writer learns of them at its next check or its next manifest put. A writer that makes one small commit a minute reaches the 256-object fold threshold after about four hours, and its newest commit is never 15 minutes old, so the idle fold doesn't run either. Its commits validate against the rows of a manifest that may have been replaced hours ago, so no window short enough to be cheap would cover the position without a check.
+
+## The design
+
+This section describes the collection rule, the gate on an aged writer position, how the window's length follows from the existing bounds, and what happens to work that no bound covers.
+
+### The collection rule
+
+A namespace's collection also keeps every manifest above the [manifest boundary](../specs/glossary.md#manifest-boundary) whose next listed manifest is younger than the replaced-manifest window, `REPLACED_MANIFEST_WINDOW_MS` (45 minutes), by provider timestamp. It keeps the segments that each of those manifests lists. And it keeps every data WAL object above the `folded_wal_no` of the oldest manifest that it keeps this way, in place of the current manifest's. The "next listed manifest" is the next higher number in the collection's listing of the manifests above the boundary. A manifest whose next listed manifest has no provider timestamp is kept, as every age rule keeps an object without one.
+
+For example, in the example above, `main`'s boundary is 38, and the collection that starts at 10:00:02 lists manifests 39 to 42. Manifest 40 was published two days ago, and manifests 41 and 42 at 10:00:01. Manifest 39's next listed manifest, 40, is two days old, so manifest 39 isn't a root. Manifest 40's next listed manifest, 41, is a second old, so manifest 40 is a root, and so is manifest 41. Manifest 42 is the newest. The collection keeps the segments of manifests 40, 41, and 42, and the WAL objects above 300, manifest 40's `folded_wal_no`. So `S` and WAL objects 301 to 305 stay. A collection that starts at 10:45:01 or later no longer keeps manifest 40.
+
+The rule applies to a deleted namespace too, until retirement, and so does the WAL floor. A deletion folds the tail before it publishes the tombstone, so the manifests that the deletion's fold and the tombstone replaced are kept for the window, and a process that checked one of them just before the deletion replays the WAL objects above that manifest's `folded_wal_no`. Today a deleted namespace keeps no data WAL object, so without the floor, the deletion of a namespace whose tail was older than `T` would lose that tail for such a process. A retired namespace has no roots, as today.
+
+Why does the rule consider only manifests above the boundary? Every manifest at or below the boundary is dead, and a put that the provider applies late, into a number that a collection emptied, is at or below the boundary (see [The manifest boundary](manifest-boundary.md#publishing-a-manifest)). Counting such a manifest wouldn't make anything safer. It would keep the late put's garbage for the window.
+
+Why does the rule keep one unbroken run of manifests? Above the boundary, each manifest was put by a publisher that had loaded its predecessor, so a manifest's provider timestamp isn't earlier than its predecessor's, within the clock margin. If one manifest's successor is younger than the window, every later manifest's successor is younger still. So the kept manifests are always the newest manifest and the manifests just below it, down to the oldest one the rule keeps.
+
+Why move the WAL floor? A process replays the WAL objects above its own manifest's `folded_wal_no`, not the current manifest's. Without the floor, the example above keeps `S` and still loses WAL objects 301 to 305.
+
+A collection lists the manifests twice today. To find the newest manifest, it lists the manifests above the boundary and keeps the highest number. Later, its sweep lists the whole manifest prefix and decides about each manifest as the listing streams, deleting the old ones in batches. The kept manifests have to be chosen before that sweep starts, so the rule uses the first listing. That listing already returns each manifest's provider timestamp, and the rule needs the find step to return the listed numbers and timestamps instead of the highest number alone. The collection then loads the kept manifests while it loads the snapshot manifests, adds their keys and segments to its live set, and computes the WAL floor, so the sweep keeps them like any other root. The rule adds no listing.
+
+### The gate on an aged writer position
+
+Before a writer position is used as the basis of a publication, LoonFS checks the position if its last check is at least `READ_REVALIDATION_BOUND_MS` (20 minutes) old. The check is the session's existing check: a HEAD of the next manifest and a conditional read of the boundary, after which the position stays, moves onto the newest manifest of its writer epoch, or is dropped, as it does for a read (see [Read freshness](read-freshness.md#the-writers-session-and-its-position)).
+
+Today the position reaches a publication without a check from the commit engine (a commit's validation and the session's folds), from a fold that starts from the position, from a namespace deletion, and from a fork of the namespace's head. (The runtime passes the position to the fork's read of the head as it is. The fork's temporary snapshot is verified after it's written, so a fork from a replaced manifest reads the head again, but the reads before that verification use the unchecked position.) A compaction unit and a retention advance already check the position before they plan, whatever its age, so the gate doesn't change them.
+
+The gate is one accessor, not a rule at each call site. The position's basis and the publisher's position accessor become private to the core crate, and the one way to get a publication basis out of a position is a method that takes a maximum age and runs the check when the position is older. A new caller then can't skip the gate. The age is that of the position's merged check (a check of an earlier manifest counts, as in [Read freshness](read-freshness.md#what-a-read-promises)), and a WAL put doesn't count as a check, because a put confirms the WAL tip and nothing about the manifest.
+
+### Choosing the window
+
+In this section, a "holder" is any work that reads a manifest's rows after checking the manifest: a read, a [read view](../specs/glossary.md#read-view), a writer position, a fold, a commit's validation, or a compaction unit. A check of manifest `m` at time `c` (a successor probe that found no newer manifest, followed by a boundary read that found `m` above the boundary) shows that the provider hadn't made manifest `m + 1` visible at `c`. The collection compares `m + 1`'s provider timestamp with its own clock. The window has to cover four terms:
+
+| Term | Value | Why |
+| --- | ---: | --- |
+| `READ_REVALIDATION_BOUND_MS` | 20 min | The oldest check that a holder may start work from. An `eventual` read checks its view once the check is that old, and the gate does the same for a publication. |
+| `METADATA_PUBLICATION_BUDGET_MS` | 15 min | How long a publication reads rows after it starts. Its reads come before its put, and the put checks the budget. |
+| `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 5 min | How much earlier than its visibility `m + 1`'s timestamp can be. A provider applies a request within this bound of the client starting it, and the timestamp of a single put is taken when the request arrives, not when it completes (inferred from provider behavior, not measured). |
+| `GC_SAFETY_MARGIN_MS` | 5 min | The difference between the collector's clock and the provider's (see [Clock and operation assumptions](../specs/format.md#114-clock-and-operation-assumptions)). |
+
+The sum is 45 minutes, which is `READ_REVALIDATION_BOUND_MS + PUBLICATION_COMPLETION_BOUND_MS`, because the completion bound is the last three terms. The window is far below `T`.
+
+The guarantee follows in three steps:
+
+1. The holder's successor probe, sent after `c`, found no `m + 1`, so the provider made `m + 1` visible after `c`, and `m + 1`'s timestamp is no earlier than `c` minus the provider bound.
+2. A collection deletes a segment of `m` only if `m` isn't a root at the collection's start, so the collection's next listed manifest after `m` is at least 45 minutes old by the collection's clock. That manifest is `m + 1` or a later, younger one.
+3. With the clocks within the margin, the collection's start is at least `c` + 45 - 5 - 5 minutes, and the collection takes its clock before it sends any delete.
+
+So a holder finds every segment that `m` lists, and every WAL object above `m`'s `folded_wal_no`, at any time less than 35 minutes after its check. A collection that starts exactly 35 minutes after the check can delete them, so the spec should say "less than", not "at most".
+
+A read starts from a check that's less than 20 minutes old, so it finds every segment it needs for at least 15 minutes after it starts, unless its process pauses for longer than the clock margin. A publication from a gated basis reads its rows before its put and within the publication budget, so it finds its basis. The contract for users is that a read or a read view works for at least 15 minutes after it starts, and work that needs a view for longer takes a snapshot.
+
+A commit's validation has no stated budget, and this design doesn't add one. In practice it finishes within the provider's deadlines, well inside 15 minutes (inferred, not measured). A commit that finds a segment missing anyway, after a pause, fails once with `store_contention`, and the client sends it again with the same commit ID.
+
+### Work with no bound
+
+Three kinds of work outlast what the window covers:
+
+- **A long read or a read view that a caller keeps.** A read that runs longer than 15 minutes from a 20-minute-old check, or a read view kept longer than that, can find a segment missing. The read fails once with an error, and the caller captures a new view or takes a snapshot.
+- **A compaction unit.** A unit can run for up to 12 hours (`METADATA_COMPACTION_BUDGET_MS`). Folds keep every run, so the unit's inputs can be dropped only by another compactor's publication. After the deletions described below, the unit fails (today it's abandoned), and no window shorter than `T` would cover it.
+- **A process paused past the margin.** Any holder can lose a segment after a pause longer than the window allows. The check that classifies a missing segment finds that the manifest was replaced, and the holder fails once.
+
+In each case, the next use repairs itself. A holder that finds a segment missing has a check at least 35 minutes old, which is older than the revalidation bound, so its next use runs a check: the gate for a writer position, and the existing age rule and the strong read for a cached view. No error path needs to move or drop anything.
+
+## What LoonFS can delete afterwards
+
+Once both rules are in, no process needs to recover from a collected segment. The in-read retry can go: the loop that runs an ordinary read again after a replaced manifest, with the extra pin and the wrappers that grep, snapshot reads, and the retention advance put around it. An ordinary read that finds its manifest replaced then returns `store_contention` once, as it does today after eight attempts. The check that classifies a missing segment gains one case, so that a namespace whose current manifest is a tombstone returns `namespace_deleted` at once, as the retry's second run returns today. After the gate, the publication side can go too: the commit engine's drop of a replaced basis, the case that publishes a commit again after a replaced basis, the fold's extra attempt after a replaced manifest, and the compaction unit's abandon branch. A unit whose inputs another compactor dropped then fails, with a log line and a backoff, instead of reporting that it was abandoned.
+
+The check that classifies a missing segment stays, with both of its kinds, because a snapshot read needs it to tell `snapshot_not_found` from `namespace_corrupt`. So do the check that a manifest is still current, the position check's three outcomes, the runtime's single place that drops a namespace's view, and the error carve-outs that report a commit's basis and not the operation.
+
+Why can't the in-read retry go before the collection rule? Without the rule, a read from a writer position accepts a check up to 20 minutes old and isn't checked again after another process's compaction. Where another process compacts the namespace and collects it hourly, roughly one in three compactions that drop old segments would show the error to reads that touch those segments (estimated from a 20-minute check age against a 60-minute collection interval). A reader process checks its view about once a second, so its exposure is roughly one in 3,600 such compactions (estimated the same way). No metric records read retries today.
+
+The deletions are modest in size. About 150 to 190 lines go outside tests, and the two rules add about 90 to 150, so the net is roughly 40 to 100 lines removed (estimated from the current code). The larger change is in kind: no read, commit, fold, or compaction unit has a branch for a replaced manifest, and the check before a holder's next use repairs every holder.
+
+## Costs
+
+This section lists what the two rules cost in requests, memory, and storage.
+
+A collection sends no new listing, because the listing above the boundary already returns the timestamps that the rule needs. It loads every kept manifest other than the newest, which it has already loaded, through the segment cache. A process caches each manifest that it publishes, so the writer's host, which also collects its namespace once an hour by default, usually finds the kept manifests in its cache. A sweep on another host loads them from the store (estimated, not measured).
+
+The extra loads grow with the number of manifests replaced within 45 minutes:
+
+| Namespace | Manifests replaced in 45 minutes | Extra requests per collection | Extra bytes read |
+| --- | ---: | --- | --- |
+| Idle | 0 | 0 | 0 |
+| Steady writer, 100,000 to 1 million files, 5 to 10 manifests a minute | 225 to 450 | 225 to 450 GETs on a cache miss, about 1 to 2 seconds at 16 in flight and 70 ms each, and none on a hit | 5 to 40 MiB stored, 20 to 200 MiB decoded |
+| The largest manifest the format allows (512 MiB decoded), about one publication a minute | about 45 | about 45 | about 23 GiB decoded |
+
+The rates in the second row are estimated from a measured build of a one-million-file namespace, which published 62 folds in 15.6 minutes at about 1,300 commits per second, each fold followed by compaction units. The sizes are estimated from the format's figure of a 440 KiB manifest for a million files and its compression example (193 KiB to 36 KiB). The last row is the format's limit, not a workload, and at that size the cheaper form in [Alternatives considered](#alternatives-considered) is needed.
+
+The collection's cost on a namespace of a million files with writes running hasn't been measured.
+
+Memory grows less than the loads. The live set stores each segment key once, so the kept manifests add the segments that compactions dropped within the window: compaction inputs, tens to hundreds of keys. Each kept manifest is decoded whole while it's loaded. Snapshot manifests already load 16 at a time, and at the format's limit, these loads would need to run one at a time.
+
+Storage grows for segments that were older than `T` when a manifest stopped listing them. Today such a segment is deleted by the first collection after the drop, 0 to 60 minutes later with hourly collections. With the rule, it's deleted 45 to 105 minutes later, so about 45 minutes longer. In the heaviest case, where base compaction rewrites all live metadata once a day, the extra stored bytes average about 3% of live metadata (45 minutes out of 24 hours), with a peak of one extra copy of live metadata for 45 minutes after a full rewrite, a peak that already lasts up to an hour today (estimated). The extra manifest objects are those older than `T` and replaced within the window, usually one or two. Content isn't affected, because a retention advance passes a commit only once it's `T` old, so a replaced revision's content stays for `T` after its replacement.
+
+The gate runs at most once per active session every 20 minutes, on one commit's path. When no other process has published since the position's last check, it costs one HEAD and one conditional boundary read. When another process has published, it costs the HEAD, a read of each newer manifest (up to nine, after which the position is dropped), and the boundary read. An idle session sends nothing, because the scheduled metadata step reads the position without publishing.
+
+## Changes to the specs
+
+In the storage format, [Reference roots](../specs/format.md#112-reference-roots) gains the rule's row and the WAL floor, and loses the paragraph that says a replaced manifest isn't a root. [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules) changes its example, and its row for data WAL objects in a deleted namespace keeps the objects above the floor until retirement. [A summary of the log protocol](../specs/format.md#26-a-summary-of-the-log-protocol) changes guarantee 8 and drops the parenthesis in guarantee 5 that exempts publications from the revalidation bound. [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal) loses the retry once the retry is deleted, and [Publication and collection timing](../specs/format.md#c1-publication-and-collection-timing) gains the constant and its relationship and loses "Doesn't bound publication bases or writer positions". [Read freshness](read-freshness.md) and the API spec's paragraph on reads on a replaced manifest (see [Standard error contract](../specs/api.md#3-standard-error-contract)) change when the retry goes. The byte format and the wire don't change.
+
+## Alternatives considered
+
+Load only the oldest kept manifest. Every publisher builds from its basis: a fold adds a run, a compaction replaces its inputs with its output, and a rebuild over a winning manifest starts from the winner's runs. So a manifest lists a subset of its predecessor's segments plus the segments that its own publication wrote. Those new segments are younger than the compaction budget plus the completion bound plus the window (13 hours 10 minutes), which is below `T`, so their age protects them. It follows that the oldest kept manifest lists every old segment that any kept manifest lists, and loading that one manifest is exact. The cost is at most one manifest per collection, so it doesn't grow with the number of kept manifests. But the format doesn't state the rule that this form depends on (see [Publishing a manifest](../specs/format.md#72-publishing-a-manifest)). It needs a new requirement, that a manifest lists no segment that its basis doesn't list other than segments its own publication wrote, and the argument above is inferred from the publishers' code, not checked. LoonFS loads every kept manifest for now, because that form needs no new format rule, and moves to this form only if the measured cost of the full form is too high.
+
+Remember, in the collector, when it first found a segment unreferenced. A collector would keep, between collections, the time it first found each segment unreferenced, and delete the segment one window after that. It's safe, and it uses the collector's own monotonic clock instead of provider timestamps. But the memory doesn't survive a restart, so a host that restarts more often than its collection interval forgets every first sighting before it can act on one. A namespace collected by a daily sweep on a server restarted daily would keep every dropped segment. Making the time durable would add scheduling state, a new mechanism.
+
+Keep today's rule. Every holder then has to handle a segment that was deleted a second after its check, and every operation that reads a manifest's rows keeps its own recovery path.
