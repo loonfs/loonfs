@@ -171,11 +171,13 @@ impl<M: crate::Mode> Namespace<M> {
     /// under the same slot, as [`Self::read_through_views`] does. A missing
     /// or expired snapshot returns `snapshot_not_found`.
     ///
-    /// Reads through the view take no slot of their own. A read through this
-    /// handle inside `read` waits for a slot of its own while the call keeps
-    /// one, so `read` reads only through the view. A copy of the view that
-    /// `read` keeps, or returns, keeps the slot taken until the last copy is
-    /// dropped. Use [`Self::read_view_at_snapshot`] for a view that serves
+    /// Reads through the view take no slot of their own. One slot admits
+    /// one running read, so reads through the view and its copies run one
+    /// at a time, and a second read waits until the first ends. A read
+    /// through this handle inside `read` waits for a slot of its own while
+    /// the call keeps one, so `read` reads only through the view. A copy of
+    /// the view that `read` keeps, or returns, keeps the slot taken until the
+    /// last copy is dropped. Use [`Self::read_view_at_snapshot`] for a view that serves
     /// several reads over time.
     pub async fn read_at_snapshot<T, F, Fut>(&self, snapshot_id: &SnapshotId, read: F) -> Result<T>
     where
@@ -189,7 +191,7 @@ impl<M: crate::Mode> Namespace<M> {
             snapshot_id = %snapshot_id
         );
         trace::in_operation(span, async {
-            let permit = Arc::new(self.core.owned_read_permit().await);
+            let slot = Arc::new(tokio::sync::Mutex::new(self.core.owned_read_permit().await));
             // Boxed for the same reason as `RuntimeCore::read_at_least`:
             // without the box, a crate that awaits a read fails to compile
             // with "queries overflow the depth limit!".
@@ -202,9 +204,7 @@ impl<M: crate::Mode> Namespace<M> {
                     self.core.clone(),
                     pinned,
                     ReadSource::Snapshot(snapshot_id.clone()),
-                    ReadAdmission::Shared {
-                        _slot: Arc::clone(&permit),
-                    },
+                    ReadAdmission::Shared(Arc::clone(&slot)),
                 ))
                 .await
             }))

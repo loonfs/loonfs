@@ -349,7 +349,7 @@ In the embedded runtime, every public read acquires one slot from the runtime's 
 
 - Each pager page acquires and releases its own slot.
 - Capturing a `ReadView` takes one slot and releases it immediately, and each read through the view takes its own slot.
-- `Namespace::read_at_snapshot` takes one slot for the capture of a snapshot's view and every read through that view, and keeps it when the read runs again after a replaced manifest. An HTTP read of a snapshot runs this way, so it takes one slot, as a read of the live head does.
+- `Namespace::read_at_snapshot` takes one slot for the capture of a snapshot's view and every read through that view, and keeps it when the read runs again after a replaced manifest. One slot admits one running read, so reads through that view, or through a copy of it, run one at a time. An HTTP read of a snapshot runs this way, so it takes one slot, as a read of the live head does.
 - A buffered content read keeps its slot until it finishes.
 - A streamed or ranged content read releases its slot after metadata and content lookup, before returning the body (transfer limits bound body consumption).
 - Internal reads inside mutations and maintenance don't take a read slot.

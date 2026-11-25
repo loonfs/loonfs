@@ -22,6 +22,7 @@ use loonfs_types::{
     PageRequest,
 };
 use std::sync::Arc;
+use tokio::sync::{Mutex, MutexGuard};
 
 /// A captured namespace state that related reads share.
 ///
@@ -41,7 +42,9 @@ use std::sync::Arc;
 /// [`Namespace::read_view_at_snapshot`](crate::Namespace::read_view_at_snapshot)
 /// takes a read slot for each read. A view that
 /// [`Namespace::read_at_snapshot`](crate::Namespace::read_at_snapshot) passes
-/// to its closure reads under that call's one slot instead.
+/// to its closure reads under that call's one slot instead, and one slot
+/// admits one running read, so reads through that view and its copies run
+/// one at a time.
 #[must_use]
 #[derive(Clone)]
 pub struct ReadView {
@@ -57,9 +60,22 @@ pub(crate) enum ReadAdmission {
     /// Each read waits for a read slot of its own.
     EachRead,
     /// The reads run under a read slot that every copy of the view shares,
-    /// and the slot returns when the last copy is dropped. Nothing reads the
-    /// permit, because keeping it keeps the slot.
-    Shared { _slot: Arc<OwnedBudgetPermit> },
+    /// and the slot returns when the last copy is dropped. One slot admits
+    /// one running read, so a read takes the lock for its duration, and a
+    /// second read through the view or a copy of it waits until the first
+    /// ends.
+    Shared(Arc<Mutex<OwnedBudgetPermit>>),
+}
+
+/// The admission that one read through a view keeps until it ends: a slot
+/// of its own, or the lock of the slot that the view shares.
+enum Admitted<'a> {
+    Own {
+        _slot: BudgetPermit<'a>,
+    },
+    Shared {
+        _lock: MutexGuard<'a, OwnedBudgetPermit>,
+    },
 }
 
 /// The state that a read view captured: the live head, or a snapshot.
@@ -169,12 +185,18 @@ impl ReadView {
         }
     }
 
-    /// Waits for a read slot when this view's reads take one each, and
-    /// returns the slot. A view that shares a slot returns `None` at once.
-    async fn admit(&self) -> Option<BudgetPermit<'_>> {
-        match self.admission {
-            ReadAdmission::EachRead => Some(self.core.read_permit().await),
-            ReadAdmission::Shared { .. } => None,
+    /// Admits one read through this view, and returns the admission that
+    /// the read keeps until it ends: a read slot of its own, or the lock of
+    /// the slot that the view shares, which admits one running read at a
+    /// time.
+    async fn admit(&self) -> Admitted<'_> {
+        match &self.admission {
+            ReadAdmission::EachRead => Admitted::Own {
+                _slot: self.core.read_permit().await,
+            },
+            ReadAdmission::Shared(slot) => Admitted::Shared {
+                _lock: slot.lock().await,
+            },
         }
     }
 
