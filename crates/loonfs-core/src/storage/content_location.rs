@@ -13,7 +13,8 @@ use loonfs_objectstore::keys::{content_blob, content_blob_name, content_span, co
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::{
-    Checksum, ContentExtent, ContentId, ContentRef, ExtentObject, NamespaceId, PoolId,
+    Checksum, ChecksumAlgorithm, ChecksumDigest, ContentExtent, ContentId, ContentRef,
+    ExtentObject, NamespaceId, PoolId,
 };
 
 #[async_trait::async_trait]
@@ -196,14 +197,63 @@ impl ContentLocation {
     }
 
     /// Reads `[start, end)` of the reference, from `object_cache` where it
-    /// has the first bytes of an object and from the store otherwise.
+    /// has the first bytes of an object and from the store otherwise. A
+    /// part that is a whole object is checked against the object checksum,
+    /// computed with `algorithm`.
     pub(crate) async fn read_range<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
         object_cache: Option<&ObjectCache>,
+        algorithm: ChecksumAlgorithm,
         start: u64,
         end: u64,
     ) -> std::result::Result<Bytes, DurableContentValidationError> {
+        let parts = self
+            .read_parts(store, object_cache, algorithm, start, end)
+            .await?;
+        Ok(join(parts.into_iter().map(|(bytes, _)| bytes).collect()))
+    }
+
+    /// Reads `[start, end)` of the reference as [`Self::read_range`] does,
+    /// and returns the `algorithm` checksum of those bytes.
+    ///
+    /// Each byte is hashed once. A part that is a whole object contributes
+    /// the checksum that its object check computed, every other part is
+    /// hashed, and the checksums are combined in byte order.
+    pub(crate) async fn read_range_with_checksum<S: ObjectStore + ?Sized>(
+        &self,
+        store: &S,
+        object_cache: Option<&ObjectCache>,
+        algorithm: ChecksumAlgorithm,
+        start: u64,
+        end: u64,
+    ) -> std::result::Result<(Bytes, Checksum), DurableContentValidationError> {
+        let parts = self
+            .read_parts(store, object_cache, algorithm, start, end)
+            .await?;
+        let mut digest = ChecksumDigest::new(algorithm);
+        for (part, object_checksum) in &parts {
+            match object_checksum {
+                Some(checksum) => digest.update_checksum(checksum, part.len() as u64),
+                None => digest.update(part),
+            }
+        }
+        let bytes = join(parts.into_iter().map(|(part, _)| part).collect());
+        Ok((bytes, digest.finish()))
+    }
+
+    /// Returns the parts of `[start, end)` in byte order: one for each
+    /// extent and each WAL piece that the range covers. A part that is a
+    /// whole object fetched from the store comes with its `algorithm`
+    /// checksum, which matched the extent's object checksum.
+    async fn read_parts<S: ObjectStore + ?Sized>(
+        &self,
+        store: &S,
+        object_cache: Option<&ObjectCache>,
+        algorithm: ChecksumAlgorithm,
+        start: u64,
+        end: u64,
+    ) -> std::result::Result<Vec<(Bytes, Option<Checksum>)>, DurableContentValidationError> {
         let mut requests = Vec::new();
         let mut offset = 0;
         for located in &self.extents {
@@ -223,15 +273,16 @@ impl ContentLocation {
         }
         // `buffered` keeps the parts in extent order, which is the byte order
         // of the requested range.
-        let mut parts: Vec<Bytes> = stream::iter(requests)
+        let mut parts: Vec<(Bytes, Option<Checksum>)> = stream::iter(requests)
             .map(|(object_key, range, object_checksum)| async move {
                 if let Some(cached) = object_cache
                     .and_then(|cache| cache.get_content(&object_key, range.end_exclusive))
                 {
-                    return Ok(cached.slice(
+                    let part = cached.slice(
                         loonfs_types::usize_from_u64(range.start_inclusive)
                             ..loonfs_types::usize_from_u64(range.end_exclusive),
-                    ));
+                    );
+                    return Ok((part, None));
                 }
                 let expected = range.end_exclusive - range.start_inclusive;
                 let bytes = store
@@ -252,10 +303,16 @@ impl ContentLocation {
                         actual: bytes.len() as u64,
                     });
                 }
-                if let Some(object_checksum) = object_checksum {
-                    verify_object_checksum(object_key, &object_checksum, &bytes)?;
-                }
-                Ok(bytes)
+                let checksum = match object_checksum {
+                    Some(object_checksum) => Some(verify_object_checksum(
+                        object_key,
+                        &object_checksum,
+                        algorithm,
+                        &bytes,
+                    )?),
+                    None => None,
+                };
+                Ok((bytes, checksum))
             })
             .buffered(STORE_READS_IN_FLIGHT)
             .try_collect()
@@ -265,14 +322,11 @@ impl ContentLocation {
             if offset < end && piece_end > start {
                 let first = loonfs_types::usize_from_u64(start.max(offset) - offset);
                 let last = loonfs_types::usize_from_u64(end.min(piece_end) - offset);
-                parts.push(piece.slice(first..last));
+                parts.push((piece.slice(first..last), None));
             }
             offset = piece_end;
         }
-        Ok(match parts.len() {
-            1 => parts.remove(0),
-            _ => parts.concat().into(),
-        })
+        Ok(parts)
     }
 
     /// Reads and verifies the whole reference. When the reference is the
@@ -283,18 +337,42 @@ impl ContentLocation {
         object_cache: Option<&ObjectCache>,
         content_ref: &ContentRef,
     ) -> std::result::Result<Vec<u8>, DurableContentValidationError> {
-        let bytes = self
-            .read_range(store, object_cache, 0, content_ref.size_bytes)
+        let expected = &content_ref.checksum;
+        let (bytes, actual) = self
+            .read_range_with_checksum(
+                store,
+                object_cache,
+                expected.algorithm(),
+                0,
+                content_ref.size_bytes,
+            )
             .await?;
-        super::content::validate_loaded_content_bytes(
-            self.object_key.clone(),
-            content_ref,
-            &bytes,
-        )?;
+        if bytes.len() as u64 != content_ref.size_bytes {
+            return Err(DurableContentValidationError::ContentLengthMismatch {
+                object_key: self.object_key.clone(),
+                expected: content_ref.size_bytes,
+                actual: bytes.len() as u64,
+            });
+        }
+        if actual != *expected {
+            return Err(DurableContentValidationError::ContentChecksumMismatch {
+                object_key: self.object_key.clone(),
+                expected: describe_checksum(expected),
+                actual: describe_checksum(&actual),
+            });
+        }
         if let Some((object_cache, object_key)) = object_cache.zip(self.single_object_key()) {
             object_cache.insert_content(object_key, &bytes);
         }
         Ok(bytes.to_vec())
+    }
+}
+
+/// Joins the parts of a read in order, without a copy when there is one.
+fn join(mut parts: Vec<Bytes>) -> Bytes {
+    match parts.len() {
+        1 => parts.remove(0),
+        _ => parts.concat().into(),
     }
 }
 
@@ -305,13 +383,15 @@ fn reads_whole_object(extent: &ContentExtent, range: &ByteRange) -> bool {
 }
 
 /// Checks the bytes of a whole content object against the stored checksum
-/// that the extents listing the object record.
+/// that the extents listing the object record, and returns the `algorithm`
+/// checksum of the bytes.
 fn verify_object_checksum(
     object_key: String,
     expected: &Checksum,
+    algorithm: ChecksumAlgorithm,
     bytes: &[u8],
-) -> std::result::Result<(), DurableContentValidationError> {
-    let actual = Checksum::compute(expected.algorithm(), bytes);
+) -> std::result::Result<Checksum, DurableContentValidationError> {
+    let actual = Checksum::compute(algorithm, bytes);
     if actual != *expected {
         return Err(DurableContentValidationError::ContentChecksumMismatch {
             object_key,
@@ -319,5 +399,5 @@ fn verify_object_checksum(
             actual: describe_checksum(&actual),
         });
     }
-    Ok(())
+    Ok(actual)
 }

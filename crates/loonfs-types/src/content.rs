@@ -255,6 +255,35 @@ impl ChecksumDigest {
         self.digest.update(bytes);
     }
 
+    /// Folds in the next piece of the payload by the piece's checksum and
+    /// length, without reading the piece's bytes, for a caller that has
+    /// already hashed the piece.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `checksum` uses another algorithm than this digest.
+    pub fn update_checksum(&mut self, checksum: &Checksum, len: u64) {
+        assert_eq!(
+            checksum.algorithm, self.algorithm,
+            "a piece's checksum should use the digest's algorithm"
+        );
+        let algorithm = crc_fast_algorithm(self.algorithm);
+        let combined = crc_fast::checksum_combine(
+            algorithm,
+            self.digest.finalize(),
+            checksum.crc_value(),
+            len,
+        );
+        // `finalize` applies the algorithm's output mask to the digest's
+        // state, so the digest starts from `combined` with the mask removed,
+        // because `finalize` applies it again. A digest whose state is 0
+        // finalizes to the mask. This relies on the checksum crate's final
+        // value being its state XORed with the output mask, which the tests
+        // below check.
+        let mask = crc_fast::Digest::new_with_init_state(algorithm, 0).finalize();
+        *self.digest = crc_fast::Digest::new_with_init_state(algorithm, combined ^ mask);
+    }
+
     /// Closes the digest over everything fed so far.
     ///
     /// The value is the big-endian spelling of the 64-bit CRC-64/NVME or the
@@ -370,6 +399,26 @@ impl ContentVerifier {
     pub fn update(&mut self, chunk: &[u8]) -> Result<(), ChunkAfterEndError> {
         self.digest().ok_or(ChunkAfterEndError)?.update(chunk);
         self.fetched_bytes += chunk.len() as u64;
+        Ok(())
+    }
+
+    /// Folds in the next fetched chunk by its checksum and length, in order,
+    /// for a caller that has already hashed the chunk.
+    ///
+    /// A chunk that arrives after [`Self::finish`] is refused.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `checksum` uses another algorithm than the reference.
+    pub fn update_checksum(
+        &mut self,
+        checksum: &Checksum,
+        chunk_bytes: u64,
+    ) -> Result<(), ChunkAfterEndError> {
+        self.digest()
+            .ok_or(ChunkAfterEndError)?
+            .update_checksum(checksum, chunk_bytes);
+        self.fetched_bytes += chunk_bytes;
         Ok(())
     }
 
@@ -538,6 +587,112 @@ mod tests {
                 actual,
                 Some(Checksum::compute(algorithm, &[first, second].concat()))
             );
+        }
+    }
+
+    /// Checks that a digest and a verifier that fold in pieces of random
+    /// lengths, some by their bytes and some by their checksums, return the
+    /// checksum of all the bytes. The pieces come from a fixed seed, so every
+    /// run checks the same cases.
+    #[test]
+    fn random_pieces_folded_by_checksum_match_hashing_the_joined_bytes() {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for algorithm in [ChecksumAlgorithm::Crc32c, ChecksumAlgorithm::Crc64nvme] {
+            for case in 0..300 {
+                let count = crate::usize_from_u64(next() % 9);
+                let mut pieces = Vec::new();
+                for _ in 0..count {
+                    let len = match next() % 4 {
+                        0 => 0,
+                        1 => crate::usize_from_u64(next() % 8),
+                        2 => crate::usize_from_u64(next() % 300),
+                        _ => crate::usize_from_u64(next() % 20_000),
+                    };
+                    let piece: Vec<u8> = (0..len).map(|_| next().to_le_bytes()[0]).collect();
+                    pieces.push((piece, next() % 2 == 0));
+                }
+                let joined: Vec<u8> = pieces.iter().flat_map(|(piece, _)| piece.clone()).collect();
+                let mut digest = ChecksumDigest::new(algorithm);
+                for (piece, by_checksum) in &pieces {
+                    if *by_checksum {
+                        digest.update_checksum(
+                            &Checksum::compute(algorithm, piece),
+                            piece.len() as u64,
+                        );
+                    } else {
+                        digest.update(piece);
+                    }
+                }
+                assert_eq!(
+                    digest.finish(),
+                    Checksum::compute(algorithm, &joined),
+                    "{algorithm} case {case}"
+                );
+
+                // The same pieces through a verifier, with the first piece
+                // as a resumed prefix.
+                let prefix_len = pieces.first().map_or(0, |(piece, _)| piece.len());
+                let reference = ContentRef::blob_v1(content_id(), &joined, algorithm);
+                let mut verifier = super::ContentVerifier::new(&reference, prefix_len as u64);
+                let mut rest = pieces.iter();
+                if let Some((first, _)) = rest.next() {
+                    verifier.fold_resumed_prefix(first).expect("prefix");
+                }
+                for (piece, by_checksum) in rest {
+                    if *by_checksum {
+                        verifier
+                            .update_checksum(
+                                &Checksum::compute(algorithm, piece),
+                                piece.len() as u64,
+                            )
+                            .expect("chunk");
+                    } else {
+                        verifier.update(piece).expect("chunk");
+                    }
+                }
+                verifier
+                    .finish()
+                    .unwrap_or_else(|mismatch| panic!("{algorithm} case {case}: {mismatch}"));
+            }
+        }
+    }
+
+    /// Checks that a digest that folds in pieces by their checksums, between
+    /// pieces it hashes, returns the checksum of all the bytes.
+    #[test]
+    fn a_digest_folds_in_pieces_by_their_checksums() {
+        for algorithm in [ChecksumAlgorithm::Crc32c, ChecksumAlgorithm::Crc64nvme] {
+            let pieces = [
+                vec![7; 3],
+                Vec::new(),
+                vec![42; 1001],
+                vec![71; 8193],
+                vec![9; 5],
+            ];
+            for by_checksum in 0..1 << pieces.len() {
+                let mut digest = ChecksumDigest::new(algorithm);
+                for (index, piece) in pieces.iter().enumerate() {
+                    if by_checksum & (1 << index) == 0 {
+                        digest.update(piece);
+                    } else {
+                        digest.update_checksum(
+                            &Checksum::compute(algorithm, piece),
+                            piece.len() as u64,
+                        );
+                    }
+                }
+                assert_eq!(
+                    digest.finish(),
+                    Checksum::compute(algorithm, &pieces.concat()),
+                    "{algorithm} with pieces {by_checksum:05b} folded by checksum"
+                );
+            }
         }
     }
 

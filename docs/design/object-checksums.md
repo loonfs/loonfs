@@ -61,7 +61,7 @@ The object checksums have these costs:
 
 - **Bytes.** A segment descriptor's `checksum` adds 64 bytes of JSON to the manifest, and an extent's `object_checksum` adds 60 bytes of CBOR to each layout row and to each revision delta that includes a layout. (A CRC-32C value is 8 bytes shorter.) After zstd compression, a descriptor or an extent costs about 11 bytes more, because the field names and the algorithm repeat and only the 8 bytes of the CRC differ. That figure comes from compressing 1,000 descriptors with and without the field.
 - **Memory.** Each extent and each descriptor that a process keeps in memory is 48 bytes larger for a CRC-64/NVME checksum: 32 bytes in the struct and 16 bytes of hexadecimal on the heap. The memory accounting of layouts and segment descriptors includes both.
-- **CPU.** A segment's writer computes one more CRC over the segment's bytes, which is small next to the zstd compression of the same bytes. A whole-file read that fetches complete objects computes a CRC of those bytes twice, once for each object and once for the file.
+- **CPU.** A segment's writer computes one more CRC over the segment's bytes, which is small next to the zstd compression of the same bytes. A whole-file read hashes each byte once. It compares the CRC of each complete object that one GET fetches with the object checksum, and then it combines the CRCs of every range it read (complete objects, parts of objects, and WAL pieces), in file order, into the CRC of the file, which it compares with the reference's checksum.
 - **Requests.** No write or read sends an extra request to produce or check an object checksum.
 
 ## Alternatives considered

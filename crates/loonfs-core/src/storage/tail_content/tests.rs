@@ -708,7 +708,7 @@ async fn a_read_of_a_whole_span_object_checks_the_extents_object_checksum() {
         .expect("location");
     assert_eq!(
         location
-            .read_range(&store, None, 0, 10)
+            .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, 0, 10)
             .await
             .expect("read"),
         Bytes::from_static(b"aaaaaabbbb")
@@ -720,7 +720,7 @@ async fn a_read_of_a_whole_span_object_checks_the_extents_object_checksum() {
         .expect("location");
     for (start, end) in [(0, 10), (6, 10)] {
         let error = location
-            .read_range(&store, None, start, end)
+            .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, start, end)
             .await
             .expect_err("a whole object that doesn't match its recorded checksum");
         assert_matches!(
@@ -732,7 +732,7 @@ async fn a_read_of_a_whole_span_object_checks_the_extents_object_checksum() {
     }
     for (start, end) in [(0, 6), (0, 9), (7, 10)] {
         location
-            .read_range(&store, None, start, end)
+            .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, start, end)
             .await
             .expect("a read of part of an object isn't checked against its checksum");
     }
@@ -759,7 +759,7 @@ async fn a_ranged_read_of_a_whole_object_detects_a_corrupted_object() {
         .expect("location");
     for (start, end) in [(0, 10), (6, 10)] {
         let error = location
-            .read_range(&store, None, start, end)
+            .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, start, end)
             .await
             .expect_err("a whole object that doesn't match its recorded checksum");
         assert_matches!(
@@ -771,7 +771,7 @@ async fn a_ranged_read_of_a_whole_object_detects_a_corrupted_object() {
     }
     for (start, end) in [(6, 9), (7, 10)] {
         location
-            .read_range(&store, None, start, end)
+            .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, start, end)
             .await
             .expect("a read of part of an object isn't checked against its checksum");
     }
@@ -783,9 +783,89 @@ async fn a_ranged_read_of_a_whole_object_detects_a_corrupted_object() {
     ContentLocation::resolve(&layout, &HEAD.pool_id, None, &truncated)
         .await
         .expect("truncated location")
-        .read_range(&store, None, 0, 9)
+        .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, 0, 9)
         .await
         .expect("a truncated revision's read isn't checked against the object checksum");
+}
+
+/// Checks that a whole-file read compares the combined checksum of its parts
+/// with the reference, so a layout whose extents each read a valid object
+/// fails the read when it lists the objects in the wrong order or takes the
+/// wrong bytes of an object.
+#[tokio::test]
+async fn a_whole_read_of_valid_objects_in_the_wrong_order_fails_the_reference_check() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    // Two whole objects, listed in the wrong order.
+    let (mut swapped, _, swapped_reference) = fixture(&store, &[6, 4], false, 0).await;
+    swapped.0.layout.extents.swap(0, 1);
+    // A slice of an object, taken from the wrong offset.
+    let extents = [(6, Source::SharedSlice { extra: 2 }), (4, Source::Own)];
+    let (mut shifted, _, shifted_reference) = fixture_of(&store, &extents, 0).await;
+    shifted.0.layout.extents[0].offset = 2;
+    for (layout, reference, read) in [
+        (swapped, swapped_reference, &b"bbbbaaaaaa"[..]),
+        (shifted, shifted_reference, b"aaaa##bbbb"),
+    ] {
+        let reference_key = content_object_key_for_ref(&HEAD.pool_id, &reference);
+        let location = ContentLocation::resolve(&layout, &HEAD.pool_id, None, &reference)
+            .await
+            .expect("location");
+        assert_eq!(
+            location
+                .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, 0, 10)
+                .await
+                .expect("every whole object matches its object checksum"),
+            read
+        );
+        let error = location
+            .read_bytes(&store, None, &reference)
+            .await
+            .expect_err("the bytes are not the reference's");
+        assert_eq!(
+            error,
+            DurableContentValidationError::ContentChecksumMismatch {
+                object_key: reference_key,
+                expected: describe_checksum(&reference.checksum),
+                actual: describe_checksum(&Checksum::crc64nvme(read)),
+            }
+        );
+    }
+}
+
+/// Checks that a flipped byte in the part of an object that an extent takes
+/// fails a whole-file read, although the part has no object check.
+#[tokio::test]
+async fn a_whole_read_detects_a_corrupted_byte_inside_a_slice() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let extents = [(6, Source::SharedSlice { extra: 2 }), (4, Source::Own)];
+    let (layout, _, reference) = fixture_of(&store, &extents, 0).await;
+    let object_key = extent_object_key(&HEAD.pool_id, &layout.0.layout.extents[0]);
+    store.delete(&object_key).await.expect("delete");
+    store
+        .put_immutable_verified(&object_key, Bytes::from_static(b"aaaXaa##"))
+        .await
+        .expect("corrupted object");
+    let location = ContentLocation::resolve(&layout, &HEAD.pool_id, None, &reference)
+        .await
+        .expect("location");
+    location
+        .read_range(&store, None, ChecksumAlgorithm::Crc64nvme, 0, 10)
+        .await
+        .expect("a part of an object isn't checked against the object checksum");
+    let error = location
+        .read_bytes(&store, None, &reference)
+        .await
+        .expect_err("a corrupted byte inside a slice");
+    assert_eq!(
+        error,
+        DurableContentValidationError::ContentChecksumMismatch {
+            object_key: content_object_key_for_ref(&HEAD.pool_id, &reference),
+            expected: describe_checksum(&reference.checksum),
+            actual: describe_checksum(&Checksum::crc64nvme(b"aaaXaabbbb")),
+        }
+    );
 }
 
 #[tokio::test]

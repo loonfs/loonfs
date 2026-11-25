@@ -2,9 +2,7 @@
 
 use crate::error::{CoreError, Result};
 use crate::object_cache::ObjectCache;
-use crate::storage::content::{
-    describe_checksum, validate_loaded_content_bytes, DurableContentValidationError,
-};
+use crate::storage::content::{describe_checksum, DurableContentValidationError};
 use crate::storage::content_location::ContentLocation;
 use bytes::Bytes;
 use loonfs_objectstore::ObjectStore;
@@ -104,22 +102,10 @@ impl<S: ObjectStore> FileContentStream<S> {
         object_cache: Arc<ObjectCache>,
     ) -> std::result::Result<Self, DurableContentValidationError> {
         let (start_offset, check) = match range {
-            StreamRange::Whole { start_offset } => {
-                if location.is_resident() {
-                    let bytes = location
-                        .read_range(&store, None, 0, content_ref.size_bytes)
-                        .await?;
-                    validate_loaded_content_bytes(
-                        location.object_key().to_owned(),
-                        &content_ref,
-                        &bytes,
-                    )?;
-                }
-                (
-                    start_offset,
-                    StreamCheck::Whole(ContentVerifier::new(&content_ref, start_offset)),
-                )
-            }
+            StreamRange::Whole { start_offset } => (
+                start_offset,
+                StreamCheck::Whole(ContentVerifier::new(&content_ref, start_offset)),
+            ),
             StreamRange::Range(range) => {
                 let end_offset = range
                     .end_offset(content_ref.size_bytes)
@@ -229,32 +215,56 @@ impl<S: ObjectStore> FileContentStream<S> {
             .next_offset
             .saturating_add(self.chunk_bytes.get())
             .min(end_offset);
-        let bytes = self
-            .location
-            .read_range(
-                &self.store,
-                Some(&self.object_cache),
-                self.next_offset,
-                end_exclusive,
-            )
-            .await?;
-        // A range ending past the object is truncated, so a short response is
-        // an object that ended earlier than its reference says it does.
-        if bytes.len() as u64 != end_exclusive - self.next_offset {
-            return Err(DurableContentValidationError::ContentLengthMismatch {
-                object_key: self.location.object_key().to_owned(),
-                expected: self.content_ref.size_bytes,
-                actual: self.next_offset + bytes.len() as u64,
-            });
-        }
-        if let StreamCheck::Whole(verifier) = &mut self.check {
-            verifier.update(&bytes).expect(
-                "a chunk below the content size arrives before `completion` finishes the verifier",
-            );
-            if self.next_offset == 0 && end_exclusive == self.content_ref.size_bytes {
-                self.unverified_object = Some(bytes.clone());
+        let algorithm = self.content_ref.checksum.algorithm();
+        let cache = Some(self.object_cache.as_ref());
+        let bytes = match &mut self.check {
+            StreamCheck::Whole(verifier) => {
+                let (bytes, checksum) = self
+                    .location
+                    .read_range_with_checksum(
+                        &self.store,
+                        cache,
+                        algorithm,
+                        self.next_offset,
+                        end_exclusive,
+                    )
+                    .await?;
+                check_chunk_length(
+                    &self.location,
+                    self.content_ref.size_bytes,
+                    self.next_offset..end_exclusive,
+                    &bytes,
+                )?;
+                verifier
+                    .update_checksum(&checksum, bytes.len() as u64)
+                    .expect(
+                        "a chunk below the content size arrives before `completion` finishes the verifier",
+                    );
+                if self.next_offset == 0 && end_exclusive == self.content_ref.size_bytes {
+                    self.unverified_object = Some(bytes.clone());
+                }
+                bytes
             }
-        }
+            StreamCheck::Range { .. } => {
+                let bytes = self
+                    .location
+                    .read_range(
+                        &self.store,
+                        cache,
+                        algorithm,
+                        self.next_offset,
+                        end_exclusive,
+                    )
+                    .await?;
+                check_chunk_length(
+                    &self.location,
+                    self.content_ref.size_bytes,
+                    self.next_offset..end_exclusive,
+                    &bytes,
+                )?;
+                bytes
+            }
+        };
         self.next_offset += bytes.len() as u64;
         Ok(Some(bytes))
     }
@@ -283,6 +293,26 @@ impl<S: ObjectStore> FileContentStream<S> {
             actual: describe_checksum(&mismatch.actual),
         })
     }
+}
+
+/// Returns an error unless `bytes` is the whole chunk `range` of a reference
+/// of `size_bytes` bytes that `location` reads.
+fn check_chunk_length(
+    location: &ContentLocation,
+    size_bytes: u64,
+    range: std::ops::Range<u64>,
+    bytes: &Bytes,
+) -> std::result::Result<(), DurableContentValidationError> {
+    // A range ending past the object is truncated, so a short response is
+    // an object that ended earlier than its reference says it does.
+    if bytes.len() as u64 != range.end - range.start {
+        return Err(DurableContentValidationError::ContentLengthMismatch {
+            object_key: location.object_key().to_owned(),
+            expected: size_bytes,
+            actual: range.start + bytes.len() as u64,
+        });
+    }
+    Ok(())
 }
 
 impl<S> std::fmt::Debug for FileContentStream<S> {
