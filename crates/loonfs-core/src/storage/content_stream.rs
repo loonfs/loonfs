@@ -3,7 +3,7 @@
 use crate::error::{CoreError, Result};
 use crate::object_cache::ObjectCache;
 use crate::storage::content::{describe_checksum, DurableContentValidationError};
-use crate::storage::content_location::ContentLocation;
+use crate::storage::content_location::{object_checksum_for_reference, ContentLocation};
 use bytes::Bytes;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::options::ReadRange;
@@ -238,7 +238,9 @@ impl<S: ObjectStore> FileContentStream<S> {
                 self.next_offset == 0 && end_exclusive == self.content_ref.size_bytes;
             // A chunk that is the whole file and one whole object was hashed
             // by its object check, so the verifier takes that checksum.
-            match object_checksum.filter(|_| whole_content) {
+            match object_checksum_for_reference(object_checksum, &self.content_ref)
+                .filter(|_| whole_content)
+            {
                 Some(checksum) => verifier.update_whole(checksum, bytes.len() as u64),
                 None => verifier.update(&bytes).expect(
                     "a chunk below the content size arrives before `completion` finishes the verifier",

@@ -307,8 +307,8 @@ impl ContentLocation {
             });
         }
         let expected = &content_ref.checksum;
-        let actual =
-            object_checksum.unwrap_or_else(|| Checksum::compute(expected.algorithm(), &bytes));
+        let actual = object_checksum_for_reference(object_checksum, content_ref)
+            .unwrap_or_else(|| Checksum::compute(expected.algorithm(), &bytes));
         if actual != *expected {
             return Err(DurableContentValidationError::ContentChecksumMismatch {
                 object_key: self.object_key.clone(),
@@ -321,6 +321,16 @@ impl ContentLocation {
         }
         Ok(bytes.to_vec())
     }
+}
+
+/// Returns the checksum that a read's object check computed, when it can
+/// stand for the check of the same bytes against `content_ref`: when it uses
+/// the reference's algorithm. Otherwise the caller hashes the bytes.
+pub(crate) fn object_checksum_for_reference(
+    object_checksum: Option<Checksum>,
+    content_ref: &ContentRef,
+) -> Option<Checksum> {
+    object_checksum.filter(|checksum| checksum.algorithm() == content_ref.checksum.algorithm())
 }
 
 /// Returns whether `range` of the object that `extent` lies in is the whole

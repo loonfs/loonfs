@@ -922,6 +922,47 @@ async fn a_file_that_is_one_whole_object_is_checked_against_its_reference() {
     );
 }
 
+/// Checks that a file that is one whole object whose object checksum uses
+/// another algorithm than its reference is hashed in the reference's
+/// algorithm, so it reads like every other layout, in a whole-file read and
+/// in a streamed read of one chunk.
+#[tokio::test]
+async fn a_one_object_file_checked_in_another_algorithm_reads() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (layout, _, mut reference) = fixture(&store, &[10], false, 0).await;
+    reference.checksum = Checksum::crc32c(b"aaaaaaaaaa");
+    let location = ContentLocation::resolve(&layout, &HEAD.pool_id, None, &reference)
+        .await
+        .expect("location");
+    assert_eq!(
+        location
+            .read_bytes(&store, None, &reference)
+            .await
+            .expect("a whole-file read"),
+        b"aaaaaaaaaa"
+    );
+    let mut stream = crate::storage::content_stream::FileContentStream::open(
+        &store,
+        location,
+        None,
+        reference.clone(),
+        std::num::NonZeroU64::new(16).expect("chunk size"),
+        crate::storage::content_stream::StreamRange::Whole { start_offset: 0 },
+        std::sync::Arc::new(crate::object_cache::ObjectCache::unshared(0, 0)),
+    )
+    .await
+    .expect("open stream");
+    assert_eq!(
+        stream.next_verified_chunk().await.expect("one chunk"),
+        Some(Bytes::from_static(b"aaaaaaaaaa"))
+    );
+    assert_eq!(
+        stream.next_verified_chunk().await.expect("verified end"),
+        None
+    );
+}
+
 #[tokio::test]
 async fn materialized_tail_prefixes_keep_own_extents_whole() {
     for (size, layout_size) in [(8, 8), (10, 10), (10, 8)] {
