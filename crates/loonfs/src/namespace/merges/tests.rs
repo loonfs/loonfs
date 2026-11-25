@@ -1155,23 +1155,22 @@ async fn the_next_merge_range_with_fresh_positions_checks_each_position() {
     );
 }
 
-/// Returns, for each extent of `layout`, its chain, the chain offsets of its
-/// span object, and the range of the object it reads. A span object's ID is
+/// Returns, for each extent of `layout`, its chain, the length of its span
+/// object, and the range of the object it reads. A span object's ID is
 /// random, so a test compares a layout's extents through this list, and
 /// compares the extents themselves to check that two layouts list the same
 /// object.
-fn span_bounds(layout: &ContentLayout) -> Vec<(ContentId, u64, u64, u64, u64)> {
+fn span_extents(layout: &ContentLayout) -> Vec<(ContentId, u64, u64, u64)> {
     layout
         .extents
         .iter()
         .map(|extent| {
-            let ExtentObject::Span { start, end, .. } = extent.object else {
+            let ExtentObject::Span { .. } = extent.object else {
                 panic!("the extent should be a span object: {extent:?}");
             };
             (
                 extent.content_id.clone(),
-                start,
-                end,
+                extent.object_bytes,
                 extent.offset,
                 extent.length,
             )
@@ -1208,8 +1207,8 @@ async fn a_merge_writes_the_pieces_in_the_forks_tail_without_folding_the_fork() 
         let length = u64::try_from(bytes.len()).expect("a small file");
         assert_eq!(layout.creator_namespace_id, *family.fork.id(), "{path}");
         assert_eq!(
-            span_bounds(&layout),
-            [(content_id, 0, length, 0, length)],
+            span_extents(&layout),
+            [(content_id, length, 0, length)],
             "{path}"
         );
         assert_eq!(family.fresh_read(&family.main, path).await, bytes, "{path}");
@@ -1238,9 +1237,9 @@ async fn a_merge_after_the_forks_fold_writes_only_the_appended_pieces() {
     assert_eq!(merged_id, content_id);
     assert_eq!(merged.creator_namespace_id, folded.creator_namespace_id);
     assert_eq!(
-        span_bounds(&merged),
-        span_bounds(&folded),
-        "the fork's fold writes the merge's range"
+        span_extents(&merged),
+        span_extents(&folded),
+        "the fork's fold writes an object of the merge's length"
     );
     assert_ne!(
         merged.extents, folded.extents,
@@ -1259,11 +1258,8 @@ async fn a_merge_after_the_forks_fold_writes_only_the_appended_pieces() {
     assert_eq!(appended, content_id, "the fork extends its own chain");
     assert_eq!(layout.creator_namespace_id, *family.fork.id());
     assert_eq!(
-        span_bounds(&layout),
-        [
-            (content_id.clone(), 0, 1, 0, 1),
-            (content_id.clone(), 1, 3, 0, 2)
-        ]
+        span_extents(&layout),
+        [(content_id.clone(), 1, 0, 1), (content_id.clone(), 2, 0, 2)]
     );
     assert_eq!(
         layout.extents[0], folded.extents[0],

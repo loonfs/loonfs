@@ -11,14 +11,10 @@ pub enum ExtentObject {
     /// The object at the chain's own key.
     Whole,
     /// A span object, whose key is the chain's key followed by the object's
-    /// own random ID. It stores the chain bytes from `start` to `end`.
+    /// own random ID.
     Span {
         /// The object's random ID, which the end of its key spells.
         object_id: SpanObjectId,
-        /// Inclusive chain offset of the object's first byte.
-        start: u64,
-        /// Exclusive chain offset, just after the object's last byte.
-        end: u64,
     },
 }
 
@@ -31,6 +27,8 @@ pub struct ContentExtent {
     pub content_id: ContentId,
     /// Object under the chain's key.
     pub object: ExtentObject,
+    /// Length of the object in bytes.
+    pub object_bytes: u64,
     /// The full-object checksum that the store keeps for the object, in the
     /// store's algorithm. Every extent that points into one object records
     /// the same value, so a read of the whole object can be checked against
@@ -81,13 +79,15 @@ impl ContentLayout {
                 self.extents.as_slice(),
                 [ContentExtent {
                     object: ExtentObject::Whole,
+                    object_bytes: 0,
+                    offset: 0,
                     length: 0,
                     ..
                 }]
             )
         {
             return Err(invalid(
-                "zero bytes require one whole extent of length zero",
+                "zero bytes require one empty whole object, taken from offset 0",
             ));
         }
         let mut length = 0_u64;
@@ -99,10 +99,8 @@ impl ContentLayout {
                 .offset
                 .checked_add(extent.length)
                 .ok_or_else(|| invalid("extent object range overflows"))?;
-            if let ExtentObject::Span { start, end, .. } = extent.object {
-                if start >= end || object_end > end - start {
-                    return Err(invalid("extent range must fit within the span"));
-                }
+            if object_end > extent.object_bytes {
+                return Err(invalid("extent range must fit within its object"));
             }
             length = length
                 .checked_add(extent.length)
@@ -119,25 +117,25 @@ impl ContentLayout {
 mod tests {
     use super::*;
 
-    fn span_object(start: u64, end: u64) -> ExtentObject {
+    fn span_object() -> ExtentObject {
         ExtentObject::Span {
             object_id: SpanObjectId::generate(),
-            start,
-            end,
         }
     }
 
     #[test]
-    fn layouts_cover_the_chain_and_validate_empty_and_span_extents() {
+    fn layouts_cover_the_chain_and_validate_empty_whole_and_span_extents() {
         let whole = ContentExtent {
             content_id: ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content"),
             object: ExtentObject::Whole,
+            object_bytes: 10,
             object_checksum: Checksum::crc64nvme(b"0123456789"),
             offset: 0,
             length: 10,
         };
         let span = ContentExtent {
-            object: span_object(10, 15),
+            object: span_object(),
+            object_bytes: 5,
             length: 5,
             ..whole.clone()
         };
@@ -163,22 +161,35 @@ mod tests {
         assert!(ContentLayout {
             creator_namespace_id: creator.clone(),
             extents: vec![ContentExtent {
+                object_bytes: 0,
                 length: 0,
                 ..whole.clone()
             }]
         }
         .validate(0)
         .is_ok());
-        for (object, length, size_bytes) in [
-            (span_object(2, 2), 0, 0),
-            (span_object(3, 2), 1, 1),
-            (span_object(10, 15), 6, 6),
-            (ExtentObject::Whole, 0, 1),
+        ContentLayout {
+            creator_namespace_id: creator.clone(),
+            extents: vec![ContentExtent {
+                object_bytes: 9,
+                offset: 5,
+                length: 0,
+                ..whole.clone()
+            }],
+        }
+        .validate(0)
+        .expect_err("a zero-byte layout should list an empty whole object from offset 0");
+        for (object, object_bytes, length, size_bytes) in [
+            (span_object(), 0, 0, 0),
+            (span_object(), 5, 6, 6),
+            (ExtentObject::Whole, 5, 6, 6),
+            (ExtentObject::Whole, 0, 0, 1),
         ] {
             ContentLayout {
                 creator_namespace_id: creator.clone(),
                 extents: vec![ContentExtent {
                     object,
+                    object_bytes,
                     length,
                     ..whole.clone()
                 }],
@@ -219,6 +230,7 @@ mod tests {
             creator_namespace_id: creator.clone(),
             extents: vec![
                 ContentExtent {
+                    object_bytes: u64::MAX,
                     length: u64::MAX,
                     ..whole.clone()
                 },

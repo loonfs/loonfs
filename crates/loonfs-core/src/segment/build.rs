@@ -577,9 +577,8 @@ mod tests {
             content_id: content_id.clone(),
             object: ExtentObject::Span {
                 object_id: loonfs_types::SpanObjectId::generate(),
-                start: 0,
-                end: 4,
             },
+            object_bytes: 4,
             object_checksum: Checksum::crc64nvme(b"four"),
             offset: 0,
             length: 4,

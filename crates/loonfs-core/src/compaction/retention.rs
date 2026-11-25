@@ -489,6 +489,7 @@ mod tests {
                     extents: vec![ContentExtent {
                         content_id,
                         object: ExtentObject::Whole,
+                        object_bytes: 1,
                         object_checksum: loonfs_types::Checksum::crc64nvme(b"x"),
                         offset: 0,
                         length: 1,

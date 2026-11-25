@@ -286,6 +286,7 @@ fn appended_wal_object() -> WalObjectPayload {
             extents: vec![crate::ContentExtent {
                 content_id: content_ref.content_id.clone(),
                 object: crate::ExtentObject::Whole,
+                object_bytes: 3,
                 object_checksum: crate::Checksum::crc64nvme(b""),
                 offset: 0,
                 length: 3,
@@ -423,6 +424,7 @@ fn revision_layouts_equal_the_reference_size_or_first_piece_offset() {
             extents: vec![crate::ContentExtent {
                 content_id: ContentId::parse("con_7yvjx9gxjm688fxq5tk1v58cgg").expect("content"),
                 object: crate::ExtentObject::Whole,
+                object_bytes: length,
                 object_checksum: crate::Checksum::crc64nvme(b""),
                 offset: 0,
                 length,

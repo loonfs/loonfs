@@ -3,9 +3,7 @@
 use super::content::{
     content_object_key_for_ref, describe_checksum, DurableContentValidationError,
 };
-use super::content_location::{
-    chain_object_key, extent_object_key, ContentLocation, LayoutLookup, LocatedExtent,
-};
+use super::content_location::{chain_object_key, ContentLocation, LayoutLookup, LocatedExtent};
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_LAYOUT_EXTENTS;
 use crate::namespace::state::NamespaceReadState;
@@ -243,6 +241,7 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
     extents.push(ContentExtent {
         content_id: newest.content_id.clone(),
         object,
+        object_bytes: length,
         object_checksum,
         offset: 0,
         length,
@@ -316,28 +315,14 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
     // only its own layout lists.
     let created_here = creator_namespace_id == *content_writes.namespace_id;
     let own = |extent: &ContentExtent| created_here && is_own_extent(extent, &newest.content_id);
-    let mut start = location.extents_length();
+    let start = location.extents_length();
     let mut candidate = if content.pieces[0].offset == start {
         pieces
     } else {
         location.pieces().to_vec()
     };
     if let Some(last) = location.extents.last_mut().filter(|last| own(&last.extent)) {
-        let full_length = match last.extent.object {
-            ExtentObject::Span { start, end, .. } => end - start,
-            ExtentObject::Whole => {
-                let row = lookup
-                    .content_layout(&newest.content_id)
-                    .await?
-                    .expect("resolved extents should have a layout");
-                row.layout
-                    .extents
-                    .iter()
-                    .find(|extent| extent_object_key(pool_id, extent) == last.object_key)
-                    .expect("resolved extent should occur in its layout")
-                    .length
-            }
-        };
+        let full_length = last.extent.object_bytes;
         let mut skip = full_length - last.extent.length;
         if skip > newest.size_bytes - start {
             return Err(CoreError::NamespaceCorrupt(format!(
@@ -345,7 +330,6 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
                 last.object_key
             )));
         }
-        start += skip;
         last.extent.length = full_length;
         // Validation can materialize bytes that remain in the WAL tail.
         candidate = candidate
@@ -359,22 +343,19 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
     }
     let extents = location.extents;
     // An assembly copies whole objects, so a shared base extent that takes
-    // part of its object can't be merged, and the plan can't tell how much
-    // of a whole-object extent's object it takes without a request. The
-    // restoration above makes an own extent whole.
+    // part of its object can't be merged. The restoration above makes an own
+    // extent whole.
     let combinable = |extent: &ContentExtent| {
         own(extent)
             || (created_here
                 && policy == CombinePolicy::OwnAndSharedBaseExtents
-                && takes_whole_span(extent))
+                && takes_whole_object(extent))
     };
     let tail_length = candidate.iter().map(|piece| piece.len() as u64).sum();
     let CombinePlan {
         retained,
         candidate_length,
     } = combine_plan(&extents, tail_length, own, combinable);
-    let combined_length = candidate_length - tail_length;
-    start -= combined_length;
     // A layout of zero bytes is one whole extent of length zero. Every other
     // write is a new span object with an ID of its own, so no other write,
     // in this namespace or another member of the pool, writes its key.
@@ -383,8 +364,6 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
     } else {
         ExtentObject::Span {
             object_id: SpanObjectId::generate(),
-            start,
-            end: newest.size_bytes,
         }
     };
     Ok(TailExtentPlan {
@@ -397,14 +376,9 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
     })
 }
 
-/// Returns whether `extent` is a span that takes every byte of its object.
-/// A layout records a span object's bounds but not a whole object's length,
-/// so a whole-object extent never qualifies.
-fn takes_whole_span(extent: &ContentExtent) -> bool {
-    match extent.object {
-        ExtentObject::Whole => false,
-        ExtentObject::Span { start, end, .. } => extent.offset == 0 && extent.length == end - start,
-    }
+/// Returns whether `extent` takes every byte of its object.
+fn takes_whole_object(extent: &ContentExtent) -> bool {
+    extent.offset == 0 && extent.length == extent.object_bytes
 }
 
 fn checksum_pieces(pieces: &[Bytes], algorithm: ChecksumAlgorithm) -> Checksum {

@@ -1,6 +1,7 @@
 //! Contracts for provider assembly and extent checksums.
 
 use super::*;
+use crate::storage::content_location::extent_object_key;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -24,15 +25,6 @@ static HEAD: std::sync::LazyLock<NamespaceReadState> = std::sync::LazyLock::new(
 });
 
 struct Layout(ContentLayoutRecord);
-
-/// Returns the chain offsets that `object` stores, or `None` for a whole
-/// object.
-fn span_bounds(object: &ExtentObject) -> Option<(u64, u64)> {
-    match object {
-        ExtentObject::Span { start, end, .. } => Some((*start, *end)),
-        ExtentObject::Whole => None,
-    }
-}
 
 #[async_trait::async_trait]
 impl LayoutLookup for Layout {
@@ -130,8 +122,6 @@ async fn fixture_of<S: ObjectStore>(
         let bytes = Bytes::from([taken.as_slice(), &vec![b'#'; extra]].concat());
         let span = ExtentObject::Span {
             object_id: SpanObjectId::generate(),
-            start: offset,
-            end: offset + bytes.len() as u64,
         };
         let (content_id, object) = match source {
             Source::Own => (content_id.clone(), span),
@@ -141,6 +131,7 @@ async fn fixture_of<S: ObjectStore>(
         let extent = ContentExtent {
             content_id,
             object,
+            object_bytes: bytes.len() as u64,
             object_checksum: Checksum::crc64nvme(&bytes),
             offset: 0,
             length: length as u64,
@@ -245,7 +236,8 @@ async fn large_extents_assemble_with_only_source_heads_and_write_again_under_a_n
     .expect("assembly");
     assert_eq!(written.layout.extents.len(), 1);
     let extent = &written.layout.extents[0];
-    assert_eq!(span_bounds(&extent.object), Some((0, reference.size_bytes)));
+    assert_matches!(extent.object, ExtentObject::Span { .. });
+    assert_eq!(extent.object_bytes, reference.size_bytes);
     let operations = store.snapshot();
     assert_eq!(operations.len(), 3);
     assert!(operations[..2]
@@ -279,10 +271,7 @@ async fn large_extents_assemble_with_only_source_heads_and_write_again_under_a_n
     .await
     .expect("second write");
     let again_extent = &again.layout.extents[0];
-    assert_eq!(
-        span_bounds(&again_extent.object),
-        span_bounds(&extent.object)
-    );
+    assert_eq!(again_extent.object_bytes, extent.object_bytes);
     assert_ne!(again_extent.object, extent.object);
     let again_key = extent_object_key(&HEAD.pool_id, again_extent);
     let again_metadata = store.head(&again_key).await.expect("head").expect("span");
@@ -348,13 +337,10 @@ async fn extent_cap_keeps_the_prefix_in_which_each_extent_covers_the_rest() {
 /// assembly, and that the new extent records the checksum that the store
 /// keeps. Validation and a direct download write only the pieces.
 #[tokio::test]
-async fn a_creators_fold_combines_whole_shared_span_extents_and_other_writes_keep_them() {
+async fn a_creators_fold_combines_shared_extents_that_take_their_whole_objects() {
     for source in [Source::Shared, Source::SharedUpload] {
         for write in ["fold", "validation", "download"] {
-            // A fold merges a shared span that takes its whole object, and
-            // keeps a shared whole-object extent because the layout doesn't
-            // record the object's length.
-            let combines = write == "fold" && source == Source::Shared;
+            let combines = write == "fold";
             let directory = tempfile::tempdir().expect("directory");
             let store = RecordingStore::new(
                 LocalFsStore::new(directory.path()).expect("store"),
@@ -396,7 +382,8 @@ async fn a_creators_fold_combines_whole_shared_span_extents_and_other_writes_kee
                 assert_eq!(written.extents.len(), 1, "{context}");
                 let extent = &written.extents[0];
                 assert_eq!(extent.content_id, reference.content_id, "{context}");
-                assert_eq!(span_bounds(&extent.object), Some((0, 10)), "{context}");
+                assert_matches!(extent.object, ExtentObject::Span { .. }, "{context}");
+                assert_eq!(extent.object_bytes, 10, "{context}");
                 assert_eq!(extent.object_checksum, reference.checksum, "{context}");
                 let key = extent_object_key(&HEAD.pool_id, extent);
                 let stored = store.head(&key).await.expect("head").expect("span");
@@ -481,10 +468,8 @@ async fn the_cap_counts_whole_shared_base_extents() {
     let policy = CombinePolicy::OwnAndSharedBaseExtents;
     let folded = fold(&store, &layout, &tail, &reference, policy).await;
     assert_eq!(folded.layout.extents.len(), 1);
-    assert_eq!(
-        span_bounds(&folded.layout.extents[0].object),
-        Some((0, reference.size_bytes))
-    );
+    assert_matches!(folded.layout.extents[0].object, ExtentObject::Span { .. });
+    assert_eq!(folded.layout.extents[0].object_bytes, reference.size_bytes);
     assert_eq!(folded.layout.extents[0].object_checksum, reference.checksum);
     let policy = CombinePolicy::OwnExtents;
     let kept = fold(&store, &layout, &tail, &reference, policy).await;
@@ -502,9 +487,8 @@ fn located(content_id: &ContentId, length: u64) -> LocatedExtent {
         content_id: content_id.clone(),
         object: ExtentObject::Span {
             object_id: SpanObjectId::generate(),
-            start: 0,
-            end: length,
         },
+        object_bytes: length,
         object_checksum: Checksum::crc64nvme(&[]),
         offset: 0,
         length,
@@ -516,10 +500,10 @@ fn located(content_id: &ContentId, length: u64) -> LocatedExtent {
 }
 
 /// Checks the cap through repeated fork, append, and merge cycles. A 1 MB
-/// uploaded base, which the fold never merges, is followed in each cycle by
-/// a fork's 1,000-byte extent, which a merge writes without combining, and
-/// `main`'s fold of 10 appended bytes, which the doubling rule can't merge
-/// into the fork's extent. The cap counts only the extents after the base,
+/// base extent, which takes part of a 2 MB upload and so is never merged, is
+/// followed in each cycle by a fork's 1,000-byte extent, which a merge writes
+/// without combining, and `main`'s fold of 10 appended bytes, which the
+/// doubling rule can't merge into the fork's extent. The cap counts only the extents after the base,
 /// so it fires at cycle 17 and copies the appended history once (17,170
 /// bytes). At cycle 33 it keeps that span, which is longer than everything
 /// after it, and at cycle 49 the extents after it have passed its length, so
@@ -531,6 +515,7 @@ fn the_cap_copies_each_span_again_only_after_the_extents_behind_it_reach_its_len
     let own = |extent: &ContentExtent| extent.content_id == chain;
     let mut base = located(&ContentId::generate(), 1_000_000);
     base.extent.object = ExtentObject::Whole;
+    base.extent.object_bytes = 2_000_000;
     let mut layout = vec![base];
     let mut firings = Vec::new();
     for cycle in 1..=49 {
@@ -539,7 +524,7 @@ fn the_cap_copies_each_span_again_only_after_the_extents_behind_it_reach_its_len
             retained,
             candidate_length,
         } = combine_plan(&layout, 10, own, |extent| {
-            own(extent) || takes_whole_span(extent)
+            own(extent) || takes_whole_object(extent)
         });
         assert!(retained <= MAX_LAYOUT_EXTENTS, "cycle {cycle}");
         if retained < layout.len() - 1 {
@@ -753,6 +738,56 @@ async fn a_read_of_a_whole_span_object_checks_the_extents_object_checksum() {
     }
 }
 
+/// Checks that a ranged read that covers an upload's whole object checks the
+/// bytes against the object checksum that the extent records, so a corrupted
+/// object is reported with its key, and that a read of part of the object, or
+/// of a revision that takes less than the object, isn't checked.
+#[tokio::test]
+async fn a_ranged_read_of_a_whole_object_detects_a_corrupted_object() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let extents = [(6, Source::Own), (4, Source::SharedUpload)];
+    let (layout, _, reference) = fixture_of(&store, &extents, 0).await;
+    let object_key = extent_object_key(&HEAD.pool_id, &layout.0.layout.extents[1]);
+    store.delete(&object_key).await.expect("delete");
+    store
+        .put_immutable_verified(&object_key, Bytes::from_static(b"bbbc"))
+        .await
+        .expect("corrupted object");
+    let location = ContentLocation::resolve(&layout, &HEAD.pool_id, None, &reference)
+        .await
+        .expect("location");
+    for (start, end) in [(0, 10), (6, 10)] {
+        let error = location
+            .read_range(&store, None, start, end)
+            .await
+            .expect_err("a whole object that doesn't match its recorded checksum");
+        assert_matches!(
+            &error,
+            DurableContentValidationError::ContentChecksumMismatch { object_key: key, .. }
+                if *key == object_key
+        );
+        assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
+    }
+    for (start, end) in [(6, 9), (7, 10)] {
+        location
+            .read_range(&store, None, start, end)
+            .await
+            .expect("a read of part of an object isn't checked against its checksum");
+    }
+    // A revision of 9 bytes takes 3 of the object's 4 bytes.
+    let truncated = ContentRef {
+        size_bytes: 9,
+        ..reference
+    };
+    ContentLocation::resolve(&layout, &HEAD.pool_id, None, &truncated)
+        .await
+        .expect("truncated location")
+        .read_range(&store, None, 0, 9)
+        .await
+        .expect("a truncated revision's read isn't checked against the object checksum");
+}
+
 #[tokio::test]
 async fn materialized_tail_prefixes_keep_own_extents_whole() {
     for (size, layout_size) in [(8, 8), (10, 10), (10, 8)] {
@@ -765,9 +800,8 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         let extent = &mut layout.0.layout.extents[0];
         extent.object = ExtentObject::Span {
             object_id: SpanObjectId::generate(),
-            start: 0,
-            end: size,
         };
+        extent.object_bytes = size;
         extent.length = layout_size;
         let bytes = Bytes::from(
             [
@@ -895,7 +929,8 @@ async fn another_members_chain_keeps_its_creator_and_its_extents() {
                 assert!(sources.is_empty());
                 assert_eq!(written.extents.len(), 2);
                 assert_eq!(written.extents[0], layout.0.layout.extents[0]);
-                assert_eq!(span_bounds(&written.extents[1].object), Some((6, 10)));
+                assert_matches!(written.extents[1].object, ExtentObject::Span { .. });
+                assert_eq!(written.extents[1].object_bytes, 4);
                 assert_eq!(written.extents[1].length, 4);
             }
         }
@@ -987,5 +1022,6 @@ async fn a_chain_that_started_in_another_members_tail_records_that_member_as_cre
     .await
     .expect("write");
     assert_eq!(written.layout.creator_namespace_id, source);
-    assert_eq!(span_bounds(&written.layout.extents[0].object), Some((0, 4)));
+    assert_matches!(written.layout.extents[0].object, ExtentObject::Span { .. });
+    assert_eq!(written.layout.extents[0].object_bytes, 4);
 }

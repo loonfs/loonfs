@@ -836,6 +836,7 @@ mod tests {
             extents: vec![ContentExtent {
                 content_id: content_id.clone(),
                 object,
+                object_bytes: 10,
                 object_checksum: Checksum::crc64nvme(b"0123456789"),
                 offset: 0,
                 length: 10,
@@ -844,8 +845,6 @@ mod tests {
         let whole = layout(ExtentObject::Whole);
         let span = layout(ExtentObject::Span {
             object_id: span_object_id.clone(),
-            start: 0,
-            end: 10,
         });
         assert_eq!(span_object_id.as_str().len(), 31);
         assert_eq!(span.heap_bytes(), whole.heap_bytes() + 31);
@@ -867,6 +866,7 @@ mod tests {
                     ContentExtent {
                         content_id: content_id.clone(),
                         object: ExtentObject::Whole,
+                        object_bytes: 10,
                         object_checksum: checksum,
                         offset: 0,
                         length: 10,

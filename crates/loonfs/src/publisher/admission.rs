@@ -21,7 +21,7 @@ use tokio::sync::oneshot;
 /// merge of file creates with edits, 3.9 in a merge of deletes, and 2.5 in
 /// a merge of directory renames. Five is above the steepest of these, 4.3,
 /// with a margin. A file create whose content has a layout of one extent plans
-/// 5,432 bytes, so the estimate is 27,160 bytes for each create.
+/// 5,418 bytes, so the estimate is 27,090 bytes for each create.
 pub(super) const MERGE_PEAK_PER_PLANNED_BYTE: usize = 5;
 
 /// The bytes of the merge allowance that a merge reserves before it plans,

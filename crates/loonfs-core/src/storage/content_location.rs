@@ -154,6 +154,7 @@ impl ContentLocation {
                 extent: ContentExtent {
                     content_id: content_ref.content_id.clone(),
                     object: ExtentObject::Whole,
+                    object_bytes: content_ref.size_bytes,
                     object_checksum: content_ref.checksum.clone(),
                     offset: 0,
                     length: content_ref.size_bytes,
@@ -212,8 +213,8 @@ impl ContentLocation {
                     start_inclusive: located.extent.offset + start.max(offset) - offset,
                     end_exclusive: located.extent.offset + end.min(extent_end) - offset,
                 };
-                // A read of a whole span object is checked against the
-                // checksum that the store keeps for the object.
+                // A read of a whole object is checked against the checksum
+                // that the store keeps for the object.
                 let object_checksum = reads_whole_object(&located.extent, &range)
                     .then(|| located.extent.object_checksum.clone());
                 requests.push((located.object_key.clone(), range, object_checksum));
@@ -298,16 +299,9 @@ impl ContentLocation {
 }
 
 /// Returns whether `range` of the object that `extent` lies in is the whole
-/// object. A span object's extent records the object's size (`end - start`),
-/// and a whole object's extent records only the bytes that it takes from the
-/// object, so a read of a whole object is never known to cover all of it.
+/// object.
 fn reads_whole_object(extent: &ContentExtent, range: &ByteRange) -> bool {
-    match extent.object {
-        ExtentObject::Span { start, end, .. } => {
-            range.start_inclusive == 0 && range.end_exclusive == end - start
-        }
-        ExtentObject::Whole => false,
-    }
+    range.start_inclusive == 0 && range.end_exclusive == extent.object_bytes
 }
 
 /// Checks the bytes of a whole content object against the stored checksum

@@ -43,24 +43,22 @@ impl LayoutLookup for Layout<'_> {
     }
 }
 
-/// Returns the chain offsets that `object` stores, or `None` for a whole
-/// object.
-fn span_bounds(object: &ExtentObject) -> Option<(u64, u64)> {
-    match object {
-        ExtentObject::Span { start, end, .. } => Some((*start, *end)),
-        ExtentObject::Whole => None,
-    }
-}
-
-/// Returns the key of the span object from `start` to `end` that `row`
-/// lists. A span object's key is random, so a test finds it through the
-/// layout.
+/// Returns the key of the span object that stores chain bytes `start` to
+/// `end` in `row`. A span object's key is random, so a test finds it through
+/// the layout, where each extent's object starts at the extent's chain
+/// position less its offset in the object.
 fn span_key(pool_id: &PoolId, row: &ContentLayoutRecord, start: u64, end: u64) -> String {
+    let mut position = 0;
     let extent = row
         .layout
         .extents
         .iter()
-        .find(|extent| span_bounds(&extent.object) == Some((start, end)))
+        .find(|extent| {
+            let object_start = position - extent.offset;
+            position += extent.length;
+            matches!(extent.object, ExtentObject::Span { .. })
+                && (object_start, object_start + extent.object_bytes) == (start, end)
+        })
         .expect("the layout should list the span object");
     extent_object_key(pool_id, extent)
 }
@@ -116,6 +114,7 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
     let rows: Vec<_> = tail.content_layouts().collect();
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].layout.extents[0].object, ExtentObject::Whole);
+    assert_eq!(rows[0].layout.extents[0].object_bytes, 8);
     assert_eq!(rows[0].size_bytes, 8);
     // The upload's whole extent records the checksum that the store keeps for
     // the uploaded object, which is the upload's reference checksum.
@@ -151,7 +150,8 @@ async fn folds_write_spans_and_combine_small_tail_extents() {
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
     let first = layout(&store, &original).await;
     assert_eq!(first.layout.extents.len(), 1);
-    assert_eq!(span_bounds(&first.layout.extents[0].object), Some((0, 100)));
+    assert_matches!(first.layout.extents[0].object, ExtentObject::Span { .. });
+    assert_eq!(first.layout.extents[0].object_bytes, 100);
     for (revision, added, expected_lengths) in [
         (2_u8, 10, vec![100, 10]),
         (3, 3, vec![100, 10, 3]),
@@ -192,10 +192,7 @@ async fn folds_write_spans_and_combine_small_tail_extents() {
             expected_lengths
         );
         assert_eq!(row.size_bytes, bytes.len() as u64);
-        assert!(
-            (span_bounds(&row.layout.extents.last().expect("tail").object) == Some((100, 115)))
-                == (revision == 4)
-        );
+        assert!((row.layout.extents.last().expect("tail").object_bytes == 15) == (revision == 4));
         assert_eq!(
             read_file(&store, &namespace_id, RevisionNo(u64::from(revision))).await,
             bytes
@@ -516,7 +513,8 @@ async fn a_retry_after_an_append_keeps_the_first_span_object_immutable() {
         .expect("retry after append");
     let row = layout(&store, &reference).await;
     assert_eq!(row.layout.extents.len(), 1);
-    assert_eq!(span_bounds(&row.layout.extents[0].object), Some((0, 10)));
+    assert_matches!(row.layout.extents[0].object, ExtentObject::Span { .. });
+    assert_eq!(row.layout.extents[0].object_bytes, 10);
     assert_eq!(
         store
             .get(&first_span, None)
