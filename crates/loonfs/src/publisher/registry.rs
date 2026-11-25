@@ -7,8 +7,7 @@ use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
 use crate::trace::phase_event;
 use crate::{
-    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode, Result,
-    WriterState,
+    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, Result, WriterState,
 };
 use futures::future::BoxFuture;
 use loonfs_core::control::{Held, LoadedManifest};
@@ -576,17 +575,16 @@ impl PublisherRegistry {
 }
 
 /// Whether a mutation with `result` may have changed the namespace in ways
-/// this runtime hasn't recorded: a success, or a stale head or a fence that
-/// another writer's change caused.
+/// this runtime hasn't recorded: a success, a stale basis (see
+/// [`CoreError::is_stale_basis`]), or a fence that another writer's change
+/// caused.
 fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
     match result {
         Ok(_) => true,
-        Err(Error::Core(error))
-            if matches!(error.code(), ErrorCode::StaleHead | ErrorCode::WriterFenced) =>
-        {
-            true
+        Err(Error::Core(error)) => {
+            error.is_stale_basis() || matches!(error.failure(), CoreError::WriterFenced(_))
         }
-        _ => false,
+        Err(_) => false,
     }
 }
 
@@ -603,7 +601,7 @@ pub(crate) enum NamespaceChange {
     /// its position, and the cached head stays confirmed.
     Unchanged,
     /// The mutation may have changed the namespace in ways this runtime
-    /// hasn't recorded, such as failing with a stale head. The publisher
+    /// hasn't recorded, such as failing on a stale basis. The publisher
     /// drops its position, and the runtime drops its cached head.
     Unknown,
 }

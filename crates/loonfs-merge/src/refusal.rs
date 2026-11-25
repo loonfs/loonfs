@@ -17,14 +17,15 @@ pub(crate) enum Refusal {
 
 /// Returns whether sending the request again can get past `error`. That's
 /// the case when the request's outcome isn't known (an `outcome_unknown`
+/// error), when the server published nothing because it lost its race or
+/// ran out of its publication budget on every attempt (a `store_contention`
 /// error), or when the client would retry the error for a request that's
 /// safe to send twice (see
 /// [`ClientError::retryable_without_operator_action`]).
 pub(crate) fn sends_again(error: &ClientError) -> bool {
-    error
-        .code()
-        .is_some_and(|code| code.kind() == ErrorKind::OutcomeUnknown)
-        || error.retryable_without_operator_action()
+    error.code().is_some_and(|code| {
+        code.kind() == ErrorKind::OutcomeUnknown || code == ErrorCode::StoreContention
+    }) || error.retryable_without_operator_action()
 }
 
 /// Returns the server's error response for a merge or a rebase that it
@@ -72,7 +73,7 @@ mod tests {
     use loonfs_types::ErrorResponse;
 
     #[test]
-    fn sends_again_on_an_unknown_outcome_and_on_what_the_client_retries() {
+    fn sends_again_on_an_unknown_outcome_a_lost_race_and_what_the_client_retries() {
         let api = |code: &str| ClientError::Api {
             status: 503,
             response: Box::new(ErrorResponse {
@@ -91,13 +92,14 @@ mod tests {
         };
         assert!(sends_again(&api("outcome_unknown")));
         assert!(sends_again(&api("server_busy")));
+        assert!(sends_again(&api("store_contention")));
         assert!(sends_again(&ClientError::Http("reset".to_owned())));
         for retried in [408, 429, 502] {
             assert!(sends_again(&status(retried)), "{retried}");
         }
 
         for non_retryable in [
-            api("store_contention"),
+            api("stale_head"),
             ClientError::ConfigIo("missing".to_owned()),
             ClientError::ConfigDecode("bad toml".to_owned()),
             ClientError::InvalidNamespacePath("/bad".to_owned()),

@@ -18,7 +18,7 @@ use loonfs_core::{MergeAllowance, MergeRequest};
 use loonfs_types::format::wal::MergeRecord;
 use std::sync::{Mutex, MutexGuard};
 
-/// The plans that one merge makes before it returns its commit's error,
+/// The plans that one merge makes before it returns `store_contention`,
 /// which are the first and three more after this namespace changed between
 /// a plan and its commit.
 const MAX_MERGE_PLANS: usize = 4;
@@ -302,10 +302,15 @@ impl Namespace<Writable> {
     /// Commits the merge, or the replay commit, that `planned` found or
     /// planned, and calls `replan` when the commit fails because this
     /// namespace changed after the plan (see
-    /// [`ErrorCode::is_stale_plan`](crate::ErrorCode::is_stale_plan)), up to
+    /// [`CoreError::is_stale_plan`]), up to
     /// [`MAX_MERGE_PLANS`] plans in all. A later plan applies the first
     /// plan's range, so it never merges a longer range, and a merge of the
     /// fork that committed in between returns `merge_range_conflict`.
+    ///
+    /// When the last plan's commit fails the same way, the call returns
+    /// `store_contention`, with the cause `lost_race`. The failure is a
+    /// precondition that the merge set for itself, not one that the caller
+    /// stated, so the caller's remedy is to send the same request again.
     pub(crate) async fn commit_merge<'a, R>(
         &'a self,
         request: &MergeRequest,
@@ -326,7 +331,12 @@ impl Namespace<Writable> {
                 PlannedMerge::Candidate(planned) => *planned,
             };
             match self.submit_merge(candidate, &reservation).await {
-                Err(error) if error.code().is_stale_plan() && plans < MAX_MERGE_PLANS => {
+                Err(Error::Core(error)) if error.is_stale_plan() => {
+                    if plans == MAX_MERGE_PLANS {
+                        return Err(Error::Core(CoreError::StoreContention {
+                            object_key: format!("{} merge commit", self.namespace_id),
+                        }));
+                    }
                     plans += 1;
                     let request = MergeRequest {
                         after_seq: Some(record.source_after_seq),

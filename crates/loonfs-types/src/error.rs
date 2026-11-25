@@ -249,8 +249,8 @@ impl ErrorCode {
     /// This predicate is deliberately narrower than [`ErrorKind::Unavailable`]:
     /// it includes only admission pressure and shutdown handoff, which settle
     /// on their own. It excludes store contention, because LoonFS returns
-    /// `store_contention` only after the write used every compare-and-swap
-    /// attempt it's allowed, and a client retry would repeat those attempts.
+    /// `store_contention` only after the request used every attempt it's
+    /// allowed, and a client retry would repeat those attempts.
     /// Transport failures are classified separately by clients.
     /// Reconciliation, request changes, and maintenance are caller or operator
     /// actions and therefore return `false` here.
@@ -359,76 +359,6 @@ impl ErrorCode {
             | ErrorCode::MaintenanceRequired
             | ErrorCode::UploadNotFound
             | ErrorCode::PoolNotFound
-            | ErrorCode::UploadAlreadyCompleted
-            | ErrorCode::UploadContentConflict
-            | ErrorCode::BelowRetentionFloor
-            | ErrorCode::QueryUnindexable
-            | ErrorCode::IndexLagging
-            | ErrorCode::IndexCorrupt
-            | ErrorCode::NamespaceCorrupt
-            | ErrorCode::ServerError => false,
-        }
-    }
-
-    /// Returns whether a merge or a replay commit that failed with this code
-    /// failed because the namespace that it commits into changed between the
-    /// plan and the commit, so that a later plan reads the change.
-    ///
-    /// The commit's preconditions return `stale_head`, `stale_revision`,
-    /// `stale_attributes`, `stale_access`, and `binding_version_mismatch`.
-    /// The commit returns `path_conflict` when another inode took a name that
-    /// a create, move, or restore needs, `inode_not_found` when a deletion
-    /// hid an inode that the merge changes or the directory that an inode
-    /// goes into, and `not_deleted` when another writer restored an inode
-    /// that the merge restores. A later plan reports a changed row that isn't
-    /// the fork's own as `merge_conflict`. The plan checks a subject's rights
-    /// as the commit does, so the commit's `inode_not_found` isn't a subject's
-    /// missing rights.
-    pub fn is_stale_plan(self) -> bool {
-        match self {
-            ErrorCode::StaleHead
-            | ErrorCode::StaleRevision
-            | ErrorCode::StaleAttributes
-            | ErrorCode::StaleAccess
-            | ErrorCode::BindingVersionMismatch
-            | ErrorCode::PathConflict
-            | ErrorCode::InodeNotFound
-            | ErrorCode::NotDeleted => true,
-            ErrorCode::InvalidRequest
-            | ErrorCode::Unauthorized
-            | ErrorCode::Forbidden
-            | ErrorCode::StoragePermissionDenied
-            | ErrorCode::ContentTooLarge
-            | ErrorCode::MergeTooLarge
-            | ErrorCode::CommitTooLarge
-            | ErrorCode::RangeNotSatisfiable
-            | ErrorCode::NotSupported
-            | ErrorCode::RouteNotFound
-            | ErrorCode::MethodNotAllowed
-            | ErrorCode::NamespaceNotFound
-            | ErrorCode::PoolNotFound
-            | ErrorCode::NamespaceDeleted
-            | ErrorCode::NamespaceExists
-            | ErrorCode::SnapshotNotFound
-            | ErrorCode::ContentNotPrepared
-            | ErrorCode::PathNotFound
-            | ErrorCode::RevisionNotFound
-            | ErrorCode::WrongKind
-            | ErrorCode::DirectoryNotEmpty
-            | ErrorCode::WriterFenced
-            | ErrorCode::WouldCycle
-            | ErrorCode::CommitIdReuseConflict
-            | ErrorCode::MergeRangeConflict
-            | ErrorCode::MergeConflict
-            | ErrorCode::OutcomeUnknown
-            | ErrorCode::CommitQueueFull
-            | ErrorCode::ServerBusy
-            | ErrorCode::ShuttingDown
-            | ErrorCode::WriterSessionClosed
-            | ErrorCode::StoreContention
-            | ErrorCode::ContentNotMaterialized
-            | ErrorCode::MaintenanceRequired
-            | ErrorCode::UploadNotFound
             | ErrorCode::UploadAlreadyCompleted
             | ErrorCode::UploadContentConflict
             | ErrorCode::BelowRetentionFloor

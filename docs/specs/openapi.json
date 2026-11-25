@@ -1223,6 +1223,7 @@
         "enum": [
           "manifest_missing",
           "publication_budget",
+          "lost_race",
           "deadline",
           "unconfirmed"
         ],
@@ -5636,21 +5637,6 @@
               }
             }
           },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Another publication changed the namespace manifest first. Retry the request.",
-            "headers": {
-              "x-request-id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            }
-          },
           "410": {
             "content": {
               "application/json": {
@@ -5784,21 +5770,6 @@
               }
             },
             "description": "Namespace not found",
-            "headers": {
-              "x-request-id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            }
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Another publication changed the namespace manifest first. Retry the request.",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"

@@ -903,7 +903,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
 }
 
 #[tokio::test]
-async fn stale_head_retry_preserves_content_admission() {
+async fn a_lost_wal_number_retry_preserves_content_admission() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("stale-head-retry").expect("valid namespace id");
     let recording = RequestLog::new(temp_dir.path());
@@ -932,7 +932,7 @@ async fn stale_head_retry_preserves_content_admission() {
     namespace
         .commit_candidate(CommitCandidate::prepared(intent, vec![prepared]))
         .await
-        .expect("publish after stale-head retry");
+        .expect("publish after the lost WAL number's retry");
 
     assert_eq!(conflicting.attempts(), 2);
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);

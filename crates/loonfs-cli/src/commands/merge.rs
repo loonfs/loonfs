@@ -49,8 +49,8 @@ pub(crate) async fn run_merge(
     }
     let mut steps = Vec::new();
     // The session's steps are bounded: a step whose request failed with a
-    // transient error or an unknown outcome returns the error, which ends the
-    // command, each split hint shortens the range, the session's rebases
+    // transient error, a lost race, or an unknown outcome returns the error,
+    // which ends the command, each split hint shortens the range, the session's rebases
     // create at most `MAX_NEW_FORKS` new forks, and each cleanup step deletes
     // one of them.
     while let Some(outcome) = session

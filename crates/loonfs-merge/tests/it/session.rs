@@ -313,49 +313,50 @@ async fn a_fork_point_below_the_floor_fails_the_session_before_it_merges() {
     }
 }
 
+/// Checks that a busy server, and a merge that lost its race on every
+/// attempt (`store_contention`), leave the session in its state instead of
+/// failing it, and that the next step sends the same request and commits.
 #[tokio::test]
-async fn a_busy_server_leaves_the_state_as_it_was_and_the_next_step_sends_the_same_merge() {
-    let mechanics = ScriptedMechanics::new([
-        Answer::range(10, 20),
-        Answer::ForkSnapshots(Vec::new()),
-        Answer::refused(ErrorCode::ServerBusy),
-        Answer::Committed(31),
-    ]);
-    let mut session = recover(&mechanics, DefaultResolver).await;
-    let before = session.state().clone();
+async fn a_busy_server_or_a_lost_race_leaves_the_state_as_it_was_and_the_next_step_sends_the_same_merge(
+) {
+    for code in [ErrorCode::ServerBusy, ErrorCode::StoreContention] {
+        let mechanics = ScriptedMechanics::new([
+            Answer::range(10, 20),
+            Answer::ForkSnapshots(Vec::new()),
+            Answer::refused(code),
+            Answer::Committed(31),
+        ]);
+        let mut session = recover(&mechanics, DefaultResolver).await;
+        let before = session.state().clone();
 
-    let busy = session.step().await;
+        let refused = session.step().await;
 
-    assert!(
-        matches!(&busy, Err(MergeError::Client(error)) if error.code() == Some(ErrorCode::ServerBusy)),
-        "{busy:?}"
-    );
-    assert_eq!(*session.state(), before);
-    let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
-    assert_eq!(state.status, MergeSessionStatus::Merged);
-    assert!(matches!(
-        outcomes.as_slice(),
-        [MergeSessionOutcome::MergeCommitted {
-            committed_seq: CommitSeq(31),
-            ..
-        }]
-    ));
-    let merges = merges(&mechanics.sent());
-    assert_eq!(merges.len(), 2);
-    assert_eq!(
-        merges[0], merges[1],
-        "the next step sends the same request and its commit ID"
-    );
+        assert!(
+            matches!(&refused, Err(MergeError::Client(error)) if error.code() == Some(code)),
+            "{refused:?}"
+        );
+        assert_eq!(*session.state(), before, "{code}");
+        let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+        assert_eq!(state.status, MergeSessionStatus::Merged, "{code}");
+        assert!(matches!(
+            outcomes.as_slice(),
+            [MergeSessionOutcome::MergeCommitted {
+                committed_seq: CommitSeq(31),
+                ..
+            }]
+        ));
+        let merges = merges(&mechanics.sent());
+        assert_eq!(merges.len(), 2, "{code}");
+        assert_eq!(
+            merges[0], merges[1],
+            "the next step sends the same request and its commit ID"
+        );
+    }
 }
 
 #[tokio::test]
 async fn errors_that_the_loop_cant_act_on_fail_the_session() {
-    let cases: [(&str, Vec<Answer>, ErrorCode); 3] = [
-        (
-            "a namespace that changed after each of the server's plans",
-            vec![Answer::refused(ErrorCode::StaleHead)],
-            ErrorCode::StaleHead,
-        ),
+    let cases: [(&str, Vec<Answer>, ErrorCode); 2] = [
         (
             "a first unmerged commit that's too large alone",
             vec![Answer::refused(ErrorCode::MergeTooLarge)],

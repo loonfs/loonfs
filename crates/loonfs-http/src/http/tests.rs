@@ -172,6 +172,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "operation_id",
     "operation_index",
     "publication_budget",
+    "lost_race",
     "operation_kind",
     "operation_part",
     "parent_inode_id",
@@ -1017,9 +1018,9 @@ async fn grep_error_unreadable_entries_and_segments_are_index_corrupt_and_core_r
 }
 
 /// Checks that an enable whose publication another process's enable beat
-/// returns `stale_head`, and that core reads still work.
+/// returns `store_contention`, and that core reads still work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() {
+async fn grep_error_publication_conflict_is_store_contention_and_core_reads_survive() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("grep-error-conflict");
     let gate = Arc::new(BlockingStore::new(
@@ -1062,9 +1063,9 @@ async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() 
         client,
         &namespace_id,
         result,
-        409,
-        ErrorCode::StaleHead,
-        "publication conflict",
+        503,
+        ErrorCode::StoreContention,
+        "grep index publication",
     )
     .await;
     harness.server.abort();

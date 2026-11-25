@@ -222,6 +222,11 @@ mod tests {
                 Some(ErrorCause::PublicationBudget),
             ),
             (
+                r#"{"code":"store_contention","message":"m","details":{"cause":"lost_race"}}"#,
+                ErrorCode::StoreContention,
+                Some(ErrorCause::LostRace),
+            ),
+            (
                 r#"{"code":"store_contention","message":"m","details":{"cause":"from_a_newer_server"}}"#,
                 ErrorCode::StoreContention,
                 Some(ErrorCause::Unknown),

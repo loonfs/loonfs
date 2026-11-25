@@ -579,7 +579,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// manifest boundary that the snapshot's verification read, and the head.
     /// When a newer manifest became current before the verification, the call
     /// reads the head again with a discovery, up to
-    /// `MAX_CONTENTION_ATTEMPTS` times, and then returns `stale_head`.
+    /// `MAX_CONTENTION_ATTEMPTS` times, and then returns `store_contention`.
     ///
     /// Each read of the head is checked before the snapshot is written: when
     /// a commit in its WAL tail is older than `MAX_TAIL_COMMIT_AGE_MS` at the

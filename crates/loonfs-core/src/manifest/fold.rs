@@ -198,7 +198,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let update = match folded {
             Ok(update) => update,
             // Every attempt lost its put to another publication or found its
-            // manifest replaced.
+            // manifest replaced. The fold reports a lost race, so a runtime
+            // that keeps a view of the namespace drops it (see
+            // `CoreError::is_stale_basis`).
             Err(CoreError::StoreContention { .. }) => {
                 return Err(CoreError::WalPublish(WalPublishError::NumberTaken))
             }

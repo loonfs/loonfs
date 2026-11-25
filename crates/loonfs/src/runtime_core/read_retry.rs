@@ -11,8 +11,10 @@ use loonfs_types::ManifestNo;
 use tracing::Instrument;
 
 /// Returns the error of a read that found its manifest replaced on every
-/// run: `store_contention`, because the `stale_head` code is a write's
-/// precondition failure, and the read reports the runs it used instead.
+/// run: the `StoreContention` variant, which a caller's own
+/// [`RuntimeCore::run_again_after_replaced_manifest`] doesn't run again, so
+/// a read inside [`crate::Namespace::read_through_views`] runs at most
+/// `MAX_CONTENTION_ATTEMPTS` times in all.
 fn replaced_on_every_run(namespace_id: &NamespaceId, current_manifest_no: ManifestNo) -> Error {
     CoreError::StoreContention {
         object_key: format!("{namespace_id} manifest {current_manifest_no}"),
@@ -171,7 +173,8 @@ mod tests {
     /// Checks that a read through views runs again after each run that
     /// returns `ManifestReplaced`. A read replaced on its first run returns
     /// its second run's result, and a read replaced on every run returns
-    /// `store_contention` after `MAX_CONTENTION_ATTEMPTS` runs.
+    /// `store_contention`, with the cause `lost_race`, after
+    /// `MAX_CONTENTION_ATTEMPTS` runs.
     #[tokio::test]
     async fn reads_through_views_run_again_after_a_replaced_manifest() {
         let temp_dir = tempdir().expect("tempdir");
@@ -209,6 +212,10 @@ mod tests {
             } else {
                 let error = result.expect_err("every run finds its manifest replaced");
                 assert_eq!(error.code(), ErrorCode::StoreContention);
+                assert_eq!(
+                    error.details().and_then(|details| details.cause),
+                    Some(loonfs_types::ErrorCause::LostRace)
+                );
                 assert_eq!(runs.into_inner(), MAX_CONTENTION_ATTEMPTS);
             }
         }

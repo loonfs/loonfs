@@ -398,7 +398,7 @@ async fn a_stored_manifest_below_the_sessions_writer_epoch_is_corrupt() {
 }
 
 /// Checks that after a takeover, the old session's next publish returns
-/// `stale_head` and every later one returns `writer_fenced`, and that the
+/// `store_contention` and every later one returns `writer_fenced`, and that the
 /// head keeps the new writer's epoch.
 #[tokio::test]
 async fn a_fenced_session_stays_fenced_and_leaves_the_head_alone() {
@@ -434,7 +434,7 @@ async fn a_fenced_session_stays_fenced_and_leaves_the_head_alone() {
         .remove(0)
         .expect("writer b takeover commit");
 
-    for expected in [ErrorCode::StaleHead, ErrorCode::WriterFenced] {
+    for expected in [ErrorCode::StoreContention, ErrorCode::WriterFenced] {
         let result = engine_a
             .publish_batch(
                 vec![create_dir("from-a-second", "gamma")],

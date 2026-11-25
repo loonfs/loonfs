@@ -199,7 +199,6 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
             (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
-            (status = 409, description = "Another publication changed the namespace manifest first. Retry the request.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 501, description = "This deployment doesn't maintain the grep index", body = ErrorResponse),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
@@ -298,7 +297,6 @@ async fn read_grep_index_status(
             (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
-            (status = 409, description = "Another publication changed the namespace manifest first. Retry the request.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 501, description = "This deployment doesn't maintain the grep index", body = ErrorResponse),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
@@ -332,9 +330,13 @@ pub(super) fn map_grep_error(error: GrepError) -> ApiResponseError {
     ApiResponseError::from_error_response(error.code(), error.to_error_response())
 }
 
+/// Returns the error of a grep enable or disable that another enable or
+/// disable superseded. Nothing that this request asked for was published, so
+/// the same request can succeed when it's sent again.
 fn grep_publication_conflict() -> ApiResponseError {
     ApiResponseError::new(
-        loonfs_types::ErrorCode::StaleHead,
-        "grep index publication conflict; retry",
+        loonfs_types::ErrorCode::StoreContention,
+        "another grep index publication changed the namespace first; retry",
     )
+    .with_cause(loonfs_types::ErrorCause::LostRace)
 }
