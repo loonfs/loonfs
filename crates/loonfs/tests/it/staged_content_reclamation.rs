@@ -1,25 +1,22 @@
 //! What garbage collection can reach after an embedded convenience put.
 //!
-//! The convenience puts stage their own bytes, so they are both ends of an
-//! upload at once. They still open a session for the object they write,
-//! because the session record is the only handle anything has on a content
-//! object before metadata references it. These tests hold that to its
-//! consequence: every blob one of these puts writes is eventually either
-//! referenced by metadata or reclaimed, and none of them is immortal.
+//! The convenience puts write their own content objects and write no upload
+//! record, so until a commit references an object, only the object's age
+//! protects it. These tests check that every object one of these puts writes
+//! is either referenced by metadata or deleted once it's older than the grace
+//! window.
 //!
 //! Garbage collection is driven through `PoolStore::gc` rather than
 //! `Maintenance::gc_pool`, because the maintenance handle stamps its pass
-//! from the wall clock and these deadlines are days out. The store is the
+//! from the wall clock and these deadlines are a day out. The store is the
 //! same one the runtime wrote through, so the pass sees exactly what the
 //! puts left behind.
 
 use crate::common::{namespace, open_runtime_with_async, store, TestRuntime};
 use loonfs::{ContentRef, NamespaceId, PoolGcResponse, PutFileOptions, SharedObjectStore};
-use loonfs_core::limits::{
-    CONTENT_RECLAMATION_GRACE_WINDOW_MS, GC_GRACE_WINDOW_MS, UPLOAD_SESSION_LEASE_MS,
-};
+use loonfs_core::limits::GC_GRACE_WINDOW_MS;
 use loonfs_core::test_support::WriterAt;
-use loonfs_objectstore::layout::{upload_id_of, DurableObjectFamily};
+use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
@@ -43,8 +40,8 @@ async fn open_staged_runtime(store: SharedObjectStore, writer_id: &str) -> TestR
 }
 
 /// Runs one pass of the pool of `namespace_id` at a fabricated clock. The
-/// runtime stamped its sessions from the real clock, so every deadline here
-/// is measured from that.
+/// provider stamped the runtime's objects from the real clock, so every
+/// deadline here is measured from that.
 async fn collect(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
@@ -79,7 +76,7 @@ async fn exists(store: &SharedObjectStore, key: &str) -> bool {
     store.head(key).await.expect("head object").is_some()
 }
 
-/// Every upload-session record the namespace still holds.
+/// Every upload-session record under the pool's prefix.
 async fn session_keys(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Vec<String> {
     let pool_id = loonfs_core::test_support::load_pool_id(store, namespace_id).await;
     store
@@ -89,7 +86,7 @@ async fn session_keys(store: &SharedObjectStore, namespace_id: &NamespaceId) -> 
 }
 
 #[tokio::test]
-async fn content_prepared_and_never_published_is_reclaimed_after_its_session() {
+async fn content_prepared_and_never_published_is_reclaimed_at_the_grace_window() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
     let runtime = open_staged_runtime(store.clone(), "prepare-only").await;
@@ -99,7 +96,7 @@ async fn content_prepared_and_never_published_is_reclaimed_after_its_session() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     // A published file: a revision keeps its content while the prepared
-    // object goes once its session record is removed.
+    // object is deleted once it's older than the grace window.
     namespace_writer
         .put_file(
             "/docs/live.txt",
@@ -110,7 +107,7 @@ async fn content_prepared_and_never_published_is_reclaimed_after_its_session() {
         .expect("published put");
 
     let prepared = namespace_writer
-        .prepare_content(b"never published", &loonfs_test_support::test_actor())
+        .prepare_content(b"never published")
         .await
         .expect("prepare content");
     let orphan_key = content_key(&store, &namespace_id, prepared.content_ref()).await;
@@ -121,22 +118,12 @@ async fn content_prepared_and_never_published_is_reclaimed_after_its_session() {
     assert_eq!(inside.deleted.content_objects, 0);
     assert!(
         exists(&store, &orphan_key).await,
-        "inside the grace evidence could still admit a commit for these bytes"
+        "inside the grace window a commit could still admit these bytes"
     );
 
-    let past_ms = staged_at_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1;
-    let past = collect(&store, &namespace_id, past_ms).await;
+    let past = collect(&store, &namespace_id, staged_at_ms + GC_GRACE_WINDOW_MS + 1).await;
     assert_eq!(
-        past.deleted.upload_sessions, 2,
-        "both sessions have said everything they will say"
-    );
-    assert_eq!(
-        past.deleted.content_objects, 0,
-        "the pass read each session as a root before it removed the record"
-    );
-    let next = collect(&store, &namespace_id, past_ms).await;
-    assert_eq!(
-        next.deleted.content_objects, 1,
+        past.deleted.content_objects, 1,
         "the prepared object is the one reclamation"
     );
     assert!(!exists(&store, &orphan_key).await);
@@ -144,7 +131,7 @@ async fn content_prepared_and_never_published_is_reclaimed_after_its_session() {
 }
 
 #[tokio::test]
-async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
+async fn a_published_put_keeps_its_content() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
     let runtime = open_staged_runtime(store.clone(), "published-put").await;
@@ -174,11 +161,10 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
     let report = collect(
         &store,
         &namespace_id,
-        loonfs_core::time::current_time_ms() + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1,
+        loonfs_core::time::current_time_ms() + GC_GRACE_WINDOW_MS + 1,
     )
     .await;
 
-    assert_eq!(report.deleted.upload_sessions, 1);
     assert_eq!(
         report.deleted.content_objects, 0,
         "metadata protects the bytes the moment the commit is made"
@@ -247,19 +233,7 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         Some(first.committed_seq),
         "the conflict identifies the original commit"
     );
-    assert_eq!(
-        session_keys(&store, &namespace_id)
-            .await
-            .iter()
-            .filter(|key| upload_id_of(key).is_some())
-            .count(),
-        2,
-        "one session per staging write, published or not"
-    );
-
-    let past_ms = loonfs_core::time::current_time_ms() + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1;
-    let report = collect(&store, &namespace_id, past_ms).await;
-    assert_eq!(report.deleted.upload_sessions, 2);
+    let past_ms = loonfs_core::time::current_time_ms() + GC_GRACE_WINDOW_MS + 1;
     let report = collect(&store, &namespace_id, past_ms).await;
     assert_eq!(
         report.deleted.content_objects, 1,
@@ -280,7 +254,7 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
 }
 
 #[tokio::test]
-async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
+async fn staging_that_fails_leaves_no_upload_record() {
     let temp_dir = tempdir().expect("tempdir");
     // A refused precondition rather than a transport failure: the immutable
     // write retries the second for most of a minute before giving up, and
@@ -311,48 +285,29 @@ async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
         .expect_err("the content write fails");
     failing.clear();
 
-    assert_eq!(
-        session_keys(&store, &namespace_id).await.len(),
-        1,
-        "the session that would have owned the bytes is durable before they are written"
+    assert!(
+        session_keys(&store, &namespace_id).await.is_empty(),
+        "a failed embedded write leaves no upload record"
     );
-
-    let staged_at_ms = loonfs_core::time::current_time_ms();
-    let inside = collect(&store, &namespace_id, staged_at_ms).await;
-    assert_eq!(
-        inside.deleted.upload_sessions, 0,
-        "the lease has not passed"
-    );
-
-    // Past the lease and its grace the session aborts; a grace after that
-    // stamp the record itself is reaped.
-    let aborted_at_ms = staged_at_ms + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS + 1;
-    collect(&store, &namespace_id, aborted_at_ms).await;
-    let reaped = collect(
-        &store,
-        &namespace_id,
-        aborted_at_ms + GC_GRACE_WINDOW_MS + 1,
-    )
-    .await;
-    assert_eq!(reaped.deleted.upload_sessions, 1);
-    assert!(session_keys(&store, &namespace_id).await.is_empty());
 }
 
 #[tokio::test]
-async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
+async fn a_put_writes_one_content_object_and_no_upload_record() {
     let temp_dir = tempdir().expect("tempdir");
-    let sessions = Arc::new(RecordingStore::new(
+    let recorded = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::new(|key| {
             loonfs_objectstore::layout::parse_object_key(key).is_some_and(|parsed| {
                 matches!(
                     parsed.family(),
-                    DurableObjectFamily::UploadSession | DurableObjectFamily::UploadOutcome
+                    DurableObjectFamily::ContentBlob
+                        | DurableObjectFamily::UploadSession
+                        | DurableObjectFamily::UploadOutcome
                 )
             })
         }),
     ));
-    let store: SharedObjectStore = sessions.clone();
+    let store: SharedObjectStore = recorded.clone();
     let runtime = open_staged_runtime(store, "counted-writer").await;
     let namespace_id = namespace(&runtime).await;
     let namespace_writer = runtime
@@ -360,7 +315,7 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
-    sessions.reset();
+    recorded.reset();
     namespace_writer
         .put_file(
             "/docs/counted.txt",
@@ -370,25 +325,15 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
         .await
         .expect("put file");
 
-    let counts = sessions.counts();
+    let counts = recorded.counts();
     assert_eq!(
-        counts.create_if_absent_puts, 2,
-        "the session record claims the content id before the bytes exist, and the outcome \
-         record freezes the reference the write produced"
-    );
-    assert_eq!(counts.compare_and_swaps, 0, "neither record is rewritten");
-    assert_eq!(
-        sessions.count(OperationSelector::Read),
-        0,
-        "the completion reads no record back"
-    );
-    assert_eq!(
-        sessions.count(OperationSelector::Head),
-        1,
-        "the completion checks that the session record still exists"
-    );
-    assert_eq!(
-        counts.deletes, 0,
-        "only collection removes a session record"
+        counts,
+        loonfs_test_support::stores::StoreCounts {
+            puts: 1,
+            create_if_absent_puts: 1,
+            written_bytes: 7,
+            ..Default::default()
+        },
+        "the put writes its content object and no upload record"
     );
 }

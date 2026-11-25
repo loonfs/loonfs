@@ -354,6 +354,32 @@ pub use loonfs_types::limits::GC_GRACE_WINDOW_MS;
 
 const _: () = assert!(GC_GRACE_WINDOW_MS >= PUBLICATION_COMPLETION_BOUND_MS);
 
+/// Time from the start of an embedded content write during which a commit
+/// admits the object that the write stored.
+///
+/// No record refers to the object, so pool collection deletes it once its
+/// provider age reaches the grace window, unless a commit references it. The
+/// write's start is read on the writing host before the put is sent, so the
+/// provider stamps the object no earlier than the moment the write started.
+/// A commit checks this window immediately before its WAL put, and the
+/// provider applies that put within its request bound. The writing host's
+/// clock error can change by up to two clock allowances between the write's
+/// start and the commit's check, and the collector's clock adds one more. The
+/// assertion below keeps those terms inside the grace window, so the provider
+/// applies the put before any collection that finds the object old enough to
+/// delete reads the namespace's commits. With the current values the window
+/// is 23 hours and 35 minutes.
+pub const OWNED_STAGING_ADMISSION_WINDOW_MS: u64 =
+    GC_GRACE_WINDOW_MS - PUBLICATION_COMPLETION_BOUND_MS;
+
+const _: () = assert!(OWNED_STAGING_ADMISSION_WINDOW_MS == 84_900_000);
+const _: () = assert!(
+    OWNED_STAGING_ADMISSION_WINDOW_MS
+        + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
+        + 3 * GC_SAFETY_MARGIN_MS
+        <= GC_GRACE_WINDOW_MS
+);
+
 /// A merge's or a rebase's commit is applied within an operation snapshot's
 /// lifetime plus the provider's request bound after the merge was prepared,
 /// and a collection deletes the record of the snapshot that the plan took of

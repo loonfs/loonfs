@@ -777,11 +777,24 @@ async fn a_second_collection_reads_no_completed_session_record() {
         .expect("create namespace")
         .pool_id;
     let namespace = fs.namespace_writer(&namespace_id).expect("open namespace");
+    let actor = loonfs_test_support::test_actor();
     for body in [&b"one"[..], b"two", b"three"] {
-        namespace
-            .prepare_content(body, &loonfs_test_support::test_actor())
+        let upload = namespace
+            .create_upload(&actor)
             .await
-            .expect("prepare content");
+            .expect("create upload");
+        namespace
+            .put_upload_content(&upload.upload_id, body, &actor)
+            .await
+            .expect("upload content");
+        namespace
+            .complete_upload(
+                &upload.upload_id,
+                loonfs_types::CompleteUploadBody::ServiceProxied {},
+                &actor,
+            )
+            .await
+            .expect("complete upload");
     }
 
     store.reset();

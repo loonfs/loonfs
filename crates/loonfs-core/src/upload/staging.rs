@@ -1,135 +1,92 @@
-//! Owned staging, where the writer stages content and completes its session
-//! in one call.
+//! Embedded content writes, where this process writes a content object itself
+//! and returns the proof that a commit of the namespace admits.
 
-use super::session::{create_upload_session_record, NewUploadSession};
 use crate::engine::RuntimeReadContext;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::Result;
-use crate::namespace::state::NamespaceReadState;
-use crate::namespace::store::NamespaceStore;
+use crate::limits::OWNED_STAGING_ADMISSION_WINDOW_MS;
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::content_staging::{
     stage_bytes_under_content_id, stage_streamed_under_content_id, ContentKeyOwner,
 };
-use crate::time::OperationClock;
 use loonfs_objectstore::{ByteStream, ObjectStore};
-use loonfs_types::format::control::UploadSessionPayload;
-use loonfs_types::{ActorId, ContentRef};
+use loonfs_types::{ContentId, ContentRef, NamespaceId};
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Stores in-process bytes as prepared content and completes the associated
-    /// upload session.
+    /// Writes in-process bytes as a content object under a fresh content ID,
+    /// and returns a proof that expires [`OWNED_STAGING_ADMISSION_WINDOW_MS`]
+    /// after the write started.
     ///
-    /// This combines session creation, content upload, and completion without a
-    /// network round trip or receipt. It still writes the upload session's
-    /// records that garbage collection needs: the session record before the
-    /// content write, so collection always has a durable owner for the object,
-    /// and the outcome record after it.
+    /// The write sends one put and writes no record. Until a commit
+    /// references the object, pool collection keeps the object only while
+    /// it's younger than the grace window.
     pub async fn stage_owned_bytes(
         &self,
         context: &RuntimeReadContext,
-        actor_id: &ActorId,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
         let _permit = self.namespace.content_writes.acquire().await;
         let head = self.namespace.context_read_basis(context).head();
-        let clock = self.namespace.start_clock();
-        let session =
-            open_owned_staging_session(&self.namespace.store, head, actor_id, &clock).await?;
+        let started_at_ms = self.namespace.start_clock().request_at_ms();
         let stored = stage_bytes_under_content_id(
             &self.namespace.store,
             &head.pool_id,
-            session.content_id.clone(),
+            ContentId::generate(),
             bytes,
             ContentKeyOwner::FreshIdentity,
         )
         .await?;
-        self.namespace
-            .complete_owned_staging(head, &session, stored.content_ref, &clock)
-            .await
+        Ok(owned_content(
+            &head.namespace_id,
+            stored.content_ref,
+            started_at_ms,
+        ))
     }
 
-    /// Stages a streamed payload as content a session owns, hashing it on
-    /// the way through instead of keeping it in memory.
+    /// Writes a streamed payload as a content object, hashing it on the way
+    /// through instead of keeping it in memory.
     ///
-    /// The streaming twin of [`Self::stage_owned_bytes`]; ownership and cost
-    /// are identical.
+    /// The streaming form of [`Self::stage_owned_bytes`], with the same proof
+    /// expiry.
     pub async fn stage_owned_stream(
         &self,
         context: &RuntimeReadContext,
-        actor_id: &ActorId,
         body: ByteStream,
     ) -> Result<PreparedContent> {
         let _permit = self.namespace.content_writes.acquire().await;
         let head = self.namespace.context_read_basis(context).head();
-        self.namespace
-            .stage_owned_stream(head, actor_id, body, &self.namespace.start_clock())
-            .await
-    }
-}
-
-impl<S: ObjectStore> NamespaceStore<S> {
-    /// Stages a payload this runtime forwards under a session that owns it.
-    ///
-    /// The streaming twin of [`stage_owned_bytes`]: the bytes are hashed on
-    /// their way to the store rather than kept in memory, and everything about ownership
-    /// is identical.
-    pub(crate) async fn stage_owned_stream(
-        &self,
-        head: &NamespaceReadState,
-        actor_id: &ActorId,
-        body: ByteStream,
-        clock: &OperationClock,
-    ) -> Result<PreparedContent> {
-        let session = open_owned_staging_session(&self.store, head, actor_id, clock).await?;
+        let started_at_ms = self.namespace.start_clock().request_at_ms();
         let content_ref = stage_streamed_under_content_id(
-            &self.store,
+            &self.namespace.store,
             &head.pool_id,
-            session.content_id.clone(),
+            ContentId::generate(),
             body,
             ContentKeyOwner::FreshIdentity,
         )
         .await?;
-        self.complete_owned_staging(head, &session, content_ref, clock)
-            .await
+        Ok(owned_content(
+            &head.namespace_id,
+            content_ref,
+            started_at_ms,
+        ))
     }
 }
 
-/// Creates the internal upload session that owns an in-process content
-/// write.
-async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
-    store: &S,
-    head: &NamespaceReadState,
-    actor_id: &ActorId,
-    clock: &OperationClock,
-) -> Result<UploadSessionPayload> {
-    create_upload_session_record(
-        store,
-        head,
-        actor_id.clone(),
-        NewUploadSession::service_proxied(),
-        clock,
+/// Returns the proof for an object of `namespace_id` that a write which
+/// started at `started_at_ms` stored.
+///
+/// The start is read before the put is sent, so the provider stamps the
+/// object no earlier than the moment the write started. A commit checks the
+/// expiry by the
+/// request clock plus elapsed monotonic time immediately before its WAL put.
+fn owned_content(
+    namespace_id: &NamespaceId,
+    content_ref: ContentRef,
+    started_at_ms: u64,
+) -> PreparedContent {
+    PreparedContent::for_staged_content(
+        namespace_id.clone(),
+        content_ref,
+        started_at_ms.saturating_add(OWNED_STAGING_ADMISSION_WINDOW_MS),
     )
-    .await
-}
-
-impl<S: ObjectStore> NamespaceStore<S> {
-    /// Completes an in-process staging session using the content reference
-    /// produced by the write.
-    ///
-    /// No additional verification is needed because this process computed the
-    /// checksum while writing. On failure, the open session eventually expires
-    /// and garbage collection removes its object.
-    async fn complete_owned_staging(
-        &self,
-        head: &NamespaceReadState,
-        session: &UploadSessionPayload,
-        written: ContentRef,
-        clock: &OperationClock,
-    ) -> Result<PreparedContent> {
-        Ok(self
-            .record_completion(head, session, written, clock)
-            .await?
-            .prepared)
-    }
 }

@@ -676,3 +676,73 @@ async fn retained_evidence_minting_stops_at_the_upload_issuance_deadline() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_commit_after_an_embedded_writes_admission_window_is_refused_and_writes_nothing() {
+    use crate::limits::OWNED_STAGING_ADMISSION_WINDOW_MS;
+    use loonfs_test_support::stores::RecordingStore;
+
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("expired-owned").expect("namespace id");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let setup = context(1_000);
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
+        .await
+        .expect("bootstrap");
+    let live_context = crate::test_support::manifest_context(&store, &namespace_id).await;
+    let prepared = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .engine()
+        .stage_owned_bytes(&live_context, b"embedded content")
+        .await
+        .expect("stage owned bytes");
+    let candidate = CommitCandidate::prepared(
+        CommitIntent::single(
+            CommitId::parse("publish-owned").expect("commit id"),
+            loonfs_test_support::test_actor(),
+            None,
+            FilesystemOperation::PutFile {
+                path: AbsolutePath::parse("/content").expect("path"),
+                content: loonfs_types::FileContent::Ref(prepared.content_ref().clone()),
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
+        ),
+        vec![prepared],
+    );
+    let timer = Arc::new(PublicationTimer::default());
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        setup.writer_id.clone(),
+    );
+    engine
+        .position
+        .session_writer_epoch(&engine.namespace, &setup.writer_id)
+        .await
+        .expect("acquire writer");
+    engine.invalidate_projection();
+    store.reset();
+
+    let result = engine
+        .publish_batch(
+            vec![candidate],
+            &OperationClock::start(setup.now_ms + OWNED_STAGING_ADMISSION_WINDOW_MS, timer),
+        )
+        .await;
+
+    assert_eq!(
+        result.results[0]
+            .as_ref()
+            .expect_err("the proof has expired")
+            .code(),
+        loonfs_types::ErrorCode::ContentNotPrepared
+    );
+    assert_eq!(store.counts().puts, 0);
+}

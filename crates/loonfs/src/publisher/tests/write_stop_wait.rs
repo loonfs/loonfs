@@ -658,12 +658,7 @@ async fn a_commit_at_the_byte_write_stop_waits_for_the_fold_and_commits() {
                 seed,
                 MAX_WAL_INLINE_CONTENT_BYTES,
             );
-            prepared.push(
-                namespace
-                    .prepare_content(&bytes, &loonfs_test_support::test_actor())
-                    .await
-                    .expect("prepare"),
-            );
+            prepared.push(namespace.prepare_content(&bytes).await.expect("prepare"));
         }
         let request = CommitIntent {
             commit_id: CommitId::generate(),

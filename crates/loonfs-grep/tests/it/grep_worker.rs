@@ -1122,7 +1122,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
     }
     assert!(directory_path.len() > MAX_PATH_BYTES);
     let content = namespace
-        .prepare_content(b"a tree\n", &loonfs_test_support::test_actor())
+        .prepare_content(b"a tree\n")
         .await
         .expect("prepare content");
     namespace
@@ -1689,7 +1689,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     }
     for path in ["/team/file", "/team/secret/file"] {
         let content = namespace
-            .prepare_content(b"needle\n", &loonfs_test_support::test_actor())
+            .prepare_content(b"needle\n")
             .await
             .expect("content");
         namespace
@@ -1823,10 +1823,7 @@ async fn a_subject_without_history_follows_a_cursor_over_unchanged_files() {
     .expect("grant read");
     let namespace = &namespace;
     let put = |path: &'static str, bytes: &'static [u8]| async move {
-        let content = namespace
-            .prepare_content(bytes, &loonfs_test_support::test_actor())
-            .await
-            .expect("content");
+        let content = namespace.prepare_content(bytes).await.expect("content");
         namespace
             .commit_prepared(
                 CommitIntent::single(

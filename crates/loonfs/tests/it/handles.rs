@@ -333,7 +333,7 @@ fn put_file_and_prepare_then_put_commit_equivalent_state() {
             .await
             .expect("put file bytes");
         let prepared = prepared_namespace_writer
-            .prepare_content(bytes, &loonfs_test_support::test_actor())
+            .prepare_content(bytes)
             .await
             .expect("prepare file bytes");
         let composed = prepared_namespace_writer

@@ -227,7 +227,7 @@ async fn a_cold_recursive_page_sends_at_most_one_data_get_to_each_segment() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let prepared = namespace_writer
-        .prepare_content(b"x", &loonfs_test_support::test_actor())
+        .prepare_content(b"x")
         .await
         .expect("prepare file content");
     let (directories, files) = spread_tree("/deps", 5_000, 16, 3);

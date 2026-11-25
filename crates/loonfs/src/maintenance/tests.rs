@@ -1142,7 +1142,7 @@ async fn write_a_large_batch_and_fold<S: ObjectStore + ?Sized>(
         for index in commit * 4096..(commit + 1) * 4096 {
             let path = format!("/large/f-{index:05}.txt");
             let content = namespace
-                .prepare_content(path.as_bytes(), &loonfs_test_support::test_actor())
+                .prepare_content(path.as_bytes())
                 .await
                 .expect("prepare the content");
             operations.push(FilesystemOperation::PutFile {

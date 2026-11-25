@@ -144,12 +144,12 @@ async fn assert_every_staging_is_refused(
     let results = [
         (
             "prepare_content",
-            namespace.prepare_content(BYTES, &actor).await.err(),
+            namespace.prepare_content(BYTES).await.err(),
         ),
         (
             "prepare_content_stream",
             namespace
-                .prepare_content_stream(streamed(BYTES), &actor)
+                .prepare_content_stream(streamed(BYTES))
                 .await
                 .err(),
         ),
@@ -221,14 +221,14 @@ async fn assert_every_staging_commits(harness: &Harness, namespace_id: &Namespac
         (
             "/bytes",
             namespace
-                .prepare_content(BYTES, &actor)
+                .prepare_content(BYTES)
                 .await
                 .expect("prepare content"),
         ),
         (
             "/stream",
             namespace
-                .prepare_content_stream(streamed(BYTES), &actor)
+                .prepare_content_stream(streamed(BYTES))
                 .await
                 .expect("prepare a stream"),
         ),
@@ -377,7 +377,7 @@ async fn inline_content_is_prepared_and_its_commit_is_refused_while_a_create_is_
     let actor = loonfs_test_support::test_actor();
 
     let prepared = namespace
-        .prepare_content(BYTES, &actor)
+        .prepare_content(BYTES)
         .await
         .expect("prepare inline content");
     assert!(staged_objects(&harness.store, &pool_id).await.is_empty());

@@ -101,11 +101,10 @@ pub fn prepare_stored_content(
     context: &RuntimeReadContext,
     stored_content: StoredContent,
 ) -> PreparedContent {
-    PreparedContent::for_completed_upload(
+    PreparedContent::for_staged_content(
         context.read_basis().head().namespace_id.clone(),
         stored_content.content_ref,
         u64::MAX,
-        None,
     )
 }
 
