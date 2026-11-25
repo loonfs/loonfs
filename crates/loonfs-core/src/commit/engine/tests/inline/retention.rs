@@ -117,29 +117,16 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     )
     .await;
 
-    // Staging changes the object ID but must preserve the inline request identity.
-    let mut staged_retry = replace(b"before");
-    let identity = staged_retry.semantic_identity(&namespace_id);
-    let inline_id = staged_retry.inline_content()[0]
-        .content_ref()
-        .content_id
-        .clone();
-    let stored = crate::test_support::namespace_store(&store, &namespace_id)
-        .store_bytes_as_content(b"before")
-        .await
-        .expect("fallback content");
-    staged_retry.stage_inline_content(
-        &inline_id,
-        PreparedContent::for_durable_content_write(
-            namespace_id.clone(),
-            stored.content_ref().clone(),
-        ),
+    // A retry draws a new content ID but keeps the inline request identity.
+    let retry = replace(b"before");
+    assert_ne!(
+        retry.inline_content()[0].content_ref().content_id,
+        old_reference.content_id
     );
-    assert_eq!(staged_retry.semantic_identity(&namespace_id), identity);
     engine.invalidate_projection();
     store.reset();
     assert_eq!(
-        publish(&mut engine, &context, staged_retry)
+        publish(&mut engine, &context, retry)
             .await
             .expect("boundary replay"),
         original

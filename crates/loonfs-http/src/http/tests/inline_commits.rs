@@ -361,7 +361,7 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
 }
 
 #[tokio::test]
-async fn inode_inline_operations_and_overflow_staging_keep_retry_identity() {
+async fn inode_inline_operations_over_the_wal_object_budget_keep_retry_identity() {
     let harness = Harness::new(Some(4), 4).await;
     let request = json!({"commit_id": "two-files", "operations": [
         {"kind": "create_file_by_inode", "parent_inode_id": "ino_00000000000000000000000000", "display_name": "first", "inline_content": "c2FtZQ=="},
@@ -369,7 +369,7 @@ async fn inode_inline_operations_and_overflow_staging_keep_retry_identity() {
     ]});
     let (status, first) = harness.commit(request.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    assert_eq!(harness.family_requests(DurableObjectFamily::ContentBlob), 1);
+    assert_eq!(harness.family_requests(DurableObjectFamily::ContentBlob), 0);
     let wal_keys: Vec<_> = harness
         .store
         .snapshot()
@@ -392,7 +392,7 @@ async fn inode_inline_operations_and_overflow_staging_keep_retry_identity() {
         .expect("get")
         .expect("WAL");
     let decoded = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&wal).expect("decode");
-    assert_eq!(decoded.payload().records()[0].inline_content.len(), 1);
+    assert_eq!(decoded.payload().records()[0].inline_content.len(), 2);
     harness.read("/first", b"same").await;
     harness.read("/second", b"same").await;
     let (status, replay) = harness.commit(request).await;

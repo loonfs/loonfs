@@ -25,9 +25,9 @@ use loonfs_types::options::{CommitSplitting, DiffOptions, ListOptions, StatOptio
 use loonfs_types::ListChangesResponse;
 use loonfs_types::{ChangeFeedPosition, EffectiveLimit};
 use loonfs_types::{
-    CommitId, CommitSeq, ContentRef, FileRevision, FileRevisionsPageCursor, InodeId,
-    ListPageCursor, NamespaceId, Page, PageRequest, PathEntry, RevisionNo, Subject, TrashEntry,
-    TrashPageCursor, WriterId, ROOT_INODE_ID,
+    CommitSeq, ContentRef, FileRevision, FileRevisionsPageCursor, InodeId, ListPageCursor,
+    NamespaceId, Page, PageRequest, PathEntry, RevisionNo, Subject, TrashEntry, TrashPageCursor,
+    WriterId, ROOT_INODE_ID,
 };
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -285,20 +285,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             mode,
             reader: Reader::Service,
         }
-    }
-
-    /// Searches the supplied WAL and metadata view without acquiring a writer epoch.
-    pub async fn find_commit_receipt(
-        &self,
-        context: &RuntimeReadContext,
-        commit_id: &CommitId,
-    ) -> Result<Option<crate::metadata::CommitReceiptRecord>> {
-        self.namespace
-            .load_metadata_view(context)
-            .await?
-            .metadata_view()
-            .find_commit_receipt(commit_id)
-            .await
     }
 
     /// Sets the subject whose rights this engine's reads check. The subject

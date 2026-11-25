@@ -386,7 +386,7 @@ Uploaded content is durable before the commit runs, though the file isn't visibl
 With an embedded `loonfs::Namespace<Writable>`, callers can separate preparation from publication:
 
 - `prepare_content` accepts file bytes, keeps files at or below the inline threshold in memory, uploads larger files as content objects, and returns an opaque prepared value.
-- `put_file_prepared` commits that prepared value. If WAL limits are reached, inline bytes may be uploaded before publication, while already-uploaded content requires no extra content-object I/O during publication.
+- `put_file_prepared` commits that prepared value. Inline bytes travel in the commit's WAL object, and already-uploaded content requires no extra content-object I/O during publication.
 - `complete_upload_prepared` returns both the upload completion response and a prepared value for an upload session. Over HTTP, commits supply either inline bytes or a `content_ref` paired with its `content_token`.
 
 When preparation uploads an object, LoonFS records the upload session before writing the object and completes the session afterward. Prepared uploads have a deadline no later than the expiry of the last token the completed session can issue (matching remote upload token lifetimes in [Upload transport](#69-upload-transport) and [Upload-session cleanup](format.md#116-upload-session-cleanup)). Prepared inline bytes have no expiry.
@@ -566,7 +566,7 @@ File content is part of a commit's identity, so what a client must keep across r
 | Uploaded content | The original `content_ref`. Re-uploading the same bytes creates a new content object whose reference conflicts with the original `commit_id` (`commit_id_reuse_conflict`). |
 | Inline content | The original bytes. Different bytes return `commit_id_reuse_conflict`, even if the size matches. |
 
-Inline retry rules still apply even if the server writes inline bytes to a separate content object to stay within WAL limits. Switching between inline bytes and an uploaded `content_ref` changes commit identity, even for identical bytes. If the original commit succeeded and its receipt is still retained, retrying the exact request returns the original commit without re-uploading bytes, even after a restart or on another server.
+A retry of an inline commit sends the same bytes. Switching between inline bytes and an uploaded `content_ref` changes commit identity, even for identical bytes. If the original commit succeeded and its receipt is still retained, retrying the exact request returns the original commit without re-uploading bytes, even after a restart or on another server.
 
 For reliable retries across both inline and uploaded files, clients prepare content once, save the result, and pass it to the prepared-commit method with the same explicit `commit_id`, path, actor, and options on every attempt:
 
@@ -1632,7 +1632,7 @@ Loonfs-Context: service
 }
 ```
 
-Inline writes are enabled by default up to 64 KiB, advertised via `filesystem.commits.inline_content` and `commit.max_inline_content_bytes_per_operation` (when disabled, both keys are omitted and inline requests return `not_supported` with `feature` `filesystem.commits.inline_content`). The per-operation limit applies before base64 encoding (larger values fail before any storage write), and the entire JSON request body MUST fit within `commit.max_request_body_bytes` (2 MiB by default). Even if the server stores some inline files as separate content objects to stay within WAL limits, all operations commit atomically and retries still send the same inline bytes and `commit_id` ([Commit responses and safe retry](#52-commit-responses-and-safe-retry)).
+Inline writes are enabled by default up to 64 KiB, advertised via `filesystem.commits.inline_content` and `commit.max_inline_content_bytes_per_operation` (when disabled, both keys are omitted and inline requests return `not_supported` with `feature` `filesystem.commits.inline_content`). The per-operation limit applies before base64 encoding (larger values fail before any storage write), and the entire JSON request body MUST fit within `commit.max_request_body_bytes` (2 MiB by default). Every inline value travels in the commit's WAL object, all operations commit atomically, and retries send the same inline bytes and `commit_id` ([Commit responses and safe retry](#52-commit-responses-and-safe-retry)). (An embedded commit whose inline and appended bytes total more than 4 MiB, the format's limit for one WAL object, returns `invalid_request`. For example, one commit of 65 files of 64 KiB each is refused. A JSON body can't reach that limit.)
 
 `append_file` and `append_file_by_inode` add bytes to an existing file as its next revision:
 

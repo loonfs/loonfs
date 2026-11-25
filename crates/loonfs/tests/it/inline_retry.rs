@@ -5,11 +5,9 @@ use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation, Inline
 use loonfs::{InlineContentPolicy, LoonFs, Namespace, SharedObjectStore, Writable};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::clock::bounded;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
-    RecordingStore,
+    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId,
@@ -18,7 +16,6 @@ use loonfs_types::{
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::Duration;
 
 fn namespace() -> NamespaceId {
     loonfs_test_support::ids::namespace_id("inline-retry")
@@ -136,7 +133,7 @@ enum ReceiptState {
     ManifestOnly,
 }
 
-async fn retained_receipt_skips_fallback(state: ReceiptState) {
+async fn retained_receipt_replays(state: ReceiptState) {
     let directory = tempfile::tempdir().expect("directory");
     let failing = Arc::new(FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -213,26 +210,26 @@ async fn retained_receipt_skips_fallback(state: ReceiptState) {
 
 #[tokio::test]
 async fn warm_receipts_answer_retries_without_content_writes() {
-    retained_receipt_skips_fallback(ReceiptState::Warm).await;
+    retained_receipt_replays(ReceiptState::Warm).await;
 }
 
 #[tokio::test]
 async fn restarted_receipts_answer_retries_without_content_writes() {
-    retained_receipt_skips_fallback(ReceiptState::Restarted).await;
+    retained_receipt_replays(ReceiptState::Restarted).await;
 }
 
 #[tokio::test]
 async fn folded_receipts_answer_retries_without_content_writes() {
-    retained_receipt_skips_fallback(ReceiptState::Folded).await;
+    retained_receipt_replays(ReceiptState::Folded).await;
 }
 
 #[tokio::test]
 async fn manifest_receipts_answer_retries_with_a_warm_publisher_without_content_writes() {
-    retained_receipt_skips_fallback(ReceiptState::ManifestOnly).await;
+    retained_receipt_replays(ReceiptState::ManifestOnly).await;
 }
 
 #[tokio::test]
-async fn inline_publication_without_fallback_keeps_its_store_requests() {
+async fn inline_publication_makes_one_wal_put() {
     let directory = tempfile::tempdir().expect("directory");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -253,67 +250,6 @@ async fn inline_publication_without_fallback_keeps_its_store_requests() {
             if key.starts_with(&loonfs_objectstore::keys::wal_prefix(&namespace()))
     );
     writer.shutdown().await.expect("shutdown");
-}
-
-#[tokio::test]
-async fn cold_receipt_lookup_does_not_acquire_authority_or_block_other_submissions() {
-    let directory = tempfile::tempdir().expect("directory");
-    let blocking = Arc::new(BlockingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-        OperationSelector::Read,
-    ));
-    let recording = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
-    let original_writer = open(recording.clone(), 1).await;
-    let original_namespace_writer = seed(&original_writer).await;
-    let original = original_namespace_writer
-        .commit_candidate(inline("retained", "alice", b"recorded"))
-        .await
-        .expect("original commit");
-    original_writer.drain().await.expect("drain");
-    let cold_writer = open(recording.clone(), 1).await;
-    recording.reset();
-    blocking.block_next();
-    let namespace_id = namespace();
-    let cold_namespace_writer = cold_writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    let retry = cold_namespace_writer.commit_candidate(inline("retained", "alice", b"recorded"));
-    let submissions = async {
-        blocking.wait_until_blocked().await;
-        assert_eq!(recording.count(OperationSelector::Put), 0);
-        original_namespace_writer
-            .commit(request(
-                "old-writer",
-                "root",
-                access(AccessGrants::default()),
-            ))
-            .await
-            .expect("lookup has not fenced the original writer");
-        cold_namespace_writer
-            .commit(request(
-                "new-writer",
-                "root",
-                access(AccessGrants::default()),
-            ))
-            .await
-            .expect("another submission can use the publisher engine");
-        blocking.release();
-    };
-    let (replay, ()) = bounded(Duration::from_secs(10), async {
-        tokio::join!(retry, submissions)
-    })
-    .await
-    .expect("submissions finish while the lookup is blocked");
-    assert_eq!(
-        replay.expect("replay").committed_seq,
-        original.committed_seq
-    );
-    original_writer
-        .shutdown()
-        .await
-        .expect("shutdown original writer");
-    cold_writer.shutdown().await.expect("shutdown cold writer");
 }
 
 #[tokio::test]

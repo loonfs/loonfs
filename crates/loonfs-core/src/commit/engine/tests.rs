@@ -30,6 +30,7 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::wal::{
     MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
+use loonfs_types::CommitId;
 use loonfs_types::{CommitSeq, ContentRef, PrincipalId, PrincipalSet, Subject};
 use loonfs_types::{ContentId, WriterEpoch};
 use std::assert_matches;
@@ -1133,8 +1134,14 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     );
     assert_eq!(moved.wal_tail_objects(), 1);
     assert_eq!(moved.tail.chunks().len(), 1);
-    let receipt =
-        |commit_id| engine.retains_commit_receipt(&CommitId::parse(commit_id).expect("id"));
+    let receipt = |commit_id| {
+        engine.writer_position().is_some_and(|position| {
+            position
+                .tail
+                .find_commit_receipt(&CommitId::parse(commit_id).expect("id"))
+                .is_some()
+        })
+    };
     assert!(receipt("gamma") && !receipt("beta"));
     store.reset();
     let delta = publish_one(&mut engine, &writer, "delta").await;
@@ -1222,8 +1229,14 @@ async fn a_manifest_published_over_another_process_fold_moves_the_position() {
         folded.current.manifest().payload().folded_wal_no
     );
     assert_eq!(moved.wal_tail_objects(), 1);
-    let receipt =
-        |commit_id| engine.retains_commit_receipt(&CommitId::parse(commit_id).expect("id"));
+    let receipt = |commit_id| {
+        engine.writer_position().is_some_and(|position| {
+            position
+                .tail
+                .find_commit_receipt(&CommitId::parse(commit_id).expect("id"))
+                .is_some()
+        })
+    };
     assert!(receipt("gamma") && !receipt("beta"));
     assert_eq!(
         engine

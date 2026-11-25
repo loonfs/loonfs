@@ -14,9 +14,7 @@ use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
 use crate::{CoreError, Error, Result};
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
-use loonfs_core::publish::{
-    is_retryable_wal_publish, settle_publish_attempt, TailSource, WalPublishError,
-};
+use loonfs_core::publish::{settle_publish_attempt, TailSource, WalPublishError};
 use loonfs_core::time::OperationClock;
 use loonfs_core::Phase;
 use loonfs_types::Commit;
@@ -243,7 +241,7 @@ impl NamespacePublisher {
             retry_count = tracing::field::Empty,
         );
         let (results, retry_count) = self
-            .publish_attempts(candidates, &permits, &mut stopped)
+            .publish_attempts(candidates, &mut stopped)
             .instrument(publish_span.clone())
             .await;
         publish_span.record("result", batch_result_label(&results).as_str());
@@ -261,7 +259,6 @@ impl NamespacePublisher {
     pub(super) async fn publish_through_engine(
         &self,
         candidates: &[CommitCandidate],
-        permits: &[Arc<AdmissionPermit>],
         clock: &OperationClock,
     ) -> Vec<std::result::Result<Commit, CoreError>> {
         let mut engine = self.lock_engine().await;
@@ -269,15 +266,6 @@ impl NamespacePublisher {
         // it, callers awaiting a put or commit (CLI, server, embedding
         // crates) exceed rustc's type-recursion depth.
         let publish = Box::pin(engine.publish_batch(candidates, clock)).await;
-        if !publish.results.iter().any(is_retryable_wal_publish) {
-            for (permit, result) in permits.iter().zip(&publish.results) {
-                // A commit refused at the write stop publishes later, so its
-                // inline bytes stay reserved against the tail limit.
-                if !result.as_ref().err().is_some_and(is_maintenance_required) {
-                    permit.release_inline();
-                }
-            }
-        }
         let fold_start = self.record_publication(&publish);
         drop(engine);
         if let Some(start) = fold_start {
@@ -426,7 +414,6 @@ impl NamespacePublisher {
     async fn publish_attempts(
         &self,
         candidates: Vec<CommitCandidate>,
-        permits: &[Arc<AdmissionPermit>],
         stopped: &mut [Option<CommitCandidate>],
     ) -> (Vec<Result<Commit>>, u64) {
         if self.context.writer.upgrade().is_none() {
@@ -445,15 +432,8 @@ impl NamespacePublisher {
         for attempt in 0..MAX_CONTENTION_ATTEMPTS {
             let (indices, candidates): (Vec<_>, Vec<_>) =
                 std::mem::take(&mut pending).into_iter().unzip();
-            let attempt_permits: Vec<_> = indices
-                .iter()
-                .map(|index| Arc::clone(&permits[*index]))
-                .collect();
             let observed = match self.context.writer.upgrade() {
-                Some(_writer) => {
-                    self.publish_through_engine(&candidates, &attempt_permits, &clock)
-                        .await
-                }
+                Some(_writer) => self.publish_through_engine(&candidates, &clock).await,
                 None => candidates
                     .iter()
                     .map(|_| Err(CoreError::ShuttingDown))

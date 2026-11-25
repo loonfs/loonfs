@@ -1,4 +1,4 @@
-//! Inline writer preparation, publication, fallback, and maintenance contracts.
+//! Inline writer preparation, publication, and maintenance contracts.
 
 use super::super::admission::estimated_admission_bytes;
 use super::*;
@@ -8,7 +8,10 @@ use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::bytes::incompressible_bytes;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::RecordedOperation;
-use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, MAX_WAL_INLINE_CONTENT_BYTES};
+use loonfs_types::format::wal::{
+    decode_wal_object_envelope_zstd, MAX_WAL_INLINE_CONTENT_BYTES,
+    MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+};
 use std::assert_matches;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -650,8 +653,11 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
     writer.shutdown().await.expect("shutdown");
 }
 
+/// Checks that a commit whose put and append pass the WAL object budget
+/// together keeps both in its WAL object, and that the file reads back
+/// before and after a fold.
 #[tokio::test]
-async fn appends_fill_the_wal_object_budget_before_inline_values() {
+async fn a_put_and_an_append_over_the_wal_object_budget_stay_in_the_wal() {
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(InlineContentPolicy {
             inline_content_wal_object_budget_bytes: 8,
@@ -683,14 +689,16 @@ async fn appends_fill_the_wal_object_budget_before_inline_values() {
         .await
         .expect("commit");
     let records = written_records(&store).await;
-    let [piece] = records[0].inline_content.as_slice() else {
-        panic!("expected the append's piece alone, got {records:?}");
-    };
+    let pieces: Vec<_> = records[0]
+        .inline_content
+        .iter()
+        .map(|piece| (piece.offset, piece.bytes.as_slice()))
+        .collect();
     assert_eq!(
-        (piece.offset, piece.bytes.as_slice()),
-        (4, b" and six".as_slice())
+        pieces,
+        [(0, b"four".as_slice()), (4, b" and six".as_slice())]
     );
-    assert!(family_requests(&store, DurableObjectFamily::ContentBlob) > 0);
+    assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
     for fold in [false, true] {
         if fold {
             writer
@@ -713,7 +721,7 @@ async fn appends_fill_the_wal_object_budget_before_inline_values() {
 }
 
 #[tokio::test]
-async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fail() {
+async fn retained_receipts_answer_retries_when_content_writes_fail() {
     for bytes in [b"four".as_slice(), b"longer"] {
         let directory = tempdir().expect("directory");
         let failing = Arc::new(FailStore::new(
@@ -763,7 +771,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
                 .publisher
                 .wal_tail_inline_bytes(&namespace)
                 .await,
-            Some(if bytes.len() == 4 { 4 } else { 0 })
+            Some(bytes.len())
         );
         failing.fail_all();
         store.reset();
@@ -789,101 +797,12 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
                 &put_options("retry"),
             )
             .await
-            .expect_err("receipt rejects different bytes before staging");
+            .expect_err("receipt rejects different bytes");
         assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
         assert_eq!(store.count(OperationSelector::Put), 0);
         assert_eq!(failing.attempts(), 0);
         writer.shutdown().await.expect("shutdown");
     }
-}
-
-#[tokio::test]
-async fn full_queue_refuses_overflow_staging_without_store_writes() {
-    let (_directory, store, writer, namespace, namespace_writer) =
-        writer_with_policy(InlineContentPolicy {
-            inline_content_wal_object_budget_bytes: 4,
-            inline_content_threshold_bytes: Some(8),
-            ..policy()
-        })
-        .await;
-    let registry = writer.mode.publisher.clone();
-    let mut permits = Vec::new();
-    while let Ok(permit) = registry.shared.context.admission.acquire(&namespace, 0) {
-        permits.push(permit);
-    }
-    store.reset();
-    let error = namespace_writer
-        .put_file_with_options(
-            "/file",
-            b"longer",
-            &loonfs_test_support::test_actor(),
-            &put_options("full-queue"),
-        )
-        .await
-        .expect_err("queue full");
-    assert_eq!(error.code(), ErrorCode::CommitQueueFull);
-    assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
-    assert_eq!(
-        family_requests(&store, DurableObjectFamily::UploadSession),
-        0
-    );
-    drop(permits);
-    writer.shutdown().await.expect("shutdown");
-}
-
-/// Checks that a commit whose inline value is staged is charged, while it
-/// waits in the queue, the admission bytes of the staged candidate's weight,
-/// to its namespace's usage and to the budget's total alike.
-#[tokio::test]
-async fn a_staged_commit_is_charged_the_weight_of_the_staged_candidate() {
-    let (_directory, _store, writer, namespace, namespace_writer) =
-        writer_with_policy(InlineContentPolicy {
-            inline_content_wal_object_budget_bytes: 4,
-            inline_content_threshold_bytes: Some(8),
-            ..policy()
-        })
-        .await;
-    let publisher = namespace_writer.session().publisher.clone();
-    let slots = hold_every_publication_permit(&writer).await;
-    let actor = loonfs_test_support::test_actor();
-    let options = put_options("staged");
-    let (put, ()) = tokio::join!(
-        namespace_writer.put_file_with_options("/file", b"longer", &actor, &options),
-        async {
-            bounded(
-                Duration::from_secs(10),
-                wait_for_queued_candidates(&publisher, 1),
-            )
-            .await
-            .expect("the staged commit is queued");
-            let queued_bytes: usize = publisher_state(&publisher)
-                .queue
-                .iter()
-                .filter_map(|item| match item {
-                    WorkItem::Batch(batch) => Some(&batch.candidates),
-                    WorkItem::Delete(_) | WorkItem::RetentionAdvance(_) => None,
-                })
-                .flatten()
-                .map(|queued| {
-                    estimated_admission_bytes(
-                        &namespace,
-                        queued.candidate.estimated_retained_bytes(),
-                    )
-                })
-                .sum();
-            assert_eq!(
-                publisher.context.admission.namespace_usage(&namespace),
-                (1, queued_bytes, 0)
-            );
-            assert_eq!(
-                writer.execution_budget().stats().admitted_bytes,
-                queued_bytes
-            );
-            drop(slots);
-        }
-    );
-    put.expect("put");
-    writer.shutdown().await.expect("shutdown");
 }
 
 /// Checks that a commit whose inline value stays inline is charged, while it
@@ -924,7 +843,7 @@ async fn a_commit_whose_values_stay_inline_is_charged_its_own_weight() {
         .expect("the inline commit is queued");
         assert_eq!(
             publisher.context.admission.namespace_usage(&namespace),
-            (1, expected, b"longer".len())
+            (1, expected)
         );
         assert_eq!(writer.execution_budget().stats().admitted_bytes, expected);
         drop(slots);
@@ -933,116 +852,30 @@ async fn a_commit_whose_values_stay_inline_is_charged_its_own_weight() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a commit whose estimate before staging fits its namespace's
-/// byte allowance, and whose staged candidate doesn't, is refused with
-/// `commit_queue_full` once its value is staged, and that admission charges
-/// nothing for the refused commit.
+/// Checks that a commit whose inline values pass the WAL object budget
+/// publishes every value inline in one WAL object of its own, and replays
+/// from its receipt, and that a commit whose inline values pass
+/// `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES`, or whose inline value passes
+/// `MAX_WAL_INLINE_CONTENT_BYTES`, is refused without a store write.
 #[tokio::test]
-async fn a_commit_that_outgrows_its_allowance_when_staged_is_refused() {
-    const ALLOWANCE: usize = 8192;
-    let (_directory, store, writer, namespace, namespace_writer) =
-        writer_with_policy_and_byte_limit(
-            InlineContentPolicy {
-                inline_content_wal_object_budget_bytes: 4,
-                inline_content_threshold_bytes: Some(8),
-                ..policy()
-            },
-            ALLOWANCE,
-        )
-        .await;
-    let publisher = namespace_writer.session().publisher.clone();
-    let admission = &publisher.context.admission;
-    let prepared = namespace_writer
-        .prepare_content(b"longer", &loonfs_test_support::test_actor())
-        .await
-        .expect("prepare");
-    let candidate = CommitCandidate::prepared(
-        CommitIntent {
-            commit_id: CommitId::parse("outgrown").expect("commit"),
-            actor_id: loonfs_test_support::test_actor(),
-            subject: None,
-            message: None,
-            preconditions: Vec::new(),
-            operations: vec![put_operation("/file", &prepared)],
-        },
-        vec![prepared],
-    );
-    let estimate = estimated_admission_bytes(
-        &namespace,
-        publisher
-            .plan_inline_candidate(candidate.clone())
-            .expect("plan")
-            .candidate
-            .estimated_retained_bytes,
-    );
-    let filler = admission
-        .acquire(
-            &namespace,
-            ALLOWANCE - estimate - estimated_admission_bytes(&namespace, 0),
-        )
-        .expect("fill the allowance up to the estimate");
-    let filled = (1, ALLOWANCE - estimate);
-    store.reset();
-    let error = namespace_writer
-        .commit_candidate(candidate.clone())
-        .await
-        .expect_err("the staged candidate outgrows the allowance");
-    assert_eq!(error.code(), ErrorCode::CommitQueueFull);
-    assert_ne!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
-    assert_eq!(
-        admission.namespace_usage(&namespace),
-        (filled.0, filled.1, 0)
-    );
-    let stats = writer.execution_budget().stats();
-    assert_eq!((stats.admitted_requests, stats.admitted_bytes), filled);
-    drop(filler);
-    writer.shutdown().await.expect("shutdown");
-}
-
-#[tokio::test]
-async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
+async fn a_commit_over_the_wal_object_budget_publishes_its_values_in_one_wal_object() {
     const VALUES: usize = 128;
     const VALUE_BYTES: usize = 16 * 1024;
-    const ADMISSION_BYTES: usize = 256 * 1024;
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy_and_byte_limit(
             InlineContentPolicy {
                 inline_content_wal_object_budget_bytes: VALUE_BYTES,
-                inline_content_threshold_bytes: Some(VALUE_BYTES),
+                inline_content_threshold_bytes: Some(MAX_WAL_INLINE_CONTENT_BYTES),
                 ..policy()
             },
-            ADMISSION_BYTES,
+            16 * 1024 * 1024,
         )
         .await;
     let namespace_reader = writer.namespace(&namespace);
     let payloads = (0..VALUES)
         .map(|index| Bytes::from(vec![u8::try_from(index).expect("byte index"); VALUE_BYTES]))
         .collect::<Vec<_>>();
-    assert!(payloads.len() * VALUE_BYTES > ADMISSION_BYTES);
-    let mut prepared = Vec::new();
-    for bytes in &payloads {
-        prepared.push(
-            namespace_writer
-                .prepare_content(bytes, &loonfs_test_support::test_actor())
-                .await
-                .expect("prepare"),
-        );
-    }
-    let request = CommitIntent {
-        commit_id: CommitId::parse("batch").expect("commit"),
-        actor_id: loonfs_test_support::test_actor(),
-        subject: None,
-        message: None,
-        preconditions: Vec::new(),
-        operations: prepared
-            .iter()
-            .enumerate()
-            .map(|(index, value)| put_operation(&format!("/file-{index}"), value))
-            .collect(),
-    };
-    let expected_inline_id = prepared[0].content_ref().content_id.clone();
-    prepared.reverse();
-    let candidate = CommitCandidate::prepared(request, prepared);
+    let candidate = prepared_puts(&namespace_writer, "batch", &payloads).await;
     let fingerprint = candidate.semantic_identity(&namespace);
     let published = namespace_writer
         .commit_candidate(candidate.clone())
@@ -1051,34 +884,12 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
     let records = written_records(&store).await;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].semantic_commit_fingerprint, fingerprint);
-    assert_eq!(records[0].inline_content.len(), 1);
-    assert_eq!(records[0].inline_content[0].content_id, expected_inline_id);
-    let staged_content_ids = store
-        .snapshot()
-        .into_iter()
-        .filter_map(|operation| match operation {
-            RecordedOperation::Put { key, .. } => parse_object_key(&key)
-                .filter(|parsed| parsed.family() == DurableObjectFamily::ContentBlob)
-                .and_then(|parsed| parsed.identifier().map(str::to_owned)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let operation_content_ids = records[0]
-        .deltas
-        .iter()
-        .filter_map(|delta| match &delta.delta {
-            loonfs_types::format::wal::WalDelta::AppendFileRevision { content_ref, .. } => {
-                Some(content_ref.content_id.as_str())
-            }
-            _ => None,
-        })
-        .skip(1)
-        .collect::<Vec<_>>();
-    assert_eq!(staged_content_ids, operation_content_ids);
+    assert_eq!(records[0].inline_content.len(), VALUES);
+    assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
     for index in [0, VALUES - 1] {
         assert_eq!(
             namespace_reader
-                .read_file(&format!("/file-{index}"))
+                .read_file(&format!("/batch-{index}"))
                 .await
                 .expect("read")
                 .bytes,
@@ -1094,7 +905,83 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
         published
     );
     assert_eq!(store.count(OperationSelector::Put), 0);
+
+    let oversized = (0..=MAX_WAL_OBJECT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES)
+        .map(|index| {
+            Bytes::from(vec![
+                u8::try_from(index).expect("byte index");
+                MAX_WAL_INLINE_CONTENT_BYTES
+            ])
+        })
+        .collect::<Vec<_>>();
+    let candidate = prepared_puts(&namespace_writer, "oversized", &oversized).await;
+    store.reset();
+    let error = namespace_writer
+        .commit_candidate(candidate)
+        .await
+        .expect_err("a commit over the WAL object's inline limit");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    assert_eq!(store.count(OperationSelector::Put), 0);
+
+    let value = loonfs_core::publish::InlineContent::new(
+        loonfs_types::ContentId::generate(),
+        Bytes::from(vec![b'p'; MAX_WAL_INLINE_CONTENT_BYTES + 1]),
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
+    );
+    let request = CommitIntent::single(
+        CommitId::parse("over-the-piece-limit").expect("commit"),
+        loonfs_test_support::test_actor(),
+        None,
+        FilesystemOperation::PutFile {
+            path: AbsolutePath::parse("/over").expect("path"),
+            content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
+            behavior: DestinationBehavior::Replace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        },
+    );
+    let error = namespace_writer
+        .commit_candidate(CommitCandidate::with_inline_content(
+            request,
+            Vec::new(),
+            vec![value],
+        ))
+        .await
+        .expect_err("an inline value over the piece limit");
+    assert_eq!(error.code(), ErrorCode::ContentTooLarge);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     writer.shutdown().await.expect("shutdown");
+}
+
+/// Prepares `payloads` and returns a commit that puts each at
+/// `/{label}-{index}`.
+async fn prepared_puts(
+    namespace_writer: &crate::Namespace<crate::Writable>,
+    label: &str,
+    payloads: &[Bytes],
+) -> CommitCandidate {
+    let mut prepared = Vec::new();
+    for bytes in payloads {
+        prepared.push(
+            namespace_writer
+                .prepare_content(bytes, &loonfs_test_support::test_actor())
+                .await
+                .expect("prepare"),
+        );
+    }
+    let request = CommitIntent {
+        commit_id: CommitId::parse(label).expect("commit"),
+        actor_id: loonfs_test_support::test_actor(),
+        subject: None,
+        message: None,
+        preconditions: Vec::new(),
+        operations: prepared
+            .iter()
+            .enumerate()
+            .map(|(index, value)| put_operation(&format!("/{label}-{index}"), value))
+            .collect(),
+    };
+    CommitCandidate::prepared(request, prepared)
 }
 
 /// Checks that two queued writes whose inline bytes together pass the WAL
