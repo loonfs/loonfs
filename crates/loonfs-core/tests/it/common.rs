@@ -214,7 +214,6 @@ pub(crate) async fn resolve_path<S: ObjectStore + ?Sized>(
             absolute_path,
             loonfs_types::options::StatOptions {
                 include_attributes: loonfs_types::options::AttributeInclusion::Include,
-                ..Default::default()
             },
             &context,
         )

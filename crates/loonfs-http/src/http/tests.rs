@@ -2445,7 +2445,6 @@ fn grep_error_request() -> GrepRequest {
         scope: GrepScope::Namespace,
         allow_stale: false,
         allow_scan: false,
-        consistency: loonfs::Consistency::Eventual,
     }
 }
 
@@ -2942,25 +2941,7 @@ mod direct_download {
         let path = NamespacePath::parse("demo", "/report.txt").expect("namespace path");
         client.put_file(&path, b"report").await.expect("put file");
         let inode_id = client.stat(&path).await.expect("stat").inode_id;
-        let snapshot_id = client
-            .create_snapshot_with_options(
-                &namespace,
-                &loonfs_client::CreateSnapshotOptions {
-                    name: Some("pinned".to_owned()),
-                    ..loonfs_client::CreateSnapshotOptions::default()
-                },
-            )
-            .await
-            .expect("snapshot")
-            .snapshot_id;
-        let past_end = DownloadOptions {
-            start_offset: 99,
-            ..DownloadOptions::default()
-        };
-        let at_snapshot = DownloadOptions {
-            at: loonfs_client::ReadAt::Snapshot(snapshot_id),
-            ..DownloadOptions::default()
-        };
+        let past_end = DownloadOptions { start_offset: 99 };
 
         let cases = [
             (
@@ -2969,13 +2950,6 @@ mod direct_download {
                     .await
                     .map(drop),
                 "/start_offset",
-            ),
-            (
-                client
-                    .create_revision_download_with_options(&path, RevisionNo(1), &at_snapshot)
-                    .await
-                    .map(drop),
-                "/revision_no",
             ),
             (
                 client
@@ -3562,10 +3536,7 @@ mod direct_download {
         let inode_id = client.stat(&target).await.expect("stat").inode_id;
 
         let held = 100;
-        let from = DownloadOptions {
-            start_offset: held,
-            ..DownloadOptions::default()
-        };
+        let from = DownloadOptions { start_offset: held };
         let signed = BTreeMap::from([("range".to_owned(), format!("bytes={held}-69999"))]);
         let grant = client
             .create_download_with_options(&target, &from)
@@ -3622,10 +3593,7 @@ mod direct_download {
         assert_eq!(received, payload[loonfs_types::usize_from_u64(held)..]);
 
         for start_offset in [payload.len() as u64, payload.len() as u64 + 1] {
-            let past = DownloadOptions {
-                start_offset,
-                ..DownloadOptions::default()
-            };
+            let past = DownloadOptions { start_offset };
             assert_offset_refused(client.create_download_with_options(&target, &past).await);
             assert_offset_refused(
                 client
@@ -3663,13 +3631,7 @@ mod direct_download {
         );
         assert_offset_refused(
             client
-                .create_download_with_options(
-                    &empty,
-                    &DownloadOptions {
-                        start_offset: 1,
-                        ..DownloadOptions::default()
-                    },
-                )
+                .create_download_with_options(&empty, &DownloadOptions { start_offset: 1 })
                 .await,
         );
         state.runtime.shutdown().await.expect("shutdown");

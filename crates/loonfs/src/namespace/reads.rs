@@ -7,14 +7,13 @@ use crate::pagers::{
     PathEntriesPager, TrashPager,
 };
 use crate::pinned_read::PinnedRead;
-use crate::read_view::{validate_view_cursor, ReadSource, ReadView, SnapshotBoundCursor};
+use crate::read_view::{ReadSource, ReadView, SnapshotBoundCursor};
 use crate::trace::{self, operation_span};
 use crate::{
-    CommitSeq, Consistency, ContentRef, CoreError, DiffOptions, DownloadOptions, Error, FileBytes,
-    FileContentStream, ListChangesOptions, ListChangesResponse, ListDiffResponse, ListOptions,
-    ListPathEntriesResponse, ListTrashOptions, LiveReadOptions, Namespace, PathEntry, ReadAt,
-    ReadFileOptions, ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore, SnapshotId,
-    StatOptions,
+    CommitSeq, ContentRef, CoreError, DiffOptions, DownloadOptions, FileBytes, FileContentStream,
+    ListChangesOptions, ListChangesResponse, ListDiffResponse, ListOptions,
+    ListPathEntriesResponse, Namespace, PathEntry, ReadFileStreamOptions, Result, RevisionNo,
+    SharedObjectStore, SnapshotId, StatOptions,
 };
 use loonfs_types::options::CommitSplitting;
 use loonfs_types::{
@@ -25,43 +24,8 @@ use std::future::Future;
 #[cfg(test)]
 mod tests;
 
-/// Returns the error for a read of a numbered revision at a snapshot. A
-/// snapshot captures one revision of each file, so a read of a numbered
-/// revision reads the live head.
-fn revision_at_snapshot() -> Error {
-    Error::InvalidRequest {
-        message: "revision_no cannot be combined with snapshot_id".to_owned(),
-        param: "snapshot_id",
-    }
-}
-
-/// Rejects a numbered revision read whose options read a snapshot.
-pub(crate) fn ensure_revision_read_at(at: &ReadAt, revision_no: Option<RevisionNo>) -> Result<()> {
-    match (at, revision_no) {
-        (ReadAt::Snapshot(_), Some(_)) => Err(revision_at_snapshot()),
-        _ => Ok(()),
-    }
-}
-
-/// Rejects a cursor that a listing of a snapshot can't resume: one minted at
-/// another head, or bound to another snapshot or to none. A cursor for a
-/// listing of the live head passes, because the listing checks the cursor
-/// with [`reject_snapshot_cursor`] before the read.
-pub(crate) fn validate_snapshot_cursor<C: SnapshotBoundCursor>(
-    request: &PageRequest<C>,
-    pinned: &PinnedRead,
-    source: &ReadSource,
-) -> Result<()> {
-    match source {
-        ReadSource::Head => Ok(()),
-        ReadSource::Snapshot(snapshot_id) => validate_view_cursor(
-            request.cursor.as_ref(),
-            pinned.head_seq(),
-            Some(snapshot_id),
-        ),
-    }
-}
-
+/// Rejects a cursor that a listing of a snapshot minted, because a listing
+/// of the live head can't resume it.
 pub(crate) fn reject_snapshot_cursor<C: SnapshotBoundCursor>(cursor: Option<&C>) -> Result<()> {
     let Some(snapshot_id) = cursor.and_then(SnapshotBoundCursor::snapshot_id) else {
         return Ok(());
@@ -74,59 +38,33 @@ pub(crate) fn reject_snapshot_cursor<C: SnapshotBoundCursor>(cursor: Option<&C>)
 }
 
 impl<M: crate::Mode> Namespace<M> {
-    /// Runs `read` at the state that `at` selects, with the state's source.
-    ///
-    /// A live read reads the live head, confirmed as `at` asks, and runs
-    /// again from the newest manifest each time a newer manifest replaced the
-    /// read's basis, up to `MAX_CONTENTION_ATTEMPTS` runs in all.
-    /// A snapshot read reads the snapshot that `at` selects. LoonFS checks
-    /// the read's rights at the live head, and the read runs again the same
-    /// way when a newer manifest replaced that head's manifest.
-    pub(crate) async fn read_at<T, Read, ReadFuture>(&self, at: &ReadAt, read: Read) -> Result<T>
+    /// Runs `read` at the live head, confirmed as this handle's consistency
+    /// asks. The read runs again from the newest manifest each time a newer
+    /// manifest replaced the read's basis, up to `MAX_CONTENTION_ATTEMPTS`
+    /// runs in all.
+    pub(crate) async fn read_head<T, Read, ReadFuture>(&self, read: Read) -> Result<T>
     where
-        Read: Fn(PinnedRead, ReadSource) -> ReadFuture,
+        Read: Fn(PinnedRead) -> ReadFuture,
         ReadFuture: Future<Output = Result<T>>,
     {
-        self.read_at_least(at, None, read).await
+        self.read_head_at_least(None, read).await
     }
 
-    /// Runs `read` as [`Self::read_at`] does. A live read whose request includes
+    /// Runs `read` as [`Self::read_head`] does. A read whose request includes
     /// `min_head_seq` reads a head at least that new when the namespace has
     /// reached it (see [`RuntimeCore::read_at_least`](crate::runtime_core::RuntimeCore::read_at_least)).
-    /// A snapshot read ignores `min_head_seq`, because the read checks the
-    /// request's position against the snapshot.
-    pub(crate) async fn read_at_least<T, Read, ReadFuture>(
+    pub(crate) async fn read_head_at_least<T, Read, ReadFuture>(
         &self,
-        at: &ReadAt,
         min_head_seq: Option<CommitSeq>,
         read: Read,
     ) -> Result<T>
     where
-        Read: Fn(PinnedRead, ReadSource) -> ReadFuture,
+        Read: Fn(PinnedRead) -> ReadFuture,
         ReadFuture: Future<Output = Result<T>>,
     {
-        match at {
-            ReadAt::Live(consistency) => {
-                self.core
-                    .read_at_least(&self.namespace_id, *consistency, min_head_seq, |pinned| {
-                        read(pinned, ReadSource::Head)
-                    })
-                    .await
-            }
-            ReadAt::Snapshot(snapshot_id) => {
-                // Boxed for the same reason as `RuntimeCore::read_at_least`:
-                // without the box, a crate that awaits a read fails to
-                // compile with "queries overflow the depth limit!".
-                Box::pin(self.core.run_again_after_replaced_manifest(|| async {
-                    let pinned = self
-                        .core
-                        .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
-                        .await?;
-                    read(pinned, ReadSource::Snapshot(snapshot_id.clone())).await
-                }))
-                .await
-            }
-        }
+        self.core
+            .read_at_least(&self.namespace_id, self.consistency, min_head_seq, read)
+            .await
     }
 
     /// Captures the current namespace state for a group of related reads.
@@ -136,24 +74,16 @@ impl<M: crate::Mode> Namespace<M> {
     /// publish concurrently. It retains nothing in the store and is meant to
     /// live for one request or unit of work.
     ///
-    /// The view reads the head as an `eventual` read does. Use
-    /// [`Self::read_view_with_options`] to capture the head as a `strong`
-    /// read does.
+    /// The view captures the head as a read through this handle confirms it,
+    /// so a view captured through [`Self::strong`] confirms the head first.
     pub async fn read_view(&self) -> Result<ReadView> {
-        self.read_view_with_options(&LiveReadOptions::default())
-            .await
-    }
-
-    /// Captures the current namespace state for a group of related reads, as
-    /// [`Self::read_view`] does, at the consistency that `options` sets.
-    pub async fn read_view_with_options(&self, options: &LiveReadOptions) -> Result<ReadView> {
         trace::in_operation(
             operation_span!(self.core, "read_view", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
                 let pinned = self
                     .core
-                    .pinned_read(&self.namespace_id, options.consistency)
+                    .pinned_read(&self.namespace_id, self.consistency)
                     .await?;
                 Ok(ReadView::new(self.core.clone(), pinned, ReadSource::Head))
             },
@@ -186,6 +116,13 @@ impl<M: crate::Mode> Namespace<M> {
     /// Captures the namespace state an unexpired snapshot, or one of the
     /// namespace's fork snapshots, preserves. A missing snapshot or an expired snapshot
     /// returns `snapshot_not_found`.
+    ///
+    /// Reads through the view check the subject's rights at the live head,
+    /// which this method confirms as a `strong` read does, whatever this
+    /// handle's consistency. A view has no rerun of its own, so a caller
+    /// that reads a snapshot through a view captures the view inside
+    /// [`Self::read_through_views`] to run again when a newer manifest
+    /// replaced the live head's manifest.
     pub async fn read_view_at_snapshot(&self, snapshot_id: &SnapshotId) -> Result<ReadView> {
         let span = operation_span!(
             self.core,
@@ -218,8 +155,8 @@ impl<M: crate::Mode> Namespace<M> {
     /// at its manifest check, which runs at most once per
     /// `manifest_revalidation_interval_ms`. A host checks that a namespace
     /// exists with this read before it opens a writer session. Use
-    /// [`Self::metadata_with_options`] to read through the runtime's cached
-    /// head at a consistency.
+    /// [`Self::head_metadata`] to read through the runtime's cached head at
+    /// this handle's consistency.
     pub async fn metadata(&self) -> Result<crate::NamespaceMetadata> {
         trace::in_operation(
             operation_span!(self.core, "metadata", self.namespace_id),
@@ -236,24 +173,16 @@ impl<M: crate::Mode> Namespace<M> {
     }
 
     /// Returns this namespace's metadata, as [`Self::metadata`] does, at the
-    /// head that the consistency in `options` confirms.
-    pub async fn metadata_with_options(
-        &self,
-        options: &LiveReadOptions,
-    ) -> Result<crate::NamespaceMetadata> {
+    /// head that a read through this handle confirms.
+    pub async fn head_metadata(&self) -> Result<crate::NamespaceMetadata> {
         trace::in_operation(
             operation_span!(self.core, "metadata", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                self.core
-                    .read(
-                        &self.namespace_id,
-                        options.consistency,
-                        |pinned| async move {
-                            Ok(pinned.engine.namespace_metadata(&pinned.context).await?)
-                        },
-                    )
-                    .await
+                self.read_head(|pinned| async move {
+                    Ok(pinned.engine.namespace_metadata(&pinned.context).await?)
+                })
+                .await
             },
         )
         .await
@@ -277,7 +206,7 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "stat", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                self.read_at(&options.at, |pinned, _| async move {
+                self.read_head(|pinned| async move {
                     Ok(pinned
                         .engine
                         .resolve_path(absolute_path, options.clone(), &pinned.context)
@@ -326,24 +255,21 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "list", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                if matches!(options.at, ReadAt::Live(_)) {
-                    reject_snapshot_cursor(request.cursor.as_ref())?;
-                }
+                reject_snapshot_cursor(request.cursor.as_ref())?;
                 let listed_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
                 let cursor_head_seq = request.cursor.as_ref().map(ListPageCursor::head_seq);
-                self.read_at_least(&options.at, cursor_head_seq, |pinned, source| {
+                self.read_head_at_least(cursor_head_seq, |pinned| {
                     let request = request.clone();
                     let options = options.clone();
                     let listed_path = listed_path.clone();
                     async move {
-                        validate_snapshot_cursor(&request, &pinned, &source)?;
                         // Give awakened validation waiters a turn before
                         // synchronous page work. The head is already
                         // captured and the validation guard has been
                         // released.
                         tokio::task::yield_now().await;
                         pinned
-                            .path_entries_page(listed_path, request, options, source.snapshot_id())
+                            .path_entries_page(listed_path, request, options, None)
                             .await
                     }
                 })
@@ -355,23 +281,12 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Reads a file's current content plus the metadata entry it came from.
     pub async fn read_file(&self, absolute_path: &str) -> Result<FileBytes> {
-        self.read_file_with_options(absolute_path, &ReadFileOptions::default())
-            .await
-    }
-
-    /// Reads a file's current content plus the metadata entry it came from,
-    /// as `options` asks.
-    pub async fn read_file_with_options(
-        &self,
-        absolute_path: &str,
-        options: &ReadFileOptions,
-    ) -> Result<FileBytes> {
         trace::in_operation(
             operation_span!(self.core, "read_file", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
                 let max_bytes = self.core.max_read_content_bytes();
-                self.read_at(&options.at, |pinned, _| async move {
+                self.read_head(|pinned| async move {
                     Ok(pinned
                         .engine
                         .read_file(absolute_path, &pinned.context, Some(max_bytes))
@@ -425,8 +340,7 @@ impl<M: crate::Mode> Namespace<M> {
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.read_permit().await;
-        ensure_revision_read_at(&options.at, revision_no)?;
-        self.read_at(&options.at, |pinned, _| async move {
+        self.read_head(|pinned| async move {
             Ok(pinned
                 .engine
                 .read_file_stream(
@@ -472,8 +386,7 @@ impl<M: crate::Mode> Namespace<M> {
         options: &DownloadOptions,
     ) -> Result<DirectDownloadTarget> {
         let _permit = self.core.read_permit().await;
-        ensure_revision_read_at(&options.at, revision_no)?;
-        self.read_at(&options.at, |pinned, _| async move {
+        self.read_head(|pinned| async move {
             Ok(pinned
                 .engine
                 .direct_download_target(
@@ -503,18 +416,13 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "read_content", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                self.core
-                    .read(
-                        &self.namespace_id,
-                        Consistency::Eventual,
-                        |pinned| async move {
-                            Ok(pinned
-                                .engine
-                                .read_content_ref(content_ref, max_bytes, &pinned.context)
-                                .await?)
-                        },
-                    )
-                    .await
+                self.read_head(|pinned| async move {
+                    Ok(pinned
+                        .engine
+                        .read_content_ref(content_ref, max_bytes, &pinned.context)
+                        .await?)
+                })
+                .await
             },
         )
         .await
@@ -524,50 +432,37 @@ impl<M: crate::Mode> Namespace<M> {
     /// A deletion stays in the trash until it's restored, or until the retention
     /// floor reaches it and it expires.
     pub fn list_trash(&self) -> TrashPager {
-        self.list_trash_with_options(&ListTrashOptions::default())
-    }
-
-    /// Lists the namespace's trash, oldest deletion first, as `options`
-    /// asks.
-    pub fn list_trash_with_options(&self, options: &ListTrashOptions) -> TrashPager {
-        loonfs_types::Pager::with_state(
-            (self.read_only(), options.consistency),
-            |(reader, consistency), request| async move {
-                reader
-                    .trash_page(decode_page_request(request)?, consistency)
-                    .await
-            },
-        )
+        loonfs_types::Pager::with_state(self.read_only(), |reader, request| async move {
+            reader.trash_page(decode_page_request(request)?).await
+        })
     }
 
     async fn trash_page(
         &self,
         request: PageRequest<TrashPageCursor>,
-        consistency: Consistency,
     ) -> Result<loonfs_types::ListTrashResponse> {
         trace::in_operation(
             operation_span!(self.core, "list_trash", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
                 let cursor_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
-                self.core
-                    .read_at_least(&self.namespace_id, consistency, cursor_head_seq, |pinned| {
-                        let request = request.clone();
-                        async move {
-                            let page = pinned
-                                .engine
-                                .list_trash_page(request, &pinned.context)
-                                .await?;
-                            let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
-                            Ok(loonfs_types::ListTrashResponse {
-                                namespace_id: self.namespace_id.clone(),
-                                head_seq: pinned.head_seq(),
-                                entries: page.items,
-                                next_cursor,
-                            })
-                        }
-                    })
-                    .await
+                self.read_head_at_least(cursor_head_seq, |pinned| {
+                    let request = request.clone();
+                    async move {
+                        let page = pinned
+                            .engine
+                            .list_trash_page(request, &pinned.context)
+                            .await?;
+                        let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
+                        Ok(loonfs_types::ListTrashResponse {
+                            namespace_id: self.namespace_id.clone(),
+                            head_seq: pinned.head_seq(),
+                            entries: page.items,
+                            next_cursor,
+                        })
+                    }
+                })
+                .await
             },
         )
         .await
@@ -581,7 +476,7 @@ impl<M: crate::Mode> Namespace<M> {
     /// Lists the ordered change feed after `after_seq`, as `options` asks.
     ///
     /// An eventual page whose `after_seq` is above the head that the page
-    /// would read confirms the head as a [`Consistency::Strong`] page does,
+    /// would read confirms the head as a `strong` page does,
     /// because the caller learned `after_seq` from a fresher read. An
     /// `after_seq` that is still above the confirmed head returns
     /// `invalid_request`.
@@ -595,20 +490,10 @@ impl<M: crate::Mode> Namespace<M> {
             event_index: options.event_index,
         };
         loonfs_types::Pager::with_state(
-            (
-                self.read_only(),
-                start,
-                options.at.clone(),
-                options.commit_splitting,
-            ),
-            |(reader, start, at, splitting), request: PageRequest<ChangeFeedPosition>| async move {
+            (self.read_only(), start, options.commit_splitting),
+            |(reader, start, splitting), request: PageRequest<ChangeFeedPosition>| async move {
                 reader
-                    .changes_page(
-                        request.cursor.unwrap_or(start),
-                        request.limit,
-                        &at,
-                        splitting,
-                    )
+                    .changes_page(request.cursor.unwrap_or(start), request.limit, splitting)
                     .await
             },
         )
@@ -618,14 +503,13 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         position: ChangeFeedPosition,
         limit: EffectiveLimit,
-        at: &ReadAt,
         splitting: CommitSplitting,
     ) -> Result<ListChangesResponse> {
         trace::in_operation(
             operation_span!(self.core, "list_changes", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                self.read_at_least(at, Some(position.after_seq), |pinned, _| async move {
+                self.read_head_at_least(Some(position.after_seq), |pinned| async move {
                     pinned.changes_page(position, limit, splitting).await
                 })
                 .await
@@ -650,8 +534,8 @@ impl<M: crate::Mode> Namespace<M> {
     /// `options.to_seq` and `options.after_seq`. A `from_seq` below the
     /// retention floor of the head that a page reads returns
     /// `below_retention_floor`. An eventual page whose `from_seq` or `to_seq`
-    /// is above that head confirms the head as a [`Consistency::Strong`] page
-    /// does, and a sequence that is still above the confirmed head returns
+    /// is above that head confirms the head as a `strong` page does, and a
+    /// sequence that is still above the confirmed head returns
     /// `invalid_request`.
     pub async fn diff_with_options(
         &self,
@@ -663,10 +547,7 @@ impl<M: crate::Mode> Namespace<M> {
             async {
                 let _permit = self.core.read_permit().await;
                 let page = self
-                    .core
-                    .read_at_least(
-                        &self.namespace_id,
-                        options.consistency,
+                    .read_head_at_least(
                         Some(options.to_seq.unwrap_or(from_seq)),
                         |pinned| async move {
                             Ok(pinned

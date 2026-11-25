@@ -5,8 +5,8 @@ use crate::metrics::{
     CounterHandle, DefaultMetricsRecorder, GaugeHandle, HistogramHandle, MetricsRecorder,
 };
 use crate::{
-    InlineContentPolicy, ListOptions, LoonFs, Namespace, ReadAt, ReadFileStreamOptions, ReadRange,
-    StatOptions, StreamRange, Writable,
+    InlineContentPolicy, ListOptions, LoonFs, Namespace, ReadFileStreamOptions, ReadRange,
+    StreamRange, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
@@ -418,42 +418,7 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
         })
         .await
         .expect("snapshot");
-    let stat = StatOptions {
-        at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
-        ..StatOptions::default()
-    };
-    let list = ListOptions {
-        at: stat.at.clone(),
-        ..ListOptions::default()
-    };
-    let root = fixture
-        .one_read(fixture.namespace.stat_with_options("/", &stat))
-        .await;
-    fixture
-        .one_read(
-            fixture
-                .namespace
-                .stat_by_inode_with_options(root.inode_id, &stat),
-        )
-        .await;
-    fixture
-        .one_read(
-            fixture
-                .namespace
-                .list_with_options("/", &list)
-                .page_limit(one_entry())
-                .page(),
-        )
-        .await;
-    fixture
-        .one_read(
-            fixture
-                .namespace
-                .list_by_inode_with_options(root.inode_id, &list)
-                .page_limit(one_entry())
-                .page(),
-        )
-        .await;
+    let list = ListOptions::default();
     let view = fixture
         .one_read(
             fixture
@@ -461,7 +426,7 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
                 .read_view_at_snapshot(&snapshot.snapshot_id),
         )
         .await;
-    fixture.one_read(view.stat("/")).await;
+    let root = fixture.one_read(view.stat("/")).await;
     fixture.one_read(view.stat_by_inode(root.inode_id)).await;
     fixture
         .one_read(

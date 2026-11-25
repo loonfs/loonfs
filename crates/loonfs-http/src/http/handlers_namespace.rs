@@ -3,14 +3,12 @@
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, ContextHeaders};
 use super::handlers_uploads::{direct_multipart_issuer, direct_put_issuer};
-use super::query_params::{effective_page_limit, required_query_param};
+use super::query_params::{at_consistency, effective_page_limit, required_query_param};
 
 use super::{AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
 use axum::Json;
-use loonfs::{
-    Consistency, CreateNamespaceOptions, DeleteNamespaceOptions, LiveReadOptions, MergeForkOptions,
-};
+use loonfs::{Consistency, CreateNamespaceOptions, DeleteNamespaceOptions, MergeForkOptions};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
@@ -342,12 +340,9 @@ pub(super) async fn get_namespace(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<GetNamespaceQuery>,
 ) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
-    let options = LiveReadOptions {
-        consistency: query.consistency.unwrap_or_default(),
-    };
-    let namespace = state.runtime.namespace(&namespace_id);
+    let namespace = at_consistency(state.runtime.namespace(&namespace_id), query.consistency);
     let response = namespace
-        .metadata_with_options(&options)
+        .head_metadata()
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
@@ -613,13 +608,12 @@ pub(super) async fn get_next_merge_range(
 ) -> Result<Json<NextMergeRangeResponse>, ApiResponseError> {
     let source_namespace_id =
         required_query_param(query.source_namespace_id, "source_namespace_id")?;
-    let options = LiveReadOptions {
-        consistency: query.consistency.unwrap_or_default(),
-    };
-    let response = state
-        .runtime_for(context)
-        .namespace(&namespace_id)
-        .next_merge_range_with_options(&source_namespace_id, &options)
+    let namespace = at_consistency(
+        state.runtime_for(context).namespace(&namespace_id),
+        query.consistency,
+    );
+    let response = namespace
+        .next_merge_range(&source_namespace_id)
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))

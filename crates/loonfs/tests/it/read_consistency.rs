@@ -7,9 +7,8 @@ use crate::writer_position_reads::{self, Parked};
 use loonfs::metrics::DefaultMetricsRecorder;
 use loonfs::test_support::{counter, writer};
 use loonfs::{
-    CommitSeq, Consistency, CoreError, DiffOptions, DownloadOptions, Error, ListChangesOptions,
-    ListOptions, LoonFs, MetadataCache, Namespace, NamespaceId, ReadAt, ReadFileOptions,
-    ReadFileStreamOptions, ReadOnly, SharedObjectStore, StatOptions, Writable,
+    CommitSeq, Consistency, CoreError, DiffOptions, Error, LoonFs, MetadataCache, Namespace,
+    NamespaceId, ReadOnly, SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
@@ -17,7 +16,7 @@ use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
-use loonfs_types::{ChecksumAlgorithm, ROOT_INODE_ID};
+use loonfs_types::ChecksumAlgorithm;
 use std::assert_matches;
 use std::sync::Arc;
 
@@ -128,69 +127,12 @@ impl Fixture {
     }
 }
 
-/// Returns the options of a strong stat.
-fn strong() -> StatOptions {
-    StatOptions {
-        at: ReadAt::Live(Consistency::Strong),
-        ..StatOptions::default()
+/// Returns `reader` at `consistency`.
+fn at(reader: &Namespace<ReadOnly>, consistency: Consistency) -> Namespace<ReadOnly> {
+    match consistency {
+        Consistency::Eventual => reader.clone(),
+        Consistency::Strong => reader.strong(),
     }
-}
-
-/// Asserts that a read failed with `invalid_request` for `expected`.
-fn assert_invalid_request(error: Option<Error>, expected: &str) {
-    match error {
-        Some(Error::InvalidRequest { param, .. }) => assert_eq!(param, expected),
-        other => panic!("expected `invalid_request` for `{expected}`, got {other:?}"),
-    }
-}
-
-/// Checks that a read view refuses a strong read with `invalid_request` for
-/// `consistency` before the read sends a request, because a pinned read
-/// can't confirm the head again.
-#[tokio::test]
-async fn a_strong_read_of_a_pinned_view_is_rejected_before_any_request() {
-    let fixture = fixture("strong-view").await;
-    let reader = &fixture.reader;
-    let consistency = Consistency::Strong;
-    let view = reader.read_view().await.expect("read view");
-    let stat = StatOptions {
-        at: ReadAt::Live(consistency),
-        ..StatOptions::default()
-    };
-    let list = ListOptions {
-        at: ReadAt::Live(consistency),
-        ..ListOptions::default()
-    };
-    let stream = ReadFileStreamOptions {
-        at: ReadAt::Live(consistency),
-        ..ReadFileStreamOptions::default()
-    };
-    let download = DownloadOptions {
-        at: ReadAt::Live(consistency),
-        ..DownloadOptions::default()
-    };
-    fixture.recording.reset();
-    let errors = [
-        view.stat_with_options("/file.txt", &stat).await.err(),
-        view.list_with_options("/", &list)
-            .next()
-            .await
-            .and_then(Result::err),
-        view.read_file_stream_with_options("/file.txt", &stream)
-            .await
-            .err(),
-        view.create_download_with_options("/file.txt", &download)
-            .await
-            .err(),
-        view.create_download_by_inode_with_options(ROOT_INODE_ID, &download)
-            .await
-            .err(),
-    ];
-    for error in errors {
-        assert_invalid_request(error, "consistency");
-    }
-    assert_eq!(fixture.recording.take(), []);
-    fixture.shutdown().await;
 }
 
 /// Checks that eventual reads in a separate reader runtime send no request
@@ -201,67 +143,27 @@ async fn a_strong_read_of_a_pinned_view_is_rejected_before_any_request() {
 async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
     let fixture = fixture("eventual-staleness").await;
     let reader = &fixture.reader;
-    let consistency = Consistency::Eventual;
-    reader
-        .stat_with_options("/file.txt", &strong())
-        .await
-        .expect("strong stat");
-    reader
-        .list_with_options(
-            "/",
-            &ListOptions {
-                at: ReadAt::Live(Consistency::Strong),
-                ..ListOptions::default()
-            },
-        )
+    let strong = reader.strong();
+    strong.stat("/file.txt").await.expect("strong stat");
+    strong
+        .list("/")
         .next()
         .await
         .expect("a page")
         .expect("strong list");
-    reader
-        .read_file_with_options(
-            "/file.txt",
-            &ReadFileOptions {
-                at: ReadAt::Live(Consistency::Strong),
-            },
-        )
-        .await
-        .expect("strong read");
+    strong.read_file("/file.txt").await.expect("strong read");
     let (refreshes, eventual_reads) = fixture.cached_head_sources();
 
     fixture.recording.reset();
     fixture.clock.advance_ms(INTERVAL_MS - 1);
-    let entry = reader
-        .stat_with_options(
-            "/file.txt",
-            &StatOptions {
-                at: ReadAt::Live(consistency),
-                ..StatOptions::default()
-            },
-        )
-        .await
-        .expect("eventual stat");
+    let entry = reader.stat("/file.txt").await.expect("eventual stat");
     reader
-        .list_with_options(
-            "/",
-            &ListOptions {
-                at: ReadAt::Live(consistency),
-                ..ListOptions::default()
-            },
-        )
+        .list("/")
         .next()
         .await
         .expect("a page")
         .expect("eventual list");
-    let file = reader
-        .read_file_with_options(
-            "/file.txt",
-            &ReadFileOptions {
-                at: ReadAt::Live(consistency),
-            },
-        )
-        .await
-        .expect("eventual read");
+    let file = reader.read_file("/file.txt").await.expect("eventual read");
     assert_eq!(file.bytes, b"file");
     assert_eq!(fixture.recording.take(), []);
     assert_eq!(
@@ -271,13 +173,7 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
 
     fixture.clock.advance_ms(1);
     let confirmed = reader
-        .stat_with_options(
-            "/file.txt",
-            &StatOptions {
-                at: ReadAt::Live(consistency),
-                ..StatOptions::default()
-            },
-        )
+        .stat("/file.txt")
         .await
         .expect("eventual stat after the maximum staleness");
     assert_eq!(confirmed.head_seq, entry.head_seq);
@@ -328,7 +224,8 @@ async fn a_fold_that_finds_its_manifest_current_confirms_the_cached_head() {
         .expect("maintainer");
     let reader = maintainer.read_only().namespace(&fixture.namespace_id);
     reader
-        .stat_with_options("/file.txt", &strong())
+        .strong()
+        .stat("/file.txt")
         .await
         .expect("a strong stat loads the cached head");
 
@@ -341,7 +238,8 @@ async fn a_fold_that_finds_its_manifest_current_confirms_the_cached_head() {
     assert_eq!(folded.outcome, loonfs::FoldWalOutcome::AlreadyCurrent);
     fixture.recording.reset();
     reader
-        .stat_with_options("/file.txt", &strong())
+        .strong()
+        .stat("/file.txt")
         .await
         .expect("strong stat");
     assert_matches!(
@@ -417,7 +315,8 @@ async fn an_eventual_read_after_a_strong_read_never_reads_an_older_head() {
     assert_eq!(stale.head_seq, before.head_seq);
 
     let strong = reader
-        .stat_with_options("/next.txt", &strong())
+        .strong()
+        .stat("/next.txt")
         .await
         .expect("strong read");
     assert_eq!(strong.head_seq, commit.committed_seq);
@@ -431,6 +330,32 @@ async fn an_eventual_read_after_a_strong_read_never_reads_an_older_head() {
         after.head_seq,
         commit.committed_seq
     );
+    fixture.shutdown().await;
+}
+
+/// Checks that a read view captures the head at the consistency of the
+/// handle that captured it. Within the maximum staleness, a view from the
+/// eventual handle captures the head that the reader confirmed last, and a
+/// view from a `strong` copy confirms the head first, so it sees another
+/// runtime's commit.
+#[tokio::test]
+async fn a_read_view_captures_the_head_at_its_handles_consistency() {
+    let fixture = fixture("view-consistency").await;
+    let reader = &fixture.reader;
+    let before = reader.stat("/file.txt").await.expect("eventual read");
+    let commit = fixture
+        .namespace
+        .put_file("/next.txt", b"next", &loonfs_test_support::test_actor())
+        .await
+        .expect("commit");
+    let eventual = reader.read_view().await.expect("eventual view");
+    assert_eq!(eventual.head_seq(), before.head_seq);
+    let strong = reader.strong().read_view().await.expect("strong view");
+    assert_eq!(strong.head_seq(), commit.committed_seq);
+    strong
+        .stat("/next.txt")
+        .await
+        .expect("the strong view's commit");
     fixture.shutdown().await;
 }
 
@@ -479,7 +404,8 @@ async fn keeps_the_head(
     .await;
     let namespace = reader.namespace(namespace_id);
     namespace
-        .stat_with_options("/file.txt", &strong())
+        .strong()
+        .stat("/file.txt")
         .await
         .expect("strong read");
     let loads = reads_from(&recorder, "loaded");
@@ -535,7 +461,8 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
     let reader = budgeted_reader(&store, clock.clone(), recorder.clone(), upper).await;
     let namespace = reader.namespace(&namespace_id);
     let before = namespace
-        .stat_with_options("/file.txt", &strong())
+        .strong()
+        .stat("/file.txt")
         .await
         .expect("strong read");
 
@@ -549,7 +476,8 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
     assert!(commit.committed_seq > before.head_seq);
     clock.advance_ms(INTERVAL_MS);
     let strong = namespace
-        .stat_with_options("/peer.txt", &strong())
+        .strong()
+        .stat("/peer.txt")
         .await
         .expect("strong read");
     assert_eq!(strong.head_seq, commit.committed_seq);
@@ -704,24 +632,21 @@ async fn a_wave_of_strong_reads_shares_at_most_two_refreshes() {
     let gate = fixture.recording.inner();
     gate.block_next();
     fixture.recording.reset();
-    let options = strong();
-    let (first, ()) = futures::join!(
-        fixture.reader.stat_with_options("/file.txt", &options),
-        async {
-            gate.wait_until_blocked().await;
-            let mut wave = std::pin::pin!(futures::future::join_all(
-                (0..4).map(|_| fixture.reader.stat_with_options("/file.txt", &options))
-            ));
-            assert!(
-                futures::poll!(wave.as_mut()).is_pending(),
-                "the reads wait for the parked refresh"
-            );
-            gate.release();
-            for entry in wave.await {
-                entry.expect("a read during the refresh");
-            }
+    let strong = fixture.reader.strong();
+    let (first, ()) = futures::join!(strong.stat("/file.txt"), async {
+        gate.wait_until_blocked().await;
+        let mut wave = std::pin::pin!(futures::future::join_all(
+            (0..4).map(|_| strong.stat("/file.txt"))
+        ));
+        assert!(
+            futures::poll!(wave.as_mut()).is_pending(),
+            "the reads wait for the parked refresh"
+        );
+        gate.release();
+        for entry in wave.await {
+            entry.expect("a read during the refresh");
         }
-    );
+    });
     first.expect("the read that started the first refresh");
     let operations = fixture.recording.take();
     let is_wal = |key: &str| key.starts_with(&wal_prefix(&fixture.namespace_id));
@@ -780,7 +705,8 @@ async fn a_closed_sessions_position_becomes_the_cached_head() {
 
     let entry = fixture
         .reader
-        .stat_with_options("/next.txt", &strong())
+        .strong()
+        .stat("/next.txt")
         .await
         .expect("a strong read after the close");
     assert_eq!(entry.head_seq, commit.committed_seq);
@@ -818,7 +744,8 @@ async fn an_eventual_read_confirms_the_head_for_a_position_ahead_of_its_cached_h
     let fixture = fixture("position-ahead").await;
     let reader = &fixture.reader;
     let cached = reader
-        .stat_with_options("/file.txt", &strong())
+        .strong()
+        .stat("/file.txt")
         .await
         .expect("strong stat")
         .head_seq;
@@ -916,7 +843,8 @@ async fn an_eventual_page_resumes_a_cursor_minted_at_a_newer_head() {
         namespace.delete_path(path, &actor).await.expect("delete");
     }
     reader
-        .stat_with_options("/file.txt", &strong())
+        .strong()
+        .stat("/file.txt")
         .await
         .expect("strong stat");
     let limit = page_limit(1);
@@ -969,16 +897,13 @@ async fn changes_page_at_the_writers_head_requests(
     let fixture = fixture(name).await;
     fixture
         .reader
-        .stat_with_options("/file.txt", &strong())
+        .strong()
+        .stat("/file.txt")
         .await
         .expect("strong stat");
     let head_seq = commit(&fixture, "next.txt").await;
     fixture.recording.reset();
-    let options = ListChangesOptions {
-        at: ReadAt::Live(consistency),
-        ..ListChangesOptions::default()
-    };
-    let page = fixture.reader.list_changes_with_options(head_seq, &options);
+    let page = at(&fixture.reader, consistency).list_changes(head_seq);
     let page = page.page().await.expect("a page at the writer's head");
     assert_eq!(page.head_seq, head_seq);
     let operations = fixture.recording.take();
@@ -1022,7 +947,8 @@ async fn an_eventual_page_ahead_of_the_head_confirms_it_once_at_zero_staleness()
     let fixture = fixture_with_staleness("zero-staleness-ahead", 0).await;
     let head_seq = fixture
         .reader
-        .stat_with_options("/file.txt", &strong())
+        .strong()
+        .stat("/file.txt")
         .await
         .expect("strong stat")
         .head_seq;
@@ -1030,14 +956,9 @@ async fn an_eventual_page_ahead_of_the_head_confirms_it_once_at_zero_staleness()
     let mut requests = Vec::new();
     for consistency in [Consistency::Eventual, Consistency::Strong] {
         fixture.recording.reset();
-        let options = ListChangesOptions {
-            at: ReadAt::Live(consistency),
-            ..ListChangesOptions::default()
-        };
         assert_matches!(
-            fixture
-                .reader
-                .list_changes_with_options(ahead, &options)
+            at(&fixture.reader, consistency)
+                .list_changes(ahead)
                 .page()
                 .await,
             Err(Error::InvalidRequest {

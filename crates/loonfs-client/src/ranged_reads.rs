@@ -4,7 +4,7 @@ use crate::operations::{self, Operation};
 use crate::transport::StreamedResponse;
 use crate::{Client, ClientError, NamespacePath, PayloadStream, Result};
 use futures::StreamExt as _;
-use loonfs_types::options::{ReadFileOptions, ReadRange};
+use loonfs_types::options::ReadRange;
 use loonfs_types::{InodeId, NamespaceId, RevisionNo};
 
 /// One byte range of a file, streamed through the server.
@@ -40,31 +40,16 @@ impl std::fmt::Debug for FileRangeStream {
 impl Client {
     /// Streams one byte range of a file's current content through the server.
     ///
-    /// See [`Self::read_file_range_stream_with_options`].
+    /// The server doesn't verify the range. A range that starts at or past
+    /// the end of the file returns `range_not_satisfiable`.
     pub async fn read_file_range_stream(
         &self,
         spec: &NamespacePath,
         range: ReadRange,
     ) -> Result<FileRangeStream> {
-        self.read_file_range_stream_with_options(spec, range, &ReadFileOptions::default())
-            .await
-    }
-
-    /// Streams one byte range of a file's content through the server.
-    ///
-    /// The range comes from the current revision, or from the revision that a
-    /// snapshot captured when the options include a snapshot. The server
-    /// doesn't verify the range. A range that starts at or past
-    /// the end of the file returns `range_not_satisfiable`.
-    pub async fn read_file_range_stream_with_options(
-        &self,
-        spec: &NamespacePath,
-        range: ReadRange,
-        options: &ReadFileOptions,
-    ) -> Result<FileRangeStream> {
         self.read_range(
             operations::GET_FILE_CONTENT,
-            &self.file_content_url(spec, None, options),
+            &self.file_content_url(spec, None, &self.head_fields()),
             range,
         )
         .await
@@ -73,37 +58,16 @@ impl Client {
     /// Streams one byte range of the current content of a visible file inode
     /// through the server, wherever the inode is bound.
     ///
-    /// See [`Self::read_file_range_stream_with_options`].
+    /// See [`Self::read_file_range_stream`].
     pub async fn read_file_range_stream_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         range: ReadRange,
     ) -> Result<FileRangeStream> {
-        self.read_file_range_stream_by_inode_with_options(
-            namespace_id,
-            inode_id,
-            range,
-            &ReadFileOptions::default(),
-        )
-        .await
-    }
-
-    /// Streams one byte range of a file's content through the server.
-    ///
-    /// The range comes from the current revision, or from the revision that a
-    /// snapshot captured when the options include a snapshot. See
-    /// [`Self::read_file_range_stream_with_options`].
-    pub async fn read_file_range_stream_by_inode_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        range: ReadRange,
-        options: &ReadFileOptions,
-    ) -> Result<FileRangeStream> {
         self.read_range(
             operations::GET_FILE_CONTENT_BY_INODE,
-            &self.inode_content_url(namespace_id, inode_id, options),
+            &self.inode_content_url(namespace_id, inode_id, &self.head_fields()),
             range,
         )
         .await
@@ -112,38 +76,16 @@ impl Client {
     /// Streams one byte range of one retained revision of a file through the
     /// server.
     ///
-    /// See [`Self::read_file_revision_range_stream_with_options`].
+    /// See [`Self::read_file_range_stream`].
     pub async fn read_file_revision_range_stream(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
         range: ReadRange,
     ) -> Result<FileRangeStream> {
-        self.read_file_revision_range_stream_with_options(
-            spec,
-            revision_no,
-            range,
-            &ReadFileOptions::default(),
-        )
-        .await
-    }
-
-    /// Streams one byte range of one retained revision of a file through the
-    /// server, at the consistency that `options` sets.
-    ///
-    /// The server doesn't verify the range. A snapshot captures one revision
-    /// of each file, so options that read a snapshot return
-    /// `invalid_request`.
-    pub async fn read_file_revision_range_stream_with_options(
-        &self,
-        spec: &NamespacePath,
-        revision_no: RevisionNo,
-        range: ReadRange,
-        options: &ReadFileOptions,
-    ) -> Result<FileRangeStream> {
         self.read_range(
             operations::GET_FILE_CONTENT,
-            &self.file_content_url(spec, Some(revision_no), options),
+            &self.file_content_url(spec, Some(revision_no), &self.head_fields()),
             range,
         )
         .await
@@ -152,7 +94,7 @@ impl Client {
     /// Streams one byte range of one retained file revision by inode identity
     /// through the server.
     ///
-    /// See [`Self::read_file_revision_range_stream_by_inode_with_options`].
+    /// See [`Self::read_file_range_stream`].
     pub async fn read_file_revision_range_stream_by_inode(
         &self,
         namespace_id: &NamespaceId,
@@ -160,39 +102,20 @@ impl Client {
         revision_no: RevisionNo,
         range: ReadRange,
     ) -> Result<FileRangeStream> {
-        self.read_file_revision_range_stream_by_inode_with_options(
-            namespace_id,
-            inode_id,
-            revision_no,
-            range,
-            &ReadFileOptions::default(),
-        )
-        .await
-    }
-
-    /// Streams one byte range of one retained file revision by inode identity
-    /// through the server, at the consistency or the snapshot that `options`
-    /// sets.
-    ///
-    /// The server doesn't verify the range. Options that read a snapshot read
-    /// the revision that the snapshot's manifest keeps.
-    pub async fn read_file_revision_range_stream_by_inode_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        range: ReadRange,
-        options: &ReadFileOptions,
-    ) -> Result<FileRangeStream> {
         self.read_range(
             operations::GET_FILE_REVISION_CONTENT_BY_INODE,
-            &self.inode_revision_content_url(namespace_id, inode_id, revision_no, options),
+            &self.inode_revision_content_url(
+                namespace_id,
+                inode_id,
+                revision_no,
+                &self.head_fields(),
+            ),
             range,
         )
         .await
     }
 
-    async fn read_range(
+    pub(crate) async fn read_range(
         &self,
         operation: Operation,
         url: &str,

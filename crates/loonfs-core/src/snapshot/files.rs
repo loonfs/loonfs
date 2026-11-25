@@ -1,16 +1,13 @@
 //! Lists files from the manifest kept by a snapshot, or at a sequence of
 //! the live namespace.
 
-use super::lifecycle::ensure_live;
-use super::read_basis::{load_snapshot_basis, SnapshotBasis};
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::Result;
 use crate::metadata::MetadataView;
 use crate::namespace::store::NamespaceStore;
-use crate::segment::KeptBy;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    CommitSeq, ContentRef, InodeId, InodeKind, PageRequest, PagedResponse, RevisionNo, SnapshotId,
+    CommitSeq, ContentRef, InodeId, InodeKind, PageRequest, PagedResponse, RevisionNo,
 };
 
 /// Minimum number of inode rows scanned at once.
@@ -81,32 +78,10 @@ impl PagedResponse for SnapshotFilesPage {
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Lists files from the manifest kept by the snapshot `snapshot_id`,
-    /// ordered by inode ID: the files visible at the snapshot, or every file it
-    /// retains with `options.include_deleted`. Directories are omitted.
-    ///
-    /// The method ignores the current metadata basis and WAL tail, so every page
-    /// comes from the same snapshot even when new commits arrive. The listing
-    /// requires namespace administrator access, as the change feed does, and
-    /// the read context is used only for that check. An ID that doesn't
-    /// identify a snapshot, or a snapshot that expired at or before the
-    /// current wall-clock time, returns `snapshot_not_found`, and so does a
-    /// snapshot whose manifest is gone, with the cause `manifest_missing`.
-    pub async fn list_snapshot_files_page(
-        &self,
-        snapshot_id: &SnapshotId,
-        request: PageRequest<SnapshotFilesPageCursor>,
-        options: ListSnapshotFilesOptions,
-        context: &RuntimeReadContext,
-    ) -> Result<SnapshotFilesPage> {
-        self.verify_administrator(context).await?;
-        self.namespace
-            .list_snapshot_files_page(snapshot_id, request, options)
-            .await
-    }
-
     /// Lists files at the sequence that `context` reads at, ordered by inode
-    /// ID, as [`Self::list_snapshot_files_page`] lists a snapshot's files.
+    /// ID: the files visible at that sequence, or every file it retains with
+    /// `options.include_deleted`. Directories are omitted. A context at a
+    /// snapshot lists the snapshot's files.
     ///
     /// The listing requires namespace administrator access, as the change
     /// feed does. A sequence below the retention floor returns
@@ -124,29 +99,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Lists one page of the files that the snapshot `snapshot_id` keeps, as
-    /// [`NamespaceEngine::list_snapshot_files_page`] describes.
-    pub(crate) async fn list_snapshot_files_page(
-        &self,
-        snapshot_id: &SnapshotId,
-        request: PageRequest<SnapshotFilesPageCursor>,
-        options: ListSnapshotFilesOptions,
-    ) -> Result<SnapshotFilesPage> {
-        let now_ms = self.wall_clock.now_ms();
-        let record = ensure_live(self.load_user_snapshot(snapshot_id).await?, now_ms)?.state;
-        let SnapshotBasis { manifest, decoded } =
-            load_snapshot_basis(&self.store, &self.segment_cache, record).await?;
-        let segments = self
-            .segments(decoded, self.keeper(KeptBy::Snapshot(snapshot_id.clone())))
-            .segments;
-
-        let view = MetadataView::over_manifest_segments(&segments, manifest.head_seq);
-        Self::files_page(view, request, options).await
-    }
-
     /// Lists one page of the files that `view` reads at its sequence, as
-    /// [`NamespaceEngine::list_snapshot_files_page`] and
-    /// [`NamespaceEngine::list_files_page`] describe.
+    /// [`NamespaceEngine::list_files_page`] describes.
     pub(crate) async fn files_page(
         view: MetadataView<'_, '_, S>,
         request: PageRequest<SnapshotFilesPageCursor>,

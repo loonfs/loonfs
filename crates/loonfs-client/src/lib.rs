@@ -43,11 +43,12 @@ mod transport_error;
 
 #[cfg(test)]
 mod scripted_transport;
+mod snapshot_reader;
 mod snapshots;
 mod uploads;
 
 use loonfs_types::config::ConfigFieldError;
-use loonfs_types::{ActorId, CapabilityDocument, SecretString};
+use loonfs_types::{ActorId, CapabilityDocument, SecretString, SnapshotId};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tower::{util::BoxCloneSyncService, Service};
@@ -64,6 +65,7 @@ pub use ranged_reads::FileRangeStream;
 pub use reads::{
     ChangesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager, TrashPager,
 };
+pub use snapshot_reader::SnapshotReader;
 pub use snapshots::SnapshotsPager;
 pub use transport_error::TransportError;
 
@@ -74,10 +76,9 @@ pub use loonfs_types::options::{
     Consistency, CopyOptions, CreateDirectoryOptions, CreateNamespaceOptions,
     CreateSnapshotOptions, DeleteByInodeOptions, DeleteNamespaceOptions, DeleteOptions,
     DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
-    ListFileRevisionsOptions, ListOptions, ListTrashOptions, LiveReadOptions, MergeForkOptions,
-    MoveOptions, PutFileOptions, ReadAt, ReadFileOptions, ReadRange, RestoreDeletedDestination,
-    RestoreDeletedOptions, StatOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
-    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    ListOptions, MergeForkOptions, MoveOptions, PutFileOptions, ReadRange,
+    RestoreDeletedDestination, RestoreDeletedOptions, StatOptions, UpdateAccessByInodeOptions,
+    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.
@@ -93,9 +94,16 @@ pub use uploads::staging::{
 ///
 /// Cloning is cheap: clones share one connection pool and one capability
 /// cache.
+///
+/// Every read reads the live head at the client's consistency, which is
+/// `eventual` on a new client. [`Self::strong`] returns a copy of the client
+/// whose reads are `strong`, and [`Self::snapshot_reader`] returns a reader
+/// of a snapshot.
 #[derive(Debug, Clone)]
 pub struct Client {
     context: loonfs_types::Context,
+    /// How recently each read confirms the live head.
+    consistency: Consistency,
     /// The actor sent as `Loonfs-Actor` on every mutation.
     actor: Option<ActorId>,
     base_url: String,
@@ -131,6 +139,29 @@ impl Client {
             context,
             ..self.clone()
         }
+    }
+
+    /// Returns a copy of this client whose reads confirm the live head
+    /// before they read, as a `strong` read does. Each read sends
+    /// `consistency=strong`.
+    pub fn strong(&self) -> Self {
+        Self {
+            consistency: Consistency::Strong,
+            ..self.clone()
+        }
+    }
+
+    /// Returns a reader of the snapshot `snapshot_id`, or of one of a
+    /// namespace's fork snapshots. Each read through the reader sends
+    /// `snapshot_id`.
+    pub fn snapshot_reader(&self, snapshot_id: SnapshotId) -> SnapshotReader {
+        SnapshotReader::new(self.clone(), snapshot_id)
+    }
+
+    /// Returns the fields of a read of the live head at this client's
+    /// consistency.
+    pub(crate) fn head_fields(&self) -> read_at_fields::ReadAtFields {
+        read_at_fields::ReadAtFields::head(self.consistency)
     }
 
     /// Returns the actor sent as `Loonfs-Actor` on commits, uploads, and
@@ -198,6 +229,7 @@ impl Client {
             .map(|timeout_ms| Duration::from_millis(timeout_ms.get()));
         Ok(Self {
             context,
+            consistency: Consistency::Eventual,
             actor: config.actor,
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),
             auth_token: config.auth_token,

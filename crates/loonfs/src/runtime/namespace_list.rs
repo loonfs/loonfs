@@ -3,9 +3,7 @@
 
 use crate::pagers::NamespacesPager;
 use crate::trace::{self, operation_span};
-use crate::{
-    Error, ErrorCode, ListNamespacesResponse, LiveReadOptions, LoonFs, Mode, ReadOnly, Result,
-};
+use crate::{Error, ErrorCode, ListNamespacesResponse, LoonFs, Mode, ReadOnly, Result};
 use futures::{StreamExt as _, TryStreamExt as _};
 use loonfs_core::CoreError;
 use loonfs_objectstore::layout::{list_namespace_ids, NamespacePageCursor, NAMESPACES_PREFIX};
@@ -70,27 +68,19 @@ impl LoonFs<ReadOnly> {
                 last_key: cursor.into_key(),
             });
             let next_cursor = crate::pagers::encode_next_cursor(next_cursor.as_ref())?;
-            let options = LiveReadOptions::default();
             let namespaces = futures::stream::iter(page.namespace_ids)
-                .map(|namespace_id| {
-                    let options = &options;
-                    async move {
-                        match self
-                            .namespace(&namespace_id)
-                            .metadata_with_options(options)
-                            .await
+                .map(|namespace_id| async move {
+                    match self.namespace(&namespace_id).head_metadata().await {
+                        Ok(metadata) => Ok(Some(metadata)),
+                        Err(error)
+                            if matches!(
+                                error.code(),
+                                ErrorCode::NamespaceDeleted | ErrorCode::NamespaceNotFound
+                            ) =>
                         {
-                            Ok(metadata) => Ok(Some(metadata)),
-                            Err(error)
-                                if matches!(
-                                    error.code(),
-                                    ErrorCode::NamespaceDeleted | ErrorCode::NamespaceNotFound
-                                ) =>
-                            {
-                                Ok(None)
-                            }
-                            Err(error) => Err(error),
+                            Ok(None)
                         }
+                        Err(error) => Err(error),
                     }
                 })
                 .buffered(MAX_CONCURRENT_METADATA_READS)

@@ -13,7 +13,7 @@ use crate::commands::recursive;
 use crate::error::{CliError, Result};
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::OutputFormat;
-use loonfs_client::{NamespacePath, ReadAt};
+use loonfs_client::NamespacePath;
 use loonfs_types::{DestinationBehavior, EntryInodeKind};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -102,7 +102,7 @@ async fn get_tree(
         &local_root,
         destination_behavior(args.force),
         behavior,
-        &ReadAt::from(args.snapshot_id.clone()),
+        args.snapshot_id.as_ref(),
     )
     .await
 }

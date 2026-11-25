@@ -3,18 +3,17 @@
 //! segments, and a query whose current manifest lists a missing segment.
 
 use crate::common::{
-    control, drive_worker_to_current, grep_with, page_request, request, writable_namespace,
-    GrepHost,
+    control, drive_worker_to_current, page_request, request, writable_namespace, GrepHost,
 };
 use loonfs::{LoonFs, NamespaceId, SharedObjectStore};
 use loonfs_grep::entry::grep_extension_name;
-use loonfs_grep::{GramIndexBuildPolicy, GrepError};
+use loonfs_grep::{GramIndexBuildPolicy, GrepError, NamespaceReads};
 use loonfs_objectstore::keys::extension_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::nonzero_usize;
-use loonfs_types::{ErrorCode, GrepRequest};
+use loonfs_types::ErrorCode;
 use std::sync::Arc;
 
 /// Checks that an eventual query runs again from
@@ -61,20 +60,12 @@ async fn a_query_at_a_collected_cached_head_reads_the_newest_manifest() {
         .expect("build reader");
     let (service, reader, store, namespace_id) = (&host.service, &reader, &store, &namespace_id);
     let query = |pattern: &str| {
-        let request = GrepRequest {
-            consistency: loonfs::Consistency::Eventual,
-            ..request(pattern)
-        };
+        let request = request(pattern);
         async move {
-            grep_with(
-                service,
-                reader,
-                store,
-                namespace_id,
-                &request,
-                page_request(None, 10),
-            )
-            .await
+            let reads = NamespaceReads::new(reader.clone(), namespace_id);
+            service
+                .query(&request, page_request(None, 10), &reads, store)
+                .await
         }
     };
     query("absent")
@@ -202,19 +193,16 @@ async fn a_query_at_a_cached_head_whose_index_segment_was_deleted_reads_the_newe
             .expect("delete the replaced segment");
     }
 
-    let response = grep_with(
-        &host.service,
-        &reader,
-        &store,
-        &namespace_id,
-        &GrepRequest {
-            consistency: loonfs::Consistency::Eventual,
-            ..request("needle")
-        },
-        page_request(None, 10),
-    )
-    .await
-    .expect("the query runs again from a reloaded head");
+    let response = host
+        .service
+        .query(
+            &request("needle"),
+            page_request(None, 10),
+            &NamespaceReads::new(reader.clone(), &namespace_id),
+            &store,
+        )
+        .await
+        .expect("the query runs again from a reloaded head");
     assert_eq!(response.head_seq, commit.committed_seq);
     let mut paths: Vec<&str> = response
         .matches

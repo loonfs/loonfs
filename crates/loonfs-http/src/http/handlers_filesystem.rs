@@ -6,16 +6,18 @@ use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, ContextHeaders};
 use super::handlers_uploads::content_preparation_for_puts;
-use super::query_params::{effective_page_limit, read_at, required_query_param};
+use super::query_params::{
+    at_consistency, check_list_cursor, check_path, check_revisions_cursor, effective_page_limit,
+    read_through, required_query_param,
+};
 use super::{acquire_download_permit, AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
-    AbsolutePath, CommitSeq, Consistency, DiffOptions, ErrorCode, ListChangesOptions,
-    ListFileRevisionsOptions, ListOptions, ListTrashOptions, ReadFileStreamOptions, SnapshotId,
-    StatOptions,
+    AbsolutePath, CommitSeq, Consistency, DiffOptions, ErrorCode, ListChangesOptions, ListOptions,
+    ReadFileStreamOptions, SnapshotId, StatOptions,
 };
 use loonfs_types::options::CommitSplitting;
 #[cfg(feature = "openapi")]
@@ -292,13 +294,33 @@ pub(super) async fn list_path_entries(
         options.recursive = recursive;
     }
     let limit = effective_page_limit(query.limit)?;
-    options.at = read_at(query.snapshot_id, query.consistency)?;
-    let listing = runtime
-        .namespace(&namespace_id)
-        .list_with_options(&path, &options)
-        .page_limit(limit)
-        .cursor(query.cursor)
-        .page()
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        query.snapshot_id,
+        query.consistency,
+    )?;
+    check_list_cursor(query.cursor.as_deref(), &options)
+        .and_then(|()| check_path(&path))
+        .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
+    let (path, options, cursor) = (&path, &options, &query.cursor);
+    let listing = through
+        .read(
+            |namespace| async move {
+                namespace
+                    .list_with_options(path, options)
+                    .page_limit(limit)
+                    .cursor(cursor.clone())
+                    .page()
+                    .await
+            },
+            |view| async move {
+                view.list_with_options(path, options)
+                    .page_limit(limit)
+                    .cursor(cursor.clone())
+                    .page()
+                    .await
+            },
+        )
         .await
         .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
     Ok(super::page_response::page_response(listing))
@@ -345,16 +367,21 @@ pub(super) async fn get_path_entry(
 ) -> Result<Json<loonfs_types::PathEntry>, ApiResponseError> {
     let runtime = state.runtime_for(context);
     let path = required_query_param(query.path, "path")?;
-    let mut options = StatOptions {
-        at: read_at(query.snapshot_id, query.consistency)?,
-        ..StatOptions::default()
-    };
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        query.snapshot_id,
+        query.consistency,
+    )?;
+    let mut options = StatOptions::default();
     if let Some(include) = query.include_attributes {
         options.include_attributes = include.into();
     }
-    let entry = runtime
-        .namespace(&namespace_id)
-        .stat_with_options(&path, &options)
+    let (path, options) = (&path, &options);
+    let entry = through
+        .read(
+            |namespace| async move { namespace.stat_with_options(path, options).await },
+            |view| async move { view.stat_with_options(path, options).await },
+        )
         .await
         .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
     Ok(Json(entry))
@@ -409,24 +436,31 @@ pub(super) async fn get_file_content(
     reject_snapshot_with_revision(query.snapshot_id.as_ref(), query.revision_no, "revision_no")?;
     let options = ReadFileStreamOptions {
         range: range.stream_range(),
-        at: read_at(query.snapshot_id, query.consistency)?,
         ..ReadFileStreamOptions::default()
     };
-    let namespace = runtime.namespace(&namespace_id);
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        query.snapshot_id,
+        query.consistency,
+    )?;
     let permit = acquire_download_permit(&state)?;
-    let stream = match query.revision_no {
-        Some(revision_no) => {
-            namespace
-                .read_file_revision_stream_with_options(&path, revision_no, &options)
-                .await
-        }
-        None => {
-            namespace
-                .read_file_stream_with_options(&path, &options)
-                .await
-        }
-    }
-    .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
+    let (path, options, revision_no) = (&path, &options, query.revision_no);
+    let stream = through
+        .read(
+            |namespace| async move {
+                match revision_no {
+                    Some(revision_no) => {
+                        namespace
+                            .read_file_revision_stream_with_options(path, revision_no, options)
+                            .await
+                    }
+                    None => namespace.read_file_stream_with_options(path, options).await,
+                }
+            },
+            |view| async move { view.read_file_stream_with_options(path, options).await },
+        )
+        .await
+        .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
     streamed_download_response(stream, range.0, permit, state.options.max_download_bytes)
 }
 
@@ -469,12 +503,9 @@ pub(super) async fn list_trash(
     AppQuery(query): AppQuery<LivePageQuery>,
 ) -> Result<Json<ListTrashResponse>, ApiResponseError> {
     let runtime = state.runtime_for(context);
-    let namespace = runtime.namespace(&namespace_id);
-    let options = ListTrashOptions {
-        consistency: query.consistency.unwrap_or_default(),
-    };
+    let namespace = at_consistency(runtime.namespace(&namespace_id), query.consistency);
     let response = namespace
-        .list_trash_with_options(&options)
+        .list_trash()
         .page_limit(effective_page_limit(query.limit)?)
         .cursor(query.cursor)
         .page()
@@ -523,16 +554,35 @@ pub(super) async fn list_file_revisions(
     AppQuery(query): AppQuery<PathPageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     let runtime = state.runtime_for(context);
-    let namespace = runtime.namespace(&namespace_id);
     let path = required_query_param(query.path, "path")?;
-    let options = ListFileRevisionsOptions {
-        at: read_at(query.snapshot_id, query.consistency)?,
-    };
-    let response = namespace
-        .list_file_revisions_with_options(&path, &options)
-        .page_limit(effective_page_limit(query.limit)?)
-        .cursor(query.cursor)
-        .page()
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        query.snapshot_id,
+        query.consistency,
+    )?;
+    let limit = effective_page_limit(query.limit)?;
+    check_revisions_cursor(query.cursor.as_deref())
+        .and_then(|()| check_path(&path))
+        .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
+    let (path, cursor) = (&path, &query.cursor);
+    let response = through
+        .read(
+            |namespace| async move {
+                namespace
+                    .list_file_revisions(path)
+                    .page_limit(limit)
+                    .cursor(cursor.clone())
+                    .page()
+                    .await
+            },
+            |view| async move {
+                view.list_file_revisions(path)
+                    .page_limit(limit)
+                    .cursor(cursor.clone())
+                    .page()
+                    .await
+            },
+        )
         .await
         .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
     Ok(Json(response))
@@ -699,16 +749,31 @@ pub(super) async fn list_changes(
     let runtime = state.runtime_for(context);
     let after_seq = required_query_param(query.after_seq, "after_seq")?;
     let limit = effective_page_limit(query.limit)?;
-    let options = ListChangesOptions {
-        at: read_at(query.snapshot_id, query.consistency)?,
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        query.snapshot_id,
+        query.consistency,
+    )?;
+    let options = &ListChangesOptions {
         commit_splitting: commit_splitting(query.split_commits),
         event_index: query.event_index.unwrap_or(0),
     };
-    let response = runtime
-        .namespace(&namespace_id)
-        .list_changes_with_options(after_seq, &options)
-        .page_limit(limit)
-        .page()
+    let response = through
+        .read(
+            |namespace| async move {
+                namespace
+                    .list_changes_with_options(after_seq, options)
+                    .page_limit(limit)
+                    .page()
+                    .await
+            },
+            |view| async move {
+                view.list_changes_with_options(after_seq, options)
+                    .page_limit(limit)
+                    .page()
+                    .await
+            },
+        )
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
@@ -762,10 +827,8 @@ pub(super) async fn list_diff(
         event_index: query.event_index.unwrap_or(0),
         limit: effective_page_limit(query.limit)?,
         commit_splitting: commit_splitting(query.split_commits),
-        consistency: query.consistency.unwrap_or_default(),
     };
-    let response = runtime
-        .namespace(&namespace_id)
+    let response = at_consistency(runtime.namespace(&namespace_id), query.consistency)
         .diff_with_options(from_seq, &options)
         .await
         .map_err(ApiResponseError::runtime)?;

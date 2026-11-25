@@ -111,7 +111,7 @@ impl GrepService {
         // after every commit that the entry records, so the view's head is
         // at or above every sequence that the entry records, such as its
         // build's capture and a reorganization's pruning floor.
-        let mut head = namespace_reads.read_view(request.consistency).await?;
+        let mut head = namespace_reads.read_view().await?;
         // A cursor minted at a head above the one that this read confirmed
         // came from a fresher read, so the head is confirmed as a `strong`
         // read confirms it, as for any read that includes a sequence that the
@@ -121,9 +121,7 @@ impl GrepService {
             .and_then(|cursor| decode_cursor::<GrepPageCursor>(cursor).ok())
             .map(|cursor| cursor.head_seq);
         if cursor_head_seq.is_some_and(|seq| seq > head.head_seq()) {
-            head = namespace_reads
-                .read_view(loonfs::Consistency::Strong)
-                .await?;
+            head = namespace_reads.strong_read_view().await?;
         }
         let snapshot = active_index(head.grep_entry().await?)?;
         let fingerprint = request.fingerprint();

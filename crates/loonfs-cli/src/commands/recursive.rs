@@ -18,10 +18,11 @@ use crate::payload::LocalPayload;
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::{write_stderr_progress, OutputFormat};
 use futures::{stream::FuturesUnordered, Stream, StreamExt};
-use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions, ReadAt};
+use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use loonfs_types::AbsolutePath;
 use loonfs_types::DestinationBehavior;
 use loonfs_types::ErrorCode;
+use loonfs_types::SnapshotId;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -334,7 +335,7 @@ pub(crate) async fn run_get_tree(
     local_root: &Path,
     behavior: DestinationBehavior,
     runtime: RuntimeBehavior,
-    at: &ReadAt,
+    snapshot_id: Option<&SnapshotId>,
 ) -> Result<CommandOutput, CommandFailure> {
     let root_outcome = create_local_directory(local_root)
         .map_err(|error| context.fail(CliError::io_for_path(local_root, error)))?;
@@ -342,7 +343,7 @@ pub(crate) async fn run_get_tree(
         context,
         remote_root,
         "remote_path",
-        at,
+        snapshot_id,
         local_root.to_path_buf(),
     )
     .await
@@ -352,6 +353,8 @@ pub(crate) async fn run_get_tree(
         ProgressOp::Get,
         render_target(context.namespace(), remote_root),
     ));
+    let version = FileVersion::from_flags(None, snapshot_id.cloned());
+    let version = &version;
     let transfer = |job: FileJob<AbsolutePath, PathBuf>| {
         let progress = Arc::clone(&progress);
         let FileJob {
@@ -368,7 +371,7 @@ pub(crate) async fn run_get_tree(
             let mut download = match context
                 .profile
                 .target
-                .open_file_download(&spec, &FileVersion::At(at.clone()))
+                .open_file_download(&spec, version)
                 .await
             {
                 Ok(opened) => opened,
@@ -439,12 +442,11 @@ pub(crate) async fn run_copy_tree(
         .map_err(|error| context.fail(error))?;
     // Read the source before creating the destination so a missing source has
     // no remote write side effects.
-    let live = ReadAt::default();
     let entries = remote_tree(
         context,
         source_root,
         "source_path",
-        &live,
+        None,
         destination_root.clone(),
     )
     .await
@@ -903,8 +905,7 @@ mod tests {
         // observed when the walk lists it on its own, and must not lose later
         // siblings or the remaining pages.
         let up = AbsolutePath::parse("/up").expect("remote root");
-        let live = ReadAt::default();
-        let entries = remote_tree(&context, &up, "remote_path", &live, PathBuf::new())
+        let entries = remote_tree(&context, &up, "remote_path", None, PathBuf::new())
             .await
             .expect("start discovery");
         let broken = remote_spec(
@@ -1011,7 +1012,7 @@ mod tests {
         let mut download = context
             .profile
             .target
-            .open_file_download(&spec, &FileVersion::At(ReadAt::default()))
+            .open_file_download(&spec, &FileVersion::Current)
             .await
             .expect("open uploaded file");
         let mut read = Vec::new();

@@ -329,12 +329,13 @@ In the embedded runtime:
 - **`loonfs::LoonFs`.** The runtime handle, parameterized as `ReadOnly` or `Writable`. A writable runtime can also create and fork namespaces, and `LoonFs::maintenance` returns its maintenance interface.
 - **`loonfs::Namespace`.** A handle bound to one namespace whose methods omit `namespace_id`. `LoonFs::namespace` returns a `Namespace<ReadOnly>` for reads, while `LoonFs::open_namespace` on a writable runtime returns a `Namespace<Writable>` for reads and writes.
 
-The namespace handle's `metadata` method corresponds to the client's `get_namespace`. Both `LoonFs::capabilities()` (a constant) and `Client::get_capabilities()` (fetched from `GET /v0/capabilities` and cached) return the capability document from [The capability document](#21-the-capability-document).
+`Namespace::head_metadata` corresponds to the client's `get_namespace`. Both `LoonFs::capabilities()` (a constant) and `Client::get_capabilities()` (fetched from `GET /v0/capabilities` and cached) return the capability document from [The capability document](#21-the-capability-document).
 
-Both Rust APIs stay aligned through three conventions:
+Both Rust APIs stay aligned through four conventions:
 
 - **Shared option structs.** Both re-export the same option types from `loonfs-types` (`PutFileOptions`, `CreateDirectoryOptions`, `DeleteOptions`) rather than hiding behind a transport trait. A host selects either the embedded runtime or the HTTP client directly.
 - **Actor and optional settings.** Every commit, upload operation, namespace creation, and fork records an actor. The embedded runtime takes it as an argument on each of those calls. The HTTP client takes it at construction (`ClientConfig::actor`) and sends it in `Loonfs-Actor`; `Client::with_actor` clones the client with another actor, and a client without one can read but fails an operation that records an actor before sending it. Option structs contain only optional fields with defaults, so each mutation provides both a plain form and an options form.
+- **Freshness on the handle.** The option structs say what to read, and the handle that a read goes through says how fresh the read is. A read through a new `Namespace` handle or `Client` is `eventual`, `strong()` on either returns a copy whose reads are `strong`, and a snapshot is read through `Namespace::read_view_at_snapshot` or `Client::snapshot_reader` ([Read consistency](#read-consistency)).
 - **Typed unsupported errors.** Individual operations return `not_supported` with their `feature` key, so capability checks and fallbacks work identically on both backends.
 
 Generated SDKs group operations by resource rather than by API group: `capabilities`, `namespaces`, `snapshots`, `commits`, `changes`, `files`, `inodes`, `trash`, and `uploads` sit at the client root. The `maintenance` group keeps its nested prefix (such as `maintenance.snapshots.list`) because hosted deployments can disable the entire group. Method names follow two rules:
@@ -348,7 +349,6 @@ In the embedded runtime, every public read acquires one slot from the runtime's 
 
 - Each pager page acquires and releases its own slot.
 - Capturing a `ReadView` takes one slot and releases it immediately, and each read through the view takes its own slot.
-- Nested snapshot stat and list calls reuse the outer read's slot.
 - A buffered content read keeps its slot until it finishes.
 - A streamed or ranged content read releases its slot after metadata and content lookup, before returning the body (transfer limits bound body consumption).
 - Internal reads inside mutations and maintenance don't take a read slot.
@@ -925,7 +925,7 @@ Path stat, inode stat, path and inode directory listings, path and inode revisio
 - A snapshot change feed stops at `captured_seq`, and `after_seq` can't exceed `captured_seq`.
 - Read routes also accept any of the namespace's fork snapshots as `snapshot_id` (unlike snapshot management routes and `POST /forks`, which refuse them with `snapshot_not_found`). In particular, every fork's `fork_basis.fork_point_snapshot_id` pins the fork's state at the fork point (identical to the source at that sequence) and never expires, so clients can read historical revisions from the fork even after the source's retention floor advances past the fork point ([`POST /forks`](#613-post-forks)).
 - Snapshot reads never fall back to live state. Missing, deleted, or expired snapshots always return `snapshot_not_found`.
-- In the embedded runtime, setting `snapshot_id` opens a read view of that snapshot. A snapshot `ReadView` rejects options referencing any other snapshot ID with `invalid_request`, and directory cursors from a snapshot view are bound to that snapshot (resuming them on a live listing or another view returns `invalid_request`).
+- In the embedded runtime, a snapshot is read through `Namespace::read_view_at_snapshot`, which captures a `ReadView` of the snapshot. Directory and revision cursors from a snapshot view are bound to that snapshot (resuming them on a live listing or another view returns `invalid_request`). The view checks the snapshot once, when it's captured, so a page can still be read through the view after the snapshot is deleted or expires. That page still returns the snapshot's state, because LoonFS keeps the snapshot's manifest and segments for a grace window after the snapshot is deleted or expires ([Snapshots](format.md#8-snapshots)). Over HTTP, each page is a separate request that checks the snapshot again, so a page after the deletion returns `snapshot_not_found`.
 
 ### Snapshot inventory
 
@@ -1286,12 +1286,12 @@ In a runtime without the namespace's writer session, confirming the cached head 
 
 The runtime and the server each have a maximum staleness setting:
 
-- **Maximum staleness.** `RuntimeConfig::max_staleness_ms` (and the server's `max_staleness_ms`) defaults to 1,000 ms. A setting of `0` confirms the head on every read, so a deployment whose readers follow writes made through other servers sets it to `0` instead of passing `strong` on every read. In Rust, the read option structs default to `Consistency::Eventual` (`ReadAt::Live(Consistency::Eventual)` for the options that can also read a snapshot), and option-less methods such as `Namespace::read_file_revision` read as `eventual`.
+- **Maximum staleness.** `RuntimeConfig::max_staleness_ms` (and the server's `max_staleness_ms`) defaults to 1,000 ms. A setting of `0` confirms the head on every read, so a deployment whose readers follow writes made through other servers sets it to `0` instead of passing `strong` on every read. In Rust, every read through a new `Namespace` handle or `loonfs_client::Client` is `eventual`, and `strong()` on either returns a copy whose reads are `strong`.
 - **Upper bound (`READ_REVALIDATION_BOUND_MS`).** Neither `max_staleness_ms` nor `manifest_revalidation_interval_ms` can exceed `READ_REVALIDATION_BOUND_MS` (1,200,000 ms, or 20 minutes). A larger setting fails runtime construction or server startup. Any cached head whose last manifest check is older than 20 minutes is always revalidated regardless of setting, ensuring the 24-hour grace window always covers the revalidation bound plus the 15-minute presigned download URL lifetime and clock allowance ([Content roots](format.md#119-content-roots)).
 
 In a runtime with the namespace's writer session, reads start from the [writer position](glossary.md#writer-position) and confirm it by checking the next manifest number (`HEAD`) and reading the manifest boundary. An `eventual` read skips the check within the maximum staleness and waits for it afterward, while a `strong` read always waits for a check that started after the read began so it sees another writer's claim. Because the session runs one check at a time and concurrent arrivals share the next check, a wave of concurrent `strong` reads costs at most two checks.
 
-Pinned reads (reads with `snapshot_id` or through a `ReadView`) have no consistency because the snapshot or view pins the state. Passing `consistency` with `snapshot_id` returns `invalid_request` with `param` `consistency`, and so does a `strong` read through a `ReadView` in Rust. In Rust, snapshot-capable options use `at` (`ReadAt::Live` or `ReadAt::Snapshot`) so both can't be set together. Looking up a snapshot at the live head uses `strong` confirmation, and capturing a `ReadView` uses the requested live consistency.
+Pinned reads (reads with `snapshot_id` or through a `ReadView`) have no consistency because the snapshot or view pins the state. Passing `consistency` with `snapshot_id` returns `invalid_request` with `param` `consistency`. In Rust, the consistency is a setting of the handle that a read goes through, and a snapshot is read through a view or a snapshot reader, so a read can't set both. A `ReadView` captures the head at the consistency of the `Namespace` handle that captured it, so a view captured through `Namespace::strong` confirms the head first. Looking up a snapshot at the live head uses `strong` confirmation.
 
 When an `eventual` request supplies a sequence learned from a fresher read (a listing cursor's head, a change feed's `after_seq`, or a diff's `to_seq`) that is ahead of the reader's cached head, LoonFS automatically confirms the head as a `strong` read and serves the request at the confirmed head (avoiding an extra client error-and-retry round trip). If the sequence is still ahead of the confirmed head, LoonFS returns `invalid_request`. Requests with sequences at or below the cached head send no confirmation request.
 

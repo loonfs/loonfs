@@ -3,7 +3,7 @@
 
 use loonfs::{
     AccessState, CommitSeq, DeleteDirectoryBehavior, DeleteOptions, ErrorCode, InodeId, LoonFs,
-    Namespace, ReadAt, ReadOnly, RevisionNo, SharedObjectStore, SnapshotId, StatOptions, Writable,
+    Namespace, ReadOnly, RevisionNo, SharedObjectStore, SnapshotId, StatOptions, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
@@ -68,7 +68,6 @@ async fn reads_by_inode(
 ) -> (Outcomes<5>, Outcomes<4>) {
     let without_attributes = StatOptions {
         include_attributes: AttributeInclusion::Omit,
-        ..StatOptions::default()
     };
     let current = [
         (
@@ -240,10 +239,6 @@ async fn history_reads(
     inode_id: InodeId,
     snapshot_id: &SnapshotId,
 ) -> Vec<(String, [Result<(), ErrorCode>; 4])> {
-    let at_snapshot = StatOptions {
-        at: ReadAt::Snapshot(snapshot_id.clone()),
-        ..StatOptions::default()
-    };
     let mut outcomes = Vec::new();
     for subject in subjects {
         let namespace = reader
@@ -268,11 +263,10 @@ async fn history_reads(
                         .create_revision_download_by_inode(inode_id, RevisionNo(1))
                         .await,
                 ),
-                code(
-                    namespace
-                        .stat_by_inode_with_options(inode_id, &at_snapshot)
-                        .await,
-                ),
+                code(match namespace.read_view_at_snapshot(snapshot_id).await {
+                    Ok(view) => view.stat_by_inode(inode_id).await,
+                    Err(error) => Err(error),
+                }),
             ],
         ));
     }

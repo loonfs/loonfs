@@ -2,13 +2,12 @@
 //! history, one revision's bytes, and revision download targets.
 
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
-use crate::namespace::reads::{reject_snapshot_cursor, validate_snapshot_cursor};
-use crate::pagers::{decode_page_request, file_revisions_page_response, FileRevisionsPager};
+use crate::namespace::reads::reject_snapshot_cursor;
+use crate::pagers::{decode_page_request, FileRevisionsPager};
 use crate::trace::{self, operation_span};
 use crate::{
-    CoreError, DownloadOptions, FileBytes, FileContentStream, InodeId, ListFileRevisionsOptions,
-    ListFileRevisionsResponse, Namespace, ReadAt, ReadFileStreamOptions, Result, RevisionNo,
-    SharedObjectStore,
+    CoreError, DownloadOptions, FileBytes, FileContentStream, InodeId, ListFileRevisionsResponse,
+    Namespace, ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore,
 };
 use loonfs_types::{AbsolutePath, FileRevisionsPageCursor, PageRequest};
 
@@ -30,9 +29,6 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Prepares the content object of one retained file revision for a
     /// direct download, as `options` asks. See [`Self::create_download`].
-    ///
-    /// A snapshot captures one revision of each file, so options that read a
-    /// snapshot return `invalid_request`.
     pub async fn create_revision_download_with_options(
         &self,
         absolute_path: &str,
@@ -63,10 +59,6 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Prepares the content object of one retained inode revision for a
     /// direct download, as `options` asks.
-    ///
-    /// Options that read a snapshot find the revision in the snapshot's
-    /// manifest instead of at the live head, as
-    /// [`Self::read_file_revision_stream_by_inode_with_options`] does.
     pub async fn create_revision_download_by_inode_with_options(
         &self,
         inode_id: InodeId,
@@ -86,30 +78,11 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Lists a file path's revision history, newest first.
     pub fn list_file_revisions(&self, absolute_path: &str) -> FileRevisionsPager {
-        self.list_file_revisions_with_options(absolute_path, &ListFileRevisionsOptions::default())
-    }
-
-    /// Lists a file path's revision history, newest first, as `options`
-    /// asks.
-    ///
-    /// Options that read a snapshot, or one of the namespace's fork
-    /// snapshots, resolve the path in the snapshot's state and list the
-    /// revisions that the snapshot's manifest keeps, newest first from the
-    /// revision that the snapshot captured.
-    pub fn list_file_revisions_with_options(
-        &self,
-        absolute_path: &str,
-        options: &ListFileRevisionsOptions,
-    ) -> FileRevisionsPager {
         loonfs_types::Pager::with_state(
-            (
-                self.read_only(),
-                absolute_path.to_owned(),
-                options.at.clone(),
-            ),
-            |(reader, absolute_path, at), request| async move {
+            (self.read_only(), absolute_path.to_owned()),
+            |(reader, absolute_path), request| async move {
                 reader
-                    .file_revisions_page(&absolute_path, decode_page_request(request)?, &at)
+                    .file_revisions_page(&absolute_path, decode_page_request(request)?)
                     .await
             },
         )
@@ -119,39 +92,21 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
-        at: &ReadAt,
     ) -> Result<ListFileRevisionsResponse> {
         trace::in_operation(
             operation_span!(self.core, "list_file_revisions", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                if matches!(at, ReadAt::Live(_)) {
-                    reject_snapshot_cursor(request.cursor.as_ref())?;
-                }
+                reject_snapshot_cursor(request.cursor.as_ref())?;
                 let absolute_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
                 let cursor_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
-                self.read_at_least(at, cursor_head_seq, |pinned, source| {
+                self.read_head_at_least(cursor_head_seq, |pinned| {
                     let request = request.clone();
                     let absolute_path = absolute_path.clone();
                     async move {
-                        validate_snapshot_cursor(&request, &pinned, &source)?;
-                        let mut revisions = pinned
-                            .engine
-                            .list_file_revisions_page(
-                                absolute_path.as_str(),
-                                request,
-                                &pinned.context,
-                            )
-                            .await?;
-                        if let Some(cursor) = revisions.page.next_cursor.as_mut() {
-                            cursor.snapshot_id = source.snapshot_id().cloned();
-                        }
-                        Ok(file_revisions_page_response(
-                            self.namespace_id.clone(),
-                            pinned.head_seq(),
-                            revisions.page,
-                            revisions.inode_id,
-                        )?)
+                        pinned
+                            .file_revisions_page(&absolute_path, request, None)
+                            .await
                     }
                 })
                 .await
@@ -162,28 +117,11 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Lists the retained revisions of a file inode, newest first.
     pub fn list_file_revisions_by_inode(&self, inode_id: InodeId) -> FileRevisionsPager {
-        self.list_file_revisions_by_inode_with_options(
-            inode_id,
-            &ListFileRevisionsOptions::default(),
-        )
-    }
-
-    /// Lists the retained revisions of a file inode, newest first, as
-    /// `options` asks.
-    ///
-    /// Options that read a snapshot, or one of the namespace's fork
-    /// snapshots, list the revisions that the snapshot's manifest keeps,
-    /// newest first from the revision that the snapshot captured.
-    pub fn list_file_revisions_by_inode_with_options(
-        &self,
-        inode_id: InodeId,
-        options: &ListFileRevisionsOptions,
-    ) -> FileRevisionsPager {
         loonfs_types::Pager::with_state(
-            (self.read_only(), inode_id, options.at.clone()),
-            |(reader, inode_id, at), request| async move {
+            (self.read_only(), inode_id),
+            |(reader, inode_id), request| async move {
                 reader
-                    .file_revisions_by_inode_page(inode_id, decode_page_request(request)?, &at)
+                    .file_revisions_by_inode_page(inode_id, decode_page_request(request)?)
                     .await
             },
         )
@@ -193,33 +131,19 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
-        at: &ReadAt,
     ) -> Result<ListFileRevisionsResponse> {
         trace::in_operation(
             operation_span!(self.core, "list_file_revisions_by_inode", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                if matches!(at, ReadAt::Live(_)) {
-                    reject_snapshot_cursor(request.cursor.as_ref())?;
-                }
+                reject_snapshot_cursor(request.cursor.as_ref())?;
                 let cursor_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
-                self.read_at_least(at, cursor_head_seq, |pinned, source| {
+                self.read_head_at_least(cursor_head_seq, |pinned| {
                     let request = request.clone();
                     async move {
-                        validate_snapshot_cursor(&request, &pinned, &source)?;
-                        let mut page = pinned
-                            .engine
-                            .list_file_revisions_by_inode_page(inode_id, request, &pinned.context)
-                            .await?;
-                        if let Some(cursor) = page.next_cursor.as_mut() {
-                            cursor.snapshot_id = source.snapshot_id().cloned();
-                        }
-                        Ok(file_revisions_page_response(
-                            self.namespace_id.clone(),
-                            pinned.head_seq(),
-                            page,
-                            inode_id,
-                        )?)
+                        pinned
+                            .file_revisions_by_inode_page(inode_id, request, None)
+                            .await
                     }
                 })
                 .await
@@ -239,23 +163,18 @@ impl<M: crate::Mode> Namespace<M> {
             async {
                 let _permit = self.core.read_permit().await;
                 let max_bytes = self.core.max_read_content_bytes();
-                self.core
-                    .read(
-                        &self.namespace_id,
-                        crate::Consistency::Eventual,
-                        |pinned| async move {
-                            Ok(pinned
-                                .engine
-                                .read_file_revision(
-                                    absolute_path,
-                                    revision_no,
-                                    &pinned.context,
-                                    Some(max_bytes),
-                                )
-                                .await?)
-                        },
-                    )
-                    .await
+                self.read_head(|pinned| async move {
+                    Ok(pinned
+                        .engine
+                        .read_file_revision(
+                            absolute_path,
+                            revision_no,
+                            &pinned.context,
+                            Some(max_bytes),
+                        )
+                        .await?)
+                })
+                .await
             },
         )
         .await
@@ -281,9 +200,6 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Reads one historical file revision by path as bounded chunks, as
     /// `options` asks. See [`Self::read_file_stream_with_options`].
-    ///
-    /// A snapshot captures one revision of each file, so options that read a
-    /// snapshot return `invalid_request`.
     pub async fn read_file_revision_stream_with_options(
         &self,
         absolute_path: &str,
@@ -315,11 +231,6 @@ impl<M: crate::Mode> Namespace<M> {
     /// Streams a retained inode revision, including content without a visible
     /// path, as `options` asks. Complete verification requires consuming the
     /// stream to its end.
-    ///
-    /// Options that read a snapshot, or one of the namespace's fork snapshots,
-    /// read the revision that the snapshot's manifest keeps, so a revision stays
-    /// readable through the snapshot after the namespace's retention floor passes
-    /// it.
     pub async fn read_file_revision_stream_by_inode_with_options(
         &self,
         inode_id: InodeId,
@@ -349,23 +260,18 @@ impl<M: crate::Mode> Namespace<M> {
             async {
                 let _permit = self.core.read_permit().await;
                 let max_bytes = self.core.max_read_content_bytes();
-                self.core
-                    .read(
-                        &self.namespace_id,
-                        crate::Consistency::Eventual,
-                        |pinned| async move {
-                            Ok(pinned
-                                .engine
-                                .read_file_revision_by_inode(
-                                    inode_id,
-                                    revision_no,
-                                    &pinned.context,
-                                    Some(max_bytes),
-                                )
-                                .await?)
-                        },
-                    )
-                    .await
+                self.read_head(|pinned| async move {
+                    Ok(pinned
+                        .engine
+                        .read_file_revision_by_inode(
+                            inode_id,
+                            revision_no,
+                            &pinned.context,
+                            Some(max_bytes),
+                        )
+                        .await?)
+                })
+                .await
             },
         )
         .await

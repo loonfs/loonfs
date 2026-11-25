@@ -1229,7 +1229,6 @@ async fn a_recursive_listing_lists_an_unreadable_directory_without_descending_in
     let options = ListOptions {
         include_attributes: AttributeInclusion::Include,
         recursive: true,
-        ..Default::default()
     };
     for (principal, expected) in [
         ("viewer", &["/team/file", "/team/kept", "/team/secret"][..]),
@@ -1524,7 +1523,6 @@ async fn administrator_read_errors(
 ) -> Vec<(&'static str, Option<ErrorCode>)> {
     let diff_options = loonfs_types::options::DiffOptions::default();
     let files_options = loonfs_core::ListSnapshotFilesOptions::default();
-    let missing_snapshot = loonfs_types::SnapshotId::generate(loonfs_types::ManifestNo(1));
     let code = |error: loonfs_core::CoreError| error.code();
     vec![
         (
@@ -1548,14 +1546,6 @@ async fn administrator_read_errors(
             "the diff",
             engine
                 .diff_page(CommitSeq(0), &diff_options, context)
-                .await
-                .err()
-                .map(code),
-        ),
-        (
-            "the file listing of a missing snapshot",
-            engine
-                .list_snapshot_files_page(&missing_snapshot, read_page(100), files_options, context)
                 .await
                 .err()
                 .map(code),

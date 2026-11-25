@@ -212,15 +212,15 @@ impl Client {
             .await
     }
 
-    /// Requests short-lived direct access to a file's content: the current
-    /// revision, or the revision a snapshot captured when the options name
-    /// one, from the offset the options name.
+    /// Requests short-lived direct access to a file's current content, from
+    /// the offset the options name.
     pub async fn create_download_with_options(
         &self,
         spec: &NamespacePath,
         options: &DownloadOptions,
     ) -> Result<CreateDownloadResponse> {
-        self.request_download(spec, None, options).await
+        self.request_download(spec, None, options, self.head_fields())
+            .await
     }
 
     /// Requests short-lived direct access to one retained revision of a file.
@@ -235,26 +235,24 @@ impl Client {
 
     /// Requests short-lived direct access to one retained revision of a file,
     /// from the offset the options name.
-    ///
-    /// A revision cannot be combined with a snapshot.
     pub async fn create_revision_download_with_options(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
         options: &DownloadOptions,
     ) -> Result<CreateDownloadResponse> {
-        self.request_download(spec, Some(revision_no), options)
+        self.request_download(spec, Some(revision_no), options, self.head_fields())
             .await
     }
 
-    async fn request_download(
+    pub(crate) async fn request_download(
         &self,
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
         options: &DownloadOptions,
+        at: ReadAtFields,
     ) -> Result<CreateDownloadResponse> {
         let url = self.namespace_url(spec.namespace(), "/filesystem/downloads");
-        let at = ReadAtFields::from(&options.at);
         let request = CreateDownloadRequest {
             path: spec.absolute_path().clone(),
             revision_no,
@@ -285,20 +283,31 @@ impl Client {
         .await
     }
 
-    /// Requests direct access to the content of a visible file inode,
-    /// wherever it is bound: the current revision, or the revision a snapshot
-    /// captured when the options name one, from the offset the options name.
+    /// Requests direct access to the current content of a visible file
+    /// inode, wherever it is bound, from the offset the options name.
     pub async fn create_download_by_inode_with_options(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         options: &DownloadOptions,
     ) -> Result<CreateDownloadByInodeResponse> {
+        self.create_download_by_inode_at(namespace_id, inode_id, options, self.head_fields())
+            .await
+    }
+
+    pub(crate) async fn create_download_by_inode_at(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        options: &DownloadOptions,
+        at: ReadAtFields,
+    ) -> Result<CreateDownloadByInodeResponse> {
         let inode_id = inode_id.to_string();
         self.request_download_by_inode(
             operations::CREATE_DOWNLOAD_BY_INODE,
             self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/downloads")),
             options,
+            at,
         )
         .await
     }
@@ -321,14 +330,31 @@ impl Client {
     }
 
     /// Requests direct access to one retained inode revision, without requiring
-    /// a current path, from the offset the options name. When the options name
-    /// a snapshot, the server finds the revision in that snapshot.
+    /// a current path, from the offset the options name.
     pub async fn create_revision_download_by_inode_with_options(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
         options: &DownloadOptions,
+    ) -> Result<CreateDownloadByInodeResponse> {
+        self.create_revision_download_by_inode_at(
+            namespace_id,
+            inode_id,
+            revision_no,
+            options,
+            self.head_fields(),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_revision_download_by_inode_at(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        options: &DownloadOptions,
+        at: ReadAtFields,
     ) -> Result<CreateDownloadByInodeResponse> {
         let inode_id = inode_id.to_string();
         self.request_download_by_inode(
@@ -338,6 +364,7 @@ impl Client {
                 &format!("/inodes/{inode_id}/revisions/{revision_no}/downloads"),
             ),
             options,
+            at,
         )
         .await
     }
@@ -347,8 +374,8 @@ impl Client {
         operation: Operation,
         url: String,
         options: &DownloadOptions,
+        at: ReadAtFields,
     ) -> Result<CreateDownloadByInodeResponse> {
-        let at = ReadAtFields::from(&options.at);
         let request = CreateDownloadByInodeRequest {
             snapshot_id: at.snapshot_id,
             consistency: at.consistency,

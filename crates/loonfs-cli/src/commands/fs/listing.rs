@@ -13,8 +13,8 @@ use crate::commands::output::{
 use crate::commands::pagination::{collect_or_stream_pages, visit_pages, PagedListing};
 use crate::error::{CliError, Result};
 use crate::render::OutputFormat;
-use loonfs_client::{ListOptions, NamespacePath, ReadAt, StatOptions};
-use loonfs_types::{AbsolutePath, CommitSeq, ListPathEntriesResponse, NamespaceId};
+use loonfs_client::{ListOptions, NamespacePath, StatOptions};
+use loonfs_types::{AbsolutePath, CommitSeq, ListPathEntriesResponse, NamespaceId, SnapshotId};
 
 struct FollowedPathEntryPages {
     namespace_id: NamespaceId,
@@ -28,24 +28,21 @@ async fn follow_path_entry_pages(
     context: &NamespaceContext,
     spec: &NamespacePath,
     pagination: &PaginationArgs,
-    at: &ReadAt,
+    snapshot_id: Option<&SnapshotId>,
     mut each_page: impl FnMut(Vec<loonfs_types::PathEntry>) -> Result<()>,
 ) -> Result<FollowedPathEntryPages, CommandFailure> {
     let mut heads = ListingHeadObservation::default();
     let mut followed = None;
+    let client = &context.profile.target.client;
+    let options = ListOptions::default();
+    let pages = match snapshot_id {
+        Some(snapshot_id) => client
+            .snapshot_reader(snapshot_id.clone())
+            .list_with_options(spec, &options),
+        None => client.list_with_options(spec, &options),
+    };
     visit_pages(
-        context
-            .profile
-            .target
-            .client
-            .list_with_options(
-                spec,
-                &ListOptions {
-                    at: at.clone(),
-                    ..ListOptions::default()
-                },
-            )
-            .cursor(pagination.cursor.clone()),
+        pages.cursor(pagination.cursor.clone()),
         &pagination.page_limits,
         |page: ListPathEntriesResponse| {
             heads.observe(page.head_seq);
@@ -77,16 +74,17 @@ pub(crate) async fn run_filesystem_ls(
         root,
     )
     .map_err(|error| context.fail(error))?;
-    let at = ReadAt::from(args.snapshot_id.clone());
+    let snapshot_id = args.snapshot_id.as_ref();
     let output = invocation.behavior.output;
     let streams_pages = args.pagination.page_limits.jsonl
         || (args.pagination.page_limits.all && output == OutputFormat::Human);
     if streams_pages {
-        let followed = follow_path_entry_pages(&context, &spec, &args.pagination, &at, |entries| {
-            crate::render::write_path_entries_page(&entries, args.pagination.page_limits.jsonl)
-                .map_err(CliError::io)
-        })
-        .await?;
+        let followed =
+            follow_path_entry_pages(&context, &spec, &args.pagination, snapshot_id, |entries| {
+                crate::render::write_path_entries_page(&entries, args.pagination.page_limits.jsonl)
+                    .map_err(CliError::io)
+            })
+            .await?;
         // Write head-drift warnings to stderr so streamed stdout contains
         // only entries.
         if let Some(drift) = followed.head_drift {
@@ -96,11 +94,12 @@ pub(crate) async fn run_filesystem_ls(
     }
 
     let mut entries = Vec::new();
-    let followed = follow_path_entry_pages(&context, &spec, &args.pagination, &at, |page| {
-        entries.extend(page);
-        Ok(())
-    })
-    .await?;
+    let followed =
+        follow_path_entry_pages(&context, &spec, &args.pagination, snapshot_id, |page| {
+            entries.extend(page);
+            Ok(())
+        })
+        .await?;
     if output == OutputFormat::Human {
         if let Some(drift) = followed.head_drift.as_ref() {
             crate::render::write_listing_drift_warning(drift);
@@ -124,15 +123,25 @@ pub(crate) async fn run_filesystem_stat(
     // `stat` shows one entry, so it shows the entry's attributes too.
     let options = StatOptions {
         include_attributes: loonfs_types::options::AttributeInclusion::Include,
-        at: ReadAt::from(args.snapshot_id.clone()),
     };
     let client = &context.profile.target.client;
+    let snapshot = args
+        .snapshot_id
+        .clone()
+        .map(|id| client.snapshot_reader(id));
     let entry = match args.inode {
-        Some(inode_id) => {
-            client
-                .stat_by_inode_with_options(context.namespace(), inode_id, &options)
-                .await
-        }
+        Some(inode_id) => match &snapshot {
+            Some(snapshot) => {
+                snapshot
+                    .stat_by_inode_with_options(context.namespace(), inode_id, &options)
+                    .await
+            }
+            None => {
+                client
+                    .stat_by_inode_with_options(context.namespace(), inode_id, &options)
+                    .await
+            }
+        },
         None => {
             let path = args
                 .path
@@ -141,7 +150,10 @@ pub(crate) async fn run_filesystem_stat(
             let root = RootPath::Allowed;
             let spec = namespace_path(context.namespace(), "path", path, root)
                 .map_err(|error| context.fail(error))?;
-            client.stat_with_options(&spec, &options).await
+            match &snapshot {
+                Some(snapshot) => snapshot.stat_with_options(&spec, &options).await,
+                None => client.stat_with_options(&spec, &options).await,
+            }
         }
     }
     .map_err(|error| context.fail(error))?;

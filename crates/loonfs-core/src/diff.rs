@@ -73,7 +73,6 @@ async fn diff_page_within<S: ObjectStore + ?Sized>(
         event_index,
         limit,
         commit_splitting,
-        consistency: _,
     } = options;
     let (to_seq, after_seq, event_index, limit, splitting) =
         (*to_seq, *after_seq, *event_index, *limit, *commit_splitting);

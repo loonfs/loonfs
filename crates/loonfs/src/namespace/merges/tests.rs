@@ -1136,12 +1136,8 @@ async fn the_next_merge_range_with_fresh_positions_checks_each_position() {
     let (family, store) = recorded_family().await;
     family
         .main
-        .next_merge_range_with_options(
-            family.fork.id(),
-            &crate::LiveReadOptions {
-                consistency: crate::Consistency::Strong,
-            },
-        )
+        .strong()
+        .next_merge_range(family.fork.id())
         .await
         .expect("the next range");
     assert_eq!(

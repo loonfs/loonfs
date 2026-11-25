@@ -5,7 +5,7 @@ use super::extractors::ContextHeaders;
 use super::handlers_filesystem::reject_snapshot_with_revision;
 use super::handlers_inodes::{InodePathParams, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
-use super::query_params::read_at;
+use super::query_params::read_through;
 use super::usage::GrantedBytes;
 use super::{AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
@@ -78,27 +78,36 @@ pub(super) async fn create_download(
         request.revision_no,
         "/revision_no",
     )?;
-    let at = read_at(request.snapshot_id, request.consistency)
-        .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        request.snapshot_id,
+        request.consistency,
+    )
+    .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
     let issuer = direct_get_issuer(&state)?;
 
-    let options = DownloadOptions {
-        at,
+    let options = &DownloadOptions {
         start_offset: request.start_offset,
     };
-    let namespace = runtime.namespace(&namespace_id);
-    let path = request.path.as_str();
-    let download = match request.revision_no {
-        Some(revision_no) => {
-            namespace
-                .create_revision_download_with_options(path, revision_no, &options)
-                .await
-        }
-        None => namespace.create_download_with_options(path, &options).await,
-    }
-    .map_err(|error| {
-        ApiResponseError::runtime(error).with_body_field_params(DOWNLOAD_BODY_FIELDS)
-    })?;
+    let (path, revision_no) = (request.path.as_str(), request.revision_no);
+    let download = through
+        .read(
+            |namespace| async move {
+                match revision_no {
+                    Some(revision_no) => {
+                        namespace
+                            .create_revision_download_with_options(path, revision_no, options)
+                            .await
+                    }
+                    None => namespace.create_download_with_options(path, options).await,
+                }
+            },
+            |view| async move { view.create_download_with_options(path, options).await },
+        )
+        .await
+        .map_err(|error| {
+            ApiResponseError::runtime(error).with_body_field_params(DOWNLOAD_BODY_FIELDS)
+        })?;
     let ranges = presigned_ranges(issuer, &download.ranges, download.start_offset).await?;
 
     Ok((
@@ -160,16 +169,28 @@ pub(super) async fn create_download_by_inode(
     let request = request.unwrap_or_default();
     let runtime = state.runtime_for(context);
     let inode_id = path.inode_id;
-    let at = read_at(request.snapshot_id, request.consistency)
-        .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        request.snapshot_id,
+        request.consistency,
+    )
+    .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
     let issuer = direct_get_issuer(&state)?;
-    let options = DownloadOptions {
-        at,
+    let options = &DownloadOptions {
         start_offset: request.start_offset,
     };
-    let download = runtime
-        .namespace(&namespace_id)
-        .create_download_by_inode_with_options(inode_id, &options)
+    let download = through
+        .read(
+            |namespace| async move {
+                namespace
+                    .create_download_by_inode_with_options(inode_id, options)
+                    .await
+            },
+            |view| async move {
+                view.create_download_by_inode_with_options(inode_id, options)
+                    .await
+            },
+        )
         .await
         .map_err(|error| {
             ApiResponseError::runtime(error).with_body_field_params(DOWNLOAD_BODY_FIELDS)
@@ -226,16 +247,28 @@ pub(super) async fn create_revision_download_by_inode(
     let runtime = state.runtime_for(context);
     let inode_id = path.inode_id;
     let revision_no = path.revision_no;
-    let at = read_at(request.snapshot_id, request.consistency)
-        .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        request.snapshot_id,
+        request.consistency,
+    )
+    .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
     let issuer = direct_get_issuer(&state)?;
-    let options = DownloadOptions {
-        at,
+    let options = &DownloadOptions {
         start_offset: request.start_offset,
     };
-    let target = runtime
-        .namespace(&namespace_id)
-        .create_revision_download_by_inode_with_options(inode_id, revision_no, &options)
+    let target = through
+        .read(
+            |namespace| async move {
+                namespace
+                    .create_revision_download_by_inode_with_options(inode_id, revision_no, options)
+                    .await
+            },
+            |view| async move {
+                view.create_revision_download_by_inode_with_options(inode_id, revision_no, options)
+                    .await
+            },
+        )
         .await
         .map_err(|error| {
             ApiResponseError::runtime(error).with_body_field_params(DOWNLOAD_BODY_FIELDS)

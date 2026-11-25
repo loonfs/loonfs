@@ -9,8 +9,8 @@ use crate::publisher::MergeReservation;
 use crate::runtime_core::HeadConfirmation;
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, Commit, CommitId, Consistency, CoreError, Error, LiveReadOptions, MergeConflict,
-    MergeForkOptions, Mode, Namespace, NamespaceId, NextMergeRangeResponse, Result, Writable,
+    ActorId, Commit, CommitId, Consistency, CoreError, Error, MergeConflict, MergeForkOptions,
+    Mode, Namespace, NamespaceId, NextMergeRangeResponse, Result, Writable,
 };
 use futures::future::BoxFuture;
 use loonfs_core::limits::{MAX_CONTENTION_ATTEMPTS, OPERATION_SNAPSHOT_TTL_MS};
@@ -75,52 +75,39 @@ impl<M: Mode> Namespace<M> {
     /// instead of returning the error. A handle with a subject needs an
     /// administrator in both namespaces, as the change feed does. A source
     /// that doesn't exist, was deleted, or isn't a fork of this namespace
-    /// returns `invalid_request`. Both heads are read as an `eventual` read
-    /// reads them, and the read runs again from this namespace's newest
+    /// returns `invalid_request`. Both heads are read at this handle's
+    /// consistency, and the read runs again from this namespace's newest
     /// manifest when a newer manifest replaced the one that it read, as an
     /// ordinary read does.
     pub async fn next_merge_range(
         &self,
         source_namespace_id: &NamespaceId,
     ) -> Result<NextMergeRangeResponse> {
-        self.next_merge_range_with_options(source_namespace_id, &LiveReadOptions::default())
-            .await
-    }
-
-    /// Returns where the fork `source_namespace_id`'s next merge into this
-    /// namespace starts, as [`Self::next_merge_range`] does, reading both
-    /// namespaces' heads at the consistency that `options` sets.
-    pub async fn next_merge_range_with_options(
-        &self,
-        source_namespace_id: &NamespaceId,
-        options: &LiveReadOptions,
-    ) -> Result<NextMergeRangeResponse> {
         trace::in_operation(
             operation_span!(self.core, "next_merge_range", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                self.core
-                    .read(&self.namespace_id, options.consistency, |main| async move {
-                        let main_administrator =
-                            main.engine.verify_administrator(&main.context).await?;
-                        let fork = self
-                            .core
-                            .pinned_read(source_namespace_id, options.consistency)
-                            .await?;
-                        let fork_administrator =
-                            fork.engine.verify_administrator(&fork.context).await?;
-                        Ok(main
-                            .engine
-                            .next_merge_range(
-                                &main_administrator,
-                                &main.context,
-                                &fork.engine,
-                                &fork_administrator,
-                                &fork.context,
-                            )
-                            .await?)
-                    })
-                    .await
+                self.read_head(|main| async move {
+                    let main_administrator =
+                        main.engine.verify_administrator(&main.context).await?;
+                    let fork = self
+                        .core
+                        .pinned_read(source_namespace_id, self.consistency)
+                        .await?;
+                    let fork_administrator =
+                        fork.engine.verify_administrator(&fork.context).await?;
+                    Ok(main
+                        .engine
+                        .next_merge_range(
+                            &main_administrator,
+                            &main.context,
+                            &fork.engine,
+                            &fork_administrator,
+                            &fork.context,
+                        )
+                        .await?)
+                })
+                .await
             },
         )
         .await

@@ -1405,14 +1405,20 @@ pub(super) async fn read_snapshot_files<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     snapshot_id: &SnapshotId,
 ) -> crate::error::Result<Vec<InodeId>> {
-    let page = crate::test_support::namespace_store(store, namespace_id)
-        .list_snapshot_files_page(
-            snapshot_id,
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    let live = namespace.load_manifest_context().await?;
+    let basis = namespace
+        .load_snapshot_read_basis(live.read_basis().head(), snapshot_id)
+        .await?;
+    let context = crate::RuntimeReadContext::at_snapshot(basis, live);
+    let page = crate::NamespaceEngine::reader(namespace)
+        .list_files_page(
             loonfs_types::PageRequest {
                 cursor: None,
                 limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
             },
             crate::snapshot::ListSnapshotFilesOptions::default(),
+            &context,
         )
         .await?;
     Ok(page.files.into_iter().map(|file| file.inode_id).collect())

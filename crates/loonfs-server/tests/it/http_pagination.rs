@@ -824,7 +824,6 @@ async fn http_change_feed_and_diff_resume_a_commit_at_an_event_index() {
     let split_at = |event_index| ListChangesOptions {
         commit_splitting: CommitSplitting::AtPageBudget,
         event_index,
-        ..ListChangesOptions::default()
     };
     // The commit fits on one page, so a page that starts at its first event
     // returns it whole.

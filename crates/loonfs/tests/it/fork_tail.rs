@@ -4,7 +4,7 @@
 //! commit older than the max age.
 
 use crate::common::*;
-use loonfs::{ListChangesOptions, LoonFs, ReadAt};
+use loonfs::LoonFs;
 use loonfs_core::limits::MAX_TAIL_COMMIT_AGE_MS;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
@@ -204,30 +204,30 @@ async fn a_fork_point_snapshot_reads_the_source_at_the_fork_point() {
         .fork_basis
         .expect("a fork basis")
         .fork_point_snapshot_id;
-    let feed = |namespace_id: &NamespaceId, at: ReadAt| {
-        let namespace = fs.reader.namespace(namespace_id);
-        async move {
-            namespace
-                .list_changes_with_options(
-                    CommitSeq(0),
-                    &ListChangesOptions {
-                        at,
-                        ..ListChangesOptions::default()
-                    },
-                )
-                .collect_up_to(100)
-                .await
-                .expect("the change feed")
-                .into_iter()
-                .map(|commit| (commit.commit_id, commit.committed_seq, commit.events.len()))
-                .collect::<Vec<_>>()
-        }
-    };
-    let source_feed = feed(&forked.source, ReadAt::default()).await;
-    assert_eq!(
-        feed(&forked.fork, ReadAt::Snapshot(snapshot_id.clone())).await,
-        source_feed
-    );
+    let source_feed = fs
+        .reader
+        .namespace(&forked.source)
+        .list_changes(CommitSeq(0))
+        .collect_up_to(100)
+        .await
+        .expect("the change feed")
+        .into_iter()
+        .map(|commit| (commit.commit_id, commit.committed_seq, commit.events.len()))
+        .collect::<Vec<_>>();
+    let fork_point_feed = fs
+        .reader
+        .namespace(&forked.fork)
+        .read_view_at_snapshot(&snapshot_id)
+        .await
+        .expect("a view at the fork point")
+        .list_changes(CommitSeq(0))
+        .collect_up_to(100)
+        .await
+        .expect("the change feed")
+        .into_iter()
+        .map(|commit| (commit.commit_id, commit.committed_seq, commit.events.len()))
+        .collect::<Vec<_>>();
+    assert_eq!(fork_point_feed, source_feed);
     assert_eq!(source_feed.last().expect("a commit").1, fork.head_seq);
     let at_fork_point = fs
         .reader

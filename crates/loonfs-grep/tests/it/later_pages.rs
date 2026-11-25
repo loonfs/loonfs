@@ -48,9 +48,6 @@ fn request(pattern: &str, scope: GrepScope) -> GrepRequest {
         scope,
         allow_stale: false,
         allow_scan: false,
-        // A query follows the worker's publication of the index, which
-        // doesn't move the runtime's cached head, so it asks for `strong`.
-        consistency: loonfs::Consistency::Strong,
     }
 }
 
@@ -171,8 +168,11 @@ impl AclPages {
         cursor: Option<String>,
         limit: u32,
     ) -> GrepResponse {
+        // A query follows the worker's publication of the index, which
+        // doesn't move the runtime's cached head, so it reads `strong`.
         let reads = NamespaceReads::new(self.host.reader.clone(), &self.namespace_id)
-            .with_subject(subject(principal));
+            .with_subject(subject(principal))
+            .strong();
         self.host
             .service
             .query(request, page_request(cursor, limit), &reads, &self.store)

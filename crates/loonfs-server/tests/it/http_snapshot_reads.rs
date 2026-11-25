@@ -3,9 +3,7 @@
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::{start_server, TestServer};
 use futures::StreamExt;
-use loonfs_client::{
-    DownloadOptions, ListFileRevisionsOptions, NamespacePath, ReadAt, ReadFileOptions,
-};
+use loonfs_client::{DownloadOptions, NamespacePath};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::ListChangesResponse;
@@ -276,25 +274,18 @@ async fn snapshot_reads_answer_the_captured_namespace() {
         entry_paths(&snapshot_listing),
         BTreeSet::from(["/deleted.txt".to_owned(), "/keep.txt".to_owned()])
     );
-    let inode_entry = harness
-        .client
+    let reader = harness.client.snapshot_reader(snapshot.snapshot_id.clone());
+    let inode_entry = reader
         .stat_by_inode_with_options(
             &namespace,
             captured_entry.inode_id,
-            &loonfs_client::StatOptions {
-                at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
-                ..Default::default()
-            },
+            &loonfs_client::StatOptions::default(),
         )
         .await
         .expect("snapshot inode stat");
     assert_eq!(inode_entry, snapshot_entry);
-    let options = loonfs_client::ListOptions {
-        at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
-        ..Default::default()
-    };
-    let first = harness
-        .client
+    let options = loonfs_client::ListOptions::default();
+    let first = reader
         .list_by_inode_with_options(&namespace, loonfs_types::ROOT_INODE_ID, &options)
         .page_limit(page_limit(1))
         .page()
@@ -312,8 +303,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
         .await
         .expect_err("snapshot children cursor cannot resume live");
     assert_eq!(error.code(), Some(loonfs_types::ErrorCode::InvalidRequest));
-    let second = harness
-        .client
+    let second = reader
         .list_by_inode_with_options(&namespace, loonfs_types::ROOT_INODE_ID, &options)
         .page_limit(page_limit(1))
         .cursor(Some(cursor.to_owned()))
@@ -397,20 +387,10 @@ async fn snapshot_reads_by_inode_serve_the_snapshot_revision_after_a_later_put()
         .await
         .expect("replace file");
 
-    let snapshot_options = ReadFileOptions {
-        at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
-    };
-    assert_eq!(
-        harness
-            .client
-            .read_file_by_inode_with_options(&namespace, inode_id, &snapshot_options)
-            .await
-            .expect("snapshot read by inode"),
-        b"captured bytes"
-    );
     let mut stream = harness
         .client
-        .read_file_stream_by_inode_with_options(&namespace, inode_id, &snapshot_options)
+        .snapshot_reader(snapshot.snapshot_id.clone())
+        .read_file_stream_by_inode(&namespace, inode_id)
         .await
         .expect("snapshot stream by inode");
     let mut streamed = Vec::new();
@@ -430,18 +410,9 @@ async fn snapshot_reads_by_inode_serve_the_snapshot_revision_after_a_later_put()
         (&namespace, &snapshot.snapshot_id),
         (&fork_id, &fork_point_snapshot_id),
     ] {
-        let snapshot_options = ReadFileOptions {
-            at: ReadAt::Snapshot(snapshot_id.clone()),
-        };
+        let reader = harness.client.snapshot_reader(snapshot_id.clone());
         let read_revision = |revision_no| {
-            harness
-                .client
-                .read_file_revision_stream_by_inode_with_options(
-                    namespace,
-                    inode_id,
-                    RevisionNo(revision_no),
-                    &snapshot_options,
-                )
+            reader.read_file_revision_stream_by_inode(namespace, inode_id, RevisionNo(revision_no))
         };
         let mut stream = read_revision(1).await.expect("snapshot revision read");
         let mut streamed = Vec::new();
@@ -585,16 +556,10 @@ async fn snapshot_revision_listings_stop_at_the_captured_revision() {
         assert_eq!(error.param.as_deref(), Some("consistency"), "{route}");
     }
 
-    let options = ListFileRevisionsOptions {
-        at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
-    };
+    let reader = harness.client.snapshot_reader(snapshot.snapshot_id.clone());
     for listing in [
-        harness
-            .client
-            .list_file_revisions_with_options(&keep, &options),
-        harness
-            .client
-            .list_file_revisions_by_inode_with_options(&namespace, inode_id, &options),
+        reader.list_file_revisions(&keep),
+        reader.list_file_revisions_by_inode(&namespace, inode_id),
     ] {
         let page = listing.page().await.expect("client snapshot listing");
         assert_eq!(revision_numbers(&page), [2, 1]);
@@ -803,13 +768,8 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         (
             harness
                 .client
-                .read_file_by_inode_with_options(
-                    &namespace,
-                    inode_id,
-                    &ReadFileOptions {
-                        at: ReadAt::Snapshot(deleted.snapshot_id.clone()),
-                    },
-                )
+                .snapshot_reader(deleted.snapshot_id.clone())
+                .read_file_stream_by_inode(&namespace, inode_id)
                 .await
                 .map(|_| ())
                 .expect_err("deleted snapshot read by inode must fail"),
@@ -818,13 +778,11 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         (
             harness
                 .client
+                .snapshot_reader(deleted.snapshot_id.clone())
                 .create_download_by_inode_with_options(
                     &namespace,
                     inode_id,
-                    &DownloadOptions {
-                        at: ReadAt::Snapshot(deleted.snapshot_id.clone()),
-                        ..DownloadOptions::default()
-                    },
+                    &DownloadOptions::default(),
                 )
                 .await
                 .map(|_| ())

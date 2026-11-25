@@ -117,6 +117,7 @@ pub(super) async fn grep(
         limit: effective_page_limit(query.limit.take())?,
         cursor: query.cursor.take(),
     };
+    let consistency = query.consistency;
     let request = grep_request(query)?;
     // Grep's own segments come off the instrumented store every LoonFS
     // request in this process is measured on; its filesystem reads go
@@ -126,6 +127,10 @@ pub(super) async fn grep(
     let reads = match context.subject() {
         Some(subject) => reads.with_subject(subject),
         None => reads,
+    };
+    let reads = match consistency {
+        Some(Consistency::Strong) => reads.strong(),
+        Some(Consistency::Eventual) | None => reads,
     };
     let response = service
         .query(&request, page, &reads, &store)
@@ -154,7 +159,6 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
         scope,
         allow_stale: query.allow_stale.unwrap_or(false),
         allow_scan: query.allow_scan.unwrap_or(false),
-        consistency: query.consistency.unwrap_or_default(),
     })
 }
 

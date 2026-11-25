@@ -5,9 +5,9 @@ use crate::common::wait_for_operation;
 use loonfs::metrics::DefaultMetricsRecorder;
 use loonfs::test_support::counter;
 use loonfs::{
-    AccessState, AttributeChanges, Consistency, CreateSnapshotOptions, LoonFs, Maintenance,
-    MaintenanceCancellation, MetadataCompactionOutcome, Namespace, ReadAt, ReadOnly,
-    SharedObjectStore, StatOptions, Writable,
+    AccessState, AttributeChanges, CreateSnapshotOptions, LoonFs, Maintenance,
+    MaintenanceCancellation, MetadataCompactionOutcome, Namespace, ReadOnly, SharedObjectStore,
+    Writable,
 };
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
@@ -166,7 +166,8 @@ async fn fixture(name: &str) -> Fixture {
         .expect("settle");
     fixture
         .user
-        .stat_with_options("/m/doc", &strong())
+        .strong()
+        .stat("/m/doc")
         .await
         .expect("warm read");
     fixture
@@ -290,14 +291,6 @@ impl Fixture {
 
 const COMMIT_KINDS: [&str; 4] = ["update_attributes", "put_file", "revoke", "regrant"];
 
-/// Returns the options of a strong stat.
-fn strong() -> StatOptions {
-    StatOptions {
-        at: ReadAt::Live(Consistency::Strong),
-        ..StatOptions::default()
-    }
-}
-
 /// Checks that reads after a compaction on the same runtime don't reload
 /// metadata.
 ///
@@ -311,7 +304,7 @@ async fn first_reads_after_commits_reload_nothing_after_a_compaction() {
         for kind in COMMIT_KINDS {
             let user_granted = fixture.commit(kind, round).await;
             fixture.recording.reset();
-            let read = fixture.user.stat_with_options("/m/doc", &strong()).await;
+            let read = fixture.user.strong().stat("/m/doc").await;
             assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
             fixture.assert_no_reload(&format!("round {round}, user after {kind}"));
         }
@@ -369,7 +362,8 @@ async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
     fixture.recording.reset();
     fixture
         .user
-        .stat_with_options("/m/doc", &strong())
+        .strong()
+        .stat("/m/doc")
         .await
         .expect("first read");
     let operations = fixture.recording.take();
@@ -382,7 +376,7 @@ async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
     for (round, kind) in COMMIT_KINDS.into_iter().enumerate() {
         let user_granted = fixture.commit(kind, round).await;
         fixture.recording.reset();
-        let read = fixture.user.stat_with_options("/m/doc", &strong()).await;
+        let read = fixture.user.strong().stat("/m/doc").await;
         assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
         fixture.assert_no_reload(&format!("user after {kind}"));
     }
@@ -439,11 +433,7 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
             .assert_write_reloads_nothing(2 * round + 1, call)
             .await;
         fixture.recording.reset();
-        fixture
-            .user
-            .stat_with_options("/m/doc", &strong())
-            .await
-            .expect("read");
+        fixture.user.strong().stat("/m/doc").await.expect("read");
         fixture.assert_no_reload(&format!("user after a write after {call}"));
     }
 }
@@ -486,11 +476,7 @@ async fn a_publish_in_flight_while_a_snapshot_publishes_ends_on_its_manifest() {
     });
     let snapshot = snapshot.expect("snapshot");
     fixture.recording.reset();
-    fixture
-        .user
-        .stat_with_options("/m/doc", &strong())
-        .await
-        .expect("read");
+    fixture.user.strong().stat("/m/doc").await.expect("read");
     // A position left on the replaced manifest would find the snapshot's
     // manifest as its successor and reload. A position on the snapshot's
     // manifest checks the manifest after it and the manifest boundary, and

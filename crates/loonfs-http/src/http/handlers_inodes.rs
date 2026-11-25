@@ -3,14 +3,14 @@
 use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::ContextHeaders;
-use super::query_params::{effective_page_limit, read_at};
+use super::query_params::{
+    check_list_cursor, check_revisions_cursor, effective_page_limit, read_through,
+};
 use super::{acquire_download_permit, AppPath, AppQuery, HttpState, NamespaceIdPath};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
-use loonfs::{
-    Consistency, ListFileRevisionsOptions, ListOptions, ReadFileStreamOptions, StatOptions,
-};
+use loonfs::{Consistency, ListOptions, ReadFileStreamOptions, StatOptions};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{InodeId, ListFileRevisionsResponse, RevisionNo, SnapshotId};
@@ -121,16 +121,25 @@ pub(super) async fn get_inode(
 ) -> Result<Json<loonfs_types::PathEntry>, ApiResponseError> {
     let runtime = state.runtime_for(context);
     let inode_id = path.inode_id;
-    let mut options = StatOptions {
-        at: read_at(query.snapshot_id, query.consistency)?,
-        ..StatOptions::default()
-    };
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        query.snapshot_id,
+        query.consistency,
+    )?;
+    let mut options = StatOptions::default();
     if let Some(include) = query.include_attributes {
         options.include_attributes = include.into();
     }
-    let entry = runtime
-        .namespace(&namespace_id)
-        .stat_by_inode_with_options(inode_id, &options)
+    let options = &options;
+    let entry = through
+        .read(
+            |namespace| async move {
+                namespace
+                    .stat_by_inode_with_options(inode_id, options)
+                    .await
+            },
+            |view| async move { view.stat_by_inode_with_options(inode_id, options).await },
+        )
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(entry))
@@ -219,13 +228,31 @@ pub(super) async fn list_inode_children(
         options.recursive = recursive;
     }
     let limit = effective_page_limit(query.limit)?;
-    options.at = read_at(query.snapshot_id, query.consistency)?;
-    let listing = runtime
-        .namespace(&namespace_id)
-        .list_by_inode_with_options(inode_id, &options)
-        .page_limit(limit)
-        .cursor(query.cursor)
-        .page()
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        query.snapshot_id,
+        query.consistency,
+    )?;
+    check_list_cursor(query.cursor.as_deref(), &options).map_err(ApiResponseError::runtime)?;
+    let (options, cursor) = (&options, &query.cursor);
+    let listing = through
+        .read(
+            |namespace| async move {
+                namespace
+                    .list_by_inode_with_options(inode_id, options)
+                    .page_limit(limit)
+                    .cursor(cursor.clone())
+                    .page()
+                    .await
+            },
+            |view| async move {
+                view.list_by_inode_with_options(inode_id, options)
+                    .page_limit(limit)
+                    .cursor(cursor.clone())
+                    .page()
+                    .await
+            },
+        )
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(super::page_response::page_response(listing))
@@ -297,16 +324,33 @@ pub(super) async fn list_file_revisions_by_inode(
     AppQuery(query): AppQuery<ListInodeRevisionsQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     let runtime = state.runtime_for(context);
-    let namespace = runtime.namespace(&namespace_id);
     let inode_id = path.inode_id;
-    let options = ListFileRevisionsOptions {
-        at: read_at(query.snapshot_id, query.consistency)?,
-    };
-    let response = namespace
-        .list_file_revisions_by_inode_with_options(inode_id, &options)
-        .page_limit(effective_page_limit(query.limit)?)
-        .cursor(query.cursor)
-        .page()
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        query.snapshot_id,
+        query.consistency,
+    )?;
+    let limit = effective_page_limit(query.limit)?;
+    check_revisions_cursor(query.cursor.as_deref()).map_err(ApiResponseError::runtime)?;
+    let cursor = &query.cursor;
+    let response = through
+        .read(
+            |namespace| async move {
+                namespace
+                    .list_file_revisions_by_inode(inode_id)
+                    .page_limit(limit)
+                    .cursor(cursor.clone())
+                    .page()
+                    .await
+            },
+            |view| async move {
+                view.list_file_revisions_by_inode(inode_id)
+                    .page_limit(limit)
+                    .cursor(cursor.clone())
+                    .page()
+                    .await
+            },
+        )
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
@@ -360,15 +404,28 @@ pub(super) async fn get_file_content_by_inode(
 ) -> Result<Response, ApiResponseError> {
     let runtime = state.runtime_for(context);
     let inode_id = path.inode_id;
-    let options = ReadFileStreamOptions {
+    let options = &ReadFileStreamOptions {
         range: range.stream_range(),
-        at: read_at(query.snapshot_id, query.consistency)?,
         ..ReadFileStreamOptions::default()
     };
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        query.snapshot_id,
+        query.consistency,
+    )?;
     let permit = acquire_download_permit(&state)?;
-    let stream = runtime
-        .namespace(&namespace_id)
-        .read_file_stream_by_inode_with_options(inode_id, &options)
+    let stream = through
+        .read(
+            |namespace| async move {
+                namespace
+                    .read_file_stream_by_inode_with_options(inode_id, options)
+                    .await
+            },
+            |view| async move {
+                view.read_file_stream_by_inode_with_options(inode_id, options)
+                    .await
+            },
+        )
         .await
         .map_err(ApiResponseError::runtime)?;
     streamed_download_response(stream, range.0, permit, state.options.max_download_bytes)
@@ -422,17 +479,30 @@ pub(super) async fn get_file_revision_content_by_inode(
     range: RangeHeader,
 ) -> Result<Response, ApiResponseError> {
     let runtime = state.runtime_for(context);
-    let namespace = runtime.namespace(&namespace_id);
     let inode_id = path.inode_id;
     let revision_no = path.revision_no;
-    let options = ReadFileStreamOptions {
+    let options = &ReadFileStreamOptions {
         range: range.stream_range(),
-        at: read_at(query.snapshot_id, query.consistency)?,
         ..ReadFileStreamOptions::default()
     };
+    let through = read_through(
+        runtime.namespace(&namespace_id),
+        query.snapshot_id,
+        query.consistency,
+    )?;
     let permit = acquire_download_permit(&state)?;
-    let stream = namespace
-        .read_file_revision_stream_by_inode_with_options(inode_id, revision_no, &options)
+    let stream = through
+        .read(
+            |namespace| async move {
+                namespace
+                    .read_file_revision_stream_by_inode_with_options(inode_id, revision_no, options)
+                    .await
+            },
+            |view| async move {
+                view.read_file_revision_stream_by_inode_with_options(inode_id, revision_no, options)
+                    .await
+            },
+        )
         .await
         .map_err(ApiResponseError::runtime)?;
     streamed_download_response(stream, range.0, permit, state.options.max_download_bytes)

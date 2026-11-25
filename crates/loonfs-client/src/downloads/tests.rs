@@ -5,7 +5,6 @@
 use super::*;
 use crate::scripted_transport::{self, Outcome};
 use crate::ClientConfig;
-use loonfs_types::options::{Consistency, ReadAt};
 use loonfs_types::{
     AbsolutePath, CapabilityDocument, ContentId, SnapshotId, API_GROUP_FILESYSTEM_V0,
     PROTOCOL_VERSION,
@@ -454,7 +453,6 @@ async fn a_resume_takes_a_new_grant_and_sends_the_headers_it_returns() {
             &spec,
             &DownloadOptions {
                 start_offset: held as u64,
-                ..DownloadOptions::default()
             },
         )
         .await
@@ -519,7 +517,6 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
             RevisionNo(1),
             &DownloadOptions {
                 start_offset: held as u64,
-                ..DownloadOptions::default()
             },
         )
         .await
@@ -554,9 +551,9 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
     );
 }
 
-/// Checks that each grant request sends `snapshot_id` for a snapshot,
-/// `consistency` for a `strong` live read, and neither for an `eventual` live
-/// read.
+/// Checks that each grant request sends `snapshot_id` through a snapshot
+/// reader, `consistency` through a `strong` copy of the client, and neither
+/// through an `eventual` client.
 #[tokio::test]
 async fn grants_send_only_the_fields_of_what_they_read_at() {
     let content_ref = ContentRef::blob_v1(
@@ -573,18 +570,7 @@ async fn grants_send_only_the_fields_of_what_they_read_at() {
         ranges: path_grant.ranges.clone(),
     };
     let snapshot_id = SnapshotId::parse("snp_0000000000000g000000000002").expect("snapshot ID");
-    let cases = [
-        (ReadAt::Live(Consistency::Eventual), serde_json::json!({})),
-        (
-            ReadAt::Live(Consistency::Strong),
-            serde_json::json!({"consistency": "strong"}),
-        ),
-        (
-            ReadAt::Snapshot(snapshot_id.clone()),
-            serde_json::json!({"snapshot_id": snapshot_id}),
-        ),
-    ];
-    let transport = scripted_transport::script(cases.iter().flat_map(|_| {
+    let transport = scripted_transport::script((0..3).flat_map(|_| {
         [
             Outcome::Success(serde_json::to_vec(&path_grant).expect("encode grant")),
             Outcome::Success(serde_json::to_vec(&inode_grant).expect("encode grant")),
@@ -594,12 +580,15 @@ async fn grants_send_only_the_fields_of_what_they_read_at() {
     let client = scripted_transport::client(&transport);
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let spec = NamespacePath::parse("demo", "/report.txt").expect("namespace path");
+    let options = DownloadOptions::default();
     let mut expected = Vec::new();
-    for (at, fields) in cases {
-        let options = DownloadOptions {
-            at,
-            ..DownloadOptions::default()
-        };
+    for (client, fields) in [
+        (client.clone(), serde_json::json!({})),
+        (
+            client.strong(),
+            serde_json::json!({"consistency": "strong"}),
+        ),
+    ] {
         client
             .create_download_with_options(&spec, &options)
             .await
@@ -621,6 +610,28 @@ async fn grants_send_only_the_fields_of_what_they_read_at() {
         path_fields["path"] = serde_json::json!("/report.txt");
         expected.extend([path_fields, fields.clone(), fields]);
     }
+    let snapshot = client.snapshot_reader(snapshot_id.clone());
+    snapshot
+        .create_download_with_options(&spec, &options)
+        .await
+        .expect("path grant");
+    snapshot
+        .create_download_by_inode_with_options(&namespace_id, InodeId(2), &options)
+        .await
+        .expect("inode grant");
+    snapshot
+        .create_revision_download_by_inode_with_options(
+            &namespace_id,
+            InodeId(2),
+            RevisionNo(1),
+            &options,
+        )
+        .await
+        .expect("revision grant");
+    let fields = serde_json::json!({"snapshot_id": snapshot_id});
+    let mut path_fields = fields.clone();
+    path_fields["path"] = serde_json::json!("/report.txt");
+    expected.extend([path_fields, fields.clone(), fields]);
     let bodies: Vec<serde_json::Value> = transport
         .sent()
         .iter()

@@ -1,6 +1,5 @@
 //! Content search requests and responses for the v0 HTTP API.
 
-use crate::options::Consistency;
 use crate::{AbsolutePath, CommitSeq, InodeId, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
@@ -22,10 +21,6 @@ pub struct GrepRequest {
     /// Whether a pattern without required literal bytes can use a scan, which the server's budget
     /// limits.
     pub allow_scan: bool,
-    /// How recently a first page confirms the live head that it reads. A later page reads at the
-    /// first page's head, which its cursor records. The fingerprint that binds a cursor to its
-    /// request leaves this field out.
-    pub consistency: Consistency,
 }
 
 /// The part of a namespace that one content search covers.

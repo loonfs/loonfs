@@ -5,7 +5,7 @@ use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::test_support::writer;
 use loonfs::{
     Consistency, CurrentFile, CurrentFileState, DestinationBehavior, InodeId, LoonFs, NamespaceId,
-    ReadAt, ReadFileOptions, RevisionNo, Writable,
+    RevisionNo, Writable,
 };
 use loonfs_core::test_support::STORE_READS_IN_FLIGHT;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -260,29 +260,20 @@ async fn check_eventual_read_access(content_size: usize) {
         .expect("reader")
         .with_context(subject("viewer").into());
     let namespace = reader.namespace(&namespace_id);
-    let eventual = ReadFileOptions {
-        at: ReadAt::Live(Consistency::Eventual),
-    };
-    let read = namespace
-        .read_file_with_options("/team/file", &eventual)
-        .await
-        .expect("warm read");
+    let read = namespace.read_file("/team/file").await.expect("warm read");
     assert_eq!(read.bytes, bytes);
     namespace_writer
         .commit(access(AccessGrants::default()))
         .await
         .expect("revoke read access");
-    let read = namespace
-        .read_file_with_options("/team/file", &eventual)
-        .await
-        .expect(
-            "a read within the maximum staleness reads the head confirmed before the revocation",
-        );
+    let read = namespace.read_file("/team/file").await.expect(
+        "a read within the maximum staleness reads the head confirmed before the revocation",
+    );
     assert_eq!(read.bytes, bytes);
     clock.advance_ms(1_000);
     assert_eq!(
         namespace
-            .read_file_with_options("/team/file", &eventual)
+            .read_file("/team/file")
             .await
             .expect_err("the first read after the maximum staleness observes the revocation")
             .code(),
@@ -406,14 +397,13 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
     if consistency == Consistency::Eventual {
         clock.advance_ms(1_000);
     }
+    let namespace = match consistency {
+        Consistency::Eventual => namespace,
+        Consistency::Strong => namespace.strong(),
+    };
     assert_eq!(
         namespace
-            .read_file_with_options(
-                "/team/file",
-                &ReadFileOptions {
-                    at: ReadAt::Live(consistency),
-                },
-            )
+            .read_file("/team/file")
             .await
             .expect_err("the read observes the revocation")
             .code(),
@@ -517,12 +507,19 @@ async fn listing_a_snapshots_files_requires_an_administrator() {
         .await
         .expect("create snapshot");
     let list = |principal: &str| {
-        writer
+        let namespace = writer
             .read_only()
             .with_context(subject(principal).into())
-            .namespace(&namespace_id)
-            .list_snapshot_files(&snapshot.snapshot_id)
-            .page()
+            .namespace(&namespace_id);
+        let snapshot_id = snapshot.snapshot_id.clone();
+        async move {
+            namespace
+                .read_view_at_snapshot(&snapshot_id)
+                .await?
+                .list_files()
+                .page()
+                .await
+        }
     };
 
     let error = list("viewer")
@@ -665,14 +662,6 @@ async fn every_read_of_a_deleted_namespace_returns_namespace_deleted_for_any_sub
                 reader.get_snapshot(&snapshot.snapshot_id).await.err(),
             ),
             ("list_snapshots", reader.list_snapshots().page().await.err()),
-            (
-                "list_snapshot_files",
-                reader
-                    .list_snapshot_files(&snapshot.snapshot_id)
-                    .page()
-                    .await
-                    .err(),
-            ),
             (
                 "list_changes",
                 reader

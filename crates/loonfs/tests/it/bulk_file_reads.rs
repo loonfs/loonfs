@@ -89,13 +89,17 @@ async fn snapshot_files(
     snapshot_id: &loonfs::SnapshotId,
     limit: usize,
 ) -> Vec<SnapshotFile> {
-    let namespace = reader.namespace(namespace_id);
+    let view = reader
+        .namespace(namespace_id)
+        .read_view_at_snapshot(snapshot_id)
+        .await
+        .expect("capture the snapshot");
     let mut files = Vec::new();
     let mut cursor = None;
     let mut seen: BTreeSet<InodeId> = BTreeSet::new();
     loop {
-        let page = namespace
-            .list_snapshot_files(snapshot_id)
+        let page = view
+            .list_files()
             .page_limit(page_limit(limit))
             .cursor(cursor)
             .page()
@@ -308,12 +312,12 @@ async fn snapshot_enumeration_answers_the_state_it_captured() {
     );
 
     let retained = namespace
-        .list_snapshot_files_with_options(
-            &snapshot.snapshot_id,
-            &ListSnapshotFilesOptions {
-                include_deleted: true,
-            },
-        )
+        .read_view_at_snapshot(&snapshot.snapshot_id)
+        .await
+        .expect("capture the snapshot")
+        .list_files_with_options(&ListSnapshotFilesOptions {
+            include_deleted: true,
+        })
         .page_limit(page_limit(100))
         .page()
         .await
@@ -468,7 +472,10 @@ async fn snapshot_files_page_without_gaps_or_duplicates() {
     // tail: no row is re-read, and none is skipped.
     for (index, file) in whole.iter().enumerate() {
         let resumed = namespace
-            .list_snapshot_files(&snapshot.snapshot_id)
+            .read_view_at_snapshot(&snapshot.snapshot_id)
+            .await
+            .expect("capture the snapshot")
+            .list_files()
             .page_limit(page_limit(100))
             .cursor(Some(SnapshotFilesPageCursor {
                 after_inode_id: file.inode_id,
@@ -497,7 +504,10 @@ async fn an_empty_namespace_answers_one_empty_page() {
         .expect("create snapshot");
 
     let page = namespace
-        .list_snapshot_files(&snapshot.snapshot_id)
+        .read_view_at_snapshot(&snapshot.snapshot_id)
+        .await
+        .expect("capture the snapshot")
+        .list_files()
         .page_limit(page_limit(10))
         .page()
         .await
@@ -622,20 +632,18 @@ async fn a_deleted_snapshot_refuses_enumeration_instead_of_answering_current_sta
         .expect("release snapshot");
 
     let error = namespace
-        .list_snapshot_files(&snapshot.snapshot_id)
-        .page_limit(page_limit(10))
-        .page()
+        .read_view_at_snapshot(&snapshot.snapshot_id)
         .await
+        .map(drop)
         .expect_err("a deleted snapshot keeps nothing to enumerate");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 
     let missing =
         loonfs::SnapshotId::parse("snp_0000000000000k456789abcdef").expect("valid snapshot id");
     let error = namespace
-        .list_snapshot_files(&missing)
-        .page_limit(page_limit(10))
-        .page()
+        .read_view_at_snapshot(&missing)
         .await
+        .map(drop)
         .expect_err("a snapshot that never existed keeps nothing either");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 }

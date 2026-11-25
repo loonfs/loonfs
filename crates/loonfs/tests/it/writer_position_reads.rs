@@ -5,8 +5,8 @@ use crate::common::{is_manifest_head, wait_for_operation};
 use loonfs::metrics::DefaultMetricsRecorder;
 use loonfs::test_support::{counter, writer};
 use loonfs::{
-    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, MetadataCache, Namespace, ReadAt,
-    ReadFileOptions, ReadOnly, SharedObjectStore, StatOptions, Writable,
+    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, MetadataCache, Namespace, ReadOnly,
+    SharedObjectStore, Writable,
 };
 use loonfs_core::limits::MAX_POSITION_MOVES;
 use loonfs_objectstore::keys::{boundary, metadata_manifest_object, metadata_manifest_prefix};
@@ -38,14 +38,6 @@ fn is_manifest_get(
         operation,
         RecordedOperation::Get { key, .. } if *key == metadata_manifest_object(namespace_id, &manifest_no)
     )
-}
-
-/// Returns the options of a strong stat.
-fn strong() -> StatOptions {
-    StatOptions {
-        at: ReadAt::Live(Consistency::Strong),
-        ..StatOptions::default()
-    }
 }
 
 pub(crate) struct Fixture {
@@ -260,18 +252,15 @@ async fn strong_reads_after_a_commit_send_one_manifest_check_each() {
     fixture.recording.reset();
     let entry = fixture
         .reader
-        .stat_with_options("/next.txt", &strong())
+        .strong()
+        .stat("/next.txt")
         .await
         .expect("stat");
     assert_eq!(entry.head_seq, commit.committed_seq);
     let file = fixture
         .reader
-        .read_file_with_options(
-            "/small.txt",
-            &ReadFileOptions {
-                at: ReadAt::Live(Consistency::Strong),
-            },
-        )
+        .strong()
+        .read_file("/small.txt")
         .await
         .expect("read");
     assert_eq!(file.bytes, [b's'; 1024]);
@@ -351,20 +340,14 @@ async fn a_read_during_a_publish_starts_from_the_head_before_it() {
     let (during, ()) = futures::join!(fixture.put("/during.txt"), async {
         gate.wait_until_blocked().await;
         fixture.recording.reset();
-        let entry = bounded(
-            NO_WAIT,
-            fixture.reader.stat_with_options("/before.txt", &strong()),
-        )
-        .await
-        .expect("the read doesn't wait for the publish")
-        .expect("stat");
+        let entry = bounded(NO_WAIT, fixture.reader.strong().stat("/before.txt"))
+            .await
+            .expect("the read doesn't wait for the publish")
+            .expect("stat");
         assert_eq!(entry.head_seq, before.committed_seq);
-        let missing = bounded(
-            NO_WAIT,
-            fixture.reader.stat_with_options("/during.txt", &strong()),
-        )
-        .await
-        .expect("the read doesn't wait for the publish");
+        let missing = bounded(NO_WAIT, fixture.reader.strong().stat("/during.txt"))
+            .await
+            .expect("the read doesn't wait for the publish");
         assert_eq!(
             missing.expect_err("the publish hasn't returned").code(),
             ErrorCode::PathNotFound
@@ -395,13 +378,9 @@ async fn a_read_during_a_publish_starts_from_the_head_before_it() {
 /// the claim, so the read reloads the namespace.
 #[tokio::test]
 async fn another_writers_takeover_is_seen_by_a_strong_read_and_past_the_staleness() {
-    for (name, advance_ms, options) in [
-        ("takeover-strong", 0, strong()),
-        (
-            "takeover-eventual",
-            MAX_STALENESS_MS,
-            StatOptions::default(),
-        ),
+    for (name, advance_ms, consistency) in [
+        ("takeover-strong", 0, Consistency::Strong),
+        ("takeover-eventual", MAX_STALENESS_MS, Consistency::Eventual),
     ] {
         let fixture = fixture(name, Parked::WalPuts).await;
         let peer_id = format!("{name}-peer");
@@ -430,9 +409,12 @@ async fn another_writers_takeover_is_seen_by_a_strong_read_and_past_the_stalenes
 
         fixture.clock.advance_ms(advance_ms);
         let (positions, anchors) = fixture.head_sources();
-        let entry = fixture
-            .reader
-            .stat_with_options("/peer.txt", &options)
+        let reader = match consistency {
+            Consistency::Eventual => fixture.reader.clone(),
+            Consistency::Strong => fixture.reader.strong(),
+        };
+        let entry = reader
+            .stat("/peer.txt")
             .await
             .expect("the check finds the claim");
         assert_eq!(entry.head_seq, peer_commit.committed_seq, "{name}");
@@ -474,7 +456,8 @@ async fn a_walk_past_its_cap_drops_the_position() {
     fixture.recording.reset();
     fixture
         .reader
-        .stat_with_options("/small.txt", &strong())
+        .strong()
+        .stat("/small.txt")
         .await
         .expect("stat");
     let operations = fixture.recording.take();
@@ -778,15 +761,12 @@ async fn a_refresh_that_spans_a_change_of_unknown_effect_installs_nothing() {
         .expect("load the view");
     let gate = fixture.recording.inner();
     gate.block_next();
-    let options = strong();
-    let (refreshed, ()) = futures::join!(
-        fixture.reader.stat_with_options("/small.txt", &options),
-        async {
-            gate.wait_until_blocked().await;
-            fixture.drop_position().await;
-            gate.release();
-        }
-    );
+    let strong = fixture.reader.strong();
+    let (refreshed, ()) = futures::join!(strong.stat("/small.txt"), async {
+        gate.wait_until_blocked().await;
+        fixture.drop_position().await;
+        gate.release();
+    });
     refreshed.expect("the read whose refresh spans the fork");
     let (positions, anchors) = fixture.head_sources();
     fixture.recording.reset();
@@ -1009,7 +989,8 @@ async fn a_fold_from_a_collected_position_starts_from_the_newest_manifest() {
     );
     fixture
         .reader
-        .stat_with_options("/small.txt", &strong())
+        .strong()
+        .stat("/small.txt")
         .await
         .expect("stat");
     let operations = fixture.recording.take();
@@ -1042,7 +1023,8 @@ async fn a_retention_advance_from_a_collected_position_drops_the_position() {
     );
     fixture
         .reader
-        .stat_with_options("/small.txt", &strong())
+        .strong()
+        .stat("/small.txt")
         .await
         .expect("stat");
     let operations = fixture.recording.take();
@@ -1138,17 +1120,19 @@ async fn a_wave_of_reads_shares_at_most_two_checks() {
     let gate = fixture.recording.inner();
     gate.block_next();
     fixture.recording.reset();
-    let first_options = strong();
-    let first = fixture
-        .reader
-        .stat_with_options("/small.txt", &first_options);
+    let strong = fixture.reader.strong();
+    let first = strong.stat("/small.txt");
     let (first, ()) = futures::join!(first, async {
         gate.wait_until_blocked().await;
-        let reads = [strong(), strong(), strong(), StatOptions::default()];
-        let mut wave =
-            pin!(futures::future::join_all(reads.iter().map(|options| {
-                fixture.reader.stat_with_options("/small.txt", options)
-            }),));
+        let readers = [
+            strong.clone(),
+            strong.clone(),
+            strong.clone(),
+            fixture.reader.clone(),
+        ];
+        let mut wave = pin!(futures::future::join_all(
+            readers.iter().map(|reader| reader.stat("/small.txt"))
+        ));
         assert!(
             futures::poll!(wave.as_mut()).is_pending(),
             "the reads wait for the parked check"
@@ -1614,7 +1598,7 @@ async fn reads_of_the_manifest_alone_from_a_collected_position_succeed() {
         if metadata {
             fixture
                 .reader
-                .metadata_with_options(&loonfs::LiveReadOptions::default())
+                .head_metadata()
                 .await
                 .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
         } else {
@@ -1825,12 +1809,8 @@ async fn a_strong_read_from_a_collected_manifest_reads_the_newest_manifest() {
     fixture.recording.reset();
     let file = fixture
         .reader
-        .read_file_with_options(
-            "/small.txt",
-            &ReadFileOptions {
-                at: ReadAt::Live(Consistency::Strong),
-            },
-        )
+        .strong()
+        .read_file("/small.txt")
         .await
         .expect("the read runs again from the newest manifest");
     assert_eq!(file.bytes, [b's'; 1024]);
@@ -1870,7 +1850,9 @@ async fn a_strong_read_from_a_collected_manifest_reads_the_newest_manifest() {
 /// Checks that the reads of a subject's administrator rights succeed
 /// from a cached head whose manifest a collection deleted, when neither the
 /// segment cache nor the store has the manifest: a deletion, a lookup of a
-/// snapshot, a listing of a snapshot's files, and a stat at a snapshot.
+/// snapshot, and a listing of a snapshot's files and a stat through a view
+/// of a snapshot, which run inside `read_through_views` as an HTTP read of a
+/// snapshot does.
 ///
 /// The writer session closes, so its position becomes the cached head. Each
 /// check reads the root's access row at a `strong` head, whose manifest check
@@ -1911,18 +1893,17 @@ async fn administrator_checks_from_a_collected_position_succeed() {
                 .map(drop),
             "get-snapshot" => reader.get_snapshot(&snapshot_id).await.map(drop),
             "snapshot-files" => reader
-                .list_snapshot_files(&snapshot_id)
-                .page()
+                .read_through_views(|| async {
+                    let view = reader.read_view_at_snapshot(&snapshot_id).await?;
+                    view.list_files().page().await
+                })
                 .await
                 .map(drop),
             _ => reader
-                .stat_with_options(
-                    "/small.txt",
-                    &StatOptions {
-                        at: ReadAt::Snapshot(snapshot_id),
-                        ..StatOptions::default()
-                    },
-                )
+                .read_through_views(|| async {
+                    let view = reader.read_view_at_snapshot(&snapshot_id).await?;
+                    view.stat("/small.txt").await
+                })
                 .await
                 .map(drop),
         };

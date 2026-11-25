@@ -1344,7 +1344,7 @@ async fn a_restarted_runtime_reads_a_folded_file_from_the_ssd_tier() {
 /// request.
 #[tokio::test]
 async fn a_read_after_an_extension_publication_runs_one_discovery() {
-    use crate::{Consistency, ReadAt, StatOptions};
+    use crate::StatOptions;
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
     use loonfs_types::format::manifest::ExtensionEntry;
     use loonfs_types::ExtensionName;
@@ -1381,10 +1381,7 @@ async fn a_read_after_an_extension_publication_runs_one_discovery() {
         .await
         .expect("maintenance runtime");
     let maintenance = runtime.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-    let stat = StatOptions {
-        at: ReadAt::Live(Consistency::Eventual),
-        ..StatOptions::default()
-    };
+    let stat = StatOptions::default();
     let namespace_handle = runtime
         .open_namespace(&namespace)
         .expect("open the namespace");
@@ -1411,7 +1408,7 @@ async fn a_read_after_an_extension_publication_runs_one_discovery() {
     store.reset();
     let pinned = maintenance
         .core
-        .pinned_read(&namespace, Consistency::Eventual)
+        .pinned_read(&namespace, crate::Consistency::Eventual)
         .await
         .expect("read the namespace");
     let found = pinned

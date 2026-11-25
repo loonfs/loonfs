@@ -297,9 +297,6 @@ pub(crate) fn request(pattern: &str) -> GrepRequest {
         scope: GrepScope::Namespace,
         allow_stale: false,
         allow_scan: false,
-        // A query follows the worker's publication of the index, which
-        // doesn't move the runtime's cached head, so it asks for `strong`.
-        consistency: loonfs::Consistency::Strong,
     }
 }
 
@@ -357,7 +354,9 @@ pub(crate) fn default_block_cache() -> Arc<GrepBlockCache> {
 }
 
 /// One composed query over caller-chosen parts, for tests that want a cold
-/// service or a reader other than a host's own.
+/// service or a reader other than a host's own. A query follows the worker's
+/// publication of the index, which doesn't move the runtime's cached head, so
+/// it reads `strong`.
 pub(crate) async fn grep_with(
     service: &GrepService,
     reader: &LoonFs<ReadOnly>,
@@ -366,7 +365,7 @@ pub(crate) async fn grep_with(
     request: &GrepRequest,
     page: PageRequest<String>,
 ) -> Result<GrepResponse, GrepError> {
-    let reads = NamespaceReads::new(reader.clone(), namespace_id);
+    let reads = NamespaceReads::new(reader.clone(), namespace_id).strong();
     service.query(request, page, &reads, store).await
 }
 
