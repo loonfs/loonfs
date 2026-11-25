@@ -382,10 +382,12 @@ async fn a_lost_fence_acknowledgment_never_fences_a_lone_writer() {
 }
 
 /// Checks that a session's floor object put with an unknown outcome leaves
-/// the session owing a fence too, because that put also skips the check
-/// after the put (format spec, "Advancing the retention floor").
+/// the session owing no fence, because collection never empties a floor
+/// object's number. The put drops the position, and the session's next
+/// commit loads the namespace from the store and succeeds (format spec,
+/// "Advancing the retention floor").
 #[tokio::test]
-async fn an_unknown_floor_object_put_leaves_the_session_owing_a_fence() {
+async fn an_unknown_floor_object_put_leaves_the_session_owing_no_fence() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let local = LocalFsStore::new(directory.path()).expect("store");
@@ -416,8 +418,10 @@ async fn an_unknown_floor_object_put_leaves_the_session_owing_a_fence() {
     assert!(engine.writer_position().is_none());
     assert_matches!(
         *engine.position.lock_session(),
-        WriterSessionStatus::HoldsEpochOwesFence(_)
+        WriterSessionStatus::Acquired(_)
     );
+    publish_one(&mut engine, &writer, "beta").await;
+    assert_readable(&local, &namespace_id, &["alpha", "beta"]).await;
 }
 
 /// Checks that a session whose WAL put had an unknown outcome is fenced by a
