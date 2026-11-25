@@ -7,7 +7,7 @@
 //! dropped.
 
 use super::classify::Classifier;
-use super::operations::{BindingChange, InodePlan, Skip};
+use super::operations::{BindingChange, Skip};
 use crate::error::{CoreError, Result};
 use crate::metadata::AncestorWalk;
 use loonfs_objectstore::ObjectStore;
@@ -277,13 +277,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                     .state(holder)
                     .await?
                     .and_then(|state| state.conflict_version());
-                // Takers are rare, because each one's holder had its move or
-                // delete skipped, so a scan finds the taker's plan.
                 let skip = self
                     .plans
-                    .iter()
-                    .find(|plan| plan.inode_id == taker)
-                    .map_or(Skip::Whole, InodePlan::skip);
+                    .binary_search_by_key(&taker, |plan| plan.inode_id)
+                    .map_or(Skip::Whole, |index| self.plans[index].skip());
                 self.target_conflict(taker, skip, MergeConflictKind::Name, theirs)
                     .await?;
                 recorded += 1;
@@ -292,7 +289,8 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     }
 
     /// Records the conflict of the plan of `inode_id`, which skips `skip`
-    /// (see [`InodePlan::skip`]), or nothing when that's already skipped.
+    /// (see [`InodePlan::skip`](super::operations::InodePlan::skip)), or
+    /// nothing when that's already skipped.
     pub(super) async fn target_conflict(
         &mut self,
         inode_id: InodeId,

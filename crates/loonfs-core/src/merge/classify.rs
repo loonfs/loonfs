@@ -71,6 +71,10 @@ pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
     /// provenance read, and whether each commit is a merge from this fork.
     /// It grows with the rows that the merge replaces.
     pub(super) own_seqs: HashMap<CommitSeq, bool>,
+    /// At most one plan for each inode, in inode ID order, because
+    /// [`Self::classify`] adds them in that order. Later passes change or
+    /// drop plans but never reorder them, so a plan is found by a binary
+    /// search on its inode ID.
     pub(super) plans: Vec<InodePlan>,
     /// An upper bound on the commit's planned WAL record so far.
     pub(super) planned_bytes: usize,
