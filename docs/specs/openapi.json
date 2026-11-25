@@ -4084,7 +4084,7 @@
             "description": "The replay commit applied to the new fork. A retry with the same commit\nID returns the same commit."
           },
           "conflicts": {
-            "description": "The replay commit's conflict report, with one entry for each inode whose change the replay\ncommit didn't apply. It's empty when the replay commit left nothing out. The replay\ncommit's merge record stores the report, so a retry with the same commit ID returns the\nsame report.",
+            "description": "The replay commit's conflict report, with one entry for each conflicting change that the\nreplay commit didn't apply, so an inode whose content and attributes both conflict has two\nentries. It's empty when the replay commit left nothing out. The replay\ncommit's merge record stores the report, so a retry with the same commit ID returns the\nsame report.",
             "items": {
               "$ref": "#/components/schemas/MergeConflict"
             },

@@ -185,17 +185,14 @@ impl PendingCommit {
 }
 
 /// The conflict report of one replay commit: the changes that it left out.
-///
-/// A replay commit's report has at most one entry for each inode that the
-/// fork's commits in its range touched, so the reports of one rebase have at
-/// most one entry for each inode that the rebased range touched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConflictReport {
     /// The fork sequence that the replay commit replayed the fork's commits
     /// through.
     pub through_seq: CommitSeq,
-    /// One entry for each inode whose change the replay commit left out.
+    /// One entry for each conflicting change that the replay commit left
+    /// out.
     pub conflicts: Vec<MergeConflict>,
 }
 

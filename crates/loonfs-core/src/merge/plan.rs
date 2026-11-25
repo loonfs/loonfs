@@ -173,6 +173,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             planned_bytes,
             subtree_checks: Vec::new(),
             conflicted: HashSet::new(),
+            skipped: HashMap::new(),
             first_conflict: None,
             replay: snapshot.map(|snapshot| Replay {
                 snapshot,

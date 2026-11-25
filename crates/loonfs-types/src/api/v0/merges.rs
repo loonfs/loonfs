@@ -76,8 +76,9 @@ pub struct ReplayForkResponse {
     /// The replay commit applied to the new fork. A retry with the same commit
     /// ID returns the same commit.
     pub commit: Commit,
-    /// The replay commit's conflict report, with one entry for each inode whose change the replay
-    /// commit didn't apply. It's empty when the replay commit left nothing out. The replay
+    /// The replay commit's conflict report, with one entry for each conflicting change that the
+    /// replay commit didn't apply, so an inode whose content and attributes both conflict has two
+    /// entries. It's empty when the replay commit left nothing out. The replay
     /// commit's merge record stores the report, so a retry with the same commit ID returns the
     /// same report.
     pub conflicts: Vec<MergeConflict>,

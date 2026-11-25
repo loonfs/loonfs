@@ -5,7 +5,7 @@
 //! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
 
 use super::classify::{Classifier, SubtreeCheck};
-use super::operations::BindingChange;
+use super::operations::{BindingChange, Skip};
 use super::state::StateReader;
 use super::targets::Targets;
 use super::{
@@ -39,8 +39,8 @@ impl ReplayPlan {
         &self.record
     }
 
-    /// Returns the conflict report, with one entry for each inode whose
-    /// change the replay commit leaves out.
+    /// Returns the conflict report, with one entry for each conflicting
+    /// change that the replay commit leaves out.
     pub fn conflicts(&self) -> &[MergeConflict] {
         &self.record.conflicts
     }
@@ -300,7 +300,7 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
         Ok(parts)
     }
 
-    /// Skips the plans of the conflicting inodes, and records a `dependency`
+    /// Leaves out the skipped parts of the plans, and records a `dependency`
     /// conflict for each change that depends on a skipped change, in the
     /// order that it finds them:
     ///
@@ -338,9 +338,16 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
                 break;
             }
         }
-        let conflicted = &self.conflicted;
+        let skipped = &self.skipped;
         self.plans
-            .retain(|plan| !conflicted.contains(&plan.inode_id));
+            .retain_mut(|plan| match skipped.get(&plan.inode_id) {
+                Some(Skip::Whole) => false,
+                Some(Skip::Binding) => {
+                    plan.binding = None;
+                    true
+                }
+                None => true,
+            });
         Ok(())
     }
 
@@ -355,13 +362,13 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
         let mut recorded = 0;
         for index in 0..self.plans.len() {
             let inode_id = self.plans[index].inode_id;
-            if self.conflicted.contains(&inode_id) {
+            if self.skipped.contains_key(&inode_id) {
                 continue;
             }
             let Some(directory) = depends_on.get(&inode_id).and_then(|directories| {
                 directories
                     .iter()
-                    .find(|directory| self.conflicted.contains(*directory))
+                    .find(|directory| self.skipped.contains_key(*directory))
                     .copied()
             }) else {
                 continue;
@@ -371,7 +378,8 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
                 .state(directory)
                 .await?
                 .and_then(|state| state.conflict_version());
-            self.target_conflict(inode_id, MergeConflictKind::Dependency, theirs)
+            let skip = self.plans[index].skip();
+            self.target_conflict(inode_id, skip, MergeConflictKind::Dependency, theirs)
                 .await?;
             recorded += 1;
         }
@@ -393,7 +401,12 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
         examined: &mut HashSet<InodeId>,
     ) -> Result<usize> {
         let mut recorded = 0;
-        let skipped: BTreeSet<_> = self.conflicted.difference(examined).copied().collect();
+        let skipped: BTreeSet<_> = self
+            .skipped
+            .keys()
+            .filter(|inode_id| !examined.contains(*inode_id))
+            .copied()
+            .collect();
         for inode_id in skipped {
             examined.insert(inode_id);
             let Some(ours) = self
@@ -406,9 +419,11 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
             };
             let mut walk = AncestorWalk::new(inode_id);
             while let Some(ancestor) = walk.next(self.theirs.session()).await? {
-                if deleted_directories.contains(&ancestor) && !self.conflicted.contains(&ancestor) {
+                if deleted_directories.contains(&ancestor) && !self.skipped.contains_key(&ancestor)
+                {
                     self.target_conflict(
                         ancestor,
+                        Skip::Whole,
                         MergeConflictKind::Dependency,
                         Some(ours.clone()),
                     )
