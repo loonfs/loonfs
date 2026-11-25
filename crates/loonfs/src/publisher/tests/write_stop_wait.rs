@@ -628,7 +628,7 @@ async fn a_commit_at_the_byte_write_stop_waits_for_the_fold_and_commits() {
         builder.config(crate::RuntimeConfig {
             min_publish_interval_ms: 0,
             inline_content: crate::InlineContentPolicy {
-                inline_content_threshold_bytes: Some(MAX_WAL_INLINE_CONTENT_BYTES),
+                inline_content_threshold_bytes: MAX_WAL_INLINE_CONTENT_BYTES,
                 inline_content_wal_object_budget_bytes: MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
                 inline_content_tail_limit_bytes: 2 * MAX_UNFOLDED_WAL_BYTES,
             },
@@ -746,7 +746,7 @@ async fn inline_commits_stop_at_the_inline_tail_limit_until_a_fold() {
             min_publish_interval_ms: 0,
             publication: short_write_stop_wait(),
             inline_content: crate::InlineContentPolicy {
-                inline_content_threshold_bytes: Some(MAX_WAL_INLINE_CONTENT_BYTES),
+                inline_content_threshold_bytes: MAX_WAL_INLINE_CONTENT_BYTES,
                 inline_content_tail_limit_bytes: LIMIT,
                 ..crate::InlineContentPolicy::default()
             },

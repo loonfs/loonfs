@@ -35,12 +35,12 @@ impl Namespace<Writable> {
         bytes: &[u8],
         actor: &ActorId,
     ) -> Result<PreparedContent> {
-        if self
-            .core
-            .config()
-            .inline_content
-            .inline_content_threshold_bytes
-            .is_some_and(|threshold| bytes.len() <= threshold)
+        if bytes.len()
+            <= self
+                .core
+                .config()
+                .inline_content
+                .inline_content_threshold_bytes
         {
             return Ok(PreparedContent::inline(
                 bytes::Bytes::copy_from_slice(bytes),
@@ -81,33 +81,31 @@ impl Namespace<Writable> {
         mut body: ByteStream,
         actor: &ActorId,
     ) -> Result<PreparedContent> {
-        if let Some(threshold) = self
+        let threshold = self
             .core
             .config()
             .inline_content
-            .inline_content_threshold_bytes
-        {
-            let mut buffered = bytes::BytesMut::with_capacity(threshold + 1);
-            while buffered.len() <= threshold {
-                let Some(chunk) = body.next().await else {
-                    return Ok(PreparedContent::inline(
-                        buffered.freeze(),
-                        self.core.store().checksum_algorithm(),
-                    ));
-                };
-                let mut chunk = chunk.map_err(|error| crate::CoreError::Store {
-                    object_key: "upload body".to_owned(),
-                    message: error.public_message().into_owned(),
-                    kind: error.kind(),
-                })?;
-                let take = chunk.len().min(threshold + 1 - buffered.len());
-                buffered.extend_from_slice(&chunk.split_to(take));
-                if buffered.len() > threshold {
-                    body = futures::stream::iter([Ok(buffered.freeze()), Ok(chunk)])
-                        .chain(body)
-                        .boxed();
-                    break;
-                }
+            .inline_content_threshold_bytes;
+        let mut buffered = bytes::BytesMut::with_capacity(threshold + 1);
+        while buffered.len() <= threshold {
+            let Some(chunk) = body.next().await else {
+                return Ok(PreparedContent::inline(
+                    buffered.freeze(),
+                    self.core.store().checksum_algorithm(),
+                ));
+            };
+            let mut chunk = chunk.map_err(|error| crate::CoreError::Store {
+                object_key: "upload body".to_owned(),
+                message: error.public_message().into_owned(),
+                kind: error.kind(),
+            })?;
+            let take = chunk.len().min(threshold + 1 - buffered.len());
+            buffered.extend_from_slice(&chunk.split_to(take));
+            if buffered.len() > threshold {
+                body = futures::stream::iter([Ok(buffered.freeze()), Ok(chunk)])
+                    .chain(body)
+                    .boxed();
+                break;
             }
         }
         let context = self

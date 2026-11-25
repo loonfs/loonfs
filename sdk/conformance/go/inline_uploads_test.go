@@ -26,8 +26,7 @@ type inlineCase struct {
 	Name      string                   `json:"name"`
 	Bytes     int                      `json:"bytes"`
 	Size      *int64                   `json:"size"`
-	Limit     json.RawMessage          `json:"limit"`
-	Feature   *bool                    `json:"feature"`
+	Limit     *int64                   `json:"limit"`
 	Inline    bool                     `json:"inline"`
 	Error     bool                     `json:"error"`
 	Fault     bool                     `json:"fault"`
@@ -50,16 +49,10 @@ func TestInlinePreparationAndRetry(t *testing.T) {
 			}
 			source := &uploadSource{reader: strings.NewReader(string(content)), fault: fixture.Fault}
 			limit := int64(65536)
-			limits := map[string]int64{}
-			if string(fixture.Limit) != "null" {
-				if len(fixture.Limit) != 0 {
-					if err := json.Unmarshal(fixture.Limit, &limit); err != nil {
-						t.Fatal(err)
-					}
-				}
-				limits["commit.max_inline_content_bytes_per_operation"] = limit
+			if fixture.Limit != nil {
+				limit = *fixture.Limit
 			}
-			feature := fixture.Feature == nil || *fixture.Feature
+			limits := map[string]int64{"commit.max_inline_content_bytes_per_operation": limit}
 			session := map[string]any{"namespace_id": "demo", "upload_id": "upl_test", "mode": "service_proxied", "checksum_algorithm": fixture.Algorithm}
 			claim := map[string]any{"kind": "blob_v1", "content_id": "con_00000000000000000000000001", "size_bytes": len(content), "checksum": mustChecksum(t, fixture.Algorithm, content)}
 			var mu sync.Mutex
@@ -77,19 +70,17 @@ func TestInlinePreparationAndRetry(t *testing.T) {
 					if len(paths) != 1 {
 						t.Error("publication reselected transport")
 					}
-					value = map[string]any{"protocol_version": "v0", "api_groups": []string{"filesystem/v0"}, "features": map[string]bool{"filesystem.commits.inline_content": feature}, "limits": limits}
+					value = map[string]any{"protocol_version": "v0", "api_groups": []string{"filesystem/v0"}, "features": map[string]bool{"filesystem.commits.inline_content": true}, "limits": limits}
 				case strings.HasSuffix(path, "/uploads"):
 					if fixture.Inline || fixture.Error {
 						t.Error("unexpected staged upload")
 					}
-					if feature && string(fixture.Limit) != "null" {
-						bound := limit
-						if bound > 65536 {
-							bound = 65536
-						}
-						if source.position.Load() != bound+1 {
-							t.Error("lookahead did not stop at the bound")
-						}
+					bound := limit
+					if bound > 65536 {
+						bound = 65536
+					}
+					if source.position.Load() != bound+1 {
+						t.Error("lookahead did not stop at the bound")
 					}
 					session["status"] = "open"
 					session["expires_at_ms"] = 2000000000000

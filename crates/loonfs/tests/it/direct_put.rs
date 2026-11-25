@@ -314,7 +314,7 @@ fn put_file_gates_publish_on_its_own_content_write_without_probing() {
         |builder| {
             builder.config(loonfs::RuntimeConfig {
                 inline_content: loonfs::InlineContentPolicy {
-                    inline_content_threshold_bytes: None,
+                    inline_content_threshold_bytes: 0,
                     ..Default::default()
                 },
                 ..loonfs::RuntimeConfig::default()
@@ -577,7 +577,7 @@ fn a_transient_content_failure_fails_only_its_own_concurrent_put() {
         let fs = open_runtime_with_async(object_store, "window-abort-test", |builder| {
             builder.config(loonfs::RuntimeConfig {
                 inline_content: loonfs::InlineContentPolicy {
-                    inline_content_threshold_bytes: None,
+                    inline_content_threshold_bytes: 0,
                     ..Default::default()
                 },
                 ..loonfs::RuntimeConfig::default()

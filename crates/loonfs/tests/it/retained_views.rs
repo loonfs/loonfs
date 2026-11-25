@@ -31,7 +31,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             builder.config(loonfs::RuntimeConfig {
                 min_publish_interval_ms: 0,
                 inline_content: InlineContentPolicy {
-                    inline_content_threshold_bytes: Some(64),
+                    inline_content_threshold_bytes: 64,
                     ..Default::default()
                 },
                 ..loonfs::RuntimeConfig::default()

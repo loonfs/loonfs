@@ -94,7 +94,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         "loonfs-server-put",
         "http-put",
     );
-    config.inline_content.inline_content_threshold_bytes = None;
+    config.inline_content.inline_content_threshold_bytes = 0;
     let harness = start_server(config).await;
 
     harness
@@ -258,7 +258,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         "loonfs-server-trimmed",
         "http-trimmed",
     );
-    config.inline_content.inline_content_threshold_bytes = None;
+    config.inline_content.inline_content_threshold_bytes = 0;
     let harness = start_server(config).await;
 
     let namespace = namespace_id("demo");

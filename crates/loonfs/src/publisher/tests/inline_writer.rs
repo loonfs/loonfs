@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 fn policy() -> InlineContentPolicy {
     InlineContentPolicy {
-        inline_content_threshold_bytes: Some(4),
+        inline_content_threshold_bytes: 4,
         ..Default::default()
     }
 }
@@ -88,7 +88,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
-                inline_content_threshold_bytes: Some(4),
+                inline_content_threshold_bytes: 4,
                 ..Default::default()
             },
             min_publish_interval_ms: 0,
@@ -488,10 +488,10 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
 }
 
 #[tokio::test]
-async fn disabled_and_above_threshold_writes_keep_uploaded_object_identity() {
+async fn zero_threshold_and_above_threshold_writes_keep_uploaded_object_identity() {
     for options in [
         InlineContentPolicy {
-            inline_content_threshold_bytes: None,
+            inline_content_threshold_bytes: 0,
             ..Default::default()
         },
         policy(),
@@ -500,7 +500,7 @@ async fn disabled_and_above_threshold_writes_keep_uploaded_object_identity() {
         let bytes: &[u8] = if writer
             .inline_content_policy()
             .inline_content_threshold_bytes
-            .is_none()
+            == 0
         {
             b"tiny"
         } else {
@@ -735,7 +735,7 @@ async fn retained_receipts_answer_retries_when_content_writes_fail() {
             .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
             .config(crate::RuntimeConfig {
                 inline_content: InlineContentPolicy {
-                    inline_content_threshold_bytes: Some(8),
+                    inline_content_threshold_bytes: 8,
                     inline_content_wal_object_budget_bytes: 4,
                     ..Default::default()
                 },
@@ -812,7 +812,7 @@ async fn retained_receipts_answer_retries_when_content_writes_fail() {
 async fn a_commit_whose_values_stay_inline_is_charged_its_own_weight() {
     let (_directory, _store, writer, namespace, namespace_writer) =
         writer_with_policy(InlineContentPolicy {
-            inline_content_threshold_bytes: Some(8),
+            inline_content_threshold_bytes: 8,
             ..policy()
         })
         .await;
@@ -865,7 +865,7 @@ async fn a_commit_over_the_wal_object_budget_publishes_its_values_in_one_wal_obj
         writer_with_policy_and_byte_limit(
             InlineContentPolicy {
                 inline_content_wal_object_budget_bytes: VALUE_BYTES,
-                inline_content_threshold_bytes: Some(MAX_WAL_INLINE_CONTENT_BYTES),
+                inline_content_threshold_bytes: MAX_WAL_INLINE_CONTENT_BYTES,
                 ..policy()
             },
             16 * 1024 * 1024,
@@ -1048,7 +1048,7 @@ async fn a_fold_that_leaves_the_tail_over_the_trigger_folds_again() {
         .session_fold_at_wal_objects(NonZeroU64::MIN)
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
-                inline_content_threshold_bytes: Some(4),
+                inline_content_threshold_bytes: 4,
                 ..Default::default()
             },
             min_publish_interval_ms: 0,
@@ -1179,7 +1179,7 @@ const LARGE_FILE_BYTES: usize = MAX_WAL_INLINE_CONTENT_BYTES;
 /// An inline policy that keeps each file of [`LARGE_FILE_BYTES`] inline.
 fn large_file_policy() -> InlineContentPolicy {
     InlineContentPolicy {
-        inline_content_threshold_bytes: Some(LARGE_FILE_BYTES),
+        inline_content_threshold_bytes: LARGE_FILE_BYTES,
         ..InlineContentPolicy::default()
     }
 }
@@ -1383,7 +1383,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
     for (options, message) in [
         (
             InlineContentPolicy {
-                inline_content_threshold_bytes: Some(MAX_WAL_INLINE_CONTENT_BYTES + 1),
+                inline_content_threshold_bytes: MAX_WAL_INLINE_CONTENT_BYTES + 1,
                 ..policy()
             },
             format!(
@@ -1439,7 +1439,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
-                inline_content_threshold_bytes: Some(0),
+                inline_content_threshold_bytes: 0,
                 ..policy()
             },
             ..crate::RuntimeConfig::default()
@@ -1462,7 +1462,7 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
-                inline_content_threshold_bytes: Some(4),
+                inline_content_threshold_bytes: 4,
                 ..Default::default()
             },
             min_publish_interval_ms: 0,

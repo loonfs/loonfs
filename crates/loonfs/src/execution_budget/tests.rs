@@ -705,7 +705,7 @@ async fn content_staging_holds_the_shared_write_permit_without_publication_admis
         .execution_budget(budget.clone())
         .config(crate::RuntimeConfig {
             inline_content: crate::InlineContentPolicy {
-                inline_content_threshold_bytes: None,
+                inline_content_threshold_bytes: 0,
                 ..Default::default()
             },
             ..crate::RuntimeConfig::default()

@@ -36,7 +36,7 @@ struct Harness {
 /// inline.
 fn staging_policy() -> loonfs::InlineContentPolicy {
     loonfs::InlineContentPolicy {
-        inline_content_threshold_bytes: None,
+        inline_content_threshold_bytes: 0,
         ..Default::default()
     }
 }

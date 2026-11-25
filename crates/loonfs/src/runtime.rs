@@ -216,22 +216,19 @@ impl LoonFs<ReadOnly> {
 
 impl LoonFs<Writable> {
     /// Returns the capability document for this embedded build (API spec,
-    /// "Capability discovery"), with merges, and with inline commit content
-    /// when this runtime prepares it.
+    /// "Capability discovery"), with merges and inline commit content.
     pub fn capabilities(&self) -> CapabilityDocument {
         let mut capabilities = self.core.capabilities();
         capabilities
             .features
             .insert(FEATURE_MERGES.to_owned(), true);
-        if let Some(threshold) = self.inline_content_policy().inline_content_threshold_bytes {
-            capabilities
-                .features
-                .insert(FEATURE_COMMIT_INLINE_CONTENT.to_owned(), true);
-            capabilities.limits.insert(
-                LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION.to_owned(),
-                u64_from_usize(threshold),
-            );
-        }
+        capabilities
+            .features
+            .insert(FEATURE_COMMIT_INLINE_CONTENT.to_owned(), true);
+        capabilities.limits.insert(
+            LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION.to_owned(),
+            u64_from_usize(self.inline_content_policy().inline_content_threshold_bytes),
+        );
         capabilities
     }
 
