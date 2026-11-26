@@ -276,3 +276,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Ok(decoded.map(|decoded| head.basis().decoded(decoded.manifest)))
     }
 }
+
+#[cfg(test)]
+mod tests;

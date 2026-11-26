@@ -1,5 +1,6 @@
 //! Composable object-store wrappers for test fault injection and observation.
 
+mod before_store;
 mod blocking_store;
 mod buffer_watch_store;
 mod concurrency_watch_store;
@@ -20,6 +21,7 @@ mod recording_store;
 mod replace;
 
 pub use crate::delegate_object_store;
+pub use before_store::{BeforeInterceptor, BeforeStore};
 pub use blocking_store::{BlockingInterceptor, BlockingStore};
 pub use buffer_watch_store::{BufferPeaks, BufferWatchStore};
 pub use concurrency_watch_store::{

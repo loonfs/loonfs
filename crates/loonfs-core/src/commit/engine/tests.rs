@@ -1,6 +1,7 @@
 //! Commit engine tests: admission weight, identity, ceilings, fencing, basis
 //! checks, and publish-view caching.
 
+mod collision;
 mod content;
 mod deletion;
 mod inline;
@@ -30,7 +31,7 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::wal::{
     MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
-use loonfs_types::CommitId;
+use loonfs_types::{CommitId, NamespaceId};
 use loonfs_types::{CommitSeq, ContentRef, PrincipalId, PrincipalSet, Subject};
 use loonfs_types::{ContentId, WriterEpoch};
 use std::assert_matches;
@@ -576,60 +577,6 @@ async fn writer_after_one_publish<'a>(
     (engine, timer, writer)
 }
 
-/// Checks that a quiet writer whose next WAL number another process took
-/// with a floor object collides with the floor object, drops its position,
-/// and runs discovery on its next publication, which writes the commit
-/// above the floor object, against the new floor.
-#[tokio::test]
-async fn a_quiet_writer_whose_next_number_is_a_floor_object_commits_above_it() {
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = gated_store(&directory, KeyPredicate::new(|_| false));
-    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-    for name in ["beta", "gamma", "delta"] {
-        publish_one(&mut engine, &writer, name).await;
-    }
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let tip = engine
-        .writer_position()
-        .expect("a position")
-        .read_basis()
-        .head
-        .wal_no;
-    let planned = namespace.load_current_manifest().await.expect("planned");
-    namespace
-        .publish_floor_object(&planned, CommitSeq(1))
-        .await
-        .expect("another process creates a floor object");
-
-    timer.advance_ms(QUIET_HOUR_MS);
-    store.reset();
-    let deadline = OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer));
-    let collided = engine
-        .publish_batch(vec![create_dir("zeta", "zeta")], &deadline)
-        .await;
-    assert_matches!(
-        collided.results.as_slice(),
-        [Err(CoreError::WalPublish(
-            crate::wal::WalPublishError::NumberTaken
-        ))]
-    );
-    let operations = store.take();
-    assert!(
-        matches!(operations.as_slice(), [put] if is_wal_put(put, &namespace_id)),
-        "the put is the only request before the collision: {operations:?}"
-    );
-    assert!(engine.writer_position().is_none());
-
-    let retried = engine
-        .publish_batch(vec![create_dir("zeta", "zeta")], &deadline)
-        .await;
-    retried.results[0].as_ref().expect("the retry commits");
-    let position = engine.writer_position().expect("a position");
-    assert_eq!(position.read_basis().head.wal_no.0, tip.0 + 2);
-    assert_eq!(position.retention_floor_seq(), CommitSeq(1));
-}
-
 /// Checks that a writer that commits every few minutes for an hour, against
 /// a manifest that nothing replaces, sends its WAL put and no other request
 /// on each commit, so it never checks its tip and never reads its WAL tail
@@ -656,8 +603,8 @@ async fn a_steady_writer_sends_only_its_wal_puts() {
 }
 
 /// Checks that a quiet writer whose next WAL number a new writer session's
-/// fence took collides with the fence, and that its retry runs discovery,
-/// which finds the new epoch.
+/// fence took collides with the fence and reads it, and that the fence's
+/// higher epoch makes its retry run discovery, which finds the new epoch.
 #[tokio::test]
 async fn a_quiet_writer_collides_with_a_takeover_fence_and_is_fenced() {
     let directory = tempdir().expect("tempdir");
@@ -683,9 +630,14 @@ async fn a_quiet_writer_collides_with_a_takeover_fence_and_is_fenced() {
     );
     let operations = store.take();
     assert!(
-        matches!(operations.as_slice(), [put] if is_wal_put(put, &namespace_id)),
-        "{operations:?}"
+        matches!(
+            operations.as_slice(),
+            [put, RecordedOperation::Get { key, .. }]
+                if is_wal_put(put, &namespace_id) && key == put.key()
+        ),
+        "the put and one read of the fence: {operations:?}"
     );
+    assert!(engine.writer_position().is_none());
     let retried = engine
         .publish_batch(vec![create_dir("beta", "beta")], &deadline)
         .await;
@@ -705,8 +657,8 @@ async fn a_quiet_writer_collides_with_a_takeover_fence_and_is_fenced() {
 
 /// Checks that a writer whose next WAL number another writer takes while
 /// the writer's put is in flight is stopped by its own put. The put
-/// collides, the writer drops its position, and its retry finds that it was
-/// fenced.
+/// collides, the writer reads the fence at the number, whose epoch is
+/// higher, and drops its position, and its retry finds that it was fenced.
 #[tokio::test]
 async fn a_takeover_after_the_last_check_is_found_by_the_put() {
     let directory = tempdir().expect("tempdir");
@@ -746,8 +698,12 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
     assert!(engine.read_position().is_none());
     let operations = store.take();
     assert!(
-        matches!(operations.as_slice(), [put] if is_wal_put(put, &namespace_id)),
-        "{operations:?}"
+        matches!(
+            operations.as_slice(),
+            [put, RecordedOperation::Get { key, .. }]
+                if is_wal_put(put, &namespace_id) && key == put.key()
+        ),
+        "the put and one read of the fence: {operations:?}"
     );
 
     let retried = engine
