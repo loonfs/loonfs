@@ -183,7 +183,7 @@ A reader with manifest 42 and the tail through 307 cached finds WAL object 308 s
 
 If commit 1,011 had written a new revision of `/docs/a.txt` instead, the check would find `A` in the touched set, and LoonFS would plan again from 1,011. `A`'s current revision would then be foreign, so the plan would return `merge_conflict`, and collection would delete the first plan's segments after the grace window.
 
-On a single server whose process already has main's writer epoch, a merge of one file into a namespace whose tail is folded takes the same steps without the claim and the fence. The process pauses its queue, finds the tail empty, and puts one manifest that adds the merge run and no other run.
+On a single server whose process already has main's writer epoch, a merge of one file into a namespace whose tail is folded takes the same steps without the claim and the fence. The process pauses its queue, finds the tail empty, and puts one manifest that adds the merge run and no other run. (A session that sent a WAL put without learning its outcome has no epoch, so it claims and writes a fence first.)
 
 ## What changes in the format and the log protocol
 
@@ -203,7 +203,7 @@ A merge's restore and a floor advance have to be ordered against each other, bec
 
 So no floor object can be written between the publication's read of the tip and its manifest put. A floor object comes from one of three places, and none of them can put a floor object in that window:
 
-- The publishing session's own queue, which stays paused from the read of the tip until the publication learns the put's outcome.
+- The publishing session's own queue, which stays paused from the read of the tip until the publication learns the put's outcome. A WAL put that the queue sent before the pause, whether a commit or a floor object, can still be in flight if the session never learned its outcome. A writer session releases its writer epoch immediately before it sends any WAL put and takes the epoch back only when it learns the outcome ([Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes), and for a floor object [Retention advance in the WAL](retention-advance-in-the-wal.md)). So after an unknown outcome the pause claims the epoch and writes a fence, and the put in flight is either found by the fence's discovery and folded by the merge's manifest, or it collides, or it's written below the fence where no reader replays it (the argument in [Publication and group commit](../specs/format.md#63-publication-and-group-commit) for a session's own put whose outcome is unknown).
 - A session in another process that claims main's writer epoch after the publishing session. The claim publishes a manifest, so the merge's put loses at that number, or the basis that the publication reads has a `writer_epoch` that isn't the session's, and the publication doesn't put its manifest (see guarantee 3 in [The guarantees of the log protocol](#the-guarantees-of-the-log-protocol)). The publication then goes back to the first stage of the check, and its next pause claims main again and reads that session's floor objects in the tail.
 - A session whose position still has an older epoch. Its position's tip is below the publishing session's fence, so its floor object's put collides with an existing WAL object, or it's written at a number that a fold already covered, where no reader replays it ([Writer ownership](../specs/format.md#61-writer-ownership)).
 
