@@ -321,3 +321,105 @@ async fn a_deletion_whose_tombstone_put_loses_its_response_reads_back_whose_tomb
         assert!(current.manifest().payload().status.is_deleted());
     }
 }
+
+/// Checks that a deletion whose tombstone put has an unknown outcome can't
+/// end the namespace below a commit that the session acknowledged after the
+/// unknown outcome, and that the session doesn't acknowledge commits after
+/// the tombstone is written (API spec, "DELETE /v0/namespaces/{ns}": deletion
+/// linearizes at the manifest put).
+///
+/// The session claims at manifest 3, and the deletion folds into manifest 4
+/// and sends its tombstone put to manifest 5. The put fails before it
+/// reaches the store and stays in flight, so the deletion reads manifest 5
+/// back empty and returns `outcome_unknown`. The session then commits
+/// `gamma`, and the put in flight is written at manifest 5. The session
+/// then tries to commit `delta`.
+#[tokio::test]
+async fn a_late_tombstone_put_never_ends_the_namespace_below_an_acknowledged_commit() {
+    use loonfs_objectstore::PutMode;
+    use loonfs_test_support::stores::{FailStore, InjectedError, OperationKind};
+    use std::sync::Mutex;
+
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("late-tombstone").expect("namespace");
+    let local = LocalFsStore::new(directory.path()).expect("store");
+    let writer = context();
+    crate::test_support::NamespaceFixture::new(&local, &namespace_id, &writer)
+        .create()
+        .await
+        .expect("bootstrap");
+    let tombstone_key = metadata_manifest_object(&namespace_id, &loonfs_types::ManifestNo(5));
+    let in_flight: Arc<Mutex<Option<bytes::Bytes>>> = Arc::default();
+    let recorded = Arc::clone(&in_flight);
+    let selected = tombstone_key.clone();
+    let store = FailStore::matching(
+        LocalFsStore::new(directory.path()).expect("store"),
+        move |operation| match operation.kind() {
+            OperationKind::Put {
+                bytes,
+                mode: PutMode::CreateIfAbsent,
+            } if operation.key() == selected => {
+                *recorded.lock().expect("lock") = Some(bytes::Bytes::clone(bytes));
+                true
+            }
+            _ => false,
+        },
+        InjectedError::Transport("tombstone put still in flight".into()),
+    );
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        writer.writer_id.clone(),
+    );
+    publish_one(&mut engine, &writer, "alpha").await;
+
+    store.fail_next(1);
+    let deleted = engine
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &namespace_id),
+            Default::default(),
+        )
+        .await;
+    assert_matches!(deleted, Err(CoreError::OutcomeUnknown { .. }));
+    let tombstone = in_flight
+        .lock()
+        .expect("lock")
+        .take()
+        .expect("the tombstone put");
+
+    let gamma = publish_one(&mut engine, &writer, "gamma").await.results[0]
+        .clone()
+        .expect("gamma");
+    // The provider applies the put in flight now.
+    let late_put = local.put_if_absent(&tombstone_key, tombstone).await;
+    let delta = engine
+        .publish_batch([create_dir("delta", "delta")], &writer.clock())
+        .await
+        .results
+        .remove(0);
+
+    let crate::namespace::control::NewestManifest::Manifest(newest) =
+        crate::test_support::namespace_store(&local, &namespace_id)
+            .find_newest_manifest(crate::test_support::observed_now())
+            .await
+            .expect("newest manifest")
+    else {
+        panic!("the namespace has a newest manifest");
+    };
+    let newest = newest.manifest().payload().clone();
+    let mut broken = Vec::new();
+    if newest.status.is_deleted() && newest.head_seq < gamma.committed_seq {
+        broken.push(format!(
+            "the late tombstone put ({late_put:?}) ended the namespace at manifest {} with head {:?}, below the acknowledged commit gamma at {:?}",
+            newest.manifest_no.0, newest.head_seq, gamma.committed_seq
+        ));
+    }
+    if newest.status.is_deleted() {
+        if let Ok(commit) = &delta {
+            broken.push(format!(
+                "the session acknowledged delta at {:?} after the tombstone was written",
+                commit.committed_seq
+            ));
+        }
+    }
+    assert!(broken.is_empty(), "{broken:#?}");
+}
