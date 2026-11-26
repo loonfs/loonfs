@@ -11,7 +11,9 @@ use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::time::Observation;
-use crate::wal::{discover_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail};
+use crate::wal::{
+    discover_tail, find_kept_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail,
+};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -177,10 +179,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// keeps with the check that found it.
     ///
     /// After the WAL tail above the manifest, the call checks the manifest
-    /// with [`Self::check_newest`]. A successor, or a manifest at or
-    /// below the boundary, makes the call find the newest manifest from the
-    /// boundary and start again (format spec, "Replaying the visible WAL").
-    /// A tombstone has no successor, so it isn't checked.
+    /// with [`Self::check_newest`]. A successor, or a manifest at or below
+    /// the boundary, makes the call find the newest manifest from the
+    /// boundary and continue from it, keeping the WAL objects that it read
+    /// above the newest manifest's `folded_wal_no` (format spec, "Resolving
+    /// the metadata basis"). A tombstone has no successor, so it isn't
+    /// checked.
     pub(crate) async fn load_read_anchor_from_manifest(
         &self,
         held: Held<LoadedManifest>,
@@ -204,9 +208,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
         writer_anchor(anchor)
     }
 
-    /// Loads the anchor at `held`'s manifest, and restarts from the newest
+    /// Loads the anchor at `held`'s manifest, and continues from the newest
     /// manifest when the check after the tail finds a newer one (see
     /// [`Self::load_read_anchor_from_manifest`]).
+    ///
+    /// A pass that continues reads the tail above the newer manifest only
+    /// when the newer manifest folds past what the last pass read, and
+    /// otherwise keeps that pass's objects (see [`find_kept_tail`]). A pass
+    /// that can't keep them, or a pass after a codec error, reads the whole
+    /// tail above its manifest. The passes stop at
+    /// [`MAX_CONTENTION_ATTEMPTS`](crate::limits::MAX_CONTENTION_ATTEMPTS),
+    /// which bounds a discovery that keeps finding newer manifests.
     ///
     /// With `acquired_writer`, the call checks the writer epoch of each
     /// manifest before it reads the WAL tail above that manifest (see
@@ -218,11 +230,21 @@ impl<S: ObjectStore> NamespaceStore<S> {
         acquired_writer: Option<&AcquiredWriter>,
         check_manifest: bool,
     ) -> CoreResult<NamespaceReadAnchor> {
+        // The anchor of the last pass, whose check found a newer manifest. The
+        // first pass, and a pass after a codec error, has none.
+        let mut previous: Option<NamespaceReadAnchor> = None;
         for _attempt in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
             if let Some(acquired_writer) = acquired_writer {
                 ensure_stored_writer_epoch(held.manifest().payload(), acquired_writer)?;
             }
-            match discover_tail(&self.store, held.manifest()).await {
+            let kept = previous.take().and_then(|previous| {
+                find_kept_tail(held.manifest(), &previous.read_state, &previous.tail)
+            });
+            let discovered = match kept {
+                Some(kept) => Ok(kept),
+                None => discover_tail(&self.store, held.manifest()).await,
+            };
+            match discovered {
                 Ok(DiscoveredTail { head: state, tail }) => {
                     let mut anchor = NamespaceReadAnchor {
                         read_state: state,
@@ -239,9 +261,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     if self.check_newest(&mut anchor.held, observed).await? == Checked::Newest {
                         return Ok(anchor);
                     }
+                    // The next pass can keep WAL objects that this pass read
+                    // before the newer manifest was loaded, so the newer
+                    // manifest keeps this check time too, and not a later one.
                     held = self
-                        .load_current_basis(anchor.held.checked().renew())
+                        .load_current_basis(anchor.held.checked().clone())
                         .await?;
+                    previous = Some(anchor);
                 }
                 Err(error @ ControlObjectLoadError::Codec { .. }) => {
                     let current = self.load_current_basis(held.checked().renew()).await?;

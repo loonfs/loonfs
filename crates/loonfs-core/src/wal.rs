@@ -12,7 +12,7 @@ mod replay;
 mod writer;
 
 pub(crate) use self::discover::probe_namespace_wal;
-pub(crate) use self::discover::{discover_tail, DiscoveredTail};
+pub(crate) use self::discover::{discover_tail, find_kept_tail, DiscoveredTail};
 pub(crate) use self::frame::ValidatedWalTail;
 use self::frame::WalTailLoadRequest;
 use self::frame::{PreparedWalObject, ReplayedWalTail, ValidatedWalObject};

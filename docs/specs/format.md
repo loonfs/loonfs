@@ -325,7 +325,7 @@ How the pieces fit together (full rules in Sections 4, 6, 7, and 11):
 - **Commits.** A writer creates WAL `tip + 1` with put-if-absent stamped with its writer epoch, re-planning on collision ([Publication and group commit](#63-publication-and-group-commit)). Any process can create a commitless [floor object](glossary.md#floor-object) without claiming the writer epoch ([Advancing the retention floor](#101-advancing-the-retention-floor)).
 - **Takeover.** A new writer publishes manifest `n + 1` with `writer_epoch + 1` and writes a fence at the next WAL number, blocking older writers ([Writer ownership](#61-writer-ownership)).
 - **Folds.** Any process writes WAL objects past `folded_wal_no` into metadata segments and pending pieces into content objects, then publishes the next manifest ([Publishing a manifest](#72-publishing-a-manifest)).
-- **Discovery.** Cold readers read `boundary.json`, list manifests above it, load the highest manifest, replay WAL objects past `folded_wal_no`, then run a successor probe and re-read `boundary.json` ([Resolving the metadata basis](#41-resolving-the-metadata-basis), [Replaying the visible WAL](#42-replaying-the-visible-wal)).
+- **Discovery.** Cold readers read `boundary.json`, list manifests above it, load the highest manifest, replay WAL objects past `folded_wal_no`, then run a successor probe and re-read `boundary.json`. If the probe finds a newer manifest, discovery continues from the newest one and keeps the WAL objects it already read above that manifest's `folded_wal_no` ([Resolving the metadata basis](#41-resolving-the-metadata-basis), [Replaying the visible WAL](#42-replaying-the-visible-wal)).
 - **Garbage collection.** Deletes folded commit WAL objects (never fences or floor objects), unpinned replaced manifests (raising `boundary.json` first, so manifest puts at or below the boundary count as lost), and unreferenced segments past grace. Reads needing to outlive the current manifest take a snapshot ([Snapshots](#8-snapshots)). Because fences and floor objects can race into emptied numbers, those puts verify their position after writing.
 
 Protocol guarantees:
@@ -397,13 +397,15 @@ Cold discovery steps:
 4. Load the highest-numbered manifest `n` from the listing (if missing, restart at step 1).
 5. Re-read the boundary (conditionally if present in step 1). If `retired`, stop. If `n <= boundary`, restart at step 1 (handling pauses during which newer manifests were published and collected). Otherwise `n` is the newest manifest (if its status is `deleted`, the namespace is deleted).
 
-A find failing to complete after `MAX_CONTENTION_ATTEMPTS` (8) attempts returns `store_contention`. After loading `n`, a cold read reads the WAL tail above `n.folded_wal_no`, sends a HEAD for manifest `n + 1`, and sends a conditional boundary read. If a successor exists or `n <= boundary`, discovery restarts.
+A find failing to complete after `MAX_CONTENTION_ATTEMPTS` (8) attempts returns `store_contention`. After loading `n`, a cold read reads the WAL tail above `n.folded_wal_no`, sends a HEAD for manifest `n + 1`, and sends a conditional boundary read. If a successor exists or `n <= boundary`, discovery finds the newest manifest `m` again and continues from it, keeping the WAL objects that it read above `m.folded_wal_no`. It validates those objects again from `m`'s head and writer epoch, which sends no request, and it reads the WAL only if `m` folds past the last object that it read, starting at `m.folded_wal_no + 1`. Discovery then checks `m` in the same way. A discovery whose check finds a newer manifest `MAX_CONTENTION_ATTEMPTS` (8) times returns `store_contention`.
+
+Keeping the objects doesn't break guarantee 4 of [A summary of the log protocol](#26-a-summary-of-the-log-protocol). The read stopped at a WAL number that was missing when discovery read it, and when discovery keeps the objects, `m` folds below that number. A collection deletes a WAL object only after a manifest that folds it is published, so if a collection had deleted the object at that number before the read, the manifest that folds it would be newer than `m`, and the check of `m`, which comes after the read, would find it. For example, if discovery reads WAL 11 to 14 above manifest 6, finds 15 missing, and the check finds manifest 7 with `folded_wal_no` 12, discovery keeps 13 and 14 and checks manifest 7. If manifest 7 folds through 20, discovery reads from 21. If `m` folds below the start of the read, a kept object fails validation against `m`, or `m` isn't active, discovery reads the tail above `m` from `m.folded_wal_no + 1`.
 
 | Discovery outcome | Interpretation |
 | --- | --- |
 | Empty listing, unchanged boundary, no boundary object | Namespace does not exist. |
 | Empty listing, unchanged boundary, boundary object exists | Store is corrupt. |
-| Boundary changed, highest manifest vanished, or `n <= boundary` | Restart discovery. |
+| Boundary changed, highest manifest vanished, or `n <= boundary` | Restart at step 1. |
 | Required object unreadable or invalid | Error (never treated as absence). |
 | Newest manifest has status `initializing` | `namespace_not_found` for all operations except create, fork, delete, or collection. |
 | Newest manifest has status `deleted` | `namespace_deleted` for ordinary operations. |
