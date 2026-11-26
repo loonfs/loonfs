@@ -204,24 +204,81 @@ pub(super) fn corrupt(object_key: &str, error: impl std::fmt::Display) -> Contro
     }
 }
 
-/// Reads the WAL numbers after the cached head, in the same windows as
-/// discovery, and extends the cached tail with the objects it finds.
+/// How [`load_tail_after_head`] ended.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one value per read, moved once: indirection would buy an allocation and save nothing"
+)]
+pub(crate) enum TailLoadOutcome {
+    /// The WAL objects after the head up to the first missing number, which
+    /// may be none, and the head after them.
+    Loaded(DiscoveredTail),
+    /// The view needs discovery from the current manifest (see
+    /// [`load_tail_after_head`]).
+    NeedsDiscovery,
+}
+
+/// Loads the WAL objects after `head`, a head that a reader already has, in
+/// the same windows as discovery, each validated as the successor of the one
+/// before. A cached view's WAL probe reads the WAL this way, and so does a
+/// writer session or a floor object put whose put found its number taken,
+/// from that number on (format spec, "Publication and group commit" and
+/// "Advancing the retention floor").
 ///
-/// Returns false when the cached view needs full discovery from the current
-/// manifest, which happens in two cases:
+/// Returns [`TailLoadOutcome::NeedsDiscovery`] in two cases:
 ///
-/// - The next object has another writer epoch. Writer acquisition raises the
-///   epoch, so a WAL object at the cached epoch must continue the cached head.
+/// - The next object has another writer epoch than `head`. Writer acquisition
+///   raises the epoch, so a WAL object at `head`'s epoch must continue `head`,
+///   and an object that doesn't is corruption, which the call returns.
 /// - A WAL number is still missing below a present one. Maintenance might have
-///   folded the objects after the cached head into a newer manifest, and
-///   garbage collection might be deleting them while the probe reads. Discovery
-///   from the current manifest still reports a gap above its folded boundary as
+///   folded the objects after `head` into a newer manifest, and garbage
+///   collection might be deleting them while the call reads. Discovery from
+///   the current manifest still reports a gap above its folded boundary as
 ///   corruption.
+pub(crate) async fn load_tail_after_head<S: ObjectStore + ?Sized>(
+    store: &S,
+    head: &NamespaceReadState,
+) -> Result<TailLoadOutcome, ControlObjectLoadError> {
+    let namespace_id = &head.namespace_id;
+    let mut walk = WalWalk::after(namespace_id, head.wal_no, head.seq, head.writer_epoch);
+    let mut loaded = head.clone();
+    let mut objects = Vec::new();
+    let mut other_epoch = false;
+    let outcome = load_wal_after(store, namespace_id, head.wal_no, |object_key, envelope| {
+        if envelope.envelope.payload().writer_epoch != head.writer_epoch {
+            other_epoch = true;
+            return Ok(ControlFlow::Break(()));
+        }
+        let object = walk.validate(object_key, envelope).map_err(wal_error)?;
+        loaded = loaded.after_wal_object(object.envelope().payload());
+        objects.push(object);
+        Ok(ControlFlow::Continue(()))
+    })
+    .await?;
+    if other_epoch || matches!(outcome, WalReadOutcome::Gap { .. }) {
+        return Ok(TailLoadOutcome::NeedsDiscovery);
+    }
+    Ok(TailLoadOutcome::Loaded(DiscoveredTail {
+        head: loaded,
+        tail: ValidatedWalTail::new(objects),
+    }))
+}
+
+/// Reads the WAL numbers after the cached head (see
+/// [`load_tail_after_head`]), and extends the cached tail with the objects it
+/// finds. Returns false when the cached view needs full discovery from the
+/// current manifest.
 pub(crate) async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     store: &S,
     head_and_wal_tail_cache: &HeadAndWalTailCache,
     basis: &mut ReadBasis,
 ) -> Result<bool, ControlObjectLoadError> {
+    let TailLoadOutcome::Loaded(loaded) = load_tail_after_head(store, &basis.head).await? else {
+        return Ok(false);
+    };
+    if loaded.tail.objects().is_empty() {
+        return Ok(true);
+    }
     let mut state = basis.head.clone();
     let mut cache_key = WalTailCacheKey {
         namespace_id: state.namespace_id.clone(),
@@ -229,22 +286,9 @@ pub(crate) async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         head_seq: state.seq,
         wal_no: state.wal_no,
     };
-    let mut tail = None;
+    let mut tail = head_and_wal_tail_cache.get_tail(&cache_key);
     let mut extended = false;
-    let namespace_id = state.namespace_id.clone();
-    let mut walk = WalWalk::after(&namespace_id, state.wal_no, state.seq, state.writer_epoch);
-    let mut other_epoch = false;
-    let each = |object_key: String,
-                envelope: StoredWalEnvelope|
-     -> Result<ControlFlow<()>, ControlObjectLoadError> {
-        if envelope.envelope.payload().writer_epoch != state.writer_epoch {
-            other_epoch = true;
-            return Ok(ControlFlow::Break(()));
-        }
-        let object = walk.validate(object_key, envelope).map_err(wal_error)?;
-        if state.wal_no == basis.head.wal_no {
-            tail = head_and_wal_tail_cache.get_tail(&cache_key);
-        }
+    for object in loaded.tail.objects() {
         let before = state.clone();
         state = state.after_wal_object(object.envelope().payload());
         cache_key.head_seq = state.seq;
@@ -253,23 +297,17 @@ pub(crate) async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
             tail = Some(cached);
             extended = false;
         } else if let Some(current) = tail.take() {
-            let object_key = object.object_key().to_owned();
-            let objects = ValidatedWalTail::new(vec![object]);
+            let objects = ValidatedWalTail::new(vec![object.clone()]);
             let replayed =
                 project_validated_wal_tail(&before, Arc::unwrap_or_clone(current), &objects)
-                    .map_err(|error| corrupt(&object_key, error))?;
+                    .map_err(|error| corrupt(object.object_key(), error))?;
             tail = Some(Arc::new(replayed.projected_tail));
             extended = true;
         }
-        Ok(ControlFlow::Continue(()))
-    };
-    let outcome = load_wal_after(store, &namespace_id, basis.head.wal_no, each).await?;
-    if other_epoch || matches!(outcome, WalReadOutcome::Gap { .. }) {
-        return Ok(false);
     }
     if let Some(tail) = tail.filter(|_| extended) {
         head_and_wal_tail_cache.insert_tail(cache_key, tail);
     }
-    basis.head = state;
+    basis.head = loaded.head;
     Ok(true)
 }

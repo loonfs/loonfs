@@ -135,6 +135,21 @@ impl ValidatedWalTail {
             .sum()
     }
 
+    /// Returns whether the tail has a fence or a floor object.
+    pub(crate) fn has_fence_or_floor_object(&self) -> bool {
+        self.objects.iter().any(|object| {
+            matches!(
+                object.envelope().payload().body,
+                WalObjectBody::Fence | WalObjectBody::Floor { .. }
+            )
+        })
+    }
+
+    /// Appends `after`, the objects after this tail's last one.
+    pub(crate) fn extend(&mut self, after: ValidatedWalTail) {
+        self.objects.extend(after.objects);
+    }
+
     pub(crate) fn push_published(&mut self, envelope: WalObjectEnvelope, stored_bytes: usize) {
         let payload = envelope.payload();
         let object_key = super::wal_object_key(&payload.namespace_id, &payload.wal_no);

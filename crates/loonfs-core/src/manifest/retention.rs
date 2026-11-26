@@ -128,13 +128,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// namespace (format spec, "Advancing the retention floor").
     ///
     /// The call first checks that the segments of `planned`, the manifest
-    /// that the advance was planned from, exist. Each attempt then runs
+    /// that the advance was planned from, exist. The first attempt then runs
     /// discovery, and when the view's floor is below `target`, puts a floor
     /// object at the number after the tip with put-if-absent, with the
-    /// writer epoch of the manifest that the attempt's discovery loaded.
-    /// After a put that succeeds, the attempt checks whether the floor object
-    /// is live, and a dead floor object, or a put that finds the number
-    /// taken, starts the next attempt, as a fence's put does. The attempts
+    /// writer epoch of the manifest whose tail the attempt read. After a put
+    /// that succeeds, the attempt checks whether the floor object is live,
+    /// and a dead floor object starts the next attempt from discovery, as a
+    /// fence's put does. A put that finds the number taken starts the next
+    /// attempt from the WAL objects at that number and after it, or from
+    /// discovery when those objects need one. The attempts
     /// stop when the publication budget runs out or after
     /// `MAX_UNFOLDED_WAL_OBJECTS` attempts, and the call then returns
     /// `store_contention`. The call claims no epoch and writes
@@ -153,8 +155,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         self.publish_floor_object_at_tip(target).await
     }
 
-    /// Creates a floor object for `target` at the WAL tip that each attempt's
-    /// discovery finds, as [`Self::publish_floor_object`] describes, after
+    /// Creates a floor object for `target` at the WAL tip that each attempt
+    /// finds, as [`Self::publish_floor_object`] describes, after
     /// the caller has checked the planned manifest's segments.
     pub(crate) async fn publish_floor_object_at_tip(
         &self,

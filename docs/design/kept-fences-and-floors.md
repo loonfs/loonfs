@@ -40,12 +40,12 @@ To publish a batch, a writer:
 1. Plans the batch against its [writer position](../specs/glossary.md#writer-position) and builds one WAL object at `tip + 1`.
 2. Checks the content-admission evidence, and puts the object with put-if-absent, however old its tip observation is.
 3. If the put succeeds, the batch is committed. The writer moves its position and acknowledges the requests, with no check of the elapsed time.
-4. If the put collides, runs discovery, as after any collision. A higher writer epoch means that the writer is fenced. A floor object means that the writer plans the batch again against the new floor, at the next number.
+4. If the put collides, reads the WAL objects from that number up to the first missing number into its position, as after any collision. A higher writer epoch ends the read, and the writer runs discovery, which finds that the writer is fenced. A floor object means that the writer plans the batch again against the new floor, at the next number.
 5. If the put's outcome is unknown, drops its position, as in [Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes). The writer releases its writer epoch from the moment it sends the put until it learns the outcome, so its next publication claims a new epoch and writes a fence (see [Writer ownership](../specs/format.md#61-writer-ownership)), and the fence's discovery reads the number back.
 
 The session's successor probe still runs every second by default, so the session learns of claims and folds between commits (see [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal)), but the put doesn't wait for the probe.
 
-In the example in [The problem](#the-problem), the writer resumes on Wednesday and puts its batch at 31. The put collides with floor object 31, which is still there, so the writer runs discovery, plans the batch again against the new floor, and commits it at 32.
+In the example in [The problem](#the-problem), the writer resumes on Wednesday and puts its batch at 31. The put collides with floor object 31, which is still there, so the writer reads floor object 31, plans the batch again against the new floor, and commits it at 32.
 
 Why is there no check after a successful put? The put succeeds only at a number where no object was ever created (see [Why the put can't reuse an emptied number](#why-the-put-cant-reuse-an-emptied-number)). A fold covers only WAL objects that exist, so that number is above every manifest's `folded_wal_no`, and every reader replays the batch.
 
@@ -81,7 +81,7 @@ The claim manifest's publication budget stays as it is, but nothing in this desi
 
 A failed check doesn't always mean that the number was emptied. A fold can cover a live fence or floor object between the put and the check, and the check then treats the object as dead, though readers replayed it. The outcome is the same: the session puts a second fence at the new tip, and the advancer's discovery finds its floor already in the view and writes nothing. The rule stays one comparison, and the cost is one more fence in a rare case.
 
-For a fence, the check also applies the rule of [Writer ownership](../specs/format.md#61-writer-ownership) that the discovery before the put applies: a newest manifest with a higher writer epoch than the claim means that another session has claimed since, and the acquisition returns `writer_fenced`. For a floor object, the epoch doesn't matter. The floor object records the epoch of the manifest that the discovery loaded, and a newer session's fence lands above it.
+For a fence, the check also applies the rule of [Writer ownership](../specs/format.md#61-writer-ownership) that the discovery before the put applies: a newest manifest with a higher writer epoch than the claim means that another session has claimed since, and the acquisition returns `writer_fenced`. For a floor object, the epoch doesn't matter. The floor object records the epoch of the manifest whose tail the process read, and a newer session's fence is written above it.
 
 Why is the check enough? A fold covers only WAL objects that exist, so a number that a collection emptied was folded before the put, and the newest manifest at the check has a `folded_wal_no` at or above that number. After a passing check, the fence's number was never used. The previous writer writes consecutive numbers, so none of its objects is at or above the fence's number, and its next put collides with the fence.
 
@@ -119,7 +119,7 @@ No rule depends on how long ago any process observed the WAL tip. These time rul
 - How often writer sessions start sets the number of fences, so the server's idle-close setting is the one to change if the count matters.
 - A commit object that would be at or below the bound is padded, by at most the bound.
 - A fence put, or a floor object put by a process without the writer epoch, costs one check after the put: a HEAD request and a conditional read of the boundary.
-- A collision with a floor object costs the writer one discovery and one new plan of the batch, as before.
+- A collision with a floor object costs the writer a read of the floor object and of the next window of numbers, and one new plan of the batch.
 - A WAL put whose outcome is unknown costs the writer session a claim of the next epoch and one fence, a small WAL object that no process deletes and that counts toward the unfolded WAL thresholds until a fold covers it.
 
 A commit after a quiet period longer than five minutes no longer waits for a tip confirmation's two round trips.

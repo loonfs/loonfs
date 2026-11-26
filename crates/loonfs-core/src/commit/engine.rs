@@ -19,7 +19,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::options::DeleteNamespaceOptions;
-use loonfs_types::{Commit, CommitSeq, DeleteNamespaceResponse, NamespaceId, WriterId};
+use loonfs_types::{Commit, CommitSeq, DeleteNamespaceResponse, WriterId};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 mod candidate;
@@ -580,11 +580,9 @@ impl PositionState {
         if !matches!(published.effect, PublishViewEffect::OutcomeUnknown) {
             *self.lock_session() = WriterSessionStatus::Acquired(acquired_writer);
         }
-        let update = self.update_publish_tail_projection(
-            &namespace.namespace_id,
-            position,
-            published.effect,
-        );
+        let update = self
+            .update_publish_tail_projection(namespace, position, published.effect)
+            .await;
         NamespaceCommitEnginePublishOutcome {
             results: published.results,
             wal_tail: Some(WalTailReport {
@@ -641,14 +639,15 @@ impl PositionState {
         let head = head.after_wal_object(floor_object.envelope().payload());
         let retention_floor_seq = head.retention_floor_seq;
         self.update_publish_tail_projection(
-            &namespace.namespace_id,
+            namespace,
             position,
             PublishViewEffect::Advanced {
                 body: floor_object.envelope().payload().body.clone(),
                 head,
                 wal_bytes: floor_object.as_bytes().len(),
             },
-        );
+        )
+        .await;
         Ok(FloorObjectReport {
             retention_floor_seq,
             manifest_retention_floor_seq,
@@ -657,15 +656,24 @@ impl PositionState {
 
     /// Folds one batch's effect into the unit's position and its tail, keeps
     /// the position, and reports the WAL-tail length the caller schedules
-    /// maintenance on.
-    fn update_publish_tail_projection(
+    /// maintenance on. After a put that found its number taken, the position
+    /// reads the WAL objects from that number on (see
+    /// [`WriterPosition::load_after_collision`]).
+    async fn update_publish_tail_projection<S: ObjectStore>(
         &mut self,
-        namespace_id: &NamespaceId,
+        namespace: &NamespaceStore<S>,
         mut position: WriterPosition,
         effect: PublishViewEffect,
     ) -> TailProjectionUpdate {
+        let namespace_id = &namespace.namespace_id;
         match effect {
             PublishViewEffect::Unchanged => {}
+            PublishViewEffect::Collided => {
+                if !position.load_after_collision(&namespace.store).await {
+                    self.invalidate_projection();
+                    return TailProjectionUpdate::of(&position);
+                }
+            }
             PublishViewEffect::Invalidated | PublishViewEffect::OutcomeUnknown => {
                 self.invalidate_projection();
                 return TailProjectionUpdate::of(&position);

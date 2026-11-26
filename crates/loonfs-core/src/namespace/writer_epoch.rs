@@ -1,6 +1,7 @@
 //! Writer acquisition through a manifest epoch and a numbered fence WAL object,
 //! and the retry loop that fences and floor objects share.
 
+use crate::control_object::ControlObjectLoadError;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::manifest::publish::ManifestChange;
@@ -11,7 +12,10 @@ use crate::namespace::held::Held;
 use crate::namespace::read_anchor::{NamespaceReadAnchor, WriterAnchor};
 use crate::namespace::store::NamespaceStore;
 use crate::time::{Observation, OperationClock};
-use crate::wal::{prepare_wal_object, publish_wal_object, wal_no_is_unfolded};
+use crate::wal::{
+    load_tail_after_head, prepare_wal_object, publish_wal_object, wal_no_is_unfolded,
+    TailLoadOutcome,
+};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::WriterBlock;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -164,9 +168,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// otherwise when its number is above the `folded_wal_no` of the newest
     /// manifest (see [`wal_no_is_unfolded`]). The newest manifest is the one
     /// that the next anchor's load finds, so a dead object's next attempt
-    /// starts from that anchor without another load. Every put after the
-    /// first checks the publication budget first, and the call returns
-    /// `store_contention` when the budget or the attempts run out.
+    /// starts from that anchor without another load. A floor object whose
+    /// number is taken starts its next attempt from the WAL objects at that
+    /// number and after it (see [`Self::continue_after_collision`]). Every
+    /// put after the first checks the publication budget first, and the call
+    /// returns `store_contention` when the budget or the attempts run out.
     async fn put_fence_or_floor_object(
         &self,
         object: FenceOrFloorObject<'_>,
@@ -184,6 +190,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 FenceOrFloorObject::Fence(acquired) => {
                     (acquired.writer_epoch, WalObjectBody::Fence)
                 }
+                // The anchor's floor comes from a discovery, which checked
+                // the anchor's manifest, or from a floor object that a
+                // continuation read before a check found the manifest still
+                // the newest.
                 FenceOrFloorObject::Floor(target) if head.retention_floor_seq >= target => {
                     return Ok(anchor)
                 }
@@ -198,7 +208,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             if attempt > 0 {
                 clock.ensure_metadata_publication_budget(&self.namespace_id)?;
             }
-            let put_wal_no = match publish_wal_object(&self.store, &prepared).await {
+            match publish_wal_object(&self.store, &prepared).await {
                 Ok(()) => {
                     let put_head = head.after_wal_object(prepared.envelope().payload());
                     if self.check_newest(&mut anchor.held, clock.origin()).await? == Checked::Newest
@@ -209,24 +219,77 @@ impl<S: ObjectStore> NamespaceStore<S> {
                             .push_published(prepared.envelope().clone(), prepared.as_bytes().len());
                         return Ok(anchor);
                     }
-                    Some(put_head.wal_no)
+                    // The old anchor's decoded WAL tail is dropped before the
+                    // next anchor's load, so the retry keeps one decoded tail
+                    // in memory.
+                    drop(anchor);
+                    anchor = self.load_next_anchor(object, clock.observe()).await?;
+                    if wal_no_is_unfolded(
+                        put_head.wal_no,
+                        anchor.current_manifest().folded_wal_no(),
+                    ) {
+                        return Ok(anchor);
+                    }
                 }
-                Err(CoreError::WalPublish(crate::wal::WalPublishError::NumberTaken)) => None,
+                Err(CoreError::WalPublish(crate::wal::WalPublishError::NumberTaken)) => {
+                    let continued = matches!(object, FenceOrFloorObject::Floor(_))
+                        && self.continue_after_collision(&mut anchor, clock).await?;
+                    if !continued {
+                        drop(anchor);
+                        anchor = self.load_next_anchor(object, clock.observe()).await?;
+                    }
+                }
                 Err(error) => return Err(error),
-            };
-            // The old anchor's decoded WAL tail is dropped before the next
-            // anchor's load, so the retry keeps one decoded tail in memory.
-            drop(anchor);
-            anchor = self.load_next_anchor(object, clock.observe()).await?;
-            if put_wal_no.is_some_and(|wal_no| {
-                wal_no_is_unfolded(wal_no, anchor.current_manifest().folded_wal_no())
-            }) {
-                return Ok(anchor);
             }
         }
         Err(CoreError::contention_exhausted(
             &anchor.current_manifest().object_key,
         ))
+    }
+
+    /// Extends `anchor` with the WAL objects from the number after its tip,
+    /// which a floor object's put found taken, up to the first missing
+    /// number, and returns whether the next put can start from it (format
+    /// spec, "Advancing the retention floor"). The anchor keeps its manifest,
+    /// so the next floor object copies that manifest's epoch.
+    ///
+    /// A WAL object with commits that the read finds is live, because a
+    /// writer commits only at a number where no object was ever written. A
+    /// fence or a floor object can be dead, at a number that a newer manifest
+    /// folds and that a collection emptied before the object was written, and
+    /// a put after a dead object would record a head that no reader replays.
+    /// So when the read finds a fence or a floor object, the call checks the
+    /// anchor's manifest with [`Self::check_newest`] before the anchor is used.
+    ///
+    /// Returns false, so that the next attempt loads its anchor by discovery,
+    /// when the number is empty (a newer manifest folds it and a collection
+    /// emptied it), when the next object has another writer epoch (a newer
+    /// writer's fence or commit, or the previous writer's commit above a
+    /// claim) or doesn't continue the tip, when a number is missing below a
+    /// present one, when the tail above the manifest reaches
+    /// `MAX_UNFOLDED_WAL_OBJECTS` objects (so a newer manifest folds part of
+    /// it), and when the check finds a newer manifest.
+    async fn continue_after_collision(
+        &self,
+        anchor: &mut NamespaceReadAnchor,
+        clock: &OperationClock,
+    ) -> Result<bool> {
+        let loaded = match load_tail_after_head(&self.store, &anchor.read_state).await {
+            Ok(TailLoadOutcome::Loaded(loaded)) => loaded,
+            Ok(TailLoadOutcome::NeedsDiscovery) | Err(ControlObjectLoadError::Codec { .. }) => {
+                return Ok(false)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if loaded.tail.objects().is_empty()
+            || loaded.head.unfolded_wal_objects() >= crate::limits::MAX_UNFOLDED_WAL_OBJECTS
+        {
+            return Ok(false);
+        }
+        let check = loaded.tail.has_fence_or_floor_object();
+        anchor.read_state = loaded.head;
+        anchor.tail.extend(loaded.tail);
+        Ok(!check || self.check_newest(&mut anchor.held, clock.origin()).await? == Checked::Newest)
     }
 
     /// Loads the anchor that the next put of `object` starts from: the writer

@@ -347,7 +347,7 @@ A commitless WAL object written by a new writer session at the next WAL number t
 
 ### Floor object
 
-A commitless WAL object recording a new `retention_floor_seq` at the next WAL number so retention advances are ordered against restores in the WAL. Any process can write one using the current manifest's writer epoch without fencing the active writer (a colliding writer simply rediscovers and re-validates against the new floor). Floor objects are never deleted, and the next fold copies the floor into a manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+A commitless WAL object recording a new `retention_floor_seq` at the next WAL number so retention advances are ordered against restores in the WAL. Any process can write one using the current manifest's writer epoch without fencing the active writer (a colliding writer reads the floor object into its position and re-validates against the new floor). Floor objects are never deleted, and the next fold copies the floor into a manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Maintainer
 

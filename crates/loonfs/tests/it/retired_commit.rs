@@ -135,8 +135,9 @@ async fn commit_through_the_stale_session(
 /// The prefix keeps the boundary object and the fences, so the WAL number
 /// after the session's tip has the fence that the deleting runtime wrote
 /// when it acquired the writer epoch. With the manifest cached, the session
-/// puts at that number, the fence refuses the put, and the next attempt
-/// loads the namespace from the store. With the manifest evicted, the
+/// puts at that number, the fence refuses the put, the session reads the
+/// fence, whose epoch is higher, and the next attempt loads the namespace
+/// from the store. With the manifest evicted, the
 /// session reads the manifest first. After the retirement the collection has
 /// deleted the manifest, so the read finds nothing and the session reads the
 /// boundary instead of putting. Before the retirement the manifest is there,
@@ -171,6 +172,7 @@ async fn a_commit_through_a_session_older_than_the_deletion_is_refused_after_ret
                     ErrorCode::WriterFenced,
                     vec![
                         line("put {ns} WalObject 00000000000000000003"),
+                        line("get {ns} WalObject 00000000000000000003"),
                         line("get {ns} Boundary"),
                         line("list namespaces/{ns}/manifests/"),
                         line("get {ns} MetadataManifest 00000000000000000006"),
@@ -181,6 +183,7 @@ async fn a_commit_through_a_session_older_than_the_deletion_is_refused_after_ret
                     ErrorCode::NamespaceDeleted,
                     vec![
                         line("put {ns} WalObject 00000000000000000003"),
+                        line("get {ns} WalObject 00000000000000000003"),
                         line("get {ns} Boundary"),
                     ],
                 ),

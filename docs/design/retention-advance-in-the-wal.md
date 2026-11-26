@@ -36,7 +36,7 @@ To advance the floor to `T`, a process:
 2. Checks that the segments of the manifest that the process planned from exist.
 3. Runs discovery to find the WAL tip. If the floor of the discovered view, which includes the floor objects in the WAL tail, is already at or above `T`, the process writes nothing. Otherwise, it creates the floor object at `tip + 1` with put-if-absent. The floor object has the writer epoch of the manifest that this discovery loaded.
 4. After the put succeeds, checks the discovery's manifest for a newer one, and compares the floor object's number with the newest manifest's `folded_wal_no`. If the number is at or below it, the floor object is dead, because the put may have used a number that a collection emptied (see [The check after a fence or floor object put](kept-fences-and-floors.md#the-check-after-a-fence-or-floor-object-put)), and the process starts the next attempt.
-5. If the put collides, runs discovery again, copies the writer epoch from the manifest that the new discovery loaded, and tries the next WAL number. The process stops after a bounded number of attempts.
+5. If the put collides, reads the WAL objects from the taken number up to the first missing number, keeps the manifest, and puts the floor object at the first missing number with that manifest's writer epoch. When the read finds a fence or a floor object, which may be dead, the process first checks the manifest for a newer one. A higher writer epoch, an empty taken number, an object that doesn't continue the view's head, or a newer manifest sends the process back to step 3. The process stops after a bounded number of attempts.
 
 A process that has the namespace's writer session creates the floor object as one item of the session's publication queue, so the floor object never collides with the session's own commits, and the session doesn't check the floor object's number after the put. If the process can't tell whether the put succeeded, it reports the outcome as unknown. If the caller then retries, a second floor object with the same floor does no harm.
 
@@ -56,7 +56,7 @@ Why does a fold publish the floor, instead of a separate manifest from the advan
 
 ### What the writer does
 
-A writer handles a collision with a floor object as it handles any collision. A [writer session](../specs/glossary.md#writer-session) whose put collides with a floor object at `tip + 1` creates no object, drops its [writer position](../specs/glossary.md#writer-position), and runs discovery. Discovery finds no higher writer epoch, so the session isn't fenced. Discovery replays the floor object into the session's position, and the session plans its batch again against the new floor. The session's callers see no error from the collision.
+A writer handles a collision with a floor object as it handles any collision. A [writer session](../specs/glossary.md#writer-session) whose put collides with a floor object at `tip + 1` creates no object, and reads the floor object, and any objects after it up to the first missing number, into its [writer position](../specs/glossary.md#writer-position). The floor object has the session's writer epoch, so the session isn't fenced, and the session plans its batch again against the new floor. The session's callers see no error from the collision.
 
 Why doesn't the floor object fence the writer? A fence stops a writer because the writer's discovery finds a higher writer epoch in the manifest. A floor object doesn't change the writer epoch.
 
@@ -70,7 +70,7 @@ The first rule is that a session never keeps a writer position whose manifest fo
 
 For example, a session has tip 30. Another process creates a floor object at 31 and publishes manifest 7, whose fold covers 31. The session's probe finds manifest 7, whose `folded_wal_no` is 31, so the session drops its position. The session's discovery starts from manifest 7 with tip 31.
 
-The second rule is that no process deletes a floor object (see [Keeping fences and floor objects](kept-fences-and-floors.md)). A session's put at `tip + 1` then collides with any floor object that another process created at that number, however long the session was idle, and the session runs discovery.
+The second rule is that no process deletes a floor object (see [Keeping fences and floor objects](kept-fences-and-floors.md)). A session's put at `tip + 1` then collides with any floor object that another process created at that number, however long the session was idle, and the session reads the floor object.
 
 Why does a session drop its position instead of moving the position onto a manifest that folds past the position's tip? If another process publishes a manifest with the session's writer epoch, and the folded tail contains only WAL objects that the session wrote, the position can move onto that manifest. If the folded tail contained another process's floor object, moving onto the manifest would leave the position's tip below the manifest's `folded_wal_no`.
 
@@ -93,9 +93,9 @@ The second case applies to a writer of any epoch, so the argument needs no separ
 
 In the first example, the advance is in the session's own queue. Suppose the floor is 5, a writer session has written WAL objects through 30, and its queue contains a restore of a deletion at sequence 10, then an advance to 20, then a second restore of the same deletion. The session commits the first restore in WAL object 31 and creates the floor object at 32. The session validates the second restore against floor 20, so the second restore returns `not_deleted`. The next fold publishes floor 20, and the deletion's latest event in that manifest is `revoke`, so a base compaction keeps the restored item's rows.
 
-In the second example, another process advances the floor. A server with no session for the namespace discovers tip 30 and creates the floor object at 31 with floor 20. A writer session in another process then tries to commit a restore of the deletion at sequence 10 at WAL number 31. The session's put collides, so the session runs discovery, replays the floor object, and validates the restore against floor 20. The restore fails because the deletion has expired (see [Expiring deletions and creating floor objects](../specs/format.md#expiring-deletions-and-creating-floor-objects) for the error), and the session keeps its writer epoch.
+In the second example, another process advances the floor. A server with no session for the namespace discovers tip 30 and creates the floor object at 31 with floor 20. A writer session in another process then tries to commit a restore of the deletion at sequence 10 at WAL number 31. The session's put collides, so the session reads and replays the floor object, and validates the restore against floor 20. The restore fails because the deletion has expired (see [Expiring deletions and creating floor objects](../specs/format.md#expiring-deletions-and-creating-floor-objects) for the error), and the session keeps its writer epoch.
 
-In the third example, the same race goes the other way, and the writer's restore is written at 31 first. The advancing process's put at 31 collides, so the process runs discovery, finds tip 31, and creates the floor object at 32. Any fold that covers 32 also covers 31, so the manifest that records floor 20 also contains the restore's `revoke` event.
+In the third example, the same race goes the other way, and the writer's restore is written at 31 first. The advancing process's put at 31 collides, so the process reads the restore at 31, finds 32 missing, and creates the floor object at 32. Any fold that covers 32 also covers 31, so the manifest that records floor 20 also contains the restore's `revoke` event.
 
 ## Costs
 

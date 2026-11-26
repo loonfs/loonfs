@@ -15,7 +15,9 @@ use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::segment::{KeptBy, VerifiedMetadataSegments};
 use crate::storage::tail_content::ContentWrites;
 use crate::time::Observation;
-use crate::wal::ProjectedWalTail;
+use crate::wal::{
+    load_tail_after_head, project_validated_wal_tail, ProjectedWalTail, TailLoadOutcome,
+};
 use crate::Permits;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{CommitId, CommitSeq};
@@ -221,6 +223,42 @@ impl WriterPosition {
     /// `manifest`'s check (see [`Held::merge`]).
     pub(crate) fn move_to(&mut self, manifest: &Held<LoadedManifest>) -> bool {
         move_read_basis(&mut self.basis, &mut self.tail, manifest)
+    }
+
+    /// Extends the position with the WAL objects from the number after its
+    /// tip, which the session's put found taken, up to the first missing
+    /// number (see [`load_tail_after_head`]), and returns `false` when the
+    /// session's next unit loads its view by discovery instead, so the engine
+    /// drops the position (format spec, "Publication and group commit").
+    ///
+    /// The position keeps its manifest, and that manifest still doesn't fold
+    /// past the position's tip, because the tip only moves up. The read needs
+    /// no check of the manifest: a put at the next number after the read is
+    /// safe however old the manifest is, and an object that the read finds
+    /// can't be at a number that a collection emptied, because only this
+    /// session commits above its own tip until a newer writer's fence, whose
+    /// epoch ends the read. A number that the read finds empty, a gap, an
+    /// object of another writer epoch, and an error all return `false`, so
+    /// the next unit's discovery fences the session or returns the error.
+    pub(crate) async fn load_after_collision<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+    ) -> bool {
+        let Ok(TailLoadOutcome::Loaded(loaded)) =
+            load_tail_after_head(store, self.basis.head()).await
+        else {
+            return false;
+        };
+        if loaded.tail.objects().is_empty() {
+            return false;
+        }
+        let tail = Arc::unwrap_or_clone(Arc::clone(&self.tail));
+        let Ok(replayed) = project_validated_wal_tail(self.basis.head(), tail, &loaded.tail) else {
+            return false;
+        };
+        self.basis.read_basis_mut().head = replayed.resulting_head;
+        self.tail = Arc::new(replayed.projected_tail);
+        true
     }
 
     /// Checks whether the position's manifest is still the newest, and

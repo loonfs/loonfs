@@ -45,6 +45,10 @@ pub(crate) enum PublishViewEffect {
     /// The batch may have left durable state the loaded projection does not
     /// account for, so that projection must be dropped.
     Invalidated,
+    /// The WAL put found its number taken. The session reads the WAL objects
+    /// from that number on into its position before its next unit (format
+    /// spec, "Publication and group commit").
+    Collided,
     /// The WAL put's outcome is unknown, so the put may still be written at
     /// the number it was sent to. The session drops the projection and stays
     /// without its epoch, so its next publication claims a new epoch and
@@ -61,13 +65,10 @@ pub(crate) enum PublishViewEffect {
 impl PublishViewEffect {
     /// The effect of a WAL put that failed with `error`.
     pub(crate) fn after_failed_put(error: &CoreError) -> Self {
-        if matches!(
-            error,
-            CoreError::WalPublish(WalPublishError::OutcomeUnknown(_))
-        ) {
-            Self::OutcomeUnknown
-        } else {
-            Self::Invalidated
+        match error {
+            CoreError::WalPublish(WalPublishError::NumberTaken) => Self::Collided,
+            CoreError::WalPublish(WalPublishError::OutcomeUnknown(_)) => Self::OutcomeUnknown,
+            _ => Self::Invalidated,
         }
     }
 }
