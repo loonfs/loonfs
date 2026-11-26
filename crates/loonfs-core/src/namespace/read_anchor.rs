@@ -262,8 +262,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         return Ok(anchor);
                     }
                     // The next pass can keep WAL objects that this pass read
-                    // before the newer manifest was loaded, so the newer
-                    // manifest keeps this check time too, and not a later one.
+                    // before the newer manifest was loaded. A later check
+                    // time would say that the view includes every commit
+                    // acknowledged before that time, but a commit written
+                    // after the read isn't in the view, so the newer manifest
+                    // keeps this check time.
                     held = self
                         .load_current_basis(anchor.held.checked().clone())
                         .await?;

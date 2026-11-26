@@ -66,8 +66,8 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
 /// `manifest`'s head and writer epoch, so it costs no request. That needs the
 /// earlier tail to start at or below `manifest`'s `folded_wal_no` and to end
 /// at or above it, and both manifests to be active, because discovery reads
-/// no WAL above another manifest (format spec, "Resolving the metadata
-/// basis").
+/// no WAL above an initializing manifest or a tombstone (format spec,
+/// "Resolving the metadata basis").
 pub(crate) fn find_kept_tail(
     manifest: &LoadedManifest,
     read_head: &NamespaceReadState,
@@ -76,10 +76,10 @@ pub(crate) fn find_kept_tail(
     let mut head = NamespaceReadState::from(manifest.payload());
     let folded = head.folded_wal_no;
     // The number after `read_head.wal_no` was missing when the discovery read
-    // it, and `manifest` folds below that number. If a collection emptied the
-    // number, a manifest that folds it existed before that read, so it's
-    // newer than `manifest`, and the discovery's check of `manifest`, which
-    // comes after the read, finds it.
+    // it, and `manifest` folds below that number. If a collection had emptied
+    // the number, a manifest that folds the number would have been published
+    // before that read. The discovery found `manifest` after the read, so
+    // `manifest` would fold past the read.
     if !read_head.status.is_active()
         || !head.status.is_active()
         || read_head.folded_wal_no > folded

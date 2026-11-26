@@ -112,8 +112,9 @@ impl Interceptor for NewerManifestInterceptor {
 /// and returns the published payload.
 ///
 /// The published manifest is a copy of the newest one with the next manifest
-/// number and a new publication ID, which `change` then edits. The test stands in for another process's publication, so the call panics
-/// when the namespace has no manifest or when the put finds the number taken.
+/// number and a new publication ID, which `change` then edits. The call
+/// stands in for another process's publication in a test, so it panics when
+/// the namespace has no manifest or when the put finds the number taken.
 pub async fn publish_next_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
