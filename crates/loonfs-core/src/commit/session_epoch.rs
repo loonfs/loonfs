@@ -1,5 +1,5 @@
-//! [`SessionEpoch`], through which a writer session sends each put under its
-//! writer epoch.
+//! [`SessionEpoch`], through which a writer session sends a commit's WAL put
+//! and a tombstone's put.
 
 use super::engine::WriterSessionStatus;
 use crate::namespace::writer_epoch::AcquiredWriter;
@@ -7,10 +7,11 @@ use std::future::Future;
 use std::sync::Mutex;
 
 /// A writer session's acquired epoch, with the session status that a put
-/// under the epoch releases (format spec, "Failed and unknown outcomes").
+/// sent through this type releases (format spec, "Failed and unknown
+/// outcomes").
 ///
-/// The session releases its epoch immediately before it sends a put under
-/// the epoch, and takes the epoch back when it learns the put's outcome. A
+/// The session releases its epoch immediately before it sends the put, and
+/// takes the epoch back when it learns the put's outcome. A
 /// put whose outcome stays unknown, or whose future is dropped or panics
 /// while the put is in flight, leaves the session unacquired, so the
 /// session's next publication claims a new epoch and writes a fence.

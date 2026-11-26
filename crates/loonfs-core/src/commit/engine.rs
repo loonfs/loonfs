@@ -72,8 +72,8 @@ pub enum TailSource {
 pub enum WriterSessionStatus {
     /// No epoch: the session's next publish acquires one with a claim and a
     /// fence. A new session starts here, and so does a session from the
-    /// moment it sends a put under its epoch until it learns the put's
-    /// outcome (format spec, "Failed and unknown outcomes").
+    /// moment it sends a commit's WAL put or a tombstone's put until it
+    /// learns the put's outcome (format spec, "Failed and unknown outcomes").
     #[default]
     Unacquired,
     /// Writer epoch acquired by a claim and a fence, and reused for the
