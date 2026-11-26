@@ -45,6 +45,7 @@ mod merge_reads;
 mod metrics_instruments;
 mod namespace;
 mod namespace_list;
+mod newer_manifests;
 mod pagination;
 mod publication;
 mod publish_discovery;

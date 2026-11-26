@@ -359,3 +359,6 @@ pub fn project_anchor_tail(anchor: &NamespaceReadAnchor) -> CoreResult<Arc<Proje
     let manifest = anchor.held.manifest().envelope();
     project_manifest_tail(manifest, &manifest_base_state(manifest), anchor)
 }
+
+#[cfg(test)]
+mod tests;
