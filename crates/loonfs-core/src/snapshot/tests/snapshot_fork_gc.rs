@@ -347,7 +347,15 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
         async {
             gate.wait_until_blocked().await;
             crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
-                .delete_namespace(Default::default(), writer, None, &fixture.context.clock())
+                .delete_namespace(
+                    Default::default(),
+                    crate::commit::session_epoch::SessionEpoch::new(
+                        &std::sync::Mutex::default(),
+                        writer,
+                    ),
+                    None,
+                    &fixture.context.clock(),
+                )
                 .await
                 .expect("delete source before the fork snapshot is written");
             gate.release();

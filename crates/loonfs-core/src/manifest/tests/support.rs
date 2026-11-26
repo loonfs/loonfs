@@ -914,7 +914,12 @@ pub(super) async fn publish_once_within<S: ObjectStore + ?Sized>(
         .load_current_basis(crate::test_support::observed_now())
         .await?;
     namespace
-        .publish_manifest_from(payload, deadline, Some(&basis))
+        .publish_manifest_from(
+            payload,
+            deadline,
+            Some(&basis),
+            crate::manifest::publish::ManifestSender::Process,
+        )
         .await
 }
 

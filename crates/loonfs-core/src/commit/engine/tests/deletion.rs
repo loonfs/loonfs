@@ -207,7 +207,10 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
                 DeleteNamespaceOptions {
                     expected_head_seq: Some(expected_head_seq),
                 },
-                acquired_writer.clone(),
+                crate::commit::session_epoch::SessionEpoch::new(
+                    &std::sync::Mutex::default(),
+                    acquired_writer.clone(),
+                ),
                 None,
                 &deadline,
             )
@@ -230,16 +233,41 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
     }
 }
 
-/// Checks that a deletion whose tombstone put loses its response returns the
-/// deletion's response when the put was written, and `namespace_deleted` when
-/// another deletion by the same writer published the same tombstone content
-/// at that number first.
+/// How a deletion's tombstone put ends, in a case whose outcome the
+/// deletion learns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LearnedTombstonePut {
+    /// The put is created.
+    Created,
+    /// Another deletion's tombstone is written first, and the put collides.
+    Collided,
+    /// The put is created, and its response is lost.
+    CreatedResponseLost,
+    /// Another deletion's tombstone is written first, and the put fails
+    /// before it reaches the store.
+    LostBeforeTheStore,
+}
+
+/// Checks what a deletion returns for each outcome of its tombstone put that
+/// the deletion learns, and that the session takes its epoch back after each
+/// one (format spec, "Failed and unknown outcomes"): the deletion's own
+/// tombstone returns the deletion's response, and another deletion's
+/// tombstone at that number returns `namespace_deleted`.
 #[tokio::test]
-async fn a_deletion_whose_tombstone_put_loses_its_response_reads_back_whose_tombstone_it_is() {
+async fn a_tombstone_put_whose_outcome_the_deletion_learns_leaves_the_session_its_epoch() {
     use crate::namespace::writer_epoch::AcquiredWriter;
     use loonfs_test_support::stores::{FailStore, InjectedError};
 
-    for rival in [false, true] {
+    for put in [
+        LearnedTombstonePut::Created,
+        LearnedTombstonePut::Collided,
+        LearnedTombstonePut::CreatedResponseLost,
+        LearnedTombstonePut::LostBeforeTheStore,
+    ] {
+        let rival = matches!(
+            put,
+            LearnedTombstonePut::Collided | LearnedTombstonePut::LostBeforeTheStore
+        );
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("lost-tombstone").expect("namespace");
         let base = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
@@ -257,15 +285,17 @@ async fn a_deletion_whose_tombstone_put_loses_its_response_reads_back_whose_tomb
             OperationSelector::PutCreateIfAbsent,
             InjectedError::Transport("lost response".to_owned()),
         );
-        // Without a rival, the put is written and its response is lost. With
-        // one, the put waits while the rival publishes, and then fails before
-        // it reaches the store.
-        let failing = if rival {
-            failing
-        } else {
-            failing.apply_then_fail()
+        let failing = match put {
+            LearnedTombstonePut::CreatedResponseLost => failing.apply_then_fail(),
+            _ => failing,
         };
-        failing.fail_next(1);
+        if matches!(
+            put,
+            LearnedTombstonePut::CreatedResponseLost | LearnedTombstonePut::LostBeforeTheStore
+        ) {
+            failing.fail_next(1);
+        }
+        // With a rival, the put waits while the rival publishes.
         let store = BlockingStore::new(
             failing,
             KeyPredicate::exact(&tombstone),
@@ -290,10 +320,13 @@ async fn a_deletion_whose_tombstone_put_loses_its_response_reads_back_whose_tomb
                 .namespace
                 .delete_namespace(
                     Default::default(),
-                    AcquiredWriter {
-                        writer_id: context.writer_id.clone(),
-                        writer_epoch: WriterEpoch(1),
-                    },
+                    crate::commit::session_epoch::SessionEpoch::new(
+                        &std::sync::Mutex::default(),
+                        AcquiredWriter {
+                            writer_id: context.writer_id.clone(),
+                            writer_epoch: WriterEpoch(1),
+                        },
+                    ),
                     None,
                     &other.namespace.start_clock(),
                 )
@@ -301,24 +334,151 @@ async fn a_deletion_whose_tombstone_put_loses_its_response_reads_back_whose_tomb
                 .expect("the rival deletion");
             store.release();
         });
-        assert_eq!(store.inner().remaining(), 0);
+        assert_eq!(store.inner().remaining(), 0, "{put:?}");
         if rival {
-            assert_matches!(deleted, Err(CoreError::NamespaceDeleted { .. }));
+            assert_matches!(deleted, Err(CoreError::NamespaceDeleted { .. }), "{put:?}");
+            assert_matches!(
+                *engine.session_status().lock(),
+                WriterSessionStatus::NamespaceGone,
+                "{put:?}"
+            );
         } else {
             assert_eq!(deleted.expect("the deletion").namespace_id, namespace_id);
+            assert_matches!(
+                *engine.session_status().lock(),
+                WriterSessionStatus::Acquired(_),
+                "{put:?}"
+            );
         }
-        let current = crate::test_support::namespace_store(&base, &namespace_id)
+        let newest = newest_manifest(&base, &namespace_id).await;
+        assert_eq!(newest.manifest_no, loonfs_types::ManifestNo(5), "{put:?}");
+        assert!(newest.status.is_deleted(), "{put:?}");
+    }
+}
+
+/// Returns the payload of the newest manifest of `namespace_id`.
+async fn newest_manifest<S: ObjectStore>(
+    store: S,
+    namespace_id: &NamespaceId,
+) -> loonfs_types::format::manifest::NamespaceManifestPayload {
+    let crate::namespace::control::NewestManifest::Manifest(newest) =
+        crate::test_support::namespace_store(store, namespace_id)
             .find_newest_manifest(crate::test_support::observed_now())
             .await
-            .expect("newest manifest");
-        let crate::namespace::control::NewestManifest::Manifest(current) = current else {
-            panic!("the tombstone is the newest manifest");
-        };
-        assert_eq!(
-            current.manifest().payload().manifest_no,
-            loonfs_types::ManifestNo(5)
+            .expect("newest manifest")
+    else {
+        panic!("the namespace has a newest manifest");
+    };
+    newest.manifest().payload().clone()
+}
+
+/// The store that [`UnknownTombstone`]'s session writes through: it fails the
+/// put of manifest 5 before the put reaches the store.
+type TombstoneFailStore = loonfs_test_support::stores::FailStore<LocalFsStore>;
+
+/// A session whose deletion's tombstone put has an unknown outcome: the put
+/// of manifest 5 failed before it reached the store, so the deletion read
+/// manifest 5 back empty. The put stays in flight, and a test writes its
+/// bytes when the put in flight would be applied.
+///
+/// The session claimed at manifest 3 and committed `alpha`, and the deletion
+/// folded into manifest 4.
+struct UnknownTombstone {
+    _directory: tempfile::TempDir,
+    namespace_id: NamespaceId,
+    writer: WriterAt,
+    local: LocalFsStore,
+    store: Arc<TombstoneFailStore>,
+    engine: NamespaceCommitEngine<Arc<TombstoneFailStore>>,
+    tombstone_key: String,
+    tombstone: bytes::Bytes,
+}
+
+impl UnknownTombstone {
+    /// Runs the deletion up to its unknown outcome, and checks that it
+    /// returns `outcome_unknown` and leaves the session without its epoch.
+    async fn new() -> Self {
+        use loonfs_objectstore::PutMode;
+        use loonfs_test_support::stores::{FailStore, InjectedError, OperationKind};
+        use std::sync::Mutex;
+
+        let directory = tempdir().expect("directory");
+        let namespace_id = NamespaceId::parse("late-tombstone").expect("namespace");
+        let local = LocalFsStore::new(directory.path()).expect("store");
+        let writer = context();
+        crate::test_support::NamespaceFixture::new(&local, &namespace_id, &writer)
+            .create()
+            .await
+            .expect("bootstrap");
+        let tombstone_key = metadata_manifest_object(&namespace_id, &loonfs_types::ManifestNo(5));
+        let in_flight: Arc<Mutex<Option<bytes::Bytes>>> = Arc::default();
+        let recorded = Arc::clone(&in_flight);
+        let selected = tombstone_key.clone();
+        let store = Arc::new(FailStore::matching(
+            LocalFsStore::new(directory.path()).expect("store"),
+            move |operation| match operation.kind() {
+                OperationKind::Put {
+                    bytes,
+                    mode: PutMode::CreateIfAbsent,
+                } if operation.key() == selected => {
+                    recorded
+                        .lock()
+                        .expect("lock")
+                        .get_or_insert_with(|| bytes::Bytes::clone(bytes));
+                    true
+                }
+                _ => false,
+            },
+            InjectedError::Transport("tombstone put still in flight".into()),
+        ));
+        let mut engine = NamespaceCommitEngine::new(
+            crate::test_support::namespace_store(Arc::clone(&store), &namespace_id),
+            writer.writer_id.clone(),
         );
-        assert!(current.manifest().payload().status.is_deleted());
+        publish_one(&mut engine, &writer, "alpha").await;
+
+        store.fail_next(1);
+        let deleted = engine
+            .delete_namespace(
+                &crate::test_support::administrator_of(Arc::clone(&store), &namespace_id),
+                Default::default(),
+            )
+            .await;
+        assert_matches!(deleted, Err(CoreError::OutcomeUnknown { .. }));
+        assert_matches!(
+            *engine.session_status().lock(),
+            WriterSessionStatus::Unacquired
+        );
+        let tombstone = in_flight
+            .lock()
+            .expect("lock")
+            .take()
+            .expect("the tombstone put");
+        Self {
+            _directory: directory,
+            namespace_id,
+            writer,
+            local,
+            store,
+            engine,
+            tombstone_key,
+            tombstone,
+        }
+    }
+
+    /// Writes the tombstone put in flight, as the provider would apply it
+    /// now.
+    async fn apply_the_put_in_flight(
+        &self,
+    ) -> std::result::Result<loonfs_objectstore::ObjectMetadata, loonfs_objectstore::ObjectStoreError>
+    {
+        self.local
+            .put_if_absent(&self.tombstone_key, self.tombstone.clone())
+            .await
+    }
+
+    async fn newest(&self) -> loonfs_types::format::manifest::NamespaceManifestPayload {
+        newest_manifest(&self.local, &self.namespace_id).await
     }
 }
 
@@ -328,84 +488,29 @@ async fn a_deletion_whose_tombstone_put_loses_its_response_reads_back_whose_tomb
 /// the tombstone is written (API spec, "DELETE /v0/namespaces/{ns}": deletion
 /// linearizes at the manifest put).
 ///
-/// The session claims at manifest 3, and the deletion folds into manifest 4
-/// and sends its tombstone put to manifest 5. The put fails before it
-/// reaches the store and stays in flight, so the deletion reads manifest 5
-/// back empty and returns `outcome_unknown`. The session then commits
-/// `gamma`, and the put in flight is written at manifest 5. The session
-/// then tries to commit `delta`.
+/// After the unknown outcome (see [`UnknownTombstone`]), the session commits
+/// `gamma`, and the put in flight is written at manifest 5. The session then
+/// tries to commit `delta`.
 #[tokio::test]
 async fn a_late_tombstone_put_never_ends_the_namespace_below_an_acknowledged_commit() {
-    use loonfs_objectstore::PutMode;
-    use loonfs_test_support::stores::{FailStore, InjectedError, OperationKind};
-    use std::sync::Mutex;
+    let mut unknown = UnknownTombstone::new().await;
+    let writer = unknown.writer.clone();
 
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("late-tombstone").expect("namespace");
-    let local = LocalFsStore::new(directory.path()).expect("store");
-    let writer = context();
-    crate::test_support::NamespaceFixture::new(&local, &namespace_id, &writer)
-        .create()
+    let gamma = publish_one(&mut unknown.engine, &writer, "gamma")
         .await
-        .expect("bootstrap");
-    let tombstone_key = metadata_manifest_object(&namespace_id, &loonfs_types::ManifestNo(5));
-    let in_flight: Arc<Mutex<Option<bytes::Bytes>>> = Arc::default();
-    let recorded = Arc::clone(&in_flight);
-    let selected = tombstone_key.clone();
-    let store = FailStore::matching(
-        LocalFsStore::new(directory.path()).expect("store"),
-        move |operation| match operation.kind() {
-            OperationKind::Put {
-                bytes,
-                mode: PutMode::CreateIfAbsent,
-            } if operation.key() == selected => {
-                *recorded.lock().expect("lock") = Some(bytes::Bytes::clone(bytes));
-                true
-            }
-            _ => false,
-        },
-        InjectedError::Transport("tombstone put still in flight".into()),
-    );
-    let mut engine = NamespaceCommitEngine::new(
-        crate::test_support::namespace_store(&store, &namespace_id),
-        writer.writer_id.clone(),
-    );
-    publish_one(&mut engine, &writer, "alpha").await;
-
-    store.fail_next(1);
-    let deleted = engine
-        .delete_namespace(
-            &crate::test_support::administrator_of(&store, &namespace_id),
-            Default::default(),
-        )
-        .await;
-    assert_matches!(deleted, Err(CoreError::OutcomeUnknown { .. }));
-    let tombstone = in_flight
-        .lock()
-        .expect("lock")
-        .take()
-        .expect("the tombstone put");
-
-    let gamma = publish_one(&mut engine, &writer, "gamma").await.results[0]
+        .results[0]
         .clone()
         .expect("gamma");
     // The provider applies the put in flight now.
-    let late_put = local.put_if_absent(&tombstone_key, tombstone).await;
-    let delta = engine
+    let late_put = unknown.apply_the_put_in_flight().await;
+    let delta = unknown
+        .engine
         .publish_batch([create_dir("delta", "delta")], &writer.clock())
         .await
         .results
         .remove(0);
 
-    let crate::namespace::control::NewestManifest::Manifest(newest) =
-        crate::test_support::namespace_store(&local, &namespace_id)
-            .find_newest_manifest(crate::test_support::observed_now())
-            .await
-            .expect("newest manifest")
-    else {
-        panic!("the namespace has a newest manifest");
-    };
-    let newest = newest.manifest().payload().clone();
+    let newest = unknown.newest().await;
     let mut broken = Vec::new();
     if newest.status.is_deleted() && newest.head_seq < gamma.committed_seq {
         broken.push(format!(
@@ -422,4 +527,88 @@ async fn a_late_tombstone_put_never_ends_the_namespace_below_an_acknowledged_com
         }
     }
     assert!(broken.is_empty(), "{broken:#?}");
+}
+
+/// Checks that the session's next commit after a tombstone put with an
+/// unknown outcome claims a new epoch at the tombstone's manifest number, so
+/// the late tombstone put collides with the claim and the namespace stays
+/// active with the commit.
+#[tokio::test]
+async fn a_commit_after_an_unknown_tombstone_put_claims_the_tombstones_number() {
+    let mut unknown = UnknownTombstone::new().await;
+    let writer = unknown.writer.clone();
+
+    let gamma = publish_one(&mut unknown.engine, &writer, "gamma")
+        .await
+        .results[0]
+        .clone()
+        .expect("gamma");
+    let claim = unknown.newest().await;
+    assert_eq!(claim.manifest_no, loonfs_types::ManifestNo(5));
+    assert_eq!(claim.writer_epoch, WriterEpoch(2));
+
+    assert_matches!(
+        unknown.apply_the_put_in_flight().await,
+        Err(loonfs_objectstore::ObjectStoreError::PreconditionFailed { .. })
+    );
+    let delta = publish_one(&mut unknown.engine, &writer, "delta")
+        .await
+        .results[0]
+        .clone()
+        .expect("delta");
+    assert!(delta.committed_seq > gamma.committed_seq);
+    assert!(!unknown.newest().await.status.is_deleted());
+}
+
+/// Checks that the session's next commit after a tombstone put with an
+/// unknown outcome returns `namespace_deleted` when the late tombstone put
+/// was written before the commit's claim.
+#[tokio::test]
+async fn a_commit_after_a_late_tombstone_is_written_returns_namespace_deleted() {
+    let mut unknown = UnknownTombstone::new().await;
+    let writer = unknown.writer.clone();
+
+    unknown
+        .apply_the_put_in_flight()
+        .await
+        .expect("the late tombstone put is written");
+    let gamma = unknown
+        .engine
+        .publish_batch([create_dir("gamma", "gamma")], &writer.clock())
+        .await
+        .results
+        .remove(0);
+    assert_matches!(gamma, Err(CoreError::NamespaceDeleted { .. }));
+    assert_matches!(
+        *unknown.engine.session_status().lock(),
+        WriterSessionStatus::NamespaceGone
+    );
+    let newest = unknown.newest().await;
+    assert_eq!(newest.manifest_no, loonfs_types::ManifestNo(5));
+    assert!(newest.status.is_deleted());
+}
+
+/// Checks that a retry of a deletion whose tombstone put has an unknown
+/// outcome claims a new epoch at the tombstone's manifest number and
+/// publishes its own tombstone, so the late tombstone put collides.
+#[tokio::test]
+async fn a_retried_deletion_after_an_unknown_tombstone_put_claims_and_deletes() {
+    let mut unknown = UnknownTombstone::new().await;
+
+    let administrator =
+        crate::test_support::administrator_of(Arc::clone(&unknown.store), &unknown.namespace_id);
+    let deleted = unknown
+        .engine
+        .delete_namespace(&administrator, Default::default())
+        .await
+        .expect("the retried deletion");
+    assert_eq!(deleted.head_seq, CommitSeq(1));
+    assert_matches!(
+        unknown.apply_the_put_in_flight().await,
+        Err(loonfs_objectstore::ObjectStoreError::PreconditionFailed { .. })
+    );
+    let newest = unknown.newest().await;
+    assert!(newest.status.is_deleted());
+    assert_eq!(newest.writer_epoch, WriterEpoch(2));
+    assert_eq!(newest.head_seq, CommitSeq(1));
 }

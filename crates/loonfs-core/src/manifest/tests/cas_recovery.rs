@@ -464,6 +464,7 @@ async fn a_failed_boundary_read_after_a_put_has_an_unknown_outcome() {
             payload,
             &OperationClock::start(0, crate::test_support::std_timer()),
             Some(&basis),
+            crate::manifest::publish::ManifestSender::Process,
         )
         .await;
     let object_key = metadata_manifest_object(&namespace_id, &ManifestNo(3));
@@ -787,6 +788,7 @@ async fn two_puts_of_one_payload_store_different_bytes() {
                 payload.clone(),
                 &OperationClock::start(0, crate::test_support::std_timer()),
                 Some(&basis),
+                crate::manifest::publish::ManifestSender::Process,
             )
             .await
             .expect("publish");

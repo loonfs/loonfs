@@ -13,6 +13,7 @@ mod error;
 mod plan;
 pub(crate) mod publish_view;
 mod session;
+pub(crate) mod session_epoch;
 mod wal_payload;
 pub(crate) mod wal_size;
 

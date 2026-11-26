@@ -273,7 +273,15 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
                 1
             );
             crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .delete_namespace(Default::default(), writer, None, &context.clock())
+                .delete_namespace(
+                    Default::default(),
+                    crate::commit::session_epoch::SessionEpoch::new(
+                        &std::sync::Mutex::default(),
+                        writer,
+                    ),
+                    None,
+                    &context.clock(),
+                )
                 .await
                 .expect("delete namespace during verification");
             store.release();
