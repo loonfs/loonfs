@@ -392,41 +392,62 @@ async fn a_discovery_continues_from_a_newer_manifest_with_the_objects_it_read() 
     }
 }
 
-/// Checks that a writer session's discovery that finds another writer's
-/// claim after its WAL read returns `writer_fenced` before it reads the WAL
-/// again, and that a discovery that finds a tombstone returns
+/// Checks that a writer session's discovery keeps the objects it read when
+/// its check finds a newer manifest of the session's writer epoch, and
+/// returns `writer_fenced` before it reads the WAL again when the newer
+/// manifest is another writer's claim.
+#[tokio::test]
+async fn a_writer_session_discovery_keeps_its_objects_or_is_fenced_by_a_newer_manifest() {
+    for (case, step) in [
+        ("same-epoch", Rival::Publishes(|_| {})),
+        ("claim", Rival::Claims),
+    ] {
+        let fixture = fixture(&format!("session-{case}"), 4).await;
+        let namespace_id = fixture.namespace_id.clone();
+        let (store, _directory) = fixture.rival_before_checks(vec![]);
+        let namespace = namespace_store(&store, &namespace_id);
+        let acquired = namespace
+            .acquire_writer_epoch(&writer_at("session", 1_000).writer_id)
+            .await
+            .expect("the session claims");
+        store
+            .inner()
+            .interceptor()
+            .steps
+            .lock()
+            .expect("the steps lock")
+            .push_back(step);
+        store.reset();
+        let loaded = namespace
+            .load_writer_read_anchor(&acquired, observed_now())
+            .await;
+        // The session's claim put a fence at WAL 6, and the reads end at 7.
+        let heads = match case {
+            "same-epoch" => {
+                let anchor = loaded.expect("a discovery of the session's own epoch");
+                assert_eq!(tail_wal_numbers(&anchor), (1..=6).collect::<Vec<_>>());
+                assert_eq!(anchor.read_state.writer_epoch, WriterEpoch(2));
+                2
+            }
+            _ => {
+                assert_matches!(loaded.map(|_| ()), Err(CoreError::WriterFenced(_)));
+                1
+            }
+        };
+        let sent = sent(&namespace_id, &store.take());
+        assert_eq!(sent.wal_gets, (1..=7).collect::<Vec<_>>(), "case {case}");
+        assert_eq!(
+            (sent.manifest_lists, sent.manifest_heads),
+            (2, heads),
+            "case {case}"
+        );
+    }
+}
+
+/// Checks that a discovery that finds a tombstone after its WAL read returns
 /// `namespace_deleted` without another WAL read.
 #[tokio::test]
-async fn a_discovery_that_finds_a_claim_or_a_tombstone_reads_no_more_wal() {
-    let fenced_fixture = fixture("fenced", 4).await;
-    let namespace_id = fenced_fixture.namespace_id.clone();
-    let (store, _directory) = fenced_fixture.rival_before_checks(vec![]);
-    let namespace = namespace_store(&store, &namespace_id);
-    let acquired = namespace
-        .acquire_writer_epoch(&writer_at("session", 1_000).writer_id)
-        .await
-        .expect("the session claims");
-    store
-        .inner()
-        .interceptor()
-        .steps
-        .lock()
-        .expect("the steps lock")
-        .push_back(Rival::Claims);
-    store.reset();
-    let fenced = namespace
-        .load_writer_read_anchor(&acquired, observed_now())
-        .await
-        .map(|_| ());
-    assert_matches!(fenced, Err(CoreError::WriterFenced(_)));
-    // The session's claim put a fence at WAL 6, and the reads end at 7.
-    let fenced_sent = sent(&namespace_id, &store.take());
-    assert_eq!(fenced_sent.wal_gets, (1..=7).collect::<Vec<_>>());
-    assert_eq!(
-        (fenced_sent.manifest_lists, fenced_sent.manifest_heads),
-        (2, 1)
-    );
-
+async fn a_discovery_that_finds_a_tombstone_reads_no_more_wal() {
     let fixture = fixture("deleted", 4).await;
     let namespace_id = fixture.namespace_id.clone();
     let (store, _directory) = fixture.rival_before_checks(vec![Rival::Deletes]);
@@ -594,4 +615,115 @@ async fn a_collection_during_a_discovery_hides_no_acknowledged_commit() {
     let sent = sent(&namespace_id, &store.take());
     assert_eq!(sent.wal_gets, vec![1, 2, 3, 6]);
     assert_eq!((sent.manifest_lists, sent.manifest_heads), (2, 2));
+}
+
+/// Checks that a discovery that loads an initializing manifest, whose pass
+/// reads no WAL, keeps nothing when its check finds the active manifest, and
+/// reads the WAL above the active manifest.
+#[tokio::test]
+async fn a_discovery_above_an_initializing_manifest_keeps_nothing() {
+    let fixture = fixture("initializing", 0).await;
+    let store = fixture.store();
+    // Takes the active manifest out, so that the newest manifest is the
+    // initializing manifest 1, and puts it back before the check of manifest
+    // 1.
+    let manifests = store
+        .list_prefix(&metadata_manifest_prefix(&fixture.namespace_id))
+        .await
+        .expect("list the manifests");
+    assert_eq!(
+        manifests
+            .iter()
+            .filter_map(|key| manifest_no_of(key))
+            .collect::<Vec<_>>(),
+        vec![ManifestNo(1), ManifestNo(2)]
+    );
+    let key = metadata_manifest_object(&fixture.namespace_id, &ManifestNo(2));
+    let bytes = store
+        .get(&key, None)
+        .await
+        .expect("get the active manifest")
+        .expect("the active manifest");
+    store
+        .delete(&key)
+        .await
+        .expect("take the active manifest out");
+    let namespace_id = fixture.namespace_id.clone();
+    let (store, _directory) = fixture.rival_before_checks(vec![Rival::Puts { key, bytes }]);
+    let anchor = namespace_store(&store, &namespace_id)
+        .load_read_anchor(observed_now())
+        .await
+        .expect("a discovery across the activation");
+    assert!(anchor.read_state.status.is_active());
+    assert_eq!(
+        anchor.current_manifest().manifest().manifest_no,
+        ManifestNo(2)
+    );
+    assert_eq!(tail_wal_numbers(&anchor), Vec::<u64>::new());
+    // The pass above manifest 1 reads no WAL, and the pass above manifest 2
+    // reads WAL 1.
+    assert_eq!(
+        sent(&namespace_id, &store.take()),
+        Sent {
+            wal_gets: vec![1],
+            manifest_lists: 2,
+            manifest_heads: 2,
+        }
+    );
+}
+
+/// Checks that a discovery whose WAL read finds a gap, a codec error, reads
+/// the whole tail above the newer manifest that the reload finds, because a
+/// pass after a codec error keeps nothing.
+#[tokio::test]
+async fn a_discovery_after_a_codec_error_reads_the_whole_tail_above_the_newer_manifest() {
+    let (fixture, fold) = fixture_with_an_earlier_fold("codec").await;
+    let Rival::Puts { key, bytes } = fold else {
+        panic!("an earlier fold is a put");
+    };
+    let namespace_id = fixture.namespace_id.clone();
+    let rival = fixture.store();
+    let wal_2 = rival
+        .list_prefix(&wal_prefix(&namespace_id))
+        .await
+        .expect("list the WAL")
+        .into_iter()
+        .find(|key| wal_no_of(key) == Some(WalNo(2)))
+        .expect("WAL 2");
+    let store = RecordingStore::new(
+        BlockingStore::new(
+            fixture.store(),
+            KeyPredicate::new(|key| wal_no_of(key) == Some(WalNo(2))),
+            OperationSelector::Read,
+        ),
+        KeyPredicate::any(),
+    );
+    store.inner().block_next();
+    let reader = namespace_store(&store, &namespace_id);
+    // While the first GET of WAL 2 waits, the fold at WAL 3 is published and
+    // a collection deletes WAL 2, so the read finds WAL 2 missing below the
+    // present WAL 3.
+    let (anchor, ()) = futures::join!(reader.load_read_anchor(observed_now()), async {
+        store.inner().wait_until_blocked().await;
+        rival
+            .put_if_absent(&key, bytes)
+            .await
+            .expect("publish the fold");
+        rival.delete(&wal_2).await.expect("delete WAL 2");
+        store.inner().release();
+    });
+    let anchor = anchor.expect("a discovery after a codec error");
+    assert_eq!(anchor.current_manifest().payload().folded_wal_no, WalNo(3));
+    assert_eq!(tail_wal_numbers(&anchor), vec![4, 5]);
+    assert_eq!(anchor.read_state.seq, CommitSeq(4));
+    // The first pass reads WAL 1 to 3 and WAL 2 again, and the second pass
+    // reads WAL 4 to 6 above the fold.
+    assert_eq!(
+        sent(&namespace_id, &store.take()),
+        Sent {
+            wal_gets: vec![1, 2, 2, 3, 4, 5, 6],
+            manifest_lists: 2,
+            manifest_heads: 1,
+        }
+    );
 }
