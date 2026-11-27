@@ -134,8 +134,8 @@ enum ClaimRequest {
     /// The check's walk loads the claim from the store.
     Get,
     /// The check's HEAD for a successor finds the claim, and the walk loads
-    /// the claim from the segment cache, because a fold in A's runtime loaded
-    /// the claim first.
+    /// the claim from the segment cache, because an earlier load in A's
+    /// runtime loaded the claim first.
     Head,
 }
 
@@ -376,14 +376,12 @@ impl Takeover {
 }
 
 /// Checks that a read in A's runtime with an interval of 0 sees B's commit
-/// when B claims the namespace after a manifest of A's own that A's position
-/// hasn't moved to yet.
+/// when B claims the namespace after a manifest of A's own.
 ///
 /// A's fold through maintenance publishes A's manifest while A's commit
-/// waits at its WAL put, so the move of A's position waits for the engine.
-/// The read's check finds A's own manifest first and goes on to the next
-/// number, which is B's claim, and its drop of the position waits for A's
-/// commit too.
+/// waits at its WAL put, and moves A's position onto it without waiting for
+/// the commit. The read's check finds the next number, which is B's claim,
+/// and its drop of the position waits for A's commit.
 #[tokio::test]
 async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
     let fixture = takeover("past-own-manifest", parked_commits, None).await;
@@ -408,10 +406,10 @@ async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
 ///
 /// B claims the namespace while A's commit waits at its WAL put, and then a
 /// fold through A's maintenance folds over B's claim, so A's own manifest
-/// follows B's claim. The fold loads B's claim, so the claim is in the
-/// segment cache. The read's check finds B's claim right after A's position
-/// with its HEAD for a successor, loads the claim from the segment cache, and
-/// drops the position once A's commit releases the engine.
+/// follows B's claim and has B's writer epoch. A's position can't move onto
+/// that manifest, so the fold ends the position that reads start from at
+/// once, without waiting for A's commit, and a read in A's runtime loads the
+/// namespace from the store.
 #[tokio::test]
 async fn a_claim_below_this_runtimes_own_manifest_is_not_its_own() {
     let fixture = takeover("claim-below-own", parked_commits, None).await;
@@ -419,11 +417,48 @@ async fn a_claim_below_this_runtimes_own_manifest_is_not_its_own() {
         .while_a_commit_waits(async {
             fixture.peer_commits().await;
             let claim = fixture.current_manifest_no().await;
-            let (own, ()) = futures::join!(fixture.maintenance_fold(), async {
-                fixture.wait_for_manifest_after(claim).await;
-                fixture.read_past_the_claim(claim, ClaimRequest::Head).await;
-            });
+            let own = bounded(STEP, fixture.maintenance_fold())
+                .await
+                .expect("the fold doesn't wait for A's commit");
             assert!(own > claim);
+            assert!(
+                !fixture.namespace.has_current_writer_position(),
+                "the fold ends A's position"
+            );
+            fixture
+                .reader
+                .stat("/b")
+                .await
+                .expect("a read in A's runtime sees B's commit");
+            fixture.gate.release();
+        })
+        .await;
+    fixture.assert_sees_the_takeover().await;
+}
+
+/// Checks that a read's check that finds B's claim with its HEAD for a
+/// successor, and loads the claim from the segment cache, drops A's
+/// position, and that the read sees B's commit.
+///
+/// B claims the namespace while A's commit waits at its WAL put. A's
+/// diagnostics load the newest manifest, which is B's claim, through A's
+/// segment cache without moving A's position. The read's check then finds
+/// the claim right after A's position.
+#[tokio::test]
+async fn a_check_finds_a_cached_claim_with_its_successor_head() {
+    let fixture = takeover("cached-claim", parked_commits, None).await;
+    fixture
+        .while_a_commit_waits(async {
+            fixture.peer_commits().await;
+            let claim = fixture.current_manifest_no().await;
+            fixture
+                .writer
+                .maintenance(writer_id("takeover-maintenance"))
+                .diagnostics(&fixture.namespace_id)
+                .await
+                .expect("diagnostics");
+            assert!(fixture.namespace.has_current_writer_position());
+            fixture.read_past_the_claim(claim, ClaimRequest::Head).await;
         })
         .await;
     fixture.assert_sees_the_takeover().await;

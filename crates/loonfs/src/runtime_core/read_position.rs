@@ -7,7 +7,9 @@ use crate::NamespaceId;
 use futures::future::BoxFuture;
 use loonfs_core::cache::{CachedHead, HeadAndWalTailCache, SharedCheck, WalTailCacheKey};
 use loonfs_core::control::{Held, HeldManifestForm, LoadedManifest};
-use loonfs_core::publish::{PositionCheck, WriterPosition};
+use loonfs_core::publish::{
+    FollowOutcome, PositionCheck, PublishedLock, PublishedManifest, WriterPosition,
+};
 use loonfs_core::CoreError;
 use loonfs_core::Phase;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -28,13 +30,13 @@ pub(crate) trait HeadPositions: Send + Sync {
     /// from the store.
     fn drop_position<'a>(&'a self, namespace_id: &'a NamespaceId) -> BoxFuture<'a, ()>;
 
-    /// Moves the position of the namespace's writer session onto
-    /// `published`, a manifest above the position's, the way the session's
-    /// own publications move it, once no other task has the engine locked.
+    /// Moves the position of the namespace's writer session onto `newest`,
+    /// a manifest above the position's that a read's check found, once no
+    /// other task has the engine locked.
     fn move_position<'a>(
         &'a self,
         namespace_id: &'a NamespaceId,
-        published: Held<LoadedManifest>,
+        newest: Held<LoadedManifest>,
     ) -> BoxFuture<'a, ()>;
 }
 
@@ -43,40 +45,191 @@ pub(crate) trait HeadPositions: Send + Sync {
 ///
 /// The publisher stores the engine's position here each time a task
 /// releases the engine, so a read after a commit's acknowledgement sees the
-/// commit.
+/// commit. A manifest that this runtime publishes moves the position that
+/// the slot returns at once, without waiting for the engine, because the
+/// slot brings the position up to the session's newest published manifest
+/// each time it returns the position (see [`PublishedManifest::follow`]).
 #[derive(Debug)]
 pub(crate) struct ReadPositionSlot {
     /// The runtime's read cache, where [`Self::clear`] installs the position
     /// as the namespace's cached head, with the position's tail.
     head_and_wal_tail_cache: Arc<HeadAndWalTailCache>,
+    /// The newest manifest that the session's runtime published.
+    published: PublishedManifest,
+    /// The position as the engine's last release stored it, or as the slot
+    /// last brought it up to `published`.
     position: Mutex<Option<Arc<WriterPosition>>>,
     /// The session's checks of the position, which the reads that need a
     /// check share.
     check: SharedCheck<Result<(), CoreError>>,
 }
 
+/// What [`ReadPositionSlot::follow_stored`] replaced in the slot.
+#[derive(Debug)]
+pub(crate) enum FollowedSlot {
+    /// A position that moved onto the published manifest replaced this one.
+    Replaced(Arc<WriterPosition>),
+    /// The slot removed this position, which can't move onto the published
+    /// manifest.
+    Removed(Arc<WriterPosition>),
+}
+
 impl ReadPositionSlot {
     /// Returns an empty slot for a writer session in the runtime whose read
-    /// cache is `head_and_wal_tail_cache`.
-    pub(crate) fn new(head_and_wal_tail_cache: Arc<HeadAndWalTailCache>) -> Self {
+    /// cache is `head_and_wal_tail_cache`, and whose newest published
+    /// manifest is `published`.
+    pub(crate) fn new(
+        head_and_wal_tail_cache: Arc<HeadAndWalTailCache>,
+        published: PublishedManifest,
+    ) -> Self {
         Self {
             head_and_wal_tail_cache,
+            published,
             position: Mutex::default(),
             check: SharedCheck::default(),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, Option<Arc<WriterPosition>>> {
-        // A critical section under this lock only moves an `Arc`, so it can't
-        // panic and poison the lock.
+        // A critical section under this lock moves an `Arc`, or follows the
+        // published manifest and stores the result, and calls no code outside
+        // the position types, so it can't panic and poison the lock.
         self.position
             .lock()
             .expect("the read position lock should not be poisoned")
     }
 
-    /// Returns the position that reads start from, or `None` when reads take
-    /// the read cache.
+    /// Returns the newest manifest that the session's runtime published,
+    /// which the slot's position follows.
+    pub(crate) fn published(&self) -> &PublishedManifest {
+        &self.published
+    }
+
+    /// Brings the stored position up to the manifest that `published`, the
+    /// slot's locked [`PublishedManifest`], records, and stores it, or
+    /// removes it when it can't move there, and returns the position that
+    /// it replaced.
+    ///
+    /// The slot stays locked from the read of the stored position to the
+    /// store, so a read's check that replaces the position meanwhile (see
+    /// [`Self::record_check`]) either comes first, and its position is the
+    /// one that follows, or comes after, and finds the position replaced.
+    /// The caller passes the result to [`Self::finish_follow`] once it has
+    /// unlocked `published`, because dropping the replaced position can free
+    /// a large WAL tail, and a removed position's tail goes into the read
+    /// cache.
+    #[must_use = "finish the follow once the published manifest is unlocked"]
+    pub(crate) fn follow_stored(&self, published: &PublishedLock<'_>) -> Option<FollowedSlot> {
+        assert!(
+            published.is_lock_of(&self.published),
+            "a slot follows its own session's published manifest"
+        );
+        let mut slot = self.lock();
+        let stored = slot.as_ref()?;
+        match published.follow(stored) {
+            FollowOutcome::Unchanged => None,
+            FollowOutcome::Moved(moved) => {
+                slot.replace(Arc::new(*moved)).map(FollowedSlot::Replaced)
+            }
+            FollowOutcome::Dropped => slot.take().map(FollowedSlot::Removed),
+        }
+    }
+
+    /// Finishes [`Self::follow_stored`] once the published manifest is
+    /// unlocked: drops the replaced position, or hands a removed position
+    /// over as [`Self::current`] does.
+    pub(crate) fn finish_follow(&self, followed: Option<FollowedSlot>) {
+        match followed {
+            Some(FollowedSlot::Replaced(replaced)) => drop(replaced),
+            Some(FollowedSlot::Removed(removed)) => self.hand_over_removed(&removed),
+            None => {}
+        }
+    }
+
+    /// Returns the position that reads start from, brought up to the
+    /// session's newest published manifest, or `None` when reads take the
+    /// read cache.
+    ///
+    /// A position that can't move onto that manifest is removed, and the
+    /// namespace's cached head is dropped, as the engine's release does when
+    /// it finds no position to store: the position's tail goes into the read
+    /// cache, and the next read loads the namespace by discovery. The
+    /// engine's own position stays until the engine's release, because every
+    /// change to it waits for the engine's turn, and a unit can keep the
+    /// engine across its WAL put. That position can't move there either, so
+    /// the release drops it (see `NamespacePublisher::record_published`).
     pub(crate) fn current(&self) -> Option<Arc<WriterPosition>> {
+        let stored = self.lock().clone()?;
+        self.apply(&stored, self.published.follow(&stored))
+    }
+
+    /// Applies `outcome`, where `stored` goes once it follows the session's
+    /// newest published manifest, and returns the position that reads start
+    /// from.
+    fn apply(
+        &self,
+        stored: &Arc<WriterPosition>,
+        outcome: FollowOutcome,
+    ) -> Option<Arc<WriterPosition>> {
+        match outcome {
+            FollowOutcome::Unchanged => Some(Arc::clone(stored)),
+            FollowOutcome::Moved(moved) => {
+                let moved = Arc::new(*moved);
+                self.replace(stored, Some(Arc::clone(&moved)));
+                Some(moved)
+            }
+            FollowOutcome::Dropped => {
+                if self.replace(stored, None) {
+                    self.hand_over_removed(stored);
+                }
+                None
+            }
+        }
+    }
+
+    /// Puts the tail of `removed`, a position that can't follow the
+    /// session's newest published manifest, into the read cache, and drops
+    /// the namespace's cached head, as the engine's release does when it
+    /// finds no position to store.
+    fn hand_over_removed(&self, removed: &WriterPosition) {
+        self.insert_tail(removed);
+        self.head_and_wal_tail_cache
+            .invalidate_head(&removed.read_basis().head().namespace_id);
+    }
+
+    /// Replaces `current` with `updated`, and returns whether it did, unless
+    /// the slot has stored or cleared a position since it returned `current`.
+    fn replace(&self, current: &Arc<WriterPosition>, updated: Option<Arc<WriterPosition>>) -> bool {
+        let mut slot = self.lock();
+        let replaced = slot
+            .as_ref()
+            .is_some_and(|position| Arc::ptr_eq(position, current));
+        if replaced {
+            *slot = updated;
+        }
+        replaced
+    }
+
+    /// Inserts `position`'s WAL tail into the read cache, under the key of
+    /// the position's manifest and head.
+    fn insert_tail(&self, position: &WriterPosition) {
+        let read_basis = position.read_basis();
+        self.head_and_wal_tail_cache.insert_tail(
+            WalTailCacheKey {
+                namespace_id: read_basis.head().namespace_id.clone(),
+                manifest_no: read_basis.basis().manifest_no(),
+                head_seq: read_basis.head().seq,
+                wal_no: read_basis.head().wal_no,
+            },
+            Arc::clone(position.tail()),
+        );
+    }
+
+    /// Returns the position as the slot stores it, without following the
+    /// session's newest published manifest, for a test of what the slot
+    /// keeps in memory.
+    #[cfg(test)]
+    pub(crate) fn stored(&self) -> Option<Arc<WriterPosition>> {
         self.lock().clone()
     }
 
@@ -117,21 +270,14 @@ impl ReadPositionSlot {
     /// [`RuntimeCore::invalidate_namespace_read_cache`]), so the slot hands
     /// the tail over at every end of a position. After another writer's
     /// claim, the caller then drops the cached head, and the tail stays
-    /// unused unless a later load finds the same head.
+    /// unused unless a later load finds the same head. A position that can't
+    /// move onto the session's newest published manifest never becomes the
+    /// cached head, because [`Self::current`] removes it first.
     pub(crate) fn clear(&self) -> bool {
         let Some(position) = self.current() else {
             return false;
         };
-        let read_basis = position.read_basis();
-        self.head_and_wal_tail_cache.insert_tail(
-            WalTailCacheKey {
-                namespace_id: read_basis.head().namespace_id.clone(),
-                manifest_no: read_basis.basis().manifest_no(),
-                head_seq: read_basis.head().seq,
-                wal_no: read_basis.head().wal_no,
-            },
-            Arc::clone(position.tail()),
-        );
+        self.insert_tail(&position);
         self.head_and_wal_tail_cache.replace_head(CachedHead::new(
             position.basis().clone(),
             position.basis().checked().clone(),
@@ -150,14 +296,7 @@ impl ReadPositionSlot {
         if !updated.merge_check(check) {
             return;
         }
-        let updated = Arc::new(updated);
-        let mut slot = self.lock();
-        if slot
-            .as_ref()
-            .is_some_and(|position| Arc::ptr_eq(position, &current))
-        {
-            *slot = Some(updated);
-        }
+        self.replace(&current, Some(Arc::new(updated)));
     }
 }
 
@@ -250,8 +389,7 @@ impl RuntimeCore {
     /// Checks the position (see [`WriterPosition::check`]), and applies
     /// what the check found: it records a check that found the position's
     /// manifest the newest, moves the position onto the newest manifest of
-    /// its writer epoch, as it moves onto the manifests this runtime
-    /// publishes (see [`HeadPositions::move_position`]), or drops this
+    /// its writer epoch (see [`HeadPositions::move_position`]), or drops this
     /// runtime's view of the namespace (see
     /// [`RuntimeCore::forget_namespace_view`]). A move or a drop waits for a
     /// publish that has the engine locked.

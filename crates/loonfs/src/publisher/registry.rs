@@ -271,11 +271,11 @@ impl HeadPositions for RegistryShared {
     fn move_position<'a>(
         &'a self,
         namespace_id: &'a NamespaceId,
-        published: Held<LoadedManifest>,
+        newest: Held<LoadedManifest>,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             if let Some(publisher) = self.live_publisher(namespace_id) {
-                publisher.move_position(published).await;
+                publisher.move_position(newest).await;
             }
         })
     }
@@ -405,8 +405,7 @@ impl PublisherRegistry {
     ) {
         match change {
             NamespaceChange::Published(published) => {
-                self.record_manifest_published(namespace_id, *published)
-                    .await;
+                self.record_manifest_published(namespace_id, &published);
             }
             NamespaceChange::Unchanged => {}
             NamespaceChange::Unknown => {
@@ -449,28 +448,30 @@ impl PublisherRegistry {
     }
 
     /// Records `published`, a manifest that this runtime published or found
-    /// current. The namespace's publisher moves its position onto it, or
-    /// drops the position when it can't move there, and the runtime drops
-    /// the namespace's cached head unless the cached head is already against
-    /// that manifest or a later one (see
+    /// current, without waiting for the engine of the namespace's writer
+    /// session. The session's position moves onto it from then on, or is
+    /// dropped when it can't move there (see
+    /// [`PublishedManifest::follow`](loonfs_core::publish::PublishedManifest::follow)),
+    /// and the runtime drops the namespace's cached head unless the cached
+    /// head is already against that manifest or a later one (see
     /// [`HeadAndWalTailCache::confirm_or_drop_head`](loonfs_core::cache::HeadAndWalTailCache::confirm_or_drop_head)).
-    pub(crate) async fn record_manifest_published(
+    pub(crate) fn record_manifest_published(
         &self,
         namespace_id: &NamespaceId,
-        published: Held<LoadedManifest>,
+        published: &Held<LoadedManifest>,
     ) {
-        // The position moves first, so a session that closes between the
-        // two steps hands the cached head a position on `published`, which
-        // the confirmation keeps, and not a position on an older manifest,
-        // which nothing would drop.
-        self.shared
-            .move_position(namespace_id, published.clone())
-            .await;
+        // The session records the manifest first, so a session that closes
+        // between the two steps hands the cached head a position on
+        // `published`, which the confirmation keeps, and not a position on an
+        // older manifest, which nothing would drop.
+        if let Some(publisher) = self.live_publisher(namespace_id) {
+            publisher.record_published(published);
+        }
         self.shared
             .context
             .runtime_core
             .head_and_wal_tail_cache()
-            .confirm_or_drop_head(namespace_id, &published);
+            .confirm_or_drop_head(namespace_id, published);
     }
 
     pub(super) fn live_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {

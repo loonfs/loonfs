@@ -6,6 +6,7 @@ mod deletion;
 mod inline;
 mod merge;
 mod preparation_panic;
+mod published_manifest;
 mod retention_floor;
 mod unknown_outcome;
 
@@ -274,7 +275,7 @@ async fn a_commit_that_cannot_check_its_manifest_returns_the_load_error() {
         .fold_wal_tail(engine.writer_position(), &writer.clock())
         .await
         .expect("fold");
-    engine.record_manifest_published(folded.current);
+    engine.move_position_onto(folded.current);
     let current = crate::test_support::namespace_store(&base, &namespace_id)
         .load_current_manifest()
         .await
@@ -859,7 +860,7 @@ async fn a_session_drops_its_position_at_a_fold_past_its_tip() {
         .await
         .expect("the probe's walk")
         .expect("the fold has the session's epoch");
-    engine.record_manifest_published(newest);
+    engine.move_position_onto(newest);
     assert!(
         engine.writer_position().is_none(),
         "the session drops its position"
@@ -905,7 +906,7 @@ async fn a_writer_at_the_write_stop_moves_onto_another_process_fold_of_its_tail(
         folded.response.outcome,
         crate::FoldWalOutcome::AlreadyCurrent
     );
-    engine.record_manifest_published(folded.current);
+    engine.move_position_onto(folded.current);
     assert_eq!(
         engine
             .read_position()
@@ -942,7 +943,7 @@ async fn writer_after_own_compaction<'a>(
             .fold_wal_tail(Some(input), &OperationClock::start(0, timer.clone()))
             .await
             .expect("own fold");
-        engine.record_manifest_published(folded.current);
+        engine.move_position_onto(folded.current);
     }
     let before = engine.writer_position().expect("re-anchored tail");
     let compacted = {
@@ -1069,7 +1070,7 @@ async fn a_writer_moved_after_its_own_compaction_keeps_its_tail() {
     let (mut engine, _timer, writer, manifest) =
         writer_after_own_compaction(&store, &namespace_id).await;
 
-    engine.record_manifest_published(manifest.clone());
+    engine.move_position_onto(manifest.clone());
     store.reset();
     let published = publish_one(&mut engine, &writer, "epsilon").await;
     assert_eq!(
@@ -1118,7 +1119,7 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     let published = folded.published().expect("the fold publishes a manifest");
     publish_one(&mut engine, &writer, "gamma").await;
 
-    engine.record_manifest_published(published.clone());
+    engine.move_position_onto(published.clone());
     let moved = engine.writer_position().expect("the position moved");
     assert_eq!(
         moved.read_basis().basis.manifest(),
@@ -1210,7 +1211,7 @@ async fn a_manifest_published_over_another_process_fold_moves_the_position() {
         basis.manifest_no().0 + 2
     );
 
-    engine.record_manifest_published(changed.clone());
+    engine.move_position_onto(changed.clone());
     let moved = engine.writer_position().expect("the position moved");
     assert_eq!(
         moved.read_basis().basis.manifest(),
@@ -1262,7 +1263,7 @@ async fn a_window_change_over_a_manifest_without_runs_keeps_the_root_directory()
     )
     .await;
 
-    engine.record_manifest_published(changed.clone());
+    engine.move_position_onto(changed.clone());
     let moved = engine.writer_position().expect("the position moved");
     assert_eq!(
         moved.read_basis().basis.manifest(),
@@ -1418,7 +1419,7 @@ pub(super) async fn advance_in_session<S: ObjectStore>(
         .await
         .expect("fold")
         .current;
-    engine.record_manifest_published(folded.clone());
+    engine.move_position_onto(folded.clone());
     folded
 }
 

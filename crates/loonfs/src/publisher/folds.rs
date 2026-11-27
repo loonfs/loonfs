@@ -314,8 +314,7 @@ impl PublisherRegistry {
         let folded = self
             .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unchanged)
             .await?;
-        self.record_manifest_published(namespace_id, folded.current.clone())
-            .await;
+        self.record_manifest_published(namespace_id, &folded.current);
         turns.record(round, &folded);
         if folded.response.outcome == FoldWalOutcome::Published {
             if let Some(publisher) = self.live_publisher(namespace_id) {
@@ -473,10 +472,10 @@ impl PublisherRegistry {
 impl NamespacePublisher {
     /// Returns the position that reads in this runtime start from.
     ///
-    /// The position is the engine's as of the engine's last release, so a
-    /// fold from it doesn't wait for a publication that the engine is
-    /// running, and that publication's commits stay in the tail above the
-    /// fold's manifest.
+    /// The position is the engine's as of the engine's last release, brought
+    /// up to the newest manifest that this runtime published, so a fold from
+    /// it doesn't wait for a publication that the engine is running, and that
+    /// publication's commits stay in the tail above the fold's manifest.
     pub(super) fn current_position(&self) -> Option<WriterPosition> {
         self.read_position
             .current()

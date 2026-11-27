@@ -194,6 +194,7 @@ pub mod publish {
         WriterSessionStatusGuard, WriterSessionStatusView,
     };
     pub use crate::commit::publish_view::{PositionCheck, WriterPosition};
+    pub use crate::commit::published_manifest::{FollowOutcome, PublishedLock, PublishedManifest};
     pub use crate::commit::CommitFingerprint;
     pub use crate::namespace::writer_epoch::AcquiredWriter;
     pub use crate::path::write::{CommitIntent, FilesystemOperation};

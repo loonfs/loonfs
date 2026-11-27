@@ -330,12 +330,12 @@ async fn an_unknown_change_drops_the_read_position_until_the_next_commit() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a manifest that this runtime publishes while a publish has
-/// the engine locked leaves the position for reads in place until the
-/// publish releases the engine, which then moves the position to that
-/// manifest.
+/// Checks that a fold that this runtime publishes while a commit's WAL put is
+/// in flight moves the position that reads start from onto its manifest at
+/// once, without waiting for the publish to release the engine, and that the
+/// commit is then in the tail above the fold's manifest.
 #[tokio::test]
-async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_ends() {
+async fn a_fold_moves_the_read_position_while_a_commits_put_is_in_flight() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
@@ -355,31 +355,28 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
         ))),
         async {
             store.wait_until_blocked().await;
-            let (snapshot, ()) =
-                futures::join!(namespace.create_snapshot_with_options(&options), async {
-                    // The snapshot's manifest is durable, and its move of
-                    // the position waits for the publish's engine.
-                    bounded(Duration::from_secs(10), async {
-                        let shared = store.clone() as SharedStore;
-                        while current_manifest_no(&shared, &namespace_id).await
-                            <= before.read_basis().basis().manifest_no()
-                        {
-                            tokio::task::yield_now().await;
-                        }
-                    })
-                    .await
-                    .expect("the snapshot publishes its manifest");
-                    let kept = writer
-                        .core
-                        .writer_position(&namespace_id)
-                        .expect("reads keep the position while the publish runs");
-                    assert_eq!(
-                        kept.read_basis().basis().manifest_no(),
-                        before.read_basis().basis().manifest_no()
-                    );
-                    store.release();
-                });
-            snapshot.expect("snapshot")
+            let snapshot = bounded(
+                Duration::from_secs(10),
+                namespace.create_snapshot_with_options(&options),
+            )
+            .await
+            .expect("the snapshot's fold doesn't wait for the commit's put")
+            .expect("snapshot");
+            let moved = writer
+                .core
+                .writer_position(&namespace_id)
+                .expect("reads keep a position while the commit's put is in flight");
+            assert_eq!(
+                moved.read_basis().basis().manifest_no(),
+                snapshot.snapshot_id.manifest_no(),
+                "the fold moves the position while the commit's put is in flight"
+            );
+            assert_eq!(
+                moved.read_basis().head().seq,
+                before.read_basis().head().seq
+            );
+            store.release();
+            snapshot
         }
     );
     let during = during.expect("the publish succeeds");
@@ -392,6 +389,285 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
         snapshot.snapshot_id.manifest_no()
     );
     assert_eq!(after.read_basis().head().seq, during.committed_seq);
+    assert_eq!(
+        after.wal_tail_objects(),
+        1,
+        "the commit is in the tail above the fold's manifest"
+    );
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a fold that this runtime publishes moves the position that
+/// reads start from before anything releases the session's engine: the test
+/// keeps the engine locked while the fold runs and reads.
+#[tokio::test]
+async fn a_fold_moves_the_read_position_before_the_engine_is_released() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let (writer, namespace) = published_namespace(store).await;
+    let namespace_id = namespace.id().clone();
+    let before = writer
+        .core
+        .writer_position(&namespace_id)
+        .expect("a position after a commit");
+    let engine = namespace.session().publisher.lock_engine().await;
+    let folded = bounded(
+        Duration::from_secs(10),
+        writer
+            .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
+            .fold_wal(&namespace_id),
+    )
+    .await
+    .expect("the fold doesn't wait for the engine")
+    .expect("fold");
+    assert_eq!(folded.outcome, FoldWalOutcome::Published);
+    let moved = writer
+        .core
+        .writer_position(&namespace_id)
+        .expect("a position while the engine is locked");
+    assert_eq!(moved.read_basis().basis().manifest_no(), folded.manifest_no);
+    assert_eq!(
+        moved.read_basis().head().seq,
+        before.read_basis().head().seq
+    );
+    drop(engine);
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a position that reads start from, and that can't move onto
+/// a manifest this runtime published, is removed by the first read while
+/// the session's engine is idle, so later reads find no position to move.
+///
+/// Another writer claims the namespace, and a fold through this runtime's
+/// maintenance then folds over the claim, so the fold's manifest has the
+/// other writer's epoch.
+#[tokio::test]
+async fn a_read_position_that_cannot_follow_a_publication_is_removed_by_the_next_read() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let (writer, namespace) = published_namespace(store.clone()).await;
+    let rival = crate::LoonFs::builder_with_store(store, crate::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-b"))
+        .build()
+        .await
+        .expect("rival");
+    rival
+        .open_namespace(namespace.id())
+        .expect("open namespace")
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "rival", "rival",
+        )))
+        .await
+        .expect("the rival takes over the namespace");
+    let folded = writer
+        .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
+        .fold_wal(namespace.id())
+        .await
+        .expect("a fold over the rival's claim");
+    assert_eq!(folded.outcome, FoldWalOutcome::Published);
+    let slot = &namespace.session().publisher.read_position;
+    assert!(
+        slot.current().is_none(),
+        "the position can't follow the fold"
+    );
+    assert!(
+        slot.stored().is_none(),
+        "the read removed the position, so later reads find none"
+    );
+    rival.shutdown().await.expect("rival shutdown");
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Returns the WAL objects and bytes of the tails that the session's engine
+/// and the position that reads start from store, without following the
+/// session's newest published manifest. The engine must be idle.
+fn stored_tails(namespace: &crate::Namespace<crate::Writable>) -> [Option<(u64, usize)>; 2] {
+    let publisher = &namespace.session().publisher;
+    let tail = |position: &loonfs_core::publish::WriterPosition| {
+        (position.wal_tail_objects(), position.wal_tail_bytes())
+    };
+    let engine = publisher
+        .engine
+        .try_lock()
+        .expect("no task has the engine")
+        .stored_position();
+    [
+        engine.as_ref().map(tail),
+        publisher.read_position.stored().as_deref().map(tail),
+    ]
+}
+
+/// Checks that a fold of an idle session's tail leaves neither the engine
+/// nor the position that reads start from storing the folded tail.
+#[tokio::test]
+async fn a_fold_of_an_idle_session_leaves_no_copy_of_the_folded_tail() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let (writer, namespace) = published_namespace(store).await;
+    assert!(
+        stored_tails(&namespace)
+            .iter()
+            .all(|tail| tail.is_some_and(|(objects, _)| objects > 0)),
+        "the commit is in both stored tails"
+    );
+    let folded = writer
+        .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
+        .fold_wal(namespace.id())
+        .await
+        .expect("fold");
+    assert_eq!(folded.outcome, FoldWalOutcome::Published);
+    assert_eq!(
+        stored_tails(&namespace),
+        [Some((0, 0)), Some((0, 0))],
+        "neither the engine nor the read copy stores the folded tail"
+    );
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a commit whose WAL put was in flight during a fold puts back
+/// a position without the tail that the fold covered: once the commit has
+/// finished, the engine and the position that reads start from store only
+/// that commit's WAL object.
+#[tokio::test]
+async fn a_commit_that_puts_back_its_position_after_a_fold_stores_no_folded_tail() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
+    let (writer, namespace) = published_namespace(store.clone() as SharedStore).await;
+    store.block_next();
+    let (during, ()) = futures::join!(
+        namespace.commit_candidate(CommitCandidate::new(create_directory_request(
+            "during", "during"
+        ))),
+        async {
+            store.wait_until_blocked().await;
+            let folded = writer
+                .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
+                .fold_wal(&namespace_id)
+                .await
+                .expect("fold");
+            assert_eq!(folded.outcome, FoldWalOutcome::Published);
+            store.release();
+        }
+    );
+    during.expect("the publish succeeds");
+    let [engine, read_copy] = stored_tails(&namespace);
+    assert_eq!(
+        engine.map(|(objects, _)| objects),
+        Some(1),
+        "the engine stores only the commit's WAL object"
+    );
+    assert_eq!(read_copy, engine, "the read copy stores the same tail");
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a fold that finds the session's engine locked, and that a
+/// read's check follows, leaves the folded tail in the engine until the
+/// engine's release, and that the release then brings both stored positions
+/// up to the fold's manifest.
+#[tokio::test]
+async fn the_release_after_a_fold_brings_both_stored_positions_up_to_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let (writer, namespace) = published_namespace(store).await;
+    let namespace_id = namespace.id().clone();
+    let engine = namespace.session().publisher.lock_engine().await;
+    let folded = bounded(
+        Duration::from_secs(10),
+        writer
+            .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
+            .fold_wal(&namespace_id),
+    )
+    .await
+    .expect("the fold doesn't wait for the engine")
+    .expect("fold");
+    assert_eq!(folded.outcome, FoldWalOutcome::Published);
+    let checked = writer
+        .core
+        .checked_writer_position(&namespace_id, None)
+        .await
+        .expect("a read's check between the record and the release")
+        .expect("a position");
+    assert_eq!(
+        checked.read_basis().basis().manifest_no(),
+        folded.manifest_no
+    );
+    assert!(
+        engine
+            .stored_position()
+            .is_some_and(|position| position.wal_tail_objects() > 0),
+        "the fold found the engine locked"
+    );
+    drop(engine);
+    assert_eq!(
+        stored_tails(&namespace),
+        [Some((0, 0)), Some((0, 0))],
+        "the release brings both stored positions up to the fold's manifest"
+    );
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a publication that confirms the session's current manifest
+/// moves the publication's check onto the position that reads start from, so a
+/// read with a freshness limit that the position's own check is past sends
+/// no request.
+#[tokio::test]
+async fn a_publication_that_confirms_the_manifest_saves_the_next_reads_check() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let clock = Arc::new(ManualClock::new(1_000_000));
+    let writer = crate::LoonFs::builder_with_store(
+        recording.clone() as SharedStore,
+        crate::Context::Service,
+    )
+    .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+    .config(crate::RuntimeConfig {
+        min_publish_interval_ms: 0,
+        max_staleness_ms: 1_000,
+        ..crate::RuntimeConfig::default()
+    })
+    .monotonic_timer(clock.clone())
+    .build()
+    .await
+    .expect("build writer");
+    let namespace = publish_once_into_each(
+        &writer,
+        &[NamespaceId::parse("demo").expect("valid namespace id")],
+    )
+    .await
+    .pop()
+    .expect("one namespace");
+    let namespace_id = namespace.id().clone();
+    clock.advance_ms(1_000);
+    let confirmed = writer
+        .core
+        .namespace_store(&namespace_id)
+        .load_live_basis(writer.core.observation())
+        .await
+        .expect("a check of the current manifest");
+    assert_eq!(
+        Some(confirmed.manifest_no()),
+        writer
+            .core
+            .writer_position(&namespace_id)
+            .map(|position| position.read_basis().basis().manifest_no()),
+        "the publication confirms the position's manifest"
+    );
+    writer
+        .mode
+        .publisher
+        .record_manifest_published(&namespace_id, &confirmed);
+
+    recording.reset();
+    namespace.stat("/").await.expect("stat the root");
+    assert_eq!(
+        recording.take(),
+        [],
+        "the read takes the publication's check"
+    );
     writer.shutdown().await.expect("shutdown");
 }
 

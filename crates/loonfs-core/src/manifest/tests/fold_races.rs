@@ -189,8 +189,7 @@ impl Writer {
             }
         });
         if let Ok(folded) = &folded {
-            self.engine
-                .record_manifest_published(folded.current.clone());
+            self.engine.move_position_onto(folded.current.clone());
         }
         folded
     }
@@ -732,7 +731,7 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
         head.wal_no.successor().expect("the new writer's fence")
     );
 
-    writer.engine.record_manifest_published(folded.current);
+    writer.engine.move_position_onto(folded.current);
     assert!(writer.engine.read_position().is_none());
     let results = writer
         .engine
@@ -806,7 +805,7 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
         // As the publisher does, a fold that ended reports the manifest that
         // covers its tail, and a fold that failed reports nothing.
         if let Some(recorded) = recorded {
-            writer.engine.record_manifest_published(recorded.current);
+            writer.engine.move_position_onto(recorded.current);
         }
         let position = writer.engine.read_position();
         let folded_manifest = folded.current.manifest().manifest();
@@ -849,9 +848,7 @@ async fn a_fold_covered_past_its_start_moves_the_position_onto_the_covering_fold
     );
     assert!(input.read_basis().head.wal_no < newest.read_basis().head.wal_no);
 
-    writer
-        .engine
-        .record_manifest_published(folded.current.clone());
+    writer.engine.move_position_onto(folded.current.clone());
     let moved = writer
         .engine
         .writer_position()
