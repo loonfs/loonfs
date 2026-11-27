@@ -199,6 +199,13 @@ impl WriterPosition {
         self.read_basis().head.unfolded_wal_objects()
     }
 
+    /// Returns the earliest `committed_at_ms` of the commits in the position's
+    /// WAL tail, or `None` when the tail has no commit, such as a tail of
+    /// fences alone.
+    pub fn wal_tail_oldest_commit_at_ms(&self) -> Option<u64> {
+        self.tail.oldest_commit_at_ms(self.read_basis().head.seq)
+    }
+
     /// Returns the inline content bytes in the position's WAL tail.
     pub fn wal_tail_inline_bytes(&self) -> usize {
         self.tail.inline_bytes()

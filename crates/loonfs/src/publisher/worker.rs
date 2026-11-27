@@ -2,13 +2,13 @@
 //! each batch, delivers the results, and paces the publications.
 
 use super::admission::AdmissionPermit;
-use super::folds::wal_tail_reached_fold_size;
+use super::folds::{fold_due, FoldDue, WalTailState};
 use super::metrics::PublishOutcome;
 use super::queue::{
     queued_candidates, BatchCandidate, OpenBatch, PendingDelete, PendingRetentionAdvance, WorkItem,
 };
 use super::session_tasks::WorkerHandle;
-use super::{LastPublish, NamespacePublisher, NamespacePublisherState, PublisherAdmissionStatus};
+use super::{NamespacePublisher, NamespacePublisherState, PublisherAdmissionStatus};
 use crate::metrics::RESULT_OK;
 use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
@@ -289,9 +289,9 @@ impl NamespacePublisher {
     }
 
     /// Records the newest commit that `publish` published, and starts a fold
-    /// when the tail it left is over the fold trigger or reached the write
-    /// stop. The caller sends the returned start once it releases the
-    /// engine.
+    /// when a fold of the tail it left is due (see [`fold_due`]) or a commit
+    /// reached the write stop. The caller sends the returned start once it
+    /// releases the engine.
     pub(super) fn record_publication(
         &self,
         publish: &loonfs_core::publish::NamespaceCommitEnginePublishOutcome,
@@ -312,13 +312,12 @@ impl NamespacePublisher {
             .any(|result| result.as_ref().err().is_some_and(is_maintenance_required));
         let core = &self.context.runtime_core;
         let fold_start = if publish.wal_tail.is_some_and(|tail| {
-            wal_tail_reached_fold_size(
+            fold_due(
+                core,
                 core.session_fold_at_wal_objects().get(),
-                core.config().inline_content.inline_content_tail_limit_bytes,
-                tail.objects,
-                tail.wal_bytes,
-                tail.inline_bytes,
-            )
+                &WalTailState::from(&tail),
+                core.now_ms(),
+            ) == FoldDue::Now
         }) || write_stopped
         {
             self.start_fold()
@@ -333,13 +332,11 @@ impl NamespacePublisher {
             .max();
         if let Some(committed_seq) = committed_seq {
             let mut state = self.lock_state();
-            let seq = state
-                .last_published
-                .map_or(committed_seq, |last| last.seq.max(committed_seq));
-            state.last_published = Some(LastPublish {
-                seq,
-                at_ms: self.context.runtime_core.timer().monotonic_now_ms(),
-            });
+            state.last_published_seq = Some(
+                state
+                    .last_published_seq
+                    .map_or(committed_seq, |last_seq| last_seq.max(committed_seq)),
+            );
         }
         fold_start
     }

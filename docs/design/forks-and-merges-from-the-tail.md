@@ -80,7 +80,7 @@ GC_GRACE_WINDOW_MS - (POOL_ROOTS_READ_BUDGET_MS + GC_SAFETY_MARGIN_MS
     + OPERATION_SNAPSHOT_TTL_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS)
 ```
 
-With the current values, the limit is 11 hours and 45 minutes. If the fork's tail has an older commit, the merge folds the fork first, as today, and plans from the manifest that the fold published. The reference implementation folds a tail that has been idle for 15 minutes ([Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy)), so a tail is normally far younger than the limit, and the fold is a backstop that rarely runs.
+With the current values, the limit is 11 hours and 45 minutes. If the fork's tail has an older commit, the merge folds the fork first, as today, and plans from the manifest that the fold published. The reference implementation folds a tail once its oldest commit is 15 minutes old, the [fold age](../specs/glossary.md#fold-age) ([Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy)), so a tail is normally far younger than the limit, and the fold is a backstop that rarely runs.
 
 A retry of a merge with the same commit ID and merge record is a replay, because a merge's fingerprint covers its merge record in place of its operations ([Commit identity and retries](../specs/format.md#65-commit-identity-and-retries)). A retry whose plan writes the same pieces again writes new span objects, and garbage collection deletes the objects that no layout lists under the age rules. A rebase's replay commit is a merge into the rebase's new fork, so it takes the same path.
 

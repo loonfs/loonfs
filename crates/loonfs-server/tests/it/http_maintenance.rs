@@ -222,15 +222,19 @@ fn decode_maintenance_response<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// The clock of a departed writer, set far in the past.
+const DEPARTED_WRITER_NOW_MS: u64 = 1_750_000_000_000;
+
 /// Creates `namespace` with one file at `path`, written by a writer whose
-/// clock is set far in the past, and shuts the writer down, so a server
-/// started on the store afterwards finds a commit that's old on its own clock.
+/// clock reads `now_ms`, and shuts the writer down, so a server started on
+/// the store afterwards finds a commit dated `now_ms`.
 async fn seed_with_a_departed_writer(
     store_root: &std::path::Path,
     key_prefix: &str,
     namespace: &loonfs_types::NamespaceId,
     path: &str,
     bytes: &[u8],
+    now_ms: u64,
 ) {
     let store = ConfiguredObjectStore::local_fs(LocalFsStoreConfig {
         root: store_root.display().to_string(),
@@ -241,7 +245,7 @@ async fn seed_with_a_departed_writer(
     let writer = loonfs::LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("departed-writer"))
         .wall_clock(std::sync::Arc::new(
-            loonfs_test_support::clock::ManualClock::new(1_750_000_000_000),
+            loonfs_test_support::clock::ManualClock::new(now_ms),
         ))
         .build()
         .await
@@ -274,6 +278,7 @@ async fn http_maintenance_snapshot_and_retention_are_idempotent_and_soft() {
         &namespace,
         "/docs/hello.txt",
         b"hello maintenance\n",
+        DEPARTED_WRITER_NOW_MS,
     )
     .await;
     let harness = start_server(test_config(
@@ -506,11 +511,11 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
         .expect_err("a missing body is refused");
     assert_eq!(empty.code, "invalid_request");
 
-    let idle = post_metadata_run(&server_url, namespace.as_str()).expect("idle step");
+    let young = post_metadata_run(&server_url, namespace.as_str()).expect("young tail step");
     assert_eq!(
-        upkeep(&idle).outcome,
+        upkeep(&young).outcome,
         loonfs_types::MetadataMaintenanceOutcome::Due,
-        "a tail below the threshold stays due until it goes idle"
+        "a tail below the threshold stays due until it reaches the fold age"
     );
 
     let forced = client
@@ -550,28 +555,48 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
     harness.server.abort();
 }
 
+/// Checks that a metadata run folds a tail whose oldest commit is older than
+/// the server's fold age, and leaves a younger tail unfolded.
 #[tokio::test]
-async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_rule_off() {
-    let default_idle_ms = loonfs::DEFAULT_IDLE_FOLD_AFTER_MS.get();
-    for (idle_fold_after_ms, expected) in [
-        // With the idle rule off, the run leaves both WAL objects in the tail.
-        (0, 2),
-        // The commit is long past the idle period, so the run folds it.
-        (default_idle_ms, 0),
+async fn http_metadata_run_folds_a_tail_once_its_oldest_commit_reaches_the_servers_fold_age() {
+    const MINUTE_MS: u64 = 60 * 1_000;
+    // The server dates the commit on its own clock, so the writer's clock
+    // reads ten minutes before the server's.
+    let committed_at_ms =
+        loonfs_types::WallClock::now_ms(&loonfs_types::SystemWallClock) - 10 * MINUTE_MS;
+    for (fold_age_ms, outcome, expected) in [
+        // The commit is younger than the default fold age, so the run leaves
+        // both WAL objects in the tail, and the fold comes due later.
+        (
+            loonfs::DEFAULT_FOLD_AGE_MS.get(),
+            loonfs_types::MetadataMaintenanceOutcome::Due,
+            2,
+        ),
+        // The commit is older than a five-minute fold age, so the run folds it.
+        (
+            5 * MINUTE_MS,
+            loonfs_types::MetadataMaintenanceOutcome::CaughtUp,
+            0,
+        ),
     ] {
         let temp_dir = tempdir().expect("tempdir");
         let store_root = temp_dir.path().join("store");
-        let key_prefix = "http-maintenance-idle";
-        let namespace = namespace_id("idle");
-        // The server reads commit age on its own clock, so a commit stamped
-        // by a writer whose clock is long past is idle on arrival.
-        seed_with_a_departed_writer(&store_root, key_prefix, &namespace, "/file.txt", b"body")
-            .await;
+        let key_prefix = "http-maintenance-fold-age";
+        let namespace = namespace_id("fold-age");
+        seed_with_a_departed_writer(
+            &store_root,
+            key_prefix,
+            &namespace,
+            "/file.txt",
+            b"body",
+            committed_at_ms,
+        )
+        .await;
 
         let harness = start_server(loonfs_server::ServerConfig {
-            idle_fold_after_ms: Some(idle_fold_after_ms),
+            fold_age_ms: std::num::NonZeroU64::new(fold_age_ms).expect("a nonzero fold age"),
             maintenance: loonfs_server::JobMode::ServeOnly,
-            ..test_config(store_root, "loonfs-server-idle", key_prefix)
+            ..test_config(store_root, "loonfs-server-fold-age", key_prefix)
         })
         .await;
         let response = harness
@@ -586,13 +611,13 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
             .expect("metadata job");
         assert_eq!(
             upkeep(&response).outcome,
-            loonfs_types::MetadataMaintenanceOutcome::CaughtUp,
-            "idle_fold_after_ms = {idle_fold_after_ms}"
+            outcome,
+            "fold_age_ms = {fold_age_ms}"
         );
         assert_eq!(
             wal_tail_objects(&harness.client, &namespace).await,
             expected,
-            "idle_fold_after_ms = {idle_fold_after_ms}"
+            "fold_age_ms = {fold_age_ms}"
         );
         harness.server.abort();
     }

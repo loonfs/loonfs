@@ -5,11 +5,14 @@
 use super::registry::NamespaceChange;
 use super::worker::elapsed_ms_from;
 use super::{NamespacePublisher, PublisherRegistry};
+use crate::runtime_core::RuntimeCore;
 use crate::trace::phase_span;
 use crate::{CoreError, Error, FoldWalOutcome, NamespaceId, Result};
-use loonfs_core::control::{Held, LoadedManifest, NamespaceStorageDiagnostics};
+use loonfs_core::control::{
+    Held, LoadedManifest, NamespaceReadAnchor, NamespaceStorageDiagnostics,
+};
 use loonfs_core::limits::{fold_at_inline_bytes, FOLD_AT_WAL_BYTES, MAX_CONTENTION_ATTEMPTS};
-use loonfs_core::publish::WriterPosition;
+use loonfs_core::publish::{WalTailReport, WriterPosition};
 use loonfs_core::time::OperationClock;
 use loonfs_core::{FoldedWalTail, MetadataCompactionCancellation, Phase};
 use std::future::Future;
@@ -86,36 +89,110 @@ pub(crate) enum FoldWhen {
     /// A tail of at least `max_wal_tail_objects` WAL objects, a tail of at
     /// least `FOLD_AT_WAL_BYTES` unfolded WAL bytes, a tail of at least
     /// `fold_at_inline_bytes` of the inline tail limit in inline content
-    /// bytes, or a tail whose newest commit has reached the runtime's idle
-    /// fold age.
+    /// bytes, or a tail whose oldest commit has reached the runtime's fold
+    /// age.
     Due { max_wal_tail_objects: u64 },
 }
 
-/// Returns whether a tail of `objects` WAL objects, `wal_bytes` unfolded WAL
-/// bytes, and `inline_bytes` inline content bytes has reached
-/// `max_wal_tail_objects` WAL objects, `FOLD_AT_WAL_BYTES`, or the inline
-/// fold trigger of `inline_tail_limit_bytes` (see `fold_at_inline_bytes`).
-pub(super) fn wal_tail_reached_fold_size(
-    max_wal_tail_objects: u64,
-    inline_tail_limit_bytes: usize,
+/// The size of a WAL tail and the time of its oldest commit, which decide
+/// whether a fold of the tail is due (see [`fold_due`]).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WalTailState {
+    /// Unfolded WAL objects, including fences.
     objects: u64,
+    /// Stored bytes of the unfolded WAL objects with commits.
     wal_bytes: usize,
+    /// Inline content bytes of the unfolded WAL objects.
     inline_bytes: usize,
-) -> bool {
-    objects >= max_wal_tail_objects
-        || wal_bytes >= FOLD_AT_WAL_BYTES
-        || inline_bytes >= fold_at_inline_bytes(inline_tail_limit_bytes)
+    /// The earliest `committed_at_ms` of the tail's commits, or `None` for a
+    /// tail without a commit.
+    oldest_commit_at_ms: Option<u64>,
+}
+
+impl From<&WriterPosition> for WalTailState {
+    fn from(position: &WriterPosition) -> Self {
+        Self {
+            objects: position.wal_tail_objects(),
+            wal_bytes: position.wal_tail_bytes(),
+            inline_bytes: position.wal_tail_inline_bytes(),
+            oldest_commit_at_ms: position.wal_tail_oldest_commit_at_ms(),
+        }
+    }
+}
+
+impl From<&WalTailReport> for WalTailState {
+    fn from(report: &WalTailReport) -> Self {
+        Self {
+            objects: report.objects,
+            wal_bytes: report.wal_bytes,
+            inline_bytes: report.inline_bytes,
+            oldest_commit_at_ms: report.oldest_commit_at_ms,
+        }
+    }
+}
+
+impl From<&NamespaceReadAnchor> for WalTailState {
+    fn from(anchor: &NamespaceReadAnchor) -> Self {
+        let status = NamespaceStorageDiagnostics::from(anchor);
+        Self {
+            objects: status.wal_tail_objects,
+            wal_bytes: anchor.wal_tail_bytes(),
+            inline_bytes: anchor.wal_tail_inline_bytes(),
+            oldest_commit_at_ms: status.wal_tail_oldest_commit_at_ms,
+        }
+    }
+}
+
+/// When a fold of a WAL tail is due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FoldDue {
+    /// The tail has reached a fold threshold or the fold age.
+    Now,
+    /// The tail's oldest commit reaches the fold age at `due_at_ms`, on the
+    /// wall clock.
+    At { due_at_ms: u64 },
+    /// The tail has no commit, so only a larger tail makes a fold due.
+    OnGrowth,
+}
+
+/// Returns when a fold of `tail` is due at `now_ms`, on the runtime's wall
+/// clock: once the tail reaches `max_wal_tail_objects` WAL objects,
+/// `FOLD_AT_WAL_BYTES`, or the inline fold trigger of the runtime's inline
+/// tail limit (see `fold_at_inline_bytes`), or once its oldest commit is the
+/// runtime's fold age old.
+///
+/// The writer session's check after each publication and every maintenance
+/// check use this one rule, with their own object threshold.
+pub(super) fn fold_due(
+    core: &RuntimeCore,
+    max_wal_tail_objects: u64,
+    tail: &WalTailState,
+    now_ms: u64,
+) -> FoldDue {
+    let reached_size = tail.objects >= max_wal_tail_objects
+        || tail.wal_bytes >= FOLD_AT_WAL_BYTES
+        || tail.inline_bytes
+            >= fold_at_inline_bytes(core.config().inline_content.inline_content_tail_limit_bytes);
+    let due_at_ms = tail
+        .oldest_commit_at_ms
+        .map(|committed_at_ms| committed_at_ms.saturating_add(core.config().fold_age_ms.get()));
+    match due_at_ms {
+        _ if reached_size => FoldDue::Now,
+        Some(due_at_ms) if now_ms >= due_at_ms => FoldDue::Now,
+        Some(due_at_ms) => FoldDue::At { due_at_ms },
+        None => FoldDue::OnGrowth,
+    }
 }
 
 /// What one [`PublisherRegistry::fold_namespace`] call did.
 pub(crate) enum NamespaceFold {
     /// No fold was due.
     NotDue {
-        /// When the tail's newest commit reaches the idle fold age, so that a
-        /// fold becomes due without another commit, on the runtime's
-        /// monotonic timer. `None` for an empty tail, or when the runtime
-        /// doesn't fold idle tails.
-        idle_fold_due_at_ms: Option<u64>,
+        /// When the tail's oldest commit reaches the fold age, so that a fold
+        /// becomes due without another commit, on the runtime's monotonic
+        /// timer. `None` for a tail without a commit, such as a tail of
+        /// fences alone.
+        fold_due_at_ms: Option<u64>,
         /// The current manifest, when the check loaded it from the store,
         /// for a compaction unit to plan from.
         observed: Option<Held<LoadedManifest>>,
@@ -331,11 +408,10 @@ impl PublisherRegistry {
     /// Returns what a fold under `when` reports without folding, or `None`
     /// when a fold is due.
     ///
-    /// When `session` has a position, the tail is the position's,
-    /// and its newest commit is the session's last publish, on the runtime's
-    /// monotonic clock. Otherwise the check loads the current manifest and
-    /// the tail from the store, and the tail's newest commit is dated on the
-    /// wall clock.
+    /// When `session` has a position, the tail is the position's. Otherwise
+    /// the check loads the current manifest and the tail from the store.
+    /// Either way, the check dates the tail's oldest commit by its
+    /// `committed_at_ms`, on the runtime's wall clock.
     async fn fold_not_due(
         &self,
         namespace_id: &NamespaceId,
@@ -350,52 +426,28 @@ impl PublisherRegistry {
         };
         let core = &self.shared.context.runtime_core;
         let position = session.and_then(NamespacePublisher::current_position);
-        let (objects, wal_bytes, inline_bytes, newest_commit_at_ms, now_ms, observed) =
-            match position {
-                Some(position) => (
-                    position.wal_tail_objects(),
-                    position.wal_tail_bytes(),
-                    position.wal_tail_inline_bytes(),
-                    session.and_then(NamespacePublisher::last_published_at_ms),
-                    core.timer().monotonic_now_ms(),
-                    None,
-                ),
-                None => {
-                    let anchor = core
-                        .namespace_store(namespace_id)
-                        .load_live_read_anchor(core.observation())
-                        .await?;
-                    let status = NamespaceStorageDiagnostics::from(&anchor);
-                    (
-                        status.wal_tail_objects,
-                        anchor.wal_tail_bytes(),
-                        anchor.wal_tail_inline_bytes(),
-                        status.wal_tail_newest_commit_at_ms,
-                        core.now_ms(),
-                        Some(anchor.held().clone()),
-                    )
-                }
-            };
-        let idle_fold_due_at_ms = newest_commit_at_ms
-            .filter(|_| objects > 0)
-            .zip(core.config().idle_fold_after_ms)
-            .map(|(committed_at_ms, after_ms)| committed_at_ms.saturating_add(after_ms.get()));
-        if wal_tail_reached_fold_size(
-            max_wal_tail_objects,
-            core.config().inline_content.inline_content_tail_limit_bytes,
-            objects,
-            wal_bytes,
-            inline_bytes,
-        ) || idle_fold_due_at_ms.is_some_and(|due_at_ms| now_ms >= due_at_ms)
-        {
-            return Ok(None);
-        }
-        // The check without a position dates the tail on the wall clock, so
-        // the due time moves onto the monotonic timer by its distance from
-        // the check's own reading.
+        let (tail, observed) = match position {
+            Some(position) => (WalTailState::from(&position), None),
+            None => {
+                let anchor = core
+                    .namespace_store(namespace_id)
+                    .load_live_read_anchor(core.observation())
+                    .await?;
+                (WalTailState::from(&anchor), Some(anchor.held().clone()))
+            }
+        };
+        let now_ms = core.now_ms();
+        let fold_due_at_ms = match fold_due(core, max_wal_tail_objects, &tail, now_ms) {
+            FoldDue::Now => return Ok(None),
+            FoldDue::At { due_at_ms } => Some(due_at_ms),
+            FoldDue::OnGrowth => None,
+        };
+        // The tail's commits are dated on the wall clock, so the due time
+        // moves onto the monotonic timer by its distance from the check's own
+        // reading.
         let monotonic_now_ms = core.timer().monotonic_now_ms();
         Ok(Some(NamespaceFold::NotDue {
-            idle_fold_due_at_ms: idle_fold_due_at_ms
+            fold_due_at_ms: fold_due_at_ms
                 .map(|due_at_ms| monotonic_now_ms.saturating_add(due_at_ms.saturating_sub(now_ms))),
             observed,
         }))

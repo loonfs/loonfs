@@ -52,7 +52,7 @@ memory_limit_bytes = 4294967296
 # not serve the group answers its routes with `route_not_found`; a mode that
 # does not maintain leaves background work to another process. The scheduler
 # runs the due steps of the sessions this process wrote to, and sweeps every
-# namespace in the store periodically. It folds idle WAL tails, compacts
+# namespace in the store periodically. It folds WAL tails, compacts
 # metadata, builds the grep index, and collects garbage.
 #maintenance = "serve_and_maintain"
 
@@ -137,11 +137,12 @@ memory_limit_bytes = 4294967296
 # Defaults to 1000, and can't exceed 1200000.
 #max_staleness_ms = 1000
 
-# How old a namespace's newest commit must be before maintenance folds a WAL
-# tail that is below the fold thresholds, in milliseconds. The maintenance
-# scheduler and explicit `metadata` requests use the same period. Zero turns the
-# rule off. Defaults to 900000 (15 minutes).
-#idle_fold_after_ms = 900000
+# The fold age, in milliseconds: how old the oldest unfolded commit of a WAL
+# tail can be before maintenance folds the tail, whatever its size. The
+# maintenance scheduler and explicit `metadata` requests use the same age.
+# Defaults to 900000 (15 minutes), and must be less than 42300000 (11 hours and
+# 45 minutes).
+#fold_age_ms = 900000
 
 # Direct-put needs no configuration. It is offered only where the adapter can
 # presign a create-only PUT and report a durable checksum, and the endpoint is

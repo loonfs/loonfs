@@ -65,7 +65,7 @@ pub struct NamespaceStorageDiagnostics {
     pub retention_floor_seq: CommitSeq,
     pub current_manifest_no: ManifestNo,
     pub wal_tail_objects: u64,
-    pub wal_tail_newest_commit_at_ms: Option<u64>,
+    pub wal_tail_oldest_commit_at_ms: Option<u64>,
 }
 
 fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
@@ -131,7 +131,7 @@ impl From<&NamespaceReadAnchor> for NamespaceStorageDiagnostics {
             retention_floor_seq: anchor.retention_floor_seq(),
             current_manifest_no: anchor.current_manifest().manifest().manifest_no,
             wal_tail_objects: head.unfolded_wal_objects(),
-            wal_tail_newest_commit_at_ms: anchor.tail.newest_commit_at_ms(),
+            wal_tail_oldest_commit_at_ms: anchor.tail.oldest_commit_at_ms(),
         }
     }
 }

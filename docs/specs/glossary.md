@@ -227,6 +227,10 @@ A set of related row families compacted together to keep them consistent (for ex
 
 Writing committed records from the WAL tail into new metadata segments and publishing the next manifest so readers replay fewer WAL objects. Folding does not change visible history and can be run by any process. See [Folding the WAL](format.md#7-folding-the-wal).
 
+### Fold age
+
+A setting, in milliseconds, of how old the oldest unfolded commit of a [WAL tail](#wal-tail) can be before a [fold](#fold) of the tail is due, whatever the tail's size. It's measured from the commit's `committed_at_ms`, so a tail below the fold thresholds is folded even while its writer keeps committing. For example, with the default of 15 minutes, a writer that commits every 10 minutes has its commits at 0 and 10 minutes folded at 15 minutes. The fold age always applies, and it has to be below `MAX_TAIL_COMMIT_AGE_MS` (11 hours and 45 minutes), the age at which a fork or a merge folds a tail first. A tail without a commit (a tail of fences alone) never comes due by age. See [Recovery material and maintenance policy](format.md#73-recovery-material-and-maintenance-policy).
+
 ### Compaction
 
 Rewriting a window of runs within one family group (up to 8 runs by default) into fewer runs while dropping obsolete rows, without altering any retained view. Publishes once at the end. See [Retention and compaction](format.md#10-retention-and-compaction).

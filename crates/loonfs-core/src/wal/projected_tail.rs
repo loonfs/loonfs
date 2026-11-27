@@ -187,6 +187,16 @@ impl ProjectedWalTail {
         self.visible_chunks(visible_seq).map(|chunk| &chunk.rows)
     }
 
+    /// Returns the earliest `committed_at_ms` of the commits that a view at
+    /// `visible_seq` can see, or `None` when the view sees no commit in the
+    /// tail, such as a tail of fences alone.
+    pub(crate) fn oldest_commit_at_ms(&self, visible_seq: CommitSeq) -> Option<u64> {
+        self.row_states(visible_seq)
+            .flat_map(MetadataState::commits)
+            .map(|commit| commit.committed_at_ms)
+            .min()
+    }
+
     /// Returns whether a commit that a view at `visible_seq` can see is older
     /// than [`MAX_TAIL_COMMIT_AGE_MS`](crate::limits::MAX_TAIL_COMMIT_AGE_MS)
     /// at `now_ms`, by the commit's `committed_at_ms`.
@@ -195,10 +205,7 @@ impl ProjectedWalTail {
         visible_seq: CommitSeq,
         now_ms: u64,
     ) -> bool {
-        self.row_states(visible_seq)
-            .flat_map(MetadataState::commits)
-            .map(|commit| commit.committed_at_ms)
-            .min()
+        self.oldest_commit_at_ms(visible_seq)
             .is_some_and(|committed_at_ms| {
                 now_ms.saturating_sub(committed_at_ms) > crate::limits::MAX_TAIL_COMMIT_AGE_MS
             })

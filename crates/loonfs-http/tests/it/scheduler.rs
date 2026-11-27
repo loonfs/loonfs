@@ -29,9 +29,9 @@ async fn wal_tail_objects(maintenance: &Maintenance, namespace_id: &NamespaceId)
 
 /// Checks that a scheduler that a host builds starts no loop, so the store
 /// sees no request while two days pass on the host's clock and on the Tokio
-/// clock. Then `run_due_steps` folds the idle tail of the session that the
-/// table holds, `run_sweep` folds the idle tail of a namespace without a
-/// session, and a sweep after `cancel` sends no request.
+/// clock. Then `run_due_steps` folds the tail of the session that the table
+/// holds, `run_sweep` folds the tail of a namespace without a session (both
+/// past the fold age), and a sweep after `cancel` sends no request.
 #[tokio::test(start_paused = true)]
 async fn a_scheduler_runs_steps_only_when_its_host_calls_them() {
     let directory = tempfile::tempdir().expect("tempdir");

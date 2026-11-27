@@ -3,7 +3,9 @@
 
 use crate::trace::TraceMode;
 use crate::RetentionWindow;
-use loonfs_core::limits::{DEFAULT_INLINE_TAIL_LIMIT_BYTES, READ_REVALIDATION_BOUND_MS};
+use loonfs_core::limits::{
+    DEFAULT_INLINE_TAIL_LIMIT_BYTES, MAX_TAIL_COMMIT_AGE_MS, READ_REVALIDATION_BOUND_MS,
+};
 use loonfs_types::config::ConfigFieldError;
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -29,9 +31,9 @@ pub const DEFAULT_MAX_READ_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 /// larger WAL objects. Zero
 /// keeps only the batching that in-flight publications force.
 const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
-/// Default age, in milliseconds, of a WAL tail's newest commit at which
-/// maintenance folds a tail that is below the fold thresholds (15 minutes).
-pub const DEFAULT_IDLE_FOLD_AFTER_MS: NonZeroU64 = NonZeroU64::new(15 * 60 * 1_000).unwrap();
+/// Default of [`RuntimeConfig::fold_age_ms`], in milliseconds (15 minutes).
+pub const DEFAULT_FOLD_AGE_MS: NonZeroU64 = NonZeroU64::new(15 * 60 * 1_000).unwrap();
+const _: () = assert!(DEFAULT_FOLD_AGE_MS.get() < MAX_TAIL_COMMIT_AGE_MS);
 
 /// The admission limits one writable runtime applies to each namespace's
 /// publication requests, and how long a commit waits at the write stop.
@@ -201,19 +203,22 @@ pub struct RuntimeConfig {
     /// Inline preparation, WAL object, fold, and tail limits of a writable
     /// runtime's commits.
     pub inline_content: InlineContentPolicy,
-    /// How old a WAL tail's newest commit must be, in milliseconds, before
-    /// maintenance folds a tail that is below the fold thresholds, or `None`
-    /// to turn that rule off.
+    /// The fold age, in milliseconds: how old the oldest unfolded commit of
+    /// a WAL tail can be before a fold of the tail is due, whatever the
+    /// tail's size.
     ///
-    /// Defaults to [`DEFAULT_IDLE_FOLD_AFTER_MS`], 15 minutes.
-    /// [`Maintenance`](crate::Maintenance) measures the age from the writer
-    /// session's last publish on the runtime's monotonic clock while the
-    /// session has a writer position, and otherwise on the runtime's
-    /// wall clock from the newest commit's `committed_at_ms`. A writer
-    /// session doesn't fold on age by itself. A host that sweeps its sessions
-    /// reads when a tail reaches the age from
+    /// Defaults to [`DEFAULT_FOLD_AGE_MS`], 15 minutes. A value at or above
+    /// [`MAX_TAIL_COMMIT_AGE_MS`](crate::MAX_TAIL_COMMIT_AGE_MS) fails the
+    /// build with [`Error::Config`](crate::Error::Config).
+    /// The age is measured on the runtime's wall clock from the oldest
+    /// commit's `committed_at_ms`. A writer session checks it after each of
+    /// its publications, so a session that goes quiet keeps its tail until a
+    /// maintenance call checks it. [`Maintenance`](crate::Maintenance)
+    /// checks it in the writer session's position when the session has one,
+    /// and otherwise in the tail that it loads from the store. A host that
+    /// sweeps its sessions reads when a tail reaches the age from
     /// [`MetadataMaintenanceReport::next_due_at_ms`](crate::MetadataMaintenanceReport::next_due_at_ms).
-    pub idle_fold_after_ms: Option<NonZeroU64>,
+    pub fold_age_ms: NonZeroU64,
     /// Retention window, in milliseconds, that the runtime records in the
     /// first manifest of each namespace that it creates without a window in
     /// the request. Defaults to `None`, so such a namespace has no window. A
@@ -232,7 +237,7 @@ impl Default for RuntimeConfig {
             min_publish_interval_ms: DEFAULT_MIN_PUBLISH_INTERVAL_MS,
             publication: PublicationPolicy::default(),
             inline_content: InlineContentPolicy::default(),
-            idle_fold_after_ms: Some(DEFAULT_IDLE_FOLD_AFTER_MS),
+            fold_age_ms: DEFAULT_FOLD_AGE_MS,
             default_retention_window_ms: None,
         }
     }
@@ -264,6 +269,19 @@ impl RuntimeConfig {
                     ),
                 });
             }
+        }
+        // A fork or a merge claims the namespace to fold its tail once a commit
+        // in the tail is older than the bound, so the fold age has to be below
+        // that age. Otherwise a live writer's own folds would always come
+        // after that claim.
+        if self.fold_age_ms.get() >= MAX_TAIL_COMMIT_AGE_MS {
+            return Err(ConfigFieldError::Invalid {
+                field: "fold_age_ms",
+                reason: format!(
+                    "must be less than {MAX_TAIL_COMMIT_AGE_MS}, the maximum age of a commit in \
+                     a WAL tail"
+                ),
+            });
         }
         self.inline_content.validate()
     }

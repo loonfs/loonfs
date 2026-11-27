@@ -19,14 +19,22 @@ use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+/// Checks that namespace diagnostics report the WAL tail's objects and the
+/// time of its oldest commit, which they leave out for a tail without a
+/// commit, and that they read the store with one listing of the manifests
+/// and one of the snapshots.
 #[test]
 fn namespace_diagnostics_reports_wal_tail_objects() {
+    const MINUTE_MS: u64 = 60 * 1_000;
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::any(),
     ));
-    let fs = open_runtime(store.clone(), "status-test");
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::at_system_time());
+    let fs = open_runtime_with(store.clone(), "status-test", |builder| {
+        builder.wall_clock(clock.clone())
+    });
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
@@ -38,15 +46,17 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
     assert_eq!(status.head_seq, CommitSeq(0));
     assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
     assert_eq!(status.wal_tail_objects, 0);
+    assert_eq!(status.wal_tail_oldest_commit_at_ms, None);
     assert_eq!(status.retention_floor_seq, CommitSeq(0));
 
-    fs.put_file_blocking(
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello",
-        &loonfs_test_support::test_actor(),
-    )
-    .expect("put file");
+    let first = fs
+        .put_file_blocking(
+            &namespace_id,
+            "/docs/hello.txt",
+            b"hello",
+            &loonfs_test_support::test_actor(),
+        )
+        .expect("put file");
 
     store.reset();
     let status = fs
@@ -55,6 +65,10 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
     assert_eq!(status.head_seq, CommitSeq(1));
     assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
     assert_eq!(status.wal_tail_objects, 2);
+    assert_eq!(
+        status.wal_tail_oldest_commit_at_ms,
+        Some(first.committed_at_ms)
+    );
     assert_eq!(status.retention_floor_seq, CommitSeq(0));
     let listings: Vec<_> = store
         .snapshot()
@@ -74,6 +88,39 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
             loonfs_objectstore::keys::snapshot_prefix(&namespace_id),
         ]
     );
+
+    clock.advance_ms(MINUTE_MS);
+    let second = fs
+        .put_file_blocking(
+            &namespace_id,
+            "/docs/later.txt",
+            b"later",
+            &loonfs_test_support::test_actor(),
+        )
+        .expect("put a later file");
+    assert_eq!(second.committed_at_ms, first.committed_at_ms + MINUTE_MS);
+    let status = fs
+        .namespace_diagnostics_blocking(&namespace_id)
+        .expect("status after a later commit");
+    assert_eq!(status.wal_tail_objects, 3);
+    assert_eq!(
+        status.wal_tail_oldest_commit_at_ms,
+        Some(first.committed_at_ms),
+        "the diagnostics report the oldest commit, not the newest"
+    );
+
+    // A delete of a missing path claims the namespace, so it writes a fence,
+    // and commits nothing.
+    let fenced = loonfs_test_support::ids::namespace_id("fences-alone");
+    fs.create_namespace_blocking(&fenced, &loonfs_test_support::test_actor())
+        .expect("create namespace");
+    fs.delete_path_blocking(&fenced, "/missing", &loonfs_test_support::test_actor())
+        .expect_err("a delete of a missing path");
+    let status = fs
+        .namespace_diagnostics_blocking(&fenced)
+        .expect("status of a tail of fences alone");
+    assert_eq!(status.wal_tail_objects, 1);
+    assert_eq!(status.wal_tail_oldest_commit_at_ms, None);
 }
 
 /// Checks that namespace diagnostics count the snapshots that haven't

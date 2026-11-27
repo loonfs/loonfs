@@ -98,16 +98,17 @@ impl ValidatedWalTail {
         &self.objects
     }
 
-    /// The `committed_at_ms` of the newest commit in the tail. A tail of
-    /// fences alone has none.
-    pub(crate) fn newest_commit_at_ms(&self) -> Option<u64> {
+    /// Returns the earliest `committed_at_ms` of the tail's commits, or
+    /// `None` for a tail without a commit, such as a tail of fences alone.
+    pub(crate) fn oldest_commit_at_ms(&self) -> Option<u64> {
         self.objects
             .iter()
-            .rev()
-            .find_map(|object| match &object.envelope().payload().body {
-                WalObjectBody::Commits(commits) => Some(commits.newest().committed_at_ms),
-                WalObjectBody::Fence | WalObjectBody::Floor { .. } => None,
+            .flat_map(|object| match &object.envelope().payload().body {
+                WalObjectBody::Commits(commits) => &commits[..],
+                WalObjectBody::Fence | WalObjectBody::Floor { .. } => &[],
             })
+            .map(|commit| commit.committed_at_ms)
+            .min()
     }
 
     /// Returns the unfolded WAL bytes of the tail: the stored sizes of its

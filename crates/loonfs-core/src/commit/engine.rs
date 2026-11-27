@@ -47,6 +47,10 @@ pub struct WalTailReport {
     /// Inline content bytes of the unfolded WAL objects that the position
     /// records, leaving out a put whose outcome is unknown.
     pub inline_bytes: usize,
+    /// The earliest `committed_at_ms` of the commits that the position
+    /// records, or `None` when the tail has no commit, such as a tail of
+    /// fences alone.
+    pub oldest_commit_at_ms: Option<u64>,
     /// Where the attempt found the tail.
     pub source: TailSource,
 }
@@ -589,6 +593,7 @@ impl PositionState {
                 objects: update.wal_tail_objects,
                 wal_bytes: update.wal_tail_bytes,
                 inline_bytes: update.wal_tail_inline_bytes,
+                oldest_commit_at_ms: update.wal_tail_oldest_commit_at_ms,
                 source: if wal_tail_discovered {
                     TailSource::Store
                 } else {
@@ -709,6 +714,7 @@ struct TailProjectionUpdate {
     wal_tail_objects: u64,
     wal_tail_bytes: usize,
     wal_tail_inline_bytes: usize,
+    wal_tail_oldest_commit_at_ms: Option<u64>,
 }
 
 impl TailProjectionUpdate {
@@ -717,6 +723,7 @@ impl TailProjectionUpdate {
             wal_tail_objects: position.wal_tail_objects(),
             wal_tail_bytes: position.wal_tail_bytes(),
             wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
+            wal_tail_oldest_commit_at_ms: position.wal_tail_oldest_commit_at_ms(),
         }
     }
 }

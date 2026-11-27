@@ -149,6 +149,11 @@ pub struct NamespaceDiagnostics {
     pub current_manifest_no: Option<ManifestNo>,
     /// The number of visible WAL objects after the current manifest.
     pub wal_tail_objects: u64,
+    /// The time of the oldest visible commit after the current manifest, in Unix milliseconds. Absent
+    /// when that tail has no commit, such as a tail of fences alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub wal_tail_oldest_commit_at_ms: Option<u64>,
     /// The number of snapshots that hadn't expired when the diagnostics read began.
     pub live_snapshots: u64,
 }
@@ -244,10 +249,11 @@ mod tests {
             retention_floor_seq: CommitSeq(4),
             current_manifest_no: Some(ManifestNo(8)),
             wal_tail_objects: 3,
+            wal_tail_oldest_commit_at_ms: Some(900),
             live_snapshots: 2,
         };
         assert_eq!(
-            serde_json::to_value(diagnostics).expect("serialize namespace diagnostics"),
+            serde_json::to_value(&diagnostics).expect("serialize namespace diagnostics"),
             serde_json::json!({
                 "namespace_id": "demo",
                 "created_at_ms": 1000,
@@ -256,8 +262,20 @@ mod tests {
                 "retention_floor_seq": 4,
                 "current_manifest_no": 8,
                 "wal_tail_objects": 3,
+                "wal_tail_oldest_commit_at_ms": 900,
                 "live_snapshots": 2
             })
+        );
+        let without_commit = NamespaceDiagnostics {
+            wal_tail_oldest_commit_at_ms: None,
+            ..diagnostics
+        };
+        assert!(
+            serde_json::to_value(without_commit)
+                .expect("serialize namespace diagnostics")
+                .get("wal_tail_oldest_commit_at_ms")
+                .is_none(),
+            "a tail without a commit leaves the field out"
         );
     }
 

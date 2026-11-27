@@ -279,3 +279,72 @@ async fn a_delete_waits_for_a_requested_fold() {
     family.assert_folded_once("a delete", FILES - 1, &[family.fork.id()]);
     family.runtime.shutdown().await.expect("shutdown");
 }
+
+/// Checks that a writer session without a host that maintains it folds its
+/// own tail at the publication that finds the tail's oldest commit at least
+/// the fold age old, and not before, while the tail stays below the fold
+/// thresholds and its newest commit is never that old.
+#[tokio::test]
+async fn a_session_folds_at_the_publication_that_finds_its_oldest_commit_past_the_fold_age() {
+    const MINUTE_MS: u64 = 60 * 1_000;
+    const STARTED_AT_MS: u64 = 1_750_000_000_000;
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(STARTED_AT_MS));
+    let runtime = LoonFs::builder_with_store(
+        Arc::new(MemoryStore::new(ChecksumAlgorithm::Crc64nvme)),
+        loonfs::Context::Service,
+    )
+    .writer_id(writer_id("fold-age-session"))
+    .wall_clock(clock.clone())
+    .build()
+    .await
+    .expect("runtime");
+    let namespace_id = namespace_id("fold-age-session");
+    runtime
+        .create_namespace(&namespace_id, &actor())
+        .await
+        .expect("create");
+    let namespace = runtime.open_namespace(&namespace_id).expect("open");
+    let maintenance = runtime.maintenance(writer_id("fold-age-session"));
+    let fold_age_ms = RuntimeConfig::default().fold_age_ms.get();
+    // The first commit is the oldest, and each later one comes 5 minutes
+    // after the one before it, except the last two, which come 1 ms apart
+    // around the first commit's fold age.
+    for (index, after_ms) in [0, 5 * MINUTE_MS, 10 * MINUTE_MS, fold_age_ms - 1]
+        .into_iter()
+        .enumerate()
+    {
+        clock.set_ms(STARTED_AT_MS + after_ms);
+        namespace
+            .put_file(&format!("/note-{index}"), b"data", &actor())
+            .await
+            .expect("publish");
+        runtime.drain().await.expect("drain");
+        let tail = maintenance
+            .diagnostics(&namespace_id)
+            .await
+            .expect("diagnostics")
+            .wal_tail_objects;
+        // The claim's fence and the commits so far.
+        assert_eq!(
+            tail,
+            u64::try_from(index).expect("a small index") + 2,
+            "a publication before the fold age leaves the tail"
+        );
+    }
+    clock.set_ms(STARTED_AT_MS + fold_age_ms);
+    namespace
+        .put_file("/at-the-fold-age", b"data", &actor())
+        .await
+        .expect("publish");
+    runtime.drain().await.expect("drain");
+    assert_eq!(
+        maintenance
+            .diagnostics(&namespace_id)
+            .await
+            .expect("diagnostics")
+            .wal_tail_objects,
+        0,
+        "the publication at the oldest commit's fold age folds the tail"
+    );
+    runtime.shutdown().await.expect("shutdown");
+}

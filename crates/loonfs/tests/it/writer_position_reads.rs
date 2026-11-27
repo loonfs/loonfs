@@ -1537,8 +1537,8 @@ async fn a_fold_that_finds_a_segment_of_the_current_manifest_missing_is_corrupt(
     assert!(format!("{error:?}").contains("MissingSegment"), "{error:?}");
 }
 
-/// Checks that the sweep's fold, which a writer runtime's host runs once
-/// the session's tail is older than the idle fold age, and a user snapshot,
+/// Checks that the sweep's fold, which a writer runtime's host runs once a
+/// fold is due (here at a one-object threshold), and a user snapshot,
 /// which folds first, succeed from the state of
 /// [`a_fold_of_an_append_from_a_position_on_a_collected_manifest_succeeds`].
 /// The sweep's fold finds that a newer manifest already folds the tail and
@@ -1560,16 +1560,15 @@ async fn a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_succeed(
                 .await
                 .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
         } else {
-            fixture.clock.advance_ms(
-                loonfs::RuntimeConfig::default()
-                    .idle_fold_after_ms
-                    .expect("idle fold age")
-                    .get(),
-            );
             let swept = fixture
                 .writer
                 .maintenance(writer_id(name))
-                .maintain_metadata(&fixture.namespace_id)
+                .maintain_metadata_with_options(
+                    &fixture.namespace_id,
+                    &loonfs::MaintainMetadataOptions {
+                        max_wal_tail_objects: std::num::NonZeroU64::MIN,
+                    },
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
             assert_eq!(

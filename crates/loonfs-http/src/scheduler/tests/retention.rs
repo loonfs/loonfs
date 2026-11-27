@@ -2,8 +2,7 @@
 //! retention window.
 
 use super::{
-    idle_fold_after_ms, local_store, scheduler_config, seed_writer, SchedulerServer, TestConfig,
-    DAY_MS,
+    fold_age_ms, local_store, scheduler_config, seed_writer, SchedulerServer, TestConfig, DAY_MS,
 };
 use crate::scheduler::lock;
 use crate::scheduler::retries::MaintenanceCall;
@@ -315,7 +314,7 @@ async fn session_steps_never_advance_the_floor_and_the_next_sweep_does() {
         .committed_seq;
     let floor = server.diagnostics(&namespace_id).await.retention_floor_seq;
 
-    server.run_steps_after(idle_fold_after_ms(&config)).await;
+    server.run_steps_after(fold_age_ms(&config)).await;
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
         0,
@@ -382,7 +381,7 @@ async fn a_sweep_that_finds_session_steps_running_leaves_its_advance_to_those_st
         .expect("write a file")
         .committed_seq;
     let floor = server.diagnostics(&namespace_id).await.retention_floor_seq;
-    server.run_steps_after(idle_fold_after_ms(&config)).await;
+    server.run_steps_after(fold_age_ms(&config)).await;
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
     server.clock.advance_ms(2 * WINDOW_MS);
 
