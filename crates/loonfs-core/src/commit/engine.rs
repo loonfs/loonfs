@@ -4,7 +4,7 @@
 
 use super::batch::{PublishBatchReport, PublishViewEffect};
 use super::publish_view::WriterPosition;
-use super::published_manifest::{KeptPosition, PublishedManifest};
+use super::published_manifest::{KeptPosition, PublishedLock, PublishedManifest};
 use super::session_epoch::SessionEpoch;
 use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
@@ -205,6 +205,17 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         self.position.current.published().clone()
     }
 
+    /// Brings the position up to the manifest that `published`, this
+    /// engine's locked [`Self::published_manifest`], records, and stores it,
+    /// so the engine doesn't keep the part of the tail that a publication
+    /// folded. The session's runtime calls this after each publication, and
+    /// when it releases the engine. Returns the position that the call
+    /// replaced, which the caller drops once it has unlocked `published`.
+    #[must_use = "drop the replaced position once the published manifest is unlocked"]
+    pub fn follow_published(&mut self, published: &PublishedLock<'_>) -> Option<WriterPosition> {
+        self.position.current.follow_stored(published)
+    }
+
     /// Drops the position and its tail, so the next unit reads the tail from
     /// the store. Writer epoch and fencing remain in session state and are
     /// not reset.
@@ -241,6 +252,14 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// or `None` when the engine has no position.
     pub fn writer_position(&self) -> Option<WriterPosition> {
         self.position.current.get()
+    }
+
+    /// Returns the engine's position as it's stored, without bringing it up
+    /// to the session's newest published manifest, for a test of what the
+    /// engine keeps in memory.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stored_position(&self) -> Option<WriterPosition> {
+        self.position.current.stored().cloned()
     }
 
     /// Moves the position onto `manifest`, a manifest above it such as one
@@ -376,9 +395,9 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// covers the tail as the session's newest published manifest, as every
     /// publication does (see [`Self::published_manifest`]), so the position
     /// moves onto it and later commits plan against it, and a failed fold
-    /// drops the position. A fold whose manifest put loses to another process's claim
-    /// still builds again on that claim through the publication loop of
-    /// [`NamespaceStore::fold_wal_tail`].
+    /// drops the position. A fold whose manifest put loses to another
+    /// process's claim still builds again on that claim through the
+    /// publication loop of [`NamespaceStore::fold_wal_tail`].
     pub async fn fold(&mut self) -> Result<FoldedWalTail> {
         let clock = self.namespace.start_clock();
         let Self {

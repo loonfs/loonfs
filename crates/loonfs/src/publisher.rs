@@ -458,6 +458,50 @@ impl NamespacePublisher {
                 }
             }
         }
+        // The engine is unlocked with the published manifest locked, after
+        // both positions follow it (see `Self::record_published`).
+        let recorded = self.read_position.published().lock();
+        let replaced = engine.follow_published(&recorded);
+        let followed = self.read_position.follow_stored(&recorded);
+        drop(engine);
+        drop(recorded);
+        drop(replaced);
+        self.read_position.finish_follow(followed);
+    }
+
+    /// Records `published`, a manifest that this runtime published or found
+    /// current, as the session's newest published manifest, without waiting
+    /// for the engine. When no task has the engine locked, the engine's
+    /// position and the position that reads start from move onto the
+    /// manifest at once, and otherwise the engine's release moves both.
+    ///
+    /// Either way neither position keeps the tail that the manifest folded,
+    /// whatever the order of events. The record and the attempt to lock the
+    /// engine run with the published manifest locked, and so does the
+    /// release's move of both positions and its unlock of the engine. So
+    /// either the record comes before the release's move, which then follows
+    /// the manifest, or it comes after the unlock, and the attempt finds the
+    /// engine free, or locked by a later task, whose release comes after the
+    /// record. A unit that stores its position before the record and
+    /// releases the engine after it is the first case.
+    ///
+    /// Under the published manifest's lock run only the record, the two
+    /// follows with their stores, and the unlock of the engine. Dropping the
+    /// positions that the follows replaced, which can free a large WAL tail,
+    /// and handing a removed read position's tail to the read cache run
+    /// after the unlock.
+    pub(super) fn record_published(&self, published: &Held<LoadedManifest>) {
+        let mut recorded = self.read_position.published().lock();
+        recorded.record(published);
+        let Ok(mut engine) = self.engine.try_lock() else {
+            return;
+        };
+        let replaced = engine.follow_published(&recorded);
+        let followed = self.read_position.follow_stored(&recorded);
+        drop(engine);
+        drop(recorded);
+        drop(replaced);
+        self.read_position.finish_follow(followed);
     }
 
     /// Drops the session's view of the namespace after a panic: the engine's

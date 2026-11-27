@@ -135,16 +135,24 @@ impl<M: HeldManifestForm> Held<M> {
     /// published after that check began. A check of a later manifest says
     /// nothing about this one, so it changes nothing.
     pub fn merge<N: HeldManifestForm>(&mut self, other: &Held<N>) -> bool {
-        if other.manifest_no() > self.manifest_no() {
+        if !self.would_merge(other) {
             return false;
         }
-        let younger = self.checked.age_at(&other.checked) > 0;
-        if younger {
+        if self.checked.age_at(&other.checked) > 0 {
             self.checked = other.checked.clone();
         }
-        let before = self.boundary.clone();
-        self.boundary = std::mem::take(&mut self.boundary).higher(other.boundary.clone());
-        younger || self.boundary != before
+        if self.boundary.is_below(&other.boundary) {
+            self.boundary = other.boundary.clone();
+        }
+        true
+    }
+
+    /// Returns whether [`Self::merge`] of `other` would change this holder:
+    /// `other`'s manifest is this holder's or an earlier one, and its check
+    /// is younger or its boundary higher. The call copies nothing.
+    pub fn would_merge<N: HeldManifestForm>(&self, other: &Held<N>) -> bool {
+        other.manifest_no() <= self.manifest_no()
+            && (self.checked.age_at(&other.checked) > 0 || self.boundary.is_below(&other.boundary))
     }
 
     /// Returns whether a check that began at or after `other`'s confirms this

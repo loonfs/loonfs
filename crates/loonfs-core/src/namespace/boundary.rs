@@ -64,10 +64,19 @@ impl KeptBoundary {
     /// namespace. Because the boundary only rises, the higher one is the
     /// newer.
     pub(crate) fn higher(self, other: Self) -> Self {
-        match other.0 {
-            Some(other) if !reaches(self.object(), other.state.boundary) => Self(Some(other)),
-            _ => self,
+        if self.is_below(&other) {
+            other
+        } else {
+            self
         }
+    }
+
+    /// Returns whether `other`, a boundary of the same namespace, is above
+    /// this one.
+    pub(crate) fn is_below(&self, other: &Self) -> bool {
+        other
+            .object()
+            .is_some_and(|other| !reaches(self.object(), other.state.boundary))
     }
 }
 

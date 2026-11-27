@@ -465,7 +465,7 @@ impl PublisherRegistry {
         // `published`, which the confirmation keeps, and not a position on an
         // older manifest, which nothing would drop.
         if let Some(publisher) = self.live_publisher(namespace_id) {
-            publisher.read_position.record_published(published);
+            publisher.record_published(published);
         }
         self.shared
             .context
