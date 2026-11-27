@@ -142,7 +142,7 @@ async fn merges_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork(
     );
 
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold the merges");
     assert_eq!(

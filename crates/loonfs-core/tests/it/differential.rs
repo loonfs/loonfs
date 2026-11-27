@@ -1486,7 +1486,10 @@ async fn commit_and_compact_at_the_floor(
     for (index, step) in steps.iter().enumerate() {
         commit_retention_step(store, namespace_id, *step, &context).await;
         if CommitSeq(u64::try_from(index + 1).expect("seq")) == RETENTION_FLOOR {
-            maintenance.fold_wal().await.expect("fold to the floor");
+            maintenance
+                .fold_in_new_session()
+                .await
+                .expect("fold to the floor");
             let advanced = maintenance
                 .advance_retention_floor(loonfs_core::RetentionTarget::Seq(RETENTION_FLOOR))
                 .await
@@ -1495,7 +1498,10 @@ async fn commit_and_compact_at_the_floor(
             assert_eq!(advanced.retention_floor_seq, RETENTION_FLOOR);
         }
     }
-    maintenance.fold_wal().await.expect("fold the history");
+    maintenance
+        .fold_in_new_session()
+        .await
+        .expect("fold the history");
     loonfs_core::test_support::compact_every_group(store, namespace_id).await;
 }
 

@@ -1,9 +1,8 @@
 //! Folds the visible WAL tail and publishes the next manifest number.
 
 use super::publish::ManifestChange;
-use super::published::{same_head, PublicationReport};
+use super::published::same_head;
 use crate::commit::publish_view::WriterPosition;
-use crate::engine::{NamespaceEngine, Writable};
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
@@ -54,27 +53,6 @@ pub struct FoldWalResponse {
     pub manifest_head_seq: CommitSeq,
     /// Whether this call published the current manifest.
     pub outcome: FoldWalOutcome,
-}
-
-impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Folds the visible WAL tail and publishes a
-    /// manifest covering the current head.
-    ///
-    /// This is the latest-state maintenance operation: it absorbs the visible
-    /// WAL tail into a new manifest, creating no
-    /// snapshot. Superseded manifests become garbage-collection
-    /// candidates once nothing keeps them. The report includes the manifest
-    /// this call published.
-    pub async fn fold_wal(&self) -> Result<PublicationReport<FoldWalResponse>> {
-        let folded = self
-            .namespace
-            .fold_wal_tail(None, &self.namespace.start_clock())
-            .await?;
-        Ok(PublicationReport {
-            published: folded.published(),
-            response: folded.response,
-        })
-    }
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {

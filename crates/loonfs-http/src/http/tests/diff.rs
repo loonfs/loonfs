@@ -160,7 +160,10 @@ async fn a_diff_below_the_floor_returns_its_from_seq_and_the_floor() {
         ),
         writer_id("maintainer"),
     );
-    maintenance.fold_wal().await.expect("fold the writes");
+    maintenance
+        .fold_in_new_session()
+        .await
+        .expect("fold the writes");
     let floor = maintenance
         .advance_retention_floor(loonfs_core::RetentionTarget::Head)
         .await

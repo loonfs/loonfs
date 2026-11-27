@@ -168,8 +168,9 @@ async fn fences_fold_and_stay_after_a_collection() {
         .acquire_writer_epoch(&setup.writer_id)
         .await
         .expect("first fence");
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+    let folded_namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    folded_namespace
+        .fold_wal_tail(None, &folded_namespace.start_clock())
         .await
         .expect("fold fence");
     crate::test_support::namespace_store(&store, &namespace_id)
@@ -229,7 +230,8 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
         .expect("first fence");
     store.block_next();
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let (folded, acquired) = futures::join!(namespace.fold_wal(), async {
+    let clock = namespace.start_clock();
+    let (folded, acquired) = futures::join!(namespace.fold_wal_tail(None, &clock), async {
         store.wait_until_blocked().await;
         let acquired = crate::test_support::namespace_store(store.inner(), &namespace_id)
             .acquire_writer_epoch(&setup.writer_id)
@@ -598,8 +600,9 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
     store.block_next();
     let (published, ()) = futures::join!(publish(&mut engine, "after-gc"), async {
         store.wait_until_blocked().await;
-        crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .fold_wal()
+        let folded_namespace = crate::test_support::namespace_store(store.inner(), &namespace_id);
+        folded_namespace
+            .fold_wal_tail(None, &folded_namespace.start_clock())
             .await
             .expect("fold old WAL");
         // A manifest after the fold, so the fold's manifest isn't current.
@@ -719,7 +722,10 @@ async fn a_put_after_a_collection_collides_with_the_kept_floor_object() {
         .publish_floor_object(&planned, CommitSeq(1))
         .await
         .expect("another process creates a floor object");
-    namespace.fold_wal().await.expect("fold the floor object");
+    namespace
+        .fold_wal_tail(None, &namespace.start_clock())
+        .await
+        .expect("fold the floor object");
     let aged = WriterAt {
         now_ms: grace + 1,
         ..context(1_000)
@@ -1151,7 +1157,10 @@ async fn acquire_over_an_emptied_number(
                     .await
                     .expect("a third session claims the next epoch");
             }
-            namespace.fold_wal().await.expect("fold the commits");
+            namespace
+                .fold_wal_tail(None, &namespace.start_clock())
+                .await
+                .expect("fold the commits");
             namespace
                 .gc(&WriterAt {
                     now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
@@ -1257,8 +1266,9 @@ async fn a_fence_above_a_newer_manifests_folded_wal_no_is_live() {
     let newer_writer = WriterId::parse("writer-b").expect("writer");
     let (acquired, ()) = futures::join!(newer.acquire_writer(&newer_writer), async {
         blocked.wait_until_blocked().await;
-        crate::test_support::namespace_store(store, &namespace_id)
-            .fold_wal()
+        let folded_namespace = crate::test_support::namespace_store(store, &namespace_id);
+        folded_namespace
+            .fold_wal_tail(None, &folded_namespace.start_clock())
             .await
             .expect("fold the commit at 2");
         blocked.release();
@@ -1370,7 +1380,10 @@ async fn a_floor_object_at_an_emptied_number_is_dead_and_the_next_attempt_puts_a
                     .expect("the session commits at the floor object's number");
             }
             let namespace = crate::test_support::namespace_store(store, &namespace_id);
-            namespace.fold_wal().await.expect("fold the commits");
+            namespace
+                .fold_wal_tail(None, &namespace.start_clock())
+                .await
+                .expect("fold the commits");
             namespace
                 .gc(&WriterAt {
                     now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
@@ -1448,8 +1461,9 @@ async fn a_floor_object_above_a_newer_manifests_folded_wal_no_is_live() {
         advancer.publish_floor_object(&planned, CommitSeq(1)),
         async {
             blocked.wait_until_blocked().await;
-            crate::test_support::namespace_store(store, &namespace_id)
-                .fold_wal()
+            let folded_namespace = crate::test_support::namespace_store(store, &namespace_id);
+            folded_namespace
+                .fold_wal_tail(None, &folded_namespace.start_clock())
                 .await
                 .expect("fold the commit at 2");
             blocked.release();

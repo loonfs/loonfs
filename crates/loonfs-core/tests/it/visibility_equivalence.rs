@@ -76,7 +76,7 @@ impl VisibilityHarness {
             .as_ref()
             .expect_err("creating the root directory should fail");
         engine
-            .fold_wal()
+            .fold_in_new_session()
             .await
             .expect("fold the acquisition fence into a base run");
         Self {
@@ -842,7 +842,11 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
         )
         .await
         .expect("create movable subtree");
-    harness.engine.fold_wal().await.expect("fold first run");
+    harness
+        .engine
+        .fold_in_new_session()
+        .await
+        .expect("fold first run");
     let old = harness.inode_id("/old").await;
     let branch = harness.inode_id("/old/branch").await;
     let live = harness.inode_id("/old/branch/live.txt").await;
@@ -855,7 +859,11 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
         )
         .await
         .expect("create subtree retained under a tombstone");
-    harness.engine.fold_wal().await.expect("fold second run");
+    harness
+        .engine
+        .fold_in_new_session()
+        .await
+        .expect("fold second run");
     let grave = harness.inode_id("/grave").await;
     let deep = harness.inode_id("/grave/deep").await;
     let dead = harness.inode_id("/grave/deep/dead.txt").await;
@@ -864,12 +872,20 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
         .move_path("/old/branch", "/moved")
         .await
         .expect("move branch out of old parent");
-    harness.engine.fold_wal().await.expect("fold third run");
+    harness
+        .engine
+        .fold_in_new_session()
+        .await
+        .expect("fold third run");
     harness
         .delete("/old", DeleteDirectoryBehavior::NonRecursive)
         .await
         .expect("delete empty old parent");
-    harness.engine.fold_wal().await.expect("fold fourth run");
+    harness
+        .engine
+        .fold_in_new_session()
+        .await
+        .expect("fold fourth run");
     harness
         .put_file(
             "/old/reused.txt",
@@ -878,14 +894,22 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
         )
         .await
         .expect("reuse old path");
-    harness.engine.fold_wal().await.expect("fold fifth run");
+    harness
+        .engine
+        .fold_in_new_session()
+        .await
+        .expect("fold fifth run");
     let reused_old = harness.inode_id("/old").await;
     let reused_file = harness.inode_id("/old/reused.txt").await;
     harness
         .delete("/grave", DeleteDirectoryBehavior::Recursive)
         .await
         .expect("delete retained descendant subtree");
-    harness.engine.fold_wal().await.expect("fold sixth run");
+    harness
+        .engine
+        .fold_in_new_session()
+        .await
+        .expect("fold sixth run");
     for (index, bytes) in [b"live two".as_slice(), b"live three".as_slice()]
         .into_iter()
         .enumerate()
@@ -896,7 +920,7 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
             .unwrap_or_else(|error| panic!("replace for run {} failed: {error}", index + 7));
         harness
             .engine
-            .fold_wal()
+            .fold_in_new_session()
             .await
             .unwrap_or_else(|error| panic!("fold run {} failed: {error}", index + 7));
     }
@@ -950,7 +974,11 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
                 )
                 .await
                 .expect("a commit after the advance");
-            harness.engine.fold_wal().await.expect("fold the commit");
+            harness
+                .engine
+                .fold_in_new_session()
+                .await
+                .expect("fold the commit");
             let inode_rows = harness.inode_rows().await;
             // The low bits of an inode ID are random, so the kept inode
             // filter could keep one of the four rows by a false positive. The
@@ -1135,7 +1163,11 @@ async fn revision_history_pages_survive_wal_folds_and_compaction() {
             .await
             .expect("write revision");
         if revision < 8 {
-            harness.engine.fold_wal().await.expect("fold revision");
+            harness
+                .engine
+                .fold_in_new_session()
+                .await
+                .expect("fold revision");
         }
     }
     let inode_id = harness.inode_id("/history.txt").await;
@@ -1181,7 +1213,11 @@ async fn revision_history_pages_survive_wal_folds_and_compaction() {
     // The first page combines a WAL revision with stored revisions. After
     // compaction, the same history comes entirely from the single family.
     assert_history(&harness, inode_id).await;
-    harness.engine.fold_wal().await.expect("fold last revision");
+    harness
+        .engine
+        .fold_in_new_session()
+        .await
+        .expect("fold last revision");
     drain_compaction(
         &harness,
         &[

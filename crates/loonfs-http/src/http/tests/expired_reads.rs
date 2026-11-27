@@ -76,7 +76,10 @@ async fn expire_old(store: &SharedObjectStore) -> (String, String) {
         ),
         writer_id("maintainer"),
     );
-    maintenance.fold_wal().await.expect("fold the deletion");
+    maintenance
+        .fold_in_new_session()
+        .await
+        .expect("fold the deletion");
     let advanced = maintenance
         .advance_retention_floor(loonfs_core::RetentionTarget::Seq(deletion.committed_seq))
         .await

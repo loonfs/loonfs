@@ -379,7 +379,7 @@ async fn an_advance_without_a_session_creates_a_floor_object_and_folds_it() {
         .await
         .expect("write");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let before = crate::test_support::namespace_store(&store, &namespace_id)
@@ -589,6 +589,18 @@ async fn a_fold_whose_manifest_put_succeeds_without_an_answer_reports_published(
         .write_file_bytes("/file", b"data", None)
         .await
         .expect("write");
+    // The session claims before the fault is armed, so the fault is the
+    // fold's own manifest put.
+    let acquired = crate::test_support::namespace_store(&store, &namespace_id)
+        .acquire_writer(&context.writer_id)
+        .await
+        .expect("claim")
+        .writer;
+    let mut session = NamespaceCommitEngine::with_acquired_session(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+        acquired,
+    );
     let predecessor = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
@@ -596,10 +608,7 @@ async fn a_fold_whose_manifest_put_succeeds_without_an_answer_reports_published(
         .manifest()
         .manifest_no;
     store.fail_next(1);
-    let folded = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold");
+    let folded = session.fold().await.expect("fold").response;
     assert_eq!(store.remaining(), 0);
     assert_eq!(folded.outcome, crate::FoldWalOutcome::Published);
     assert_eq!(
@@ -907,8 +916,9 @@ async fn a_fold_that_finds_another_fold_after_a_lost_put_keeps_its_position_chec
         .into_position();
     // Another process folds the tail, and then publishes a manifest above
     // that fold, before this fold's clock starts.
-    crate::test_support::namespace_store(&local, &namespace_id)
-        .fold_wal()
+    let folded_namespace = crate::test_support::namespace_store(&local, &namespace_id);
+    folded_namespace
+        .fold_wal_tail(None, &folded_namespace.start_clock())
         .await
         .expect("another process's fold");
     crate::test_support::change_retention_window(

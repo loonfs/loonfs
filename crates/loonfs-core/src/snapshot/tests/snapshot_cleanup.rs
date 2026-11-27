@@ -192,7 +192,7 @@ async fn an_unverified_snapshot_left_without_its_manifest_is_deleted_at_the_grac
             .await
             .expect("write");
         crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold");
     }
@@ -292,7 +292,7 @@ async fn snapshot_removed_after_listing_does_not_make_a_collected_basis_corrupti
         .await
         .expect("write");
     crate::test_support::namespace_store(&base, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let old_manifest = metadata_manifest_object(&namespace_id, &snapshot.manifest_no);
@@ -381,7 +381,7 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
         .await
         .expect("write");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     // A fork snapshot's manifest is protected from its creation, so losing it

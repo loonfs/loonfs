@@ -40,7 +40,7 @@ impl Fixture {
                 .await
                 .expect("write");
             crate::test_support::namespace_store(&store, &source)
-                .fold_wal()
+                .fold_as_test_writer()
                 .await
                 .expect("fold");
         }
@@ -69,7 +69,7 @@ impl Fixture {
             .await
             .expect("advance source");
         crate::test_support::namespace_store(&store, &source)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold");
         let report = crate::test_support::NamespaceFixture::new(

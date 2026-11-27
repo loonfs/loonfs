@@ -133,11 +133,13 @@ async fn publish_while_the_put_is_written_and_collected(
             .put_if_absent(&in_flight_key, in_flight_bytes)
             .await
             .expect("the put in flight is written");
+        let namespace = crate::test_support::namespace_store(local, &namespace_id);
         assert_eq!(
-            crate::test_support::namespace_store(local, &namespace_id)
-                .fold_wal()
+            namespace
+                .fold_wal_tail(None, &namespace.start_clock())
                 .await
                 .expect("fold")
+                .response
                 .outcome,
             FoldWalOutcome::Published
         );
@@ -271,11 +273,7 @@ async fn a_publish_future_dropped_while_planning_leaves_the_session_acquired() {
         .head
         .wal_no;
     assert_eq!(
-        crate::test_support::namespace_store(&local, &namespace_id)
-            .fold_wal()
-            .await
-            .expect("fold")
-            .outcome,
+        engine.fold().await.expect("fold").response.outcome,
         FoldWalOutcome::Published
     );
     engine.invalidate_projection();

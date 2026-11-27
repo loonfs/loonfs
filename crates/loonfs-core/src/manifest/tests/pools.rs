@@ -44,7 +44,7 @@ async fn a_create_generates_a_pool_and_every_fork_records_its_source_pool() {
     // A successor of the first manifest keeps the value.
     write_test_file(&store, &grandchild, "/file", "write", &setup).await;
     crate::test_support::namespace_store(&store, &grandchild)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     for namespace_id in [&root, &fork, &grandchild] {

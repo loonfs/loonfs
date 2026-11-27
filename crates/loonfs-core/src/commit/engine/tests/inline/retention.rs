@@ -76,10 +76,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     publish(&mut engine, &context, filler)
         .await
         .expect("first run");
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("first fold");
+    engine.fold().await.expect("first fold");
     let request = replace(b"before");
     let old_reference = request.inline_content()[0].content_ref().clone();
     let original = publish(&mut engine, &context, request)
@@ -138,7 +135,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .await
         .expect("advance history");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    namespace.fold_wal().await.expect("fold later history");
+    engine.fold().await.expect("fold later history");
     // Another process creates a floor object at the number after the
     // session's tip, so the session's own put finds the number taken, and
     // the session's advance ends as an advance without a session does.
@@ -196,10 +193,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .expect("a pruned ID can identify a new mutation");
     assert_eq!(reused.committed_seq, CommitSeq(later.committed_seq.0 + 1));
     assert_ne!(reused.events, original.events);
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold reused ID");
+    engine.fold().await.expect("fold reused ID");
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
     crate::test_support::namespace_store(&aged, &namespace_id)
         .gc(&WriterAt {

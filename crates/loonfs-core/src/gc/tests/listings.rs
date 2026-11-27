@@ -225,7 +225,7 @@ async fn a_fold_during_a_collection_keeps_what_the_new_manifest_needs() {
     let (report, segments) = tokio::join!(namespace.gc(&collection_clock), async {
         gated.wait_until_blocked().await;
         crate::test_support::namespace_store(&seed, &namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold the tail");
         let segments =
@@ -339,7 +339,7 @@ async fn snapshot_views_add_segment_reads_only_for_uncovered_layout_segments() {
             )
             .await;
             crate::test_support::namespace_store(&store, &namespace_id)
-                .fold_wal()
+                .fold_as_test_writer()
                 .await
                 .expect("fold");
         }

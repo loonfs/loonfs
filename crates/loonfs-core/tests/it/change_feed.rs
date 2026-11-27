@@ -251,7 +251,7 @@ async fn append_events_report_where_the_appended_bytes_begin_before_and_after_a_
     for folded in [false, true] {
         if folded {
             namespace_engine(&store, &namespace_id, &context)
-                .fold_wal()
+                .fold_in_new_session()
                 .await
                 .expect("fold the WAL tail into commit rows");
         }
@@ -320,7 +320,7 @@ async fn an_append_in_a_fork_to_an_inherited_file_reports_its_offset() {
     for folded in [false, true] {
         if folded {
             namespace_engine(&store, &fork, &context)
-                .fold_wal()
+                .fold_in_new_session()
                 .await
                 .expect("fold the fork's WAL tail into commit rows");
         }

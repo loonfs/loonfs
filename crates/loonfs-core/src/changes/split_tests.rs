@@ -194,7 +194,7 @@ async fn a_commit_splits_the_same_way_before_and_after_a_fold() {
     let budget = feed.budget();
     let before = feed.pages(CommitSplitting::AtPageBudget, budget).await;
     namespace_store(&feed.store, &feed.namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let after = feed.pages(CommitSplitting::AtPageBudget, budget).await;

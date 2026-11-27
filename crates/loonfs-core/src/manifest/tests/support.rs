@@ -66,16 +66,6 @@ pub(super) use std::num::{NonZeroU32, NonZeroUsize};
 pub(super) use std::sync::Arc;
 pub(super) use tempfile::tempdir;
 
-impl<S: ObjectStore> crate::namespace::store::NamespaceStore<S> {
-    /// Folds the visible WAL tail into segments and publishes the next manifest.
-    pub(crate) async fn fold_wal(&self) -> crate::error::Result<crate::manifest::FoldWalResponse> {
-        let clock = self.start_clock();
-        self.fold_wal_tail(None, &clock)
-            .await
-            .map(|folded| folded.response)
-    }
-}
-
 pub(super) async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -192,17 +182,13 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &WriterAt,
 ) -> crate::error::Result<loonfs_types::NamespaceMetadata> {
-    let summary = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
-        .create()
-        .await?;
-    crate::test_support::namespace_store(store, namespace_id)
-        .acquire_writer_epoch(&context.writer_id)
+    let fixture = crate::test_support::NamespaceFixture::new(store, namespace_id, context);
+    let summary = fixture.create().await?;
+    fixture
+        .engine()
+        .fold_in_new_session()
         .await
-        .expect("acquire fixture writer");
-    crate::test_support::namespace_store(store, namespace_id)
-        .fold_wal()
-        .await
-        .expect("publish the first manifest");
+        .expect("acquire the fixture writer and publish the first manifest");
     Ok(summary)
 }
 
@@ -234,7 +220,7 @@ pub(super) async fn advance_floor_through<S: ObjectStore + ?Sized>(
     context: &WriterAt,
 ) {
     crate::test_support::namespace_store(store, namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold the deletion");
     let advanced = crate::test_support::NamespaceFixture::new(

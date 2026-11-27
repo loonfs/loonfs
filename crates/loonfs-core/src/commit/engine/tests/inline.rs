@@ -131,10 +131,7 @@ async fn folded_file(
     publish(engine, context, candidate("file", vec![value.clone()]))
         .await
         .expect("publish");
-    crate::test_support::namespace_store(store, &engine.namespace.namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold");
+    engine.fold().await.expect("fold");
     let inode_id = crate::test_support::namespace_store(store, &engine.namespace.namespace_id)
         .load_current_metadata_view()
         .await
@@ -493,10 +490,11 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         .await
         .expect("directory");
     assert_eq!(
-        crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-            .fold_wal()
+        engine
+            .fold()
             .await
             .expect("non-inline fold")
+            .response
             .outcome,
         FoldWalOutcome::Published
     );

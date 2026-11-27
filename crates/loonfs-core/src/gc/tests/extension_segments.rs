@@ -72,7 +72,7 @@ async fn an_extension_segment_goes_once_no_root_lists_it() {
         .expect("create");
     write_test_file(&store, &namespace_id, "/one", "one", &setup).await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let first = extension_segment(&namespace_id, 1);
@@ -143,7 +143,7 @@ async fn an_inherited_extension_segment_stays_until_no_fork_snapshot_keeps_it() 
         .expect("create");
     write_test_file(&store, &source, "/one", "one", &setup).await;
     crate::test_support::namespace_store(&store, &source)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let inherited = extension_segment(&source, 1);

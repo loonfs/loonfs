@@ -532,7 +532,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
     for index in 0..70u32 {
         if index % 32 == 0 {
             namespace_engine(&store, &namespace_id, &context)
-                .fold_wal()
+                .fold_in_new_session()
                 .await
                 .expect("fold seed writes");
         }
@@ -2594,7 +2594,7 @@ async fn a_view_below_the_manifest_head_lists_every_revision_of_a_file_once() {
         // and 10.
         if revision == 8 {
             namespace_engine(&store, &namespace_id, &context)
-                .fold_wal()
+                .fold_in_new_session()
                 .await
                 .expect("fold");
         }

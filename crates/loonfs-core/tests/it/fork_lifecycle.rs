@@ -126,7 +126,10 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .write_file_bytes("/docs/later.txt", b"later", Some(&commit_id("later")))
         .await
         .expect("advance source");
-    engine.fold_wal().await.expect("fold current source");
+    engine
+        .fold_in_new_session()
+        .await
+        .expect("fold current source");
     let floor = engine
         .advance_retention_floor(loonfs_core::RetentionTarget::Head)
         .await
@@ -697,12 +700,12 @@ async fn a_created_namespace_reads_manifest_two_before_its_first_fold() {
     );
 
     namespace_engine(&store, &namespace_id, &context)
-        .fold_wal()
+        .fold_in_new_session()
         .await
         .expect("fold");
     assert!(
         store
-            .head(&metadata_manifest_object(&namespace_id, &ManifestNo(4)))
+            .head(&metadata_manifest_object(&namespace_id, &ManifestNo(5)))
             .await
             .expect("probe root")
             .is_some(),
@@ -721,7 +724,7 @@ async fn a_created_namespace_reads_manifest_two_before_its_first_fold() {
         .expect("anchor after fold");
     assert_eq!(
         anchor.current_manifest().payload().manifest_no,
-        ManifestNo(4)
+        ManifestNo(5)
     );
 }
 
@@ -1061,7 +1064,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     // The target's own first fold inherits the source's segments by
     // reference and adds only its own delta run.
     namespace_engine(&store, &clone_namespace_id, &context)
-        .fold_wal()
+        .fold_in_new_session()
         .await
         .expect("fold clone");
     let clone_root = namespace_store(&store, &clone_namespace_id)
@@ -1163,7 +1166,7 @@ async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
             .write_file_bytes(path, b"body", Some(&commit_id(commit)))
             .await
             .expect("seed a file");
-        source.fold_wal().await.expect("fold the file");
+        source.fold_in_new_session().await.expect("fold the file");
     }
     submit_operation(
         &store,
@@ -1178,7 +1181,10 @@ async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
     )
     .await
     .expect("delete /old");
-    source.fold_wal().await.expect("fold the deletion");
+    source
+        .fold_in_new_session()
+        .await
+        .expect("fold the deletion");
     fork_namespace(&store, &source_namespace_id, &fork_namespace_id, &context)
         .await
         .expect("fork");
@@ -1237,7 +1243,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .await
         .expect("write descendant");
     let engine = namespace_engine(&store, &descendant, &context);
-    engine.fold_wal().await.expect("fold descendant");
+    engine.fold_in_new_session().await.expect("fold descendant");
     let (_, published) = compact_every_group(&store, &descendant).await;
     assert!(published > 0);
 
