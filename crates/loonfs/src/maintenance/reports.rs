@@ -10,9 +10,10 @@ use crate::{
 pub struct MetadataMaintenanceReport {
     /// The call's response, as the HTTP API returns it.
     pub response: MetadataMaintenanceResponse,
-    /// When the tail's idle fold comes due, on the runtime's monotonic timer
-    /// (see [`LoonFs::monotonic_timer`](crate::LoonFs::monotonic_timer)),
-    /// when that fold is the only work left: the outcome is
+    /// When the tail's oldest commit reaches the fold age, on the runtime's
+    /// monotonic timer (see
+    /// [`LoonFs::monotonic_timer`](crate::LoonFs::monotonic_timer)), when
+    /// that fold is the only work left: the outcome is
     /// [`MetadataMaintenanceOutcome::Due`](crate::MetadataMaintenanceOutcome::Due)
     /// only because the tail waits for its age. `None` when nothing is due,
     /// or when other work is left.

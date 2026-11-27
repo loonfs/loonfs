@@ -109,10 +109,11 @@ root = "/tmp/loonfs-server"
     );
 }
 
-/// Checks that an absent idle fold age takes the runtime's default, and that
-/// zero turns the rule off.
+/// Checks that an absent fold age takes the runtime's default, that a set
+/// one reaches the runtime, and that zero and a fold age at
+/// `MAX_TAIL_COMMIT_AGE_MS` are refused.
 #[test]
-fn the_runtime_takes_the_idle_fold_age_or_its_default() {
+fn the_runtime_takes_the_fold_age_or_its_default_below_the_tail_commit_age_bound() {
     let config = |setting: &str| {
         parse_server_config(&format!(
             r#"
@@ -126,22 +127,33 @@ kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
         ))
-        .expect("valid config")
     };
+    let bound = loonfs::MAX_TAIL_COMMIT_AGE_MS;
     for (setting, expected) in [
-        ("", Some(loonfs::DEFAULT_IDLE_FOLD_AFTER_MS)),
-        (
-            "idle_fold_after_ms = 60000",
-            std::num::NonZeroU64::new(60_000),
-        ),
-        ("idle_fold_after_ms = 0", None),
+        ("".to_owned(), loonfs::DEFAULT_FOLD_AGE_MS.get()),
+        ("fold_age_ms = 60000".to_owned(), 60_000),
+        (format!("fold_age_ms = {}", bound - 1), bound - 1),
     ] {
         assert_eq!(
-            config(setting).config().runtime_config().idle_fold_after_ms,
+            config(&setting)
+                .expect("valid config")
+                .config()
+                .runtime_config()
+                .fold_age_ms
+                .get(),
             expected,
             "{setting:?}"
         );
     }
+    let error = config("fold_age_ms = 0").expect_err("a zero fold age");
+    assert!(
+        matches!(&error, ServerError::ConfigDecode(message) if message.contains("fold_age_ms")),
+        "{error:?}"
+    );
+    assert_invalid_field(
+        config(&format!("fold_age_ms = {bound}")).expect_err("a fold age at the bound"),
+        "fold_age_ms",
+    );
 }
 
 #[test]

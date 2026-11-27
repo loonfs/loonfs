@@ -223,13 +223,15 @@ pub struct ServerConfig {
     /// the namespace head on every read. Unset keeps the runtime default of
     /// 1000. At most 1200000, the revalidation bound.
     pub max_staleness_ms: Option<u64>,
-    /// How old a WAL tail's newest commit must be before maintenance folds
-    /// a tail that is below the fold thresholds, in milliseconds. The
-    /// maintenance scheduler and explicit `metadata` requests use the same
-    /// period. Zero turns the rule off. Defaults to the runtime's
-    /// [`DEFAULT_IDLE_FOLD_AFTER_MS`](loonfs::DEFAULT_IDLE_FOLD_AFTER_MS), 15
-    /// minutes.
-    pub idle_fold_after_ms: Option<u64>,
+    /// The fold age, in milliseconds: how old the oldest unfolded commit of
+    /// a WAL tail can be before maintenance folds the tail, whatever its
+    /// size. The maintenance scheduler and explicit `metadata` requests use
+    /// the same age. Defaults to the runtime's
+    /// [`DEFAULT_FOLD_AGE_MS`](loonfs::DEFAULT_FOLD_AGE_MS), 15 minutes, and
+    /// must be less than
+    /// [`MAX_TAIL_COMMIT_AGE_MS`](loonfs::MAX_TAIL_COMMIT_AGE_MS), 42300000.
+    #[serde(default = "default_fold_age_ms")]
+    pub fold_age_ms: NonZeroU64,
     /// How the server's listener receives requests. Without a `[transport]`
     /// table, the server serves plaintext HTTP, which validation accepts
     /// only on a loopback bind, because the requests include the bearer token
@@ -360,6 +362,10 @@ fn default_idle_session_close_after_ms() -> NonZeroU64 {
     loonfs_http::DEFAULT_IDLE_SESSION_CLOSE_AFTER_MS
 }
 
+fn default_fold_age_ms() -> NonZeroU64 {
+    loonfs::DEFAULT_FOLD_AGE_MS
+}
+
 impl ServerConfig {
     /// Builds the object store selected by this server configuration.
     pub fn object_store(&self) -> Result<ConfiguredObjectStore> {
@@ -391,10 +397,7 @@ impl ServerConfig {
                 ..self.publication.clone()
             },
             inline_content: self.inline_content.clone(),
-            idle_fold_after_ms: match self.idle_fold_after_ms {
-                Some(idle_fold_after_ms) => NonZeroU64::new(idle_fold_after_ms),
-                None => defaults.idle_fold_after_ms,
-            },
+            fold_age_ms: self.fold_age_ms,
             default_retention_window_ms: self.retention_window_ms,
         }
     }

@@ -3358,6 +3358,12 @@
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "wal_tail_oldest_commit_at_ms": {
+            "description": "The time of the oldest visible commit after the current manifest, in Unix milliseconds. Absent\nwhen that tail has no commit, such as a tail of fences alone.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [

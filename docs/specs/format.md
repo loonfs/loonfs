@@ -839,9 +839,9 @@ Reference implementation folding defaults (not format requirements):
 | Request a fold | 8 MiB unfolded WAL bytes, 256 unfolded WAL objects, or 8 MiB of unfolded inline content bytes (a quarter of the inline write stop) |
 | Stall new commits waiting for a fold (write-stop) | 64 MiB unfolded WAL bytes, 1,024 unfolded WAL objects, or 32 MiB of unfolded inline content bytes |
 | Reject stalled commit with `maintenance_required` (write-stop wait) | 30 s from queue entry |
-| Idle tail fold | Tail has a commit and newest `committed_at_ms` is >= 15 min old on maintenance clock |
+| Fold age | Tail's oldest `committed_at_ms` is >= 15 min old on the maintenance clock |
 
-Fences and [floor objects](glossary.md#floor-object) count toward WAL object counts (not byte counts or idleness). Inline content bytes are the decoded bytes of the tail's [pieces](glossary.md#piece), which a writer keeps in memory, so those thresholds bound the memory of a tail whose pieces compress well. Each fold threshold sits well below its write stop, so a fold starts early and commits reach the stop only when folds fall behind. The commit crossing a threshold may finish first, and reads plus retained-receipt replays continue during write-stop. Folding never advances retention on its own beyond floor objects already in the tail. See [Appendix C](#appendix-c-timing-and-size-reference) for sizing defaults.
+The [fold age](glossary.md#fold-age) is how old the oldest unfolded commit can be before a fold is due, whatever the tail's size, so a writer that commits every 10 minutes still has its tail folded, and no unfolded commit of a maintained tail is much older than 15 minutes. The fold age always applies, and the reference implementation refuses a setting at or above `MAX_TAIL_COMMIT_AGE_MS` (11 hours and 45 minutes), the age past which a fork or a merge folds a tail first. A tail without a commit (a tail of fences alone) never comes due by age. Fences and [floor objects](glossary.md#floor-object) count toward WAL object counts (not byte counts or the fold age). Inline content bytes are the decoded bytes of the tail's [pieces](glossary.md#piece), which a writer keeps in memory, so those thresholds bound the memory of a tail whose pieces compress well. Each fold threshold sits well below its write stop, so a fold starts early and commits reach the stop only when folds fall behind. The commit crossing a threshold may finish first, and reads plus retained-receipt replays continue during write-stop. Folding never advances retention on its own beyond floor objects already in the tail. See [Appendix C](#appendix-c-timing-and-size-reference) for sizing defaults.
 
 ### 7.4 Statistics
 
@@ -2267,7 +2267,7 @@ These defaults configure the reference producer and runtime without changing the
 | Target decoded segment size | 8 MiB |
 | Maximum decoded input one compaction keeps in memory | 64 MiB |
 | Automatic WAL-fold threshold | 8 MiB of WAL bytes, 256 WAL objects, or 8 MiB of inline content bytes (a quarter of the inline tail limit) |
-| Idle WAL-fold period | 15 minutes |
+| [Fold age](glossary.md#fold-age) | 15 minutes |
 | Unfolded-tail write stop (new commits wait for a fold) | 64 MiB of WAL bytes, 1,024 WAL objects, or 32 MiB of inline content bytes (`InlineContentPolicy::inline_content_tail_limit_bytes`) |
 | `PublicationPolicy::write_stop_wait_budget_ms` | 30,000 ms |
 | `RuntimeConfig::manifest_revalidation_interval_ms` | 1,000 ms |

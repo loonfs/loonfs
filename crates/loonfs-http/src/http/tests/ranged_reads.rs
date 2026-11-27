@@ -62,10 +62,6 @@ async fn fixture(configure: impl FnOnce(&mut TestOptions)) -> Fixture {
         .collect();
     let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(writer_id("ranged-seed"))
-        .config(loonfs::RuntimeConfig {
-            idle_fold_after_ms: None,
-            ..loonfs::RuntimeConfig::default()
-        })
         .build()
         .await
         .expect("writer");

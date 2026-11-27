@@ -1,6 +1,6 @@
 //! Concurrent steps preserve session progress and share the host's slots.
 
-use super::{scheduler_config, with_held, SchedulerServer};
+use super::{scheduler_config, with_held, SchedulerServer, LONG_FOLD_AGE_MS};
 use crate::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
@@ -34,7 +34,7 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
     // which writes the folded content under the pool's prefix. A gate on the
     // namespace's prefix alone would park one of the fold's concurrent segment
     // puts and let the others through.
-    config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
+    config.runtime.fold_age_ms = std::num::NonZeroU64::MIN;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -126,7 +126,7 @@ async fn a_publish_during_a_metadata_step_is_folded_by_the_next_run() {
     let mut config = scheduler_config(None);
     // The session's metadata step folds the session's tail, so the gate
     // parks the step at the fold's first request.
-    config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
+    config.runtime.fold_age_ms = std::num::NonZeroU64::MIN;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -193,7 +193,7 @@ async fn session_steps_share_slots_with_a_parked_sweep_and_continue_when_a_slot_
             std::num::NonZeroUsize::new(slots).expect("a nonzero slot count");
         // The session's metadata step folds the held session's tail, so a
         // run of the session steps sends requests.
-        config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
+        config.runtime.fold_age_ms = std::num::NonZeroU64::MIN;
         let server = SchedulerServer::start(store.clone(), &config, 0).await;
         server
             .runtime
@@ -321,7 +321,7 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
         OperationSelector::Any,
     ));
     let mut config = scheduler_config(None);
-    config.runtime.idle_fold_after_ms = None;
+    config.runtime.fold_age_ms = LONG_FOLD_AGE_MS;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -389,7 +389,7 @@ async fn a_step_parked_in_one_session_does_not_stop_another_sessions_fold_on_the
     let mut config = scheduler_config(None);
     // The session's metadata step folds a session's tail once the manual
     // clock moves, so the gate parks the steps of `parked` at the fold.
-    config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
+    config.runtime.fold_age_ms = std::num::NonZeroU64::MIN;
     // The runs before the first commit make the step from the store, and
     // that step waits the retry interval, which the manual clock then passes.
     config.scheduler.metadata_retry_interval_ms = std::num::NonZeroU64::MIN;

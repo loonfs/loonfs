@@ -983,6 +983,43 @@ fn builders_reject_a_read_interval_above_the_revalidation_bound() {
     });
 }
 
+/// Checks that a fold age at `MAX_TAIL_COMMIT_AGE_MS` fails the build with a
+/// config error that identifies the setting, and that the build accepts a
+/// fold age just below it.
+#[test]
+fn a_builder_rejects_a_fold_age_at_the_tail_commit_age_bound() {
+    let temp_dir = tempdir().expect("tempdir");
+    let bound = loonfs::MAX_TAIL_COMMIT_AGE_MS;
+    let build = |fold_age_ms: u64| {
+        LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
+            .writer_id(loonfs_test_support::ids::writer_id("fold-age-test"))
+            .config(loonfs::RuntimeConfig {
+                fold_age_ms: std::num::NonZeroU64::new(fold_age_ms).expect("a nonzero fold age"),
+                ..loonfs::RuntimeConfig::default()
+            })
+            .build()
+    };
+    block_on(async {
+        match build(bound).await {
+            Err(error @ Error::Config(_)) => assert_eq!(
+                error.to_string(),
+                format!(
+                    "invalid runtime config: `fold_age_ms` must be less than {bound}, the \
+                     maximum age of a commit in a WAL tail"
+                )
+            ),
+            Err(other) => panic!("expected a config error for `fold_age_ms`, got {other:?}"),
+            Ok(_) => panic!("a fold age at the bound must fail the build"),
+        }
+        build(bound - 1)
+            .await
+            .expect("a fold age below the bound is accepted")
+            .shutdown()
+            .await
+            .expect("shutdown");
+    });
+}
+
 #[test]
 fn maintenance_snapshot_and_retention_are_explicit_one_shot_calls() {
     let temp_dir = tempdir().expect("tempdir");

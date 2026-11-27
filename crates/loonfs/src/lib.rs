@@ -53,7 +53,7 @@
 //! its WAL tail at a threshold, and after each fold it publishes, it runs
 //! compaction units over its namespace while a unit is due. A runtime starts
 //! no other maintenance by itself. A host that wants more, such as folding
-//! idle tails, finishing compaction a session left due after its last fold,
+//! a quiet session's tail at the fold age, finishing compaction a session left due after its last fold,
 //! or collecting garbage, calls the operations on [`LoonFs::maintenance`] on
 //! a schedule of its own. Each namespace has one fold path and one
 //! compaction path in a runtime, which the session and every maintenance
@@ -88,8 +88,8 @@ pub use loonfs_core::cache::{DecodedBlockCacheConfig, DecodedBlockCacheStats, Se
 pub use loonfs_core::limits::{
     DIRECT_TRANSFER_URL_TTL_MS, GC_GRACE_WINDOW_MS, MAX_BLOCK_MEMO_BYTES, MAX_COLLECTION_BYTES,
     MAX_MULTIPART_PARTS, MAX_PENDING_SEGMENT_BYTES, MAX_SCAN_DECODED_BYTES,
-    MAX_SIGNED_PARTS_PER_REQUEST, PUBLICATION_COMPLETION_BOUND_MS, READ_REVALIDATION_BOUND_MS,
-    SSD_WRITE_QUEUE_BYTES,
+    MAX_SIGNED_PARTS_PER_REQUEST, MAX_TAIL_COMMIT_AGE_MS, PUBLICATION_COMPLETION_BOUND_MS,
+    READ_REVALIDATION_BOUND_MS, SSD_WRITE_QUEUE_BYTES,
 };
 pub use loonfs_core::time::WallClock;
 pub use loonfs_core::{
@@ -218,7 +218,7 @@ pub use loonfs_objectstore::{
 };
 
 pub use config::{
-    InlineContentPolicy, PublicationPolicy, RuntimeConfig, DEFAULT_IDLE_FOLD_AFTER_MS,
+    InlineContentPolicy, PublicationPolicy, RuntimeConfig, DEFAULT_FOLD_AGE_MS,
     DEFAULT_MAX_READ_CONTENT_BYTES,
 };
 pub use execution_budget::{
