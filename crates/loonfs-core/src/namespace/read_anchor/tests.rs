@@ -221,7 +221,15 @@ impl RivalBeforeChecks {
                     .await
                     .expect("the rival claims");
                 namespace
-                    .delete_namespace(Default::default(), acquired, None, &namespace.start_clock())
+                    .delete_namespace(
+                        Default::default(),
+                        crate::commit::session_epoch::SessionEpoch::new(
+                            &std::sync::Mutex::default(),
+                            acquired,
+                        ),
+                        None,
+                        &namespace.start_clock(),
+                    )
                     .await
                     .expect("the rival deletes the namespace");
             }
