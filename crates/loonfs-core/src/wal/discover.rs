@@ -56,6 +56,55 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
     })
 }
 
+/// Returns the tail above `manifest` that a discovery already read above an
+/// earlier manifest, or `None` when the discovery reads the tail above
+/// `manifest` instead.
+///
+/// `read_head` and `read_tail` are the head and the tail that the discovery
+/// found above the earlier manifest. The returned tail is the objects of
+/// `read_tail` above `manifest`'s `folded_wal_no`, validated again from
+/// `manifest`'s head and writer epoch, so it costs no request. That needs the
+/// earlier tail to start at or below `manifest`'s `folded_wal_no` and to end
+/// at or above it, and both manifests to be active, because discovery reads
+/// no WAL above an initializing manifest or a tombstone (format spec,
+/// "Resolving the metadata basis").
+pub(crate) fn find_kept_tail(
+    manifest: &LoadedManifest,
+    read_head: &NamespaceReadState,
+    read_tail: &ValidatedWalTail,
+) -> Option<DiscoveredTail> {
+    let mut head = NamespaceReadState::from(manifest.payload());
+    let folded = head.folded_wal_no;
+    // The number after `read_head.wal_no` was missing when the discovery read
+    // it, and `manifest` folds below that number. If a collection had emptied
+    // the number, a manifest that folds the number would have been published
+    // before that read. The discovery found `manifest` after the read, so
+    // `manifest` would fold past the read.
+    if !read_head.status.is_active()
+        || !head.status.is_active()
+        || read_head.folded_wal_no > folded
+        || read_head.wal_no < folded
+    {
+        return None;
+    }
+    let namespace_id = &manifest.payload().namespace_id;
+    let mut walk = WalWalk::after(namespace_id, head.wal_no, head.seq, head.writer_epoch);
+    let mut objects = Vec::new();
+    for object in read_tail.objects() {
+        let payload = object.envelope().payload();
+        if payload.wal_no <= folded {
+            continue;
+        }
+        walk.validate_again(object).ok()?;
+        head = head.after_wal_object(payload);
+        objects.push(object.clone());
+    }
+    Some(DiscoveredTail {
+        head,
+        tail: ValidatedWalTail::new(objects),
+    })
+}
+
 /// How [`load_wal_after`] ended.
 enum WalReadOutcome {
     /// The reads reached the first missing number or the largest WAL number,

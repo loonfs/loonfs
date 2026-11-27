@@ -123,30 +123,48 @@ impl<'a> WalWalk<'a> {
         object_key: String,
         stored: StoredWalEnvelope,
     ) -> Result<ValidatedWalObject, WalTailLoadError> {
-        let StoredWalEnvelope {
-            envelope,
-            stored_bytes,
-        } = stored;
+        self.validate_envelope(&object_key, &stored.envelope)?;
+        Ok(ValidatedWalObject::new(
+            object_key,
+            stored.envelope,
+            stored.stored_bytes,
+        ))
+    }
+
+    /// Validates `object`, which a walk above an earlier manifest validated,
+    /// as the next object of this walk.
+    pub(super) fn validate_again(
+        &mut self,
+        object: &ValidatedWalObject,
+    ) -> Result<(), WalTailLoadError> {
+        self.validate_envelope(object.object_key(), object.envelope())
+    }
+
+    fn validate_envelope(
+        &mut self,
+        object_key: &str,
+        envelope: &WalObjectEnvelope,
+    ) -> Result<(), WalTailLoadError> {
         let payload = envelope.payload();
         if payload.writer_epoch < self.epoch || payload.writer_epoch > self.epoch_bound {
             return Err(WalTailLoadError::Replay {
-                object_key,
+                object_key: object_key.to_owned(),
                 error: WalObjectError::WriterEpochMismatch {
                     expected_max: self.epoch_bound,
                     actual: payload.writer_epoch,
                 },
             });
         }
-        validate_wal_object_for_replay(self.seq, &envelope).map_err(|error| {
+        validate_wal_object_for_replay(self.seq, envelope).map_err(|error| {
             WalTailLoadError::Replay {
-                object_key: object_key.clone(),
+                object_key: object_key.to_owned(),
                 error,
             }
         })?;
         self.wal_no = payload.wal_no;
         self.seq = payload.head_seq;
         self.epoch = payload.writer_epoch;
-        Ok(ValidatedWalObject::new(object_key, envelope, stored_bytes))
+        Ok(())
     }
 }
 

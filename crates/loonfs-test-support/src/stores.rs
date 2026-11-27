@@ -13,6 +13,7 @@ mod lost_create_store;
 mod memory_store;
 mod metadata_map_store;
 mod namespace_overlap_store;
+mod newer_manifest_store;
 mod operation;
 mod panic_store;
 mod recording_store;
@@ -34,6 +35,9 @@ pub use memory_store::MemoryStore;
 pub use metadata_map_store::MetadataMapStore;
 pub use namespace_overlap_store::{
     NamespaceInFlightGuard, NamespaceOverlapInterceptor, NamespaceOverlapStore,
+};
+pub use newer_manifest_store::{
+    publish_next_manifest, NewerManifestInterceptor, NewerManifestStore,
 };
 pub use operation::{
     request_lines, sort_head_runs, write_keys, OperationContext, OperationKind, OperationSelector,
