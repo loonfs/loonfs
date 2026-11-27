@@ -49,7 +49,7 @@ async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
         )
         .await
         .expect("fold");
-    engine.record_manifest_published(folded.current.clone());
+    engine.move_position_onto(folded.current.clone());
     let moved = engine.writer_position().expect("the position moved");
     assert_eq!(
         moved.read_basis().basis.manifest(),
@@ -119,7 +119,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             .await
             .expect("fold");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-        engine.record_manifest_published(folded.current);
+        engine.move_position_onto(folded.current);
         timer.advance_ms(100);
         store.reset();
 
@@ -199,7 +199,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             engine
                 .position
                 .current
-                .as_ref()
+                .get()
                 .expect("basis")
                 .basis()
                 .checked()
@@ -226,7 +226,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
         .await
         .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-    engine.record_manifest_published(folded.current);
+    engine.move_position_onto(folded.current);
     crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
         .acquire_writer(
             &WriterAt {
@@ -639,8 +639,8 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     .await
     .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-    engine.record_manifest_published(folded.current.clone());
-    let position = engine.position.current.as_ref().expect("retained position");
+    engine.move_position_onto(folded.current.clone());
+    let position = engine.position.current.get().expect("retained position");
     assert_eq!(
         position.read_basis().basis.manifest(),
         &folded.current.manifest().manifest()
@@ -704,7 +704,7 @@ async fn a_published_fold_moves_the_position_with_its_tail() {
         .await
         .expect("commit after the fold");
 
-    engine.record_manifest_published(published.clone());
+    engine.move_position_onto(published.clone());
     let moved = engine.read_position().expect("the position moved");
     assert_eq!(
         moved.read_basis().basis.manifest(),
@@ -817,7 +817,7 @@ async fn new_commits_wait_at_the_inline_tail_limit_until_a_fold() {
         )
         .await
         .expect("fold");
-    engine.record_manifest_published(folded.current);
+    engine.move_position_onto(folded.current);
     assert_eq!(engine.wal_tail_inline_bytes(), Some(0));
     publish(
         &mut engine,

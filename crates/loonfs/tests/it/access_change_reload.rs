@@ -439,8 +439,8 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
 }
 
 /// Checks that a snapshot that folds the WAL tail while a publish is in
-/// flight moves the position onto the snapshot's manifest once the publish
-/// releases the engine, so reads start from the snapshot's manifest.
+/// flight moves the position onto the snapshot's manifest without waiting for
+/// the publish, so reads start from the snapshot's manifest.
 ///
 /// The publish's WAL put waits until the snapshot has published the manifest
 /// that folds the commits before it, so the snapshot's manifest misses the

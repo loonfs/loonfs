@@ -4,6 +4,7 @@
 
 use super::batch::{PublishBatchReport, PublishViewEffect};
 use super::publish_view::WriterPosition;
+use super::published_manifest::{KeptPosition, PublishedManifest};
 use super::session_epoch::SessionEpoch;
 use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
@@ -149,7 +150,10 @@ pub struct NamespaceCommitEngine<S> {
 /// that the units publish under.
 #[derive(Debug)]
 struct PositionState {
-    current: Option<WriterPosition>,
+    /// The position as the last unit, drop or move left it, which the
+    /// engine reads only brought up to the newest manifest that the
+    /// session's runtime published.
+    current: KeptPosition,
     acquired_anchor: Option<WriterAnchor>,
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionStatus`]. The engine creates the status, and no other
@@ -167,7 +171,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             namespace,
             writer_id,
             position: PositionState {
-                current: None,
+                current: KeptPosition::default(),
                 acquired_anchor: None,
                 session: Arc::default(),
             },
@@ -193,6 +197,14 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         WriterSessionStatusView(Arc::clone(&self.position.session))
     }
 
+    /// Returns the newest manifest that the session's runtime published,
+    /// where the runtime records each fold and maintenance call without
+    /// locking the engine. The engine brings its position up to it each
+    /// time it reads the position (see [`PublishedManifest::follow`]).
+    pub fn published_manifest(&self) -> PublishedManifest {
+        self.position.current.published().clone()
+    }
+
     /// Drops the position and its tail, so the next unit reads the tail from
     /// the store. Writer epoch and fencing remain in session state and are
     /// not reset.
@@ -203,8 +215,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// Unfolded WAL objects as of the last publication unit, or `None` when
     /// the engine has no position.
     pub fn wal_tail_objects(&self) -> Option<u64> {
-        self.position
-            .current
+        self.writer_position()
             .as_ref()
             .map(WriterPosition::wal_tail_objects)
     }
@@ -212,8 +223,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// Inline content bytes in the unfolded WAL tail as of the last
     /// publication unit, or `None` when the engine has no position.
     pub fn wal_tail_inline_bytes(&self) -> Option<usize> {
-        self.position
-            .current
+        self.writer_position()
             .as_ref()
             .map(WriterPosition::wal_tail_inline_bytes)
     }
@@ -221,36 +231,36 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// Unfolded WAL bytes as of the last publication unit, or `None` when
     /// the engine has no position.
     pub fn wal_tail_bytes(&self) -> Option<usize> {
-        self.position
-            .current
+        self.writer_position()
             .as_ref()
             .map(WriterPosition::wal_tail_bytes)
     }
 
-    /// Returns the engine's position, whether or not the session is fenced,
+    /// Returns the engine's position, brought up to the newest manifest that
+    /// the session's runtime published, whether or not the session is fenced,
     /// or `None` when the engine has no position.
     pub fn writer_position(&self) -> Option<WriterPosition> {
-        self.position.current.clone()
+        self.position.current.get()
     }
 
-    /// Moves the position onto `manifest`, a manifest that this runtime
-    /// published or found current (the session's own fold, or a maintenance
-    /// call), or that a read found above the position, or drops the
-    /// position when it can't move there (see
-    /// `WriterPosition::move_to` for the rule).
+    /// Moves the position onto `manifest`, a manifest above it such as one
+    /// that a read's check found, or drops the position when it can't move
+    /// there (see `WriterPosition::move_to` for the rule).
     ///
     /// Later commits then plan against the new manifest, and reads in this
-    /// runtime start from it, so a read's manifest check doesn't find the
-    /// new manifest as a successor and drop the position. The position keeps
-    /// the WAL tail above the new manifest.
-    ///
-    /// The position merges `manifest`'s check (see [`Held::merge`]).
-    pub fn record_manifest_published(&mut self, manifest: Held<LoadedManifest>) {
+    /// runtime start from it. The position keeps the WAL tail above the new
+    /// manifest, and it merges `manifest`'s check (see [`Held::merge`]). The
+    /// session's runtime records the manifests that it publishes itself in
+    /// [`Self::published_manifest`] instead, which doesn't wait for the
+    /// engine.
+    pub fn move_position_onto(&mut self, manifest: Held<LoadedManifest>) {
         let state = &mut self.position;
-        let Some(position) = state.current.as_mut() else {
+        let Some(mut position) = state.current.take() else {
             return;
         };
-        if !position.move_to(&manifest) {
+        if position.move_to(&manifest) {
+            state.current.set(position);
+        } else {
             state.invalidate_projection();
         }
     }
@@ -267,7 +277,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         ) {
             return None;
         }
-        self.position.current.clone()
+        self.position.current.get()
     }
 
     /// Deletes the namespace using this writer session (format spec,
@@ -462,7 +472,7 @@ impl PositionState {
     }
 
     fn invalidate_projection(&mut self) {
-        self.current = None;
+        self.current.clear();
         self.acquired_anchor = None;
     }
 
@@ -531,7 +541,7 @@ impl PositionState {
         let acquired_anchor = self.acquired_anchor.take();
         let cached_position = match acquired_anchor {
             Some(_) => {
-                self.current = None;
+                self.current.clear();
                 None
             }
             None => self.current.take(),
@@ -616,7 +626,7 @@ impl PositionState {
         let head = view.head().clone();
         let manifest_retention_floor_seq = view.manifest_retention_floor_seq();
         if head.retention_floor_seq >= target {
-            self.current = Some(view.into_position());
+            self.current.set(view.into_position());
             return Ok(FloorObjectReport {
                 retention_floor_seq: head.retention_floor_seq,
                 manifest_retention_floor_seq,
@@ -694,9 +704,13 @@ impl PositionState {
                 }
             }
         }
-        let update = TailProjectionUpdate::of(&position);
-        self.current = Some(position);
-        update
+        self.current.set(position);
+        // The report describes the position that the engine keeps, which a
+        // manifest published meanwhile may have moved.
+        self.current
+            .get()
+            .as_ref()
+            .map_or_else(TailProjectionUpdate::default, TailProjectionUpdate::of)
     }
 }
 
@@ -709,7 +723,9 @@ struct LoadedPublishView<'a, S: ObjectStore + ?Sized> {
 }
 
 /// What folding one batch into the tail projection left: the WAL-tail length
-/// the caller schedules maintenance on.
+/// the caller schedules maintenance on. The default is the report of a
+/// position that the engine dropped, which leaves nothing to fold.
+#[derive(Default)]
 struct TailProjectionUpdate {
     wal_tail_objects: u64,
     wal_tail_bytes: usize,

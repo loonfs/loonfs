@@ -12,6 +12,7 @@ pub(crate) mod engine;
 mod error;
 mod plan;
 pub(crate) mod publish_view;
+pub(crate) mod published_manifest;
 mod session;
 pub(crate) mod session_epoch;
 mod wal_payload;

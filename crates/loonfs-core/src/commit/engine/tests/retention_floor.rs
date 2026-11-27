@@ -152,7 +152,7 @@ async fn a_sessions_floor_object_orders_its_restores_around_the_floor() {
         .current;
     assert_eq!(folded.manifest().payload().retention_floor_seq, expired_seq);
     assert!(folded.manifest().manifest().head_seq >= restored_commit.committed_seq);
-    engine.record_manifest_published(folded);
+    engine.move_position_onto(folded);
     let (above, above_seq) = delete(&mut engine, "above").await;
     publish(
         &mut engine,
