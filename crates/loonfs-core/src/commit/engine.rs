@@ -8,7 +8,7 @@ use super::published_manifest::{KeptPosition, PublishedManifest};
 use super::session_epoch::SessionEpoch;
 use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
-use crate::manifest::FloorObjectReport;
+use crate::manifest::{FloorObjectReport, FoldedWalTail};
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::held::Held;
@@ -364,6 +364,40 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         deleted
             .map(|report| report.response)
             .inspect_err(|error| self.position.record_session_error(error))
+    }
+
+    /// Folds the WAL tail from this session's position and publishes the
+    /// next manifest (format spec, "Publishing a manifest").
+    ///
+    /// The fold loads its view as a commit does: a session without its
+    /// writer epoch claims it first, and the fold starts from the claim's
+    /// discovery, from the position once the store shows that it's still
+    /// current, or from the writer's load. The fold records the manifest that
+    /// covers the tail as the session's newest published manifest, as every
+    /// publication does (see [`Self::published_manifest`]), so the position
+    /// moves onto it and later commits plan against it, and a failed fold
+    /// drops the position. A fold whose manifest put loses to another process's claim
+    /// still builds again on that claim through the publication loop of
+    /// [`NamespaceStore::fold_wal_tail`].
+    pub async fn fold(&mut self) -> Result<FoldedWalTail> {
+        let clock = self.namespace.start_clock();
+        let Self {
+            namespace,
+            writer_id,
+            position,
+        } = self;
+        let held = position
+            .load_publish_view(namespace, writer_id, &clock)
+            .await?
+            .view
+            .into_position();
+        let folded = namespace
+            .fold_wal_tail(Some(held.clone()), &clock)
+            .await
+            .inspect_err(|error| position.record_session_error(error))?;
+        position.current.published().record(&folded.current);
+        position.current.set(held);
+        Ok(folded)
     }
 
     /// Advances the retention floor to `target` with a floor object, as one

@@ -24,7 +24,7 @@ async fn namespace_with_kept_manifests<S: ObjectStore>(
     }
     write_test_file(store, namespace_id, "/docs/three", "three", &setup).await;
     crate::test_support::namespace_store(store, namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     pool_id

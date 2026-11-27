@@ -298,7 +298,7 @@ impl Family {
     /// returns the floor.
     async fn advance_floor(&self, namespace_id: &NamespaceId) -> CommitSeq {
         let engine = namespace_engine(&self.store, namespace_id, &self.writer);
-        engine.fold_wal().await.expect("fold");
+        engine.fold_in_new_session().await.expect("fold");
         engine
             .advance_retention_floor(RetentionTarget::Head)
             .await
@@ -1236,7 +1236,7 @@ async fn the_plan_returns_the_writers_error_for_the_subjects_missing_rights() {
     let team = subject(&["prn_team"]);
     let main = family.engine(&family.main, Some(&team));
     let fork = family.engine(&family.fork, Some(&team));
-    fork.fold_wal().await.expect("fold the fork");
+    fork.fold_in_new_session().await.expect("fold the fork");
     let error = main
         .plan_merge(
             &read_context(&family.store, &family.main).await,

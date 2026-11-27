@@ -740,7 +740,7 @@ mod tests {
             expected.push((commit.committed_seq, commit.commit_id, commit.events.len()));
             if number == 2 || number == 4 {
                 crate::test_support::namespace_store(&store, &namespace_id)
-                    .fold_wal()
+                    .fold_as_test_writer()
                     .await
                     .expect("fold commits");
             }
@@ -749,7 +749,7 @@ mod tests {
         for fully_folded in [false, true] {
             if fully_folded {
                 crate::test_support::namespace_store(&store, &namespace_id)
-                    .fold_wal()
+                    .fold_as_test_writer()
                     .await
                     .expect("fold tail");
             }
@@ -913,7 +913,7 @@ mod tests {
             seqs.push(commit.committed_seq);
             if number == 3 {
                 crate::test_support::namespace_store(&store, &namespace_id)
-                    .fold_wal()
+                    .fold_as_test_writer()
                     .await
                     .expect("fold commits");
             }

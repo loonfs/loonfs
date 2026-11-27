@@ -810,7 +810,7 @@ async fn published_compaction_segments_are_referenced_and_kept() {
         // published, and a snapshot's manifest protects its segments forever, which
         // would leave this collection nothing to reap and nothing to prove.
         crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold wal");
     }
@@ -856,7 +856,7 @@ async fn a_publication_during_a_collection_never_costs_the_job_its_segments() {
         )
         .await;
         crate::test_support::namespace_store(&seed, &namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold wal");
     }
@@ -1011,7 +1011,7 @@ async fn a_collection_keeps_folded_fences_and_floor_objects_and_deletes_commit_o
     // The floor advances over folded commits, and the advance folds its
     // floor object.
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    namespace.fold_wal().await.expect("fold the WAL");
+    namespace.fold_as_test_writer().await.expect("fold the WAL");
     advance_floor_past(&store, &namespace_id, &setup).await;
 
     let commit_keys = crate::test_support::commit_wal_keys(&store, &namespace_id).await;
@@ -1154,7 +1154,7 @@ async fn gc_retains_unrecognized_wal_keys() {
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/file", "data", &setup).await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold wal");
 
@@ -1211,7 +1211,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         )
         .await;
         crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold wal");
     }
@@ -1230,10 +1230,11 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     let report = collect(&store, &namespace_id, &aged).await;
 
-    // The create's two manifests and every fold's manifest but the last are
+    // The create's two manifests, the claim manifests of the three commits
+    // and of the three folds, and every fold's manifest but the last are
     // replaced; only the current manifest is reachable. Its segments are all
     // still referenced (a fold only appends delta runs).
-    assert_eq!(report.deleted.manifests, 7);
+    assert_eq!(report.deleted.manifests, 10);
     let manifests_left = store
         .list_prefix(&metadata_manifest_prefix(&namespace_id))
         .await
@@ -1854,7 +1855,7 @@ async fn publish_owned_content<S: ObjectStore>(
         ));
         if (number + 1) % 32 == 0 {
             crate::test_support::namespace_store(store, namespace_id)
-                .fold_wal()
+                .fold_as_test_writer()
                 .await
                 .expect("fold published content");
         }
@@ -1955,13 +1956,13 @@ async fn gc_keeps_only_the_snapshot_and_current_manifests() {
         )
         .await;
         crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold");
     }
     write_test_file(&store, &namespace_id, "/four", "four", &setup).await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let current = crate::test_support::namespace_store(&store, &namespace_id)
@@ -1974,7 +1975,7 @@ async fn gc_keeps_only_the_snapshot_and_current_manifests() {
         .gc(&aged.clock())
         .await
         .expect("collect");
-    assert_eq!(report.deleted.manifests, 8);
+    assert_eq!(report.deleted.manifests, 11);
     assert_eq!(
         store
             .list_prefix(&metadata_manifest_prefix(&namespace_id))
@@ -2010,7 +2011,7 @@ async fn concurrent_collectors_keep_snapshot_and_current_roots_and_young_objects
         .expect("snapshot");
     write_test_file(&inner, &namespace_id, "/two", "two", &setup).await;
     crate::test_support::namespace_store(&inner, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let protected: BTreeSet<_> = inner
@@ -2082,7 +2083,7 @@ async fn unreferenced_segments_are_deleted_concurrently_within_the_write_wave() 
         .expect("bootstrap");
     write_test_file(&inner, &namespace_id, "/one", "one", &setup).await;
     crate::test_support::namespace_store(&inner, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let protected = inner
@@ -2330,7 +2331,7 @@ async fn a_fork_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping
         .expect("snapshot");
     write_test_file(&store, &namespace_id, "/file", "new", &setup).await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     store

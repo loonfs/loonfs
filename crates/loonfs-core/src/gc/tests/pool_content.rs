@@ -8,7 +8,7 @@ use super::*;
 /// keeps only its newest revision.
 async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
     crate::test_support::namespace_store(store, namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold wal");
     let floor_writer = crate::test_support::writer_at(
@@ -120,7 +120,7 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
     )
     .await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold the first revision into the base run");
     let second = put_file_content_with_id(
@@ -205,7 +205,7 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
         .await
         .expect("delete /old");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold the deletion");
     crate::test_support::NamespaceFixture::new(
@@ -427,7 +427,7 @@ async fn an_unlisted_span_object_is_kept_while_young_and_deleted_once_old() {
         .pool_id;
     let content_id = publish_inline(&store, &namespace_id, 0, &setup).await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let [listed] = <[String; 1]>::try_from(

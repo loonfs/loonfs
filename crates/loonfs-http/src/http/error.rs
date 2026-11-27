@@ -83,6 +83,11 @@ impl ApiResponseError {
         self
     }
 
+    /// Returns the error's code.
+    pub(crate) fn code(&self) -> ErrorCode {
+        self.code
+    }
+
     #[cfg(test)]
     pub(super) fn message(&self) -> &str {
         &self.body.message

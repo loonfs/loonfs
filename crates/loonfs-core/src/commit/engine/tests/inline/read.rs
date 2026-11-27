@@ -534,11 +534,14 @@ async fn inline_checksum_failures_match_object_validation() {
     assert_no_writes(&store);
     assert_eq!(store.counts().heads, 0);
     assert_eq!(store.counts().gets, 0);
-    let fold_error =
-        crate::test_support::namespace_store(&store, &publisher.namespace.namespace_id)
-            .fold_wal()
-            .await
-            .expect_err("corrupt tail");
+    // The corrupt commit was written below the session, so the session
+    // loads the namespace from the store before it folds.
+    publisher.invalidate_projection();
+    let fold_error = publisher
+        .fold()
+        .await
+        .map(|folded| folded.response)
+        .expect_err("corrupt tail");
     assert_eq!(fold_error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
     assert_eq!(fold_error.to_string(), error.to_string());
     assert_no_writes(&store);
@@ -569,11 +572,8 @@ async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() 
     publish(&mut publisher, &context, candidate("fold", values.clone()))
         .await
         .expect("publish");
-    let folded = crate::test_support::namespace_store(&store, &publisher.namespace.namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold");
-    assert_eq!(folded.outcome, FoldWalOutcome::Published);
+    let folded = publisher.fold().await.expect("fold");
+    assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     for delete_wal in [false, true] {
         if delete_wal {
             for object in store
@@ -727,10 +727,7 @@ async fn a_reference_older_than_its_object_reads_only_its_prefix() {
         None,
     )
     .await;
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold the append");
+    publisher.fold().await.expect("fold the append");
     let pool_id = pool_id(&store).await;
     let row = crate::test_support::content_layout(&store, &namespace_id, &original.content_id)
         .await

@@ -1944,7 +1944,7 @@ impl Interceptor for FoldDuringFinalization {
             && self.folded.fetch_add(1, Ordering::SeqCst) == 0
         {
             crate::test_support::namespace_store(&self.folder, &self.namespace_id)
-                .fold_wal()
+                .fold_as_test_writer()
                 .await
                 .expect("the competing fold must publish");
         }
@@ -2111,7 +2111,7 @@ impl Interceptor for RivalDuringPublication {
                     .await
                     .expect("the rival writes");
                 crate::test_support::namespace_store(rival, namespace_id)
-                    .fold_wal()
+                    .fold_as_test_writer()
                     .await
                     .expect("the rival folds");
             }

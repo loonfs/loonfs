@@ -229,7 +229,7 @@ async fn access_rows_survive_a_fold_and_the_counter_keeps_going() {
     .await
     .expect("root access");
     namespace_engine(&store, &namespace_id, &context)
-        .fold_wal()
+        .fold_in_new_session()
         .await
         .expect("fold");
     let after = submit_operation(
@@ -1832,7 +1832,7 @@ async fn a_revocation_is_visible_to_the_next_read() {
     for fold in [false, true] {
         if fold {
             namespace_engine(&store, &namespace_id, &mutation)
-                .fold_wal()
+                .fold_in_new_session()
                 .await
                 .expect("fold");
         }

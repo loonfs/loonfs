@@ -538,7 +538,7 @@ impl LongCommitHistory {
             }
         }
         crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold the commits");
         let (segment, index) = commit_segment_with_index(&store, &namespace_id).await;
@@ -1272,7 +1272,10 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
             if retention_floor_seq == deletion_seq
     );
 
-    namespace.fold_wal().await.expect("fold the floor object");
+    namespace
+        .fold_wal_tail(None, &namespace.start_clock())
+        .await
+        .expect("fold the floor object");
     assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
     let head = namespace.load_read_state().await.expect("read the head");
     let lower = WalObjectPayload {
@@ -1297,7 +1300,7 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
         .await
         .expect("put a floor object with a lower floor");
     namespace
-        .fold_wal()
+        .fold_wal_tail(None, &namespace.start_clock())
         .await
         .expect("fold the lower floor object");
     assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
@@ -1344,7 +1347,10 @@ async fn two_advances_to_different_floors_leave_the_higher_floor() {
         let head = namespace.load_read_state().await.expect("read the head");
         let floor_objects = if first > second { 1 } else { 2 };
         assert_eq!(head.wal_no.0, tip.0 + floor_objects);
-        namespace.fold_wal().await.expect("fold");
+        namespace
+            .fold_wal_tail(None, &namespace.start_clock())
+            .await
+            .expect("fold");
         assert_eq!(read_floor_seq(&store, &namespace_id).await, CommitSeq(2));
     }
 }
@@ -1719,7 +1725,7 @@ async fn snapshot_creation_deletes_its_snapshot_when_the_floor_passed_its_manife
         .await
         .expect("write");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     crate::test_support::NamespaceFixture::new(
@@ -2151,7 +2157,7 @@ async fn a_unit_whose_replaced_basis_lost_an_input_segment_is_abandoned() {
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         for prefix in ["a", "b", "c"] {
             publish_directories(&mut writer, prefix, 2).await;
-            namespace.fold_wal().await.expect("fold");
+            writer.fold().await.expect("fold");
         }
         let basis = namespace
             .load_current_basis(crate::test_support::observed_now())
@@ -2633,11 +2639,11 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
 
     // The in-budget retry publishes normally over fresh outputs.
     let advanced = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("in-budget retry succeeds");
-    assert_eq!(advanced.outcome, crate::FoldWalOutcome::Published);
-    assert!(advanced.manifest_no > manifest_before.manifest().manifest_no);
+    assert_eq!(advanced.response.outcome, crate::FoldWalOutcome::Published);
+    assert!(advanced.response.manifest_no > manifest_before.manifest().manifest_no);
 }
 
 #[tokio::test]
@@ -2662,7 +2668,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         .await
         .expect("seed file");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("publish a delta run to compact");
     let manifest_before = crate::test_support::namespace_store(&store, &namespace_id)
@@ -3167,7 +3173,7 @@ async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_dele
         .await
         .expect("second write");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let current_segments = super::compact_a_family_group(&store, &namespace_id).await;

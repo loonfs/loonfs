@@ -251,7 +251,7 @@ impl Family {
         let main = namespace_engine(&self.store, &self.main, &self.writer);
         let source_engine = namespace_engine(&self.store, source, &self.writer);
         source_engine
-            .fold_wal()
+            .fold_in_new_session()
             .await
             .expect("fold the merged fork");
         let request = MergeRequest {
@@ -303,7 +303,10 @@ impl Family {
     /// that point.
     async fn compact_rebase(&self) {
         let rebase = namespace_engine(&self.store, &self.rebase, &self.writer);
-        rebase.fold_wal().await.expect("fold the new fork");
+        rebase
+            .fold_in_new_session()
+            .await
+            .expect("fold the new fork");
         let (_, published) =
             loonfs_core::test_support::compact_every_group(&self.store, &self.rebase).await;
         assert!(

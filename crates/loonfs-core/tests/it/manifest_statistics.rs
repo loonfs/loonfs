@@ -149,7 +149,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             .await
             .expect("repeat fold");
         namespace_engine(&store, &ns, &context)
-            .fold_wal()
+            .fold_in_new_session()
             .await
             .expect("restart fold");
         store.reset();
@@ -235,7 +235,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_snapshot_footprin
             .expect("snapshot statistics exclude newer WAL"),
         baseline
     );
-    engine.fold_wal().await.expect("fold parent");
+    engine.fold_in_new_session().await.expect("fold parent");
     let layout_snapshot = engine
         .create_snapshot(
             &loonfs_core::test_support::administrator(&engine),
@@ -330,7 +330,10 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_snapshot_footprin
         .await
         .expect("child write");
     let child_engine = namespace_engine(&store, &child, &context);
-    child_engine.fold_wal().await.expect("fold child");
+    child_engine
+        .fold_in_new_session()
+        .await
+        .expect("fold child");
     let observed = namespace_store(&store, &child)
         .load_statistics()
         .await
@@ -401,7 +404,7 @@ async fn deleting_and_restoring_a_subtree_preserves_retained_inodes() {
         .expect("directory")
         .inode_id;
     let engine = namespace_engine(&store, &ns, &context);
-    engine.fold_wal().await.expect("fold");
+    engine.fold_in_new_session().await.expect("fold");
     let before = namespace_store(&store, &ns)
         .load_statistics()
         .await
@@ -419,7 +422,7 @@ async fn deleting_and_restoring_a_subtree_preserves_retained_inodes() {
     )
     .await
     .expect("delete subtree");
-    engine.fold_wal().await.expect("fold delete");
+    engine.fold_in_new_session().await.expect("fold delete");
     let during = namespace_store(&store, &ns)
         .load_statistics()
         .await
@@ -437,7 +440,7 @@ async fn deleting_and_restoring_a_subtree_preserves_retained_inodes() {
     )
     .await
     .expect("restore_deleted");
-    engine.fold_wal().await.expect("fold restore");
+    engine.fold_in_new_session().await.expect("fold restore");
     let after = namespace_store(&store, &ns)
         .load_statistics()
         .await
@@ -545,9 +548,20 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
             .write_file_bytes("/file", b"data", None)
             .await
             .expect("write");
+        // The fold's session claims the next manifest number first, so the
+        // fault is armed on the number after it, which the fold puts.
+        let written = namespace_store(&inner, &ns)
+            .load_current_manifest()
+            .await
+            .expect("the written manifest")
+            .payload()
+            .manifest_no;
         let store = FailStore::new(
             inner,
-            KeyPredicate::manifest(&ns),
+            KeyPredicate::exact(loonfs_objectstore::keys::metadata_manifest_object(
+                &ns,
+                &loonfs_types::ManifestNo(written.0 + 2),
+            )),
             OperationSelector::Put,
             if applied {
                 InjectedError::Transport("acknowledgment lost".to_owned())
@@ -561,7 +575,9 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
             store
         };
         store.fail_next(1);
-        let result = namespace_engine(&store, &ns, &context).fold_wal().await;
+        let result = namespace_engine(&store, &ns, &context)
+            .fold_in_new_session()
+            .await;
         assert_eq!(result.is_ok(), applied);
         let observed = namespace_store(&store, &ns)
             .load_statistics()
@@ -574,7 +590,7 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
         store.clear();
         for _ in 0..2 {
             namespace_engine(&store, &ns, &context)
-                .fold_wal()
+                .fold_in_new_session()
                 .await
                 .expect("restart and retry");
         }

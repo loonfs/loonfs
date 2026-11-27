@@ -66,7 +66,7 @@ async fn history() -> History {
         .await
         .expect("create /later.txt");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold the three commits");
     let first_inode =

@@ -65,7 +65,11 @@ async fn fixture(name: &str, commits: usize) -> Fixture {
 async fn fixture_with_an_earlier_fold(name: &str) -> (Fixture, Rival) {
     let mut fixture = fixture(name, 2).await;
     let namespace = namespace_store(fixture.store(), &fixture.namespace_id);
-    let folded = namespace.fold_wal().await.expect("fold WAL 1 to 3");
+    let folded = namespace
+        .fold_wal_tail(None, &namespace.start_clock())
+        .await
+        .expect("fold WAL 1 to 3")
+        .response;
     assert_eq!(folded.manifest_head_seq, CommitSeq(2));
     let key = metadata_manifest_object(&fixture.namespace_id, &folded.manifest_no);
     let store = fixture.store();
@@ -193,8 +197,9 @@ impl RivalBeforeChecks {
                     .expect("the rival publishes its fold");
             }
             Rival::Folds => {
-                namespace_store(rival, namespace_id)
-                    .fold_wal()
+                let namespace = namespace_store(rival, namespace_id);
+                namespace
+                    .fold_wal_tail(None, &namespace.start_clock())
                     .await
                     .expect("the rival folds");
             }
@@ -203,8 +208,9 @@ impl RivalBeforeChecks {
                 for name in ["raced-0", "raced-1"] {
                     publish(&mut writer, name).await.expect("the rival commits");
                 }
-                namespace_store(rival, namespace_id)
-                    .fold_wal()
+                let namespace = namespace_store(rival, namespace_id);
+                namespace
+                    .fold_wal_tail(None, &namespace.start_clock())
                     .await
                     .expect("the rival folds");
             }
@@ -594,8 +600,9 @@ async fn a_collection_during_a_discovery_hides_no_acknowledged_commit() {
     let reader = namespace_store(&store, &namespace_id);
     let (anchor, ()) = futures::join!(reader.load_read_anchor(observed_now()), async {
         store.inner().wait_until_blocked().await;
-        namespace_store(&rival, &namespace_id)
-            .fold_wal()
+        let rival_namespace = namespace_store(&rival, &namespace_id);
+        rival_namespace
+            .fold_wal_tail(None, &rival_namespace.start_clock())
             .await
             .expect("fold the tail");
         // A manifest after the fold, so the fold's manifest isn't current.
@@ -733,5 +740,50 @@ async fn a_discovery_after_a_codec_error_reads_the_whole_tail_above_the_newer_ma
             manifest_lists: 2,
             manifest_heads: 1,
         }
+    );
+}
+
+#[test]
+fn a_higher_epoch_is_writer_fenced_with_its_writer_block_and_one_without_a_block_is_refused() {
+    let session = crate::namespace::writer_epoch::AcquiredWriter {
+        writer_id: loonfs_types::WriterId::parse("writer-a").expect("writer id"),
+        writer_epoch: WriterEpoch(1),
+    };
+    let block = loonfs_types::format::control::WriterBlock {
+        writer_id: loonfs_types::WriterId::parse("writer-b").expect("writer id"),
+        acquired_at_ms: 2_000,
+    };
+    let namespace_id = NamespaceId::parse("fenced").expect("namespace");
+    let mut manifest = NamespaceManifestPayload::initial(
+        namespace_id.clone(),
+        loonfs_types::PoolId::parse("pool_00000000000000000000000001").expect("pool"),
+        1_000,
+        loonfs_test_support::test_actor(),
+    )
+    .activated();
+    manifest.manifest_no = ManifestNo(2);
+    manifest.writer_epoch = WriterEpoch(2);
+    manifest.writer = Some(block.clone());
+    assert_matches!(
+        super::ensure_stored_writer_epoch(&manifest, &session),
+        Err(CoreError::WriterFenced(fence)) if fence.active_writer == block
+            && fence.active_epoch == WriterEpoch(2)
+            && fence.fenced_epoch == WriterEpoch(1)
+    );
+
+    // Decoding refuses the same manifest without its writer block, so the
+    // writer's load never compares an epoch that has no writer.
+    manifest.writer = None;
+    let key = metadata_manifest_object(&namespace_id, &ManifestNo(2));
+    let (_, bytes) = loonfs_types::format::manifest::encode_namespace_manifest_json(manifest)
+        .expect("manifest envelope")
+        .into_parts();
+    let error =
+        crate::manifest::load::decode_manifest_at(&namespace_id, ManifestNo(2), &key, &bytes)
+            .expect_err("a raised epoch without a writer block is refused");
+    assert_matches!(
+        error,
+        crate::manifest::ManifestLoadError::RunManifestMismatch { message, .. }
+            if message == "writer epoch 2 has no writer block"
     );
 }

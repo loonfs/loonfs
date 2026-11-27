@@ -11,7 +11,7 @@ use loonfs_types::format::manifest::{
     NamespaceManifestPayload, RunTier, METADATA_SEGMENT_ENCODING,
 };
 use loonfs_types::format::segment_blocks::BlockHandle;
-use loonfs_types::{CommitSeq, ManifestNo, NamespaceId, RunNo};
+use loonfs_types::{CommitSeq, ManifestNo, NamespaceId, RunNo, WriterEpoch};
 #[cfg(test)]
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -55,6 +55,15 @@ pub(super) fn validate_manifest(
             object_key: object_key.to_owned(),
             message: "fork provenance disagrees with namespace identity or retention floor"
                 .to_owned(),
+        });
+    }
+    // A claim writes its writer block, and every later manifest copies it
+    // (format spec, "Writer ownership"), so a `writer_fenced` error can
+    // always identify the newer writer.
+    if payload.writer_epoch > WriterEpoch(0) && payload.writer.is_none() {
+        return Err(ManifestLoadError::RunManifestMismatch {
+            object_key: object_key.to_owned(),
+            message: format!("writer epoch {} has no writer block", payload.writer_epoch),
         });
     }
     validate_manifest_sequence_ranges(object_key, payload)?;

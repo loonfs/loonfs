@@ -501,9 +501,15 @@ async fn an_occupied_span_key_is_corruption_and_stops_manifest_publication() {
         Bytes::from_static(b"wrong"),
     );
     store.reset();
-    let error = crate::test_support::namespace_store(&occupied, &engine.namespace.namespace_id)
-        .fold_wal()
+    let mut session = NamespaceCommitEngine {
+        namespace: crate::test_support::namespace_store(&occupied, &engine.namespace.namespace_id),
+        writer_id: engine.writer_id.clone(),
+        position: engine.position,
+    };
+    let error = session
+        .fold()
         .await
+        .map(|folded| folded.response)
         .expect_err("occupied span key");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert_matches!(error, CoreError::NamespaceCorrupt(_));
@@ -557,9 +563,15 @@ async fn a_materialization_transport_failure_remains_retryable() {
     .apply_then_fail();
     failing.fail_all();
     store.reset();
-    let error = crate::test_support::namespace_store(&failing, &engine.namespace.namespace_id)
-        .fold_wal()
+    let mut session = NamespaceCommitEngine {
+        namespace: crate::test_support::namespace_store(&failing, &engine.namespace.namespace_id),
+        writer_id: engine.writer_id.clone(),
+        position: engine.position,
+    };
+    let error = session
+        .fold()
         .await
+        .map(|folded| folded.response)
         .expect_err("assembly failure");
     assert_matches!(
         error,

@@ -2,7 +2,7 @@
 //! commits that replay the fork's unmerged commits into the new fork
 //! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
 
-use super::merges::{MergeOutcome, PlannedMerge};
+use super::merges::{MergeOutcome, MergeReport, PlannedMerge};
 use crate::publisher::MergeReservation;
 use crate::trace::{self, operation_span};
 use crate::{
@@ -114,20 +114,34 @@ impl Namespace<Writable> {
         actor: &ActorId,
         options: &MergeForkOptions,
     ) -> Result<ReplayForkResponse> {
-        trace::in_operation(
+        self.replay(MergeRequest {
+            source_namespace_id: source_namespace_id.clone(),
+            through_seq: options.through_seq,
+            after_seq: None,
+            commit_id: options.commit_id.clone().unwrap_or_else(CommitId::generate),
+            actor_id: actor.clone(),
+            message: options.message.clone(),
+        })
+        .await
+        .result
+    }
+
+    /// Replays the fork `request.source_namespace_id`'s unmerged commits
+    /// into this namespace as one replay commit, as
+    /// [`Self::replay_fork_with_options`] does, through `request.through_seq`
+    /// or the fork's head, and after `request.after_seq` or where the next
+    /// replay commit starts.
+    ///
+    /// A host that sends a fenced replay commit again in a new session uses
+    /// this form, because the report's request has the range that the first
+    /// plan resolved, as for [`Self::merge`].
+    pub async fn replay(&self, mut request: MergeRequest) -> MergeReport<ReplayForkResponse> {
+        let result = trace::in_operation(
             operation_span!(self.core, "replay_fork", self.namespace_id),
             async {
-                let request = MergeRequest {
-                    source_namespace_id: source_namespace_id.clone(),
-                    through_seq: options.through_seq,
-                    after_seq: None,
-                    commit_id: options.commit_id.clone().unwrap_or_else(CommitId::generate),
-                    actor_id: actor.clone(),
-                    message: options.message.clone(),
-                };
                 let planned = self.plan_replay(&request, None).await?;
                 let (commit, conflicts) = match self
-                    .commit_merge(&request, planned, |request, reservation| {
+                    .commit_merge(&mut request, planned, |request, reservation| {
                         Box::pin(async move { self.plan_replay(&request, Some(reservation)).await })
                     })
                     .await?
@@ -142,7 +156,8 @@ impl Namespace<Writable> {
                 })
             },
         )
-        .await
+        .await;
+        MergeReport { request, result }
     }
 
     /// Returns the replay commit that this namespace committed under the

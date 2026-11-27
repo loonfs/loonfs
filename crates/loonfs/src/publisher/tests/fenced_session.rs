@@ -3,9 +3,19 @@
 use super::*;
 use crate::{ExecutionBudgetStats, LoonFs, Namespace, Writable};
 
-async fn superseded_session(store: SharedStore) -> (LoonFs<Writable>, Namespace<Writable>) {
+/// Returns writer A's runtime, its handle of a session that writer B has
+/// since superseded, and the recorder of writer A's metrics.
+async fn superseded_session(
+    store: SharedStore,
+) -> (
+    LoonFs<Writable>,
+    Namespace<Writable>,
+    Arc<DefaultMetricsRecorder>,
+) {
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .metrics_recorder(recorder.clone())
         .config(crate::RuntimeConfig {
             min_publish_interval_ms: 0,
             ..crate::RuntimeConfig::default()
@@ -42,7 +52,7 @@ async fn superseded_session(store: SharedStore) -> (LoonFs<Writable>, Namespace<
         .await
         .expect("take over");
     rival.shutdown().await.expect("rival shutdown");
-    (writer, namespace)
+    (writer, namespace, recorder)
 }
 
 async fn discover_fence(namespace: &Namespace<Writable>) -> Error {
@@ -73,7 +83,7 @@ async fn assert_old_handle_refuses_submission(delete: bool) {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let (writer, old) = superseded_session(store.clone()).await;
+    let (writer, old, _) = superseded_session(store.clone()).await;
     let first_error = discover_fence(&old).await;
     writer.drain().await.expect("fenced work ends");
     let publisher = &old.session().publisher;
@@ -138,7 +148,7 @@ async fn a_fenced_session_starts_no_fold_or_compaction() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let (writer, old) = superseded_session(store.clone()).await;
+    let (writer, old, _) = superseded_session(store.clone()).await;
     discover_fence(&old).await;
     writer.drain().await.expect("fenced work ends");
     let replacement = writer.open_namespace(old.id()).expect("replacement");
@@ -173,10 +183,30 @@ async fn a_fenced_session_starts_no_fold_or_compaction() {
 }
 
 #[tokio::test]
+async fn a_fenced_session_cancels_its_compaction_unit_and_records_one_displacement() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let (writer, old, recorder) = superseded_session(store).await;
+    let publisher = &old.session().publisher;
+    assert!(!publisher.compaction_cancellation.is_cancelled());
+    assert_eq!(counter(&recorder, "loonfs.publisher.displacements"), 0);
+    discover_fence(&old).await;
+    assert!(
+        publisher.compaction_cancellation.is_cancelled(),
+        "the unit that found the fence cancelled the session's compaction"
+    );
+    // A later unit of the fenced session finds the same fence, and the
+    // session's displacement stays recorded once.
+    discover_fence(&old).await;
+    assert_eq!(counter(&recorder, "loonfs.publisher.displacements"), 1);
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn a_candidate_charged_before_fencing_is_refused_at_queue_insertion() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let (writer, old) = superseded_session(store).await;
+    let (writer, old, _) = superseded_session(store).await;
     let publisher = &old.session().publisher;
     let candidate = PreparedCandidate::new(CommitCandidate::new(create_directory_request(
         "late", "late",
@@ -219,7 +249,7 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let (writer, old) = superseded_session(store.clone()).await;
+    let (writer, old, _) = superseded_session(store.clone()).await;
     let publisher = &old.session().publisher;
     let engine = publisher.engine.lock().await;
     let mut discovery = Box::pin(discover_fence(&old));

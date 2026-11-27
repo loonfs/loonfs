@@ -35,7 +35,7 @@ async fn a_snapshot_of_a_manifest_replaced_before_verification_is_refused_and_de
                 .await
                 .expect("write");
             crate::test_support::namespace_store(&store, &namespace_id)
-                .fold_wal()
+                .fold_as_test_writer()
                 .await
                 .expect("fold");
         }
@@ -52,7 +52,7 @@ async fn a_snapshot_of_a_manifest_replaced_before_verification_is_refused_and_de
                     .await
                     .expect("advance head");
                 crate::test_support::namespace_store(&store, &namespace_id)
-                    .fold_wal()
+                    .fold_as_test_writer()
                     .await
                     .expect("fold newer head");
             }
@@ -97,6 +97,18 @@ async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replace
         .write_file_bytes("/one", b"data", None)
         .await
         .expect("write");
+    // The fold's session claims before the snapshot reads its basis, so the
+    // manifest that replaces the basis below is the fold's, not the claim's.
+    let acquired = crate::test_support::namespace_store(&store, &namespace_id)
+        .acquire_writer(&context.writer_id)
+        .await
+        .expect("claim")
+        .writer;
+    let mut session = crate::publish::NamespaceCommitEngine::with_acquired_session(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+        acquired,
+    );
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let clock = context.clock();
     let basis = namespace
@@ -138,10 +150,7 @@ async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replace
         ),
         async {
             store.wait_until_blocked().await;
-            crate::test_support::namespace_store(&store, &namespace_id)
-                .fold_wal()
-                .await
-                .expect("fold");
+            session.fold().await.expect("fold");
             store.release();
         }
     );

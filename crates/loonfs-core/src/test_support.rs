@@ -836,6 +836,26 @@ pub async fn drain_compaction<S: ObjectStore + ?Sized>(
     }
 }
 
+impl<S: ObjectStore + Clone> NamespaceWriterEngine<S> {
+    /// Folds the WAL tail through a new commit engine of this engine's
+    /// writer, whose session claims the writer epoch before it folds (see
+    /// [`crate::publish::NamespaceCommitEngine::fold`]).
+    pub async fn fold_in_new_session(&self) -> crate::Result<crate::FoldedWalTail> {
+        self.commit_engine().fold().await
+    }
+}
+
+impl<S: ObjectStore + Clone> NamespaceStore<S> {
+    /// Folds the WAL tail through a new commit engine of the writer
+    /// `test-writer`, as [`NamespaceWriterEngine::fold_in_new_session`] does
+    /// for a test that has no writer of its own.
+    pub async fn fold_as_test_writer(&self) -> crate::Result<crate::FoldedWalTail> {
+        NamespaceWriterEngine::writer(self.clone(), writer_at("test-writer", 0).writer_id)
+            .fold_in_new_session()
+            .await
+    }
+}
+
 impl<S: ObjectStore> NamespaceWriterEngine<S> {
     /// Loads the namespace's current manifest and runs one metadata
     /// compaction unit planned from it, without a cancellation.

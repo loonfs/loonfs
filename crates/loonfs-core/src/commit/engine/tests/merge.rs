@@ -117,7 +117,7 @@ async fn the_feed_reports_a_merge_record_before_and_after_a_fold() {
     for folded in [false, true] {
         if folded {
             crate::test_support::namespace_store(&store, &namespace_id)
-                .fold_wal()
+                .fold_as_test_writer()
                 .await
                 .expect("fold");
         }
@@ -148,7 +148,7 @@ async fn a_reused_commit_id_replays_the_same_merge_and_conflicts_with_another_ra
     for folded in [false, true] {
         if folded {
             crate::test_support::namespace_store(&store, &namespace_id)
-                .fold_wal()
+                .fold_as_test_writer()
                 .await
                 .expect("fold");
         }
@@ -239,7 +239,7 @@ async fn a_repeat_merge_continues_the_previous_merge_exactly() {
     .await
     .expect("first merge");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold the first merge");
 
@@ -639,7 +639,7 @@ async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
         panic!("expected a file creation");
     };
     crate::test_support::namespace_store(&store, &fork)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold the fork");
     let layout = crate::test_support::namespace_store(&store, &fork)
@@ -763,7 +763,7 @@ async fn advance_floor_and_compact(
     target: RetentionTarget,
 ) -> CommitSeq {
     crate::test_support::namespace_store(store, namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let mut maintainer = NamespaceFixture::new(

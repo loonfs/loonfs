@@ -46,6 +46,7 @@ pub(crate) struct PublisherInstruments {
     queued_candidates: CountGauge,
     sessions_open: Arc<dyn GaugeHandle>,
     panics: Arc<dyn CounterHandle>,
+    displacements: Arc<dyn CounterHandle>,
     publishes: LabeledCounters<PublishOutcome>,
 }
 
@@ -110,6 +111,11 @@ impl PublisherInstruments {
                 "Publisher tasks that panicked",
                 &[],
             ),
+            displacements: recorder.register_counter(
+                "loonfs.publisher.displacements",
+                "Writer sessions that found another writer's newer epoch and were fenced",
+                &[],
+            ),
             publishes: LabeledCounters::register(
                 recorder,
                 "loonfs.publisher.publishes",
@@ -145,6 +151,11 @@ impl PublisherInstruments {
     /// Reports one publisher task that panicked.
     pub(crate) fn panic(&self) {
         self.panics.increment(1);
+    }
+
+    /// Reports one writer session that another writer fenced.
+    pub(crate) fn displacement(&self) {
+        self.displacements.increment(1);
     }
 
     /// Reports one batch taken for publication.

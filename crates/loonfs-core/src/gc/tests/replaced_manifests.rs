@@ -24,7 +24,7 @@ async fn seed_segments<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) ->
     for name in ["one", "two"] {
         write_test_file(store, namespace_id, &format!("/docs/{name}"), name, &setup).await;
         crate::test_support::namespace_store(store, namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold");
     }
@@ -270,7 +270,7 @@ async fn a_pass_reads_no_replaced_manifest() {
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one", "one", &setup).await;
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    namespace.fold_wal().await.expect("fold");
+    namespace.fold_as_test_writer().await.expect("fold");
     let first = namespace
         .load_current_manifest()
         .await

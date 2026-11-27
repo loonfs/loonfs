@@ -138,7 +138,7 @@ fn run_command<T>(command: impl std::future::Future<Output = T>) -> T {
 }
 
 #[tokio::test]
-async fn an_embedded_fence_fails_the_request_and_a_later_request_starts_a_new_session() {
+async fn an_embedded_fence_is_retried_once_in_a_new_session() {
     let directory = tempfile::tempdir().expect("store directory");
     let config = StoreConfig::LocalFs(LocalFsStoreConfig {
         root: directory.path().display().to_string(),
@@ -169,16 +169,25 @@ async fn an_embedded_fence_fails_the_request_and_a_later_request_starts_a_new_se
         .create_directory(&path)
         .await
         .expect("take over");
-    let path = NamespacePath::parse("demo", "/after").expect("path");
-    let error = first
-        .client
-        .create_directory(&path)
-        .await
-        .expect_err("fenced request");
-    assert_eq!(error.code(), Some(loonfs_types::ErrorCode::WriterFenced));
-    first
-        .client
-        .create_directory(&path)
-        .await
-        .expect("later request");
+    // Each host's session finds the other host's claim, and the host sends
+    // the request once more in a new session, whose claim raises the writer
+    // epoch.
+    let store =
+        loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store");
+    let writer_epoch = || async {
+        loonfs_core::test_support::namespace_store(&store, path.namespace())
+            .load_read_state()
+            .await
+            .expect("read head")
+            .writer_epoch
+            .0
+    };
+    for (host, path) in [(&first, "/after"), (&second, "/after-second")] {
+        let before = writer_epoch().await;
+        host.client
+            .create_directory(&NamespacePath::parse("demo", path).expect("path"))
+            .await
+            .expect("the fenced request takes the namespace back");
+        assert_eq!(writer_epoch().await, before + 1);
+    }
 }
