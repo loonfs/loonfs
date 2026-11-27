@@ -772,7 +772,7 @@ impl CoreError {
             CoreError::WriterFenced(fence) => Some(ErrorDetails {
                 fenced_writer_epoch: Some(fence.fenced_epoch),
                 active_writer_epoch: Some(fence.active_epoch),
-                active_writer: fence.active_writer.as_ref().map(ActiveWriter::from),
+                active_writer: Some(ActiveWriter::from(&fence.active_writer)),
                 ..ErrorDetails::default()
             }),
             CoreError::CommitIdReuseConflict {
@@ -981,7 +981,7 @@ fn control_object_store_message(
 }
 
 /// Describes a writer fencing event: the displaced epoch, the active epoch,
-/// and any available information about the active writer.
+/// and the active writer's writer block.
 ///
 /// Epochs identify the competing sessions. Writer labels may be shared by
 /// multiple processes, so the acquisition timestamp helps distinguish them.
@@ -991,9 +991,10 @@ pub struct WriterFence {
     pub fenced_epoch: WriterEpoch,
     /// Epoch that owns the namespace now.
     pub active_epoch: WriterEpoch,
-    /// Writer label and acquisition time recorded by the winning acquirer,
-    /// when known.
-    pub active_writer: Option<WriterBlock>,
+    /// Writer label and acquisition time that the claim of the active epoch
+    /// recorded. Every manifest of a claimed epoch includes them, because a
+    /// claim writes them and every later manifest copies them.
+    pub active_writer: WriterBlock,
 }
 
 fn destination_exists_message(path: &str, existing_display_name: Option<&str>) -> String {
@@ -1011,17 +1012,12 @@ impl std::fmt::Display for WriterFence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "epoch {} was fenced by epoch {}",
-            self.fenced_epoch, self.active_epoch
-        )?;
-        match &self.active_writer {
-            Some(writer) => write!(
-                f,
-                " (writer `{}`, acquired at {} ms)",
-                writer.writer_id, writer.acquired_at_ms
-            ),
-            None => Ok(()),
-        }
+            "epoch {} was fenced by epoch {} (writer `{}`, acquired at {} ms)",
+            self.fenced_epoch,
+            self.active_epoch,
+            self.active_writer.writer_id,
+            self.active_writer.acquired_at_ms
+        )
     }
 }
 
@@ -1078,10 +1074,10 @@ mod tests {
         let fenced = CoreError::WriterFenced(WriterFence {
             fenced_epoch: WriterEpoch(3),
             active_epoch: WriterEpoch(4),
-            active_writer: Some(WriterBlock {
+            active_writer: WriterBlock {
                 writer_id: loonfs_types::WriterId::parse("writer-b").expect("writer id"),
                 acquired_at_ms: 2_000,
-            }),
+            },
         });
         let details = fenced.details().expect("fence details");
         assert_eq!(details.fenced_writer_epoch, Some(WriterEpoch(3)));
@@ -1093,16 +1089,6 @@ mod tests {
                 active_acquired_at_ms: 2_000,
             })
         );
-
-        let anonymous = CoreError::WriterFenced(WriterFence {
-            fenced_epoch: WriterEpoch(3),
-            active_epoch: WriterEpoch(4),
-            active_writer: None,
-        });
-        let details = anonymous.details().expect("fence details");
-        assert_eq!(details.fenced_writer_epoch, Some(WriterEpoch(3)));
-        assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
-        assert_eq!(details.active_writer, None);
 
         // A conflict decided against a durable receipt names where the
         // commit id was committed and what was committed there, which is what a retry

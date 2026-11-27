@@ -49,7 +49,7 @@ pub use registry::{CloseNamespaceReport, NamespaceSessionStatus};
 pub(crate) use registry::{MergeReservation, NamespaceChange, NamespaceSession, PublisherRegistry};
 use session_tasks::{SessionTask, WorkerHandle};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
@@ -103,9 +103,12 @@ struct NamespacePublisher {
     /// back would cycle the whole structure into a leak. A publisher whose
     /// registry is gone keeps serving, with an unowned worker.
     shared: Weak<RegistryShared>,
-    /// Set once the session stops admitting work. A session never compacts
-    /// again after that.
+    /// Set once the session stops admitting work or is fenced. A session
+    /// never compacts again after that.
     compaction_cancellation: MetadataCompactionCancellation,
+    /// Set by the first release of the engine after the engine found the
+    /// session fenced, so the session records its displacement once.
+    displacement_recorded: Arc<AtomicBool>,
     /// Signals each fold of this session's namespace that publishes, so a
     /// worker waiting at the write stop wakes once that fold frees room,
     /// even when the fold task goes on to fold again.
@@ -260,6 +263,7 @@ impl NamespacePublisher {
             session,
             shared: Arc::downgrade(shared),
             compaction_cancellation: MetadataCompactionCancellation::default(),
+            displacement_recorded: Arc::new(AtomicBool::new(false)),
             fold_published: watch::Sender::new(()),
             turns,
         }
@@ -411,11 +415,28 @@ impl NamespacePublisher {
         }
     }
 
-    /// Stores the engine's position for reads, and releases the engine.
+    /// Stores the engine's position for reads, and releases the engine. The
+    /// first release after the engine found the session fenced records the
+    /// displacement in the `loonfs.publisher.displacements` metric and
+    /// cancels the session's compaction.
+    ///
+    /// Every unit that can find a fence runs with the engine locked, so this
+    /// release is the one place that sees each fence. A fenced session
+    /// publishes nothing more, and its drain ends once its admitted work and
+    /// a running fold end instead of waiting for a compaction whose result
+    /// it can't publish.
     pub(super) fn release_engine(
         &self,
         mut engine: tokio::sync::MutexGuard<'_, NamespaceCommitEngine<SharedObjectStore>>,
     ) {
+        if self.session_is_fenced() && !self.displacement_recorded.swap(true, Ordering::SeqCst) {
+            self.compaction_cancellation.cancel();
+            self.context
+                .runtime_core
+                .instruments()
+                .publisher
+                .displacement();
+        }
         // A panic can stop any holder of the engine, in any task, partway
         // through its work, after a put whose outcome the engine hasn't
         // recorded (a commit's WAL put or a deletion's tombstone put).

@@ -430,11 +430,15 @@ pub(super) async fn delete_namespace(
     let options = DeleteNamespaceOptions {
         expected_head_seq: query.expected_head_seq,
     };
-    let namespace = state.open_writer(&namespace_id, context).await?;
-    let response = namespace
-        .delete_with_options(&options)
-        .await
-        .map_err(ApiResponseError::runtime)?;
+    let options = &options;
+    let response = state
+        .run_as_writer(&namespace_id, context, |namespace| async move {
+            namespace
+                .delete_with_options(options)
+                .await
+                .map_err(ApiResponseError::runtime)
+        })
+        .await?;
     state.namespaces.forget(&namespace_id);
     Ok(Json(response))
 }
@@ -545,23 +549,23 @@ pub(super) async fn merge_fork(
         commit_id,
         message,
     } = request;
-    let namespace = state
-        .open_writer(&namespace_id, context)
-        .await
-        .map_err(|error| error.with_commit_id(&commit_id))?;
     let options = MergeForkOptions {
         commit_id: Some(commit_id.clone()),
         message,
         through_seq,
     };
-    let response = namespace
-        .merge_fork_with_options(&source_namespace_id, &actor_id, &options)
+    let (options, source_namespace_id, actor_id) = (&options, &source_namespace_id, &actor_id);
+    let response = state
+        .run_as_writer(&namespace_id, context, |namespace| async move {
+            namespace
+                .merge_fork_with_options(source_namespace_id, actor_id, options)
+                .await
+                .map_err(|error| {
+                    ApiResponseError::runtime(error).with_body_field_params(MERGE_BODY_FIELDS)
+                })
+        })
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime(error)
-                .with_body_field_params(MERGE_BODY_FIELDS)
-                .with_commit_id(&commit_id)
-        })?;
+        .map_err(|error| error.with_commit_id(&commit_id))?;
     Ok(Json(response))
 }
 
@@ -729,22 +733,22 @@ pub(super) async fn replay_fork(
         commit_id,
         message,
     } = request;
-    let new_fork = state
-        .open_writer(&namespace_id, context)
-        .await
-        .map_err(|error| error.with_commit_id(&commit_id))?;
     let options = MergeForkOptions {
         commit_id: Some(commit_id.clone()),
         message,
         through_seq,
     };
-    let response = new_fork
-        .replay_fork_with_options(&source_namespace_id, &actor_id, &options)
+    let (options, source_namespace_id, actor_id) = (&options, &source_namespace_id, &actor_id);
+    let response = state
+        .run_as_writer(&namespace_id, context, |new_fork| async move {
+            new_fork
+                .replay_fork_with_options(source_namespace_id, actor_id, options)
+                .await
+                .map_err(|error| {
+                    ApiResponseError::runtime(error).with_body_field_params(MERGE_BODY_FIELDS)
+                })
+        })
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime(error)
-                .with_body_field_params(MERGE_BODY_FIELDS)
-                .with_commit_id(&commit_id)
-        })?;
+        .map_err(|error| error.with_commit_id(&commit_id))?;
     Ok(Json(response))
 }

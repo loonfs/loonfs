@@ -55,14 +55,20 @@ pub(super) async fn create_snapshot(
     OptionalAppJson(request): OptionalAppJson<CreateSnapshotRequest>,
 ) -> Result<Json<Snapshot>, ApiResponseError> {
     let request = request.unwrap_or_default();
-    let namespace = state.open_writer(&namespace_id, context).await?;
-    let snapshot = namespace
-        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
-            name: request.name,
-            ttl_ms: request.ttl_ms,
+    let options = &loonfs::CreateSnapshotOptions {
+        name: request.name,
+        ttl_ms: request.ttl_ms,
+    };
+    let snapshot = state
+        .run_as_writer(&namespace_id, context, |namespace| async move {
+            namespace
+                .create_snapshot_with_options(options)
+                .await
+                .map_err(|error| {
+                    ApiResponseError::runtime(error).with_body_field_params(&["/name"])
+                })
         })
-        .await
-        .map_err(|error| ApiResponseError::runtime(error).with_body_field_params(&["/name"]))?;
+        .await?;
     Ok(Json(snapshot))
 }
 
@@ -157,11 +163,15 @@ pub(super) async fn extend_snapshot(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ExtendSnapshotRequest>,
 ) -> Result<Json<Snapshot>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, context).await?;
-    let response = namespace
-        .extend_snapshot(&snapshot_id, request.ttl_ms)
-        .await
-        .map_err(ApiResponseError::runtime)?;
+    let (snapshot_id, ttl_ms) = (&snapshot_id, request.ttl_ms);
+    let response = state
+        .run_as_writer(&namespace_id, context, |namespace| async move {
+            namespace
+                .extend_snapshot(snapshot_id, ttl_ms)
+                .await
+                .map_err(ApiResponseError::runtime)
+        })
+        .await?;
     Ok(Json(response))
 }
 
@@ -252,7 +262,16 @@ pub(super) async fn delete_snapshot(
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<DeleteSnapshotResponse>, ApiResponseError> {
-    let namespace = match state.namespaces.open(&namespace_id).await {
+    let snapshot_id = &snapshot_id;
+    let response = match state
+        .run_as_writer(&namespace_id, context.clone(), |namespace| async move {
+            namespace
+                .delete_snapshot(snapshot_id)
+                .await
+                .map_err(ApiResponseError::runtime)
+        })
+        .await
+    {
         // The session registry opens sessions for active namespaces only, but
         // a snapshot without an expiry has to stay deletable after its
         // namespace is deleted. Deleting a snapshot publishes nothing, so a
@@ -260,14 +279,13 @@ pub(super) async fn delete_snapshot(
         Err(error) if error.code() == ErrorCode::NamespaceDeleted => state
             .runtime
             .open_namespace(&namespace_id)
+            .map_err(ApiResponseError::runtime)?
+            .with_context(context)
+            .delete_snapshot(snapshot_id)
+            .await
             .map_err(ApiResponseError::runtime)?,
-        opened => opened.map_err(ApiResponseError::runtime)?,
+        settled => settled?,
     };
-    let namespace = namespace.with_context(context);
-    let response = namespace
-        .delete_snapshot(&snapshot_id)
-        .await
-        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 

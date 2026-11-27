@@ -488,7 +488,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
 
 // Both listeners and their clients run while writer ownership changes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
+async fn two_servers_share_one_store_and_retry_a_fenced_request_in_a_new_session() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store");
     let server_a = start_server(test_config(
@@ -498,11 +498,23 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
     ))
     .await;
     let server_b = start_server(test_config(
-        store_root,
+        store_root.clone(),
         "loonfs-server-b",
         "two-server-smoke",
     ))
     .await;
+    let store = loonfs_objectstore::local_fs_store::LocalFsStore::with_key_prefix(
+        &store_root,
+        Some("two-server-smoke"),
+    )
+    .expect("store");
+    let writer_epoch = || async {
+        loonfs_core::test_support::namespace_store(&store, &namespace_id("demo"))
+            .load_read_state()
+            .await
+            .expect("read head")
+            .writer_epoch
+    };
     let client_a = server_a.client.clone();
     let client_b = server_b.client.clone();
 
@@ -542,40 +554,18 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         moved.committed_seq.0
     );
 
+    // Each server's session finds the other server's claim, and the server
+    // sends the request once more in a new session, whose claim raises the
+    // writer epoch.
     let host_c_target = NamespacePath::parse("demo", "/docs/host-c.txt").expect("host c target");
-    for (loser, winning_writer_id) in [
-        (&server_a, "loonfs-server-b"),
-        (&server_b, "loonfs-server-a"),
-        (&server_a, "loonfs-server-b"),
-        (&server_b, "loonfs-server-a"),
-    ] {
-        match loser
-            .client
-            .put_file_with_options(&host_c_target, b"another write\n", &replace_file_options())
-            .await
-        {
-            Err(ClientError::Api { response, .. }) => {
-                assert_eq!(
-                    response.code,
-                    loonfs_types::ErrorCode::WriterFenced.as_str()
-                );
-                let details = response.details.expect("fenced details");
-                let active_writer = details.active_writer.expect("the active writer");
-                assert_eq!(active_writer.active_writer_id.as_str(), winning_writer_id);
-                let acquired_at_ms = active_writer.active_acquired_at_ms;
-                assert!(response.message.contains(&format!(
-                    "(writer `{winning_writer_id}`, acquired at {acquired_at_ms} ms)"
-                )));
-            }
-            other => panic!("expected writer_fenced, got {other:?}"),
-        }
-        // The fenced request dropped the loser's session, so the next
-        // request opens a new one instead of failing the same way.
+    for loser in [&server_a, &server_b, &server_a, &server_b] {
+        let before = writer_epoch().await;
         loser
             .client
             .put_file_with_options(&host_c_target, b"another write\n", &replace_file_options())
             .await
-            .expect("next request takes the namespace back");
+            .expect("the fenced request takes the namespace back in a new session");
+        assert_eq!(writer_epoch().await.0, before.0 + 1);
     }
 
     // Fencing gates writes only; server A still reads the moved file.

@@ -1676,7 +1676,7 @@ A namespace manifest contains these fields:
 | `fork_basis?` | Immutable fork provenance: source manifest reference, `fork_point_seq`, `source_snapshot_id`, `forked_from_snapshot_id`, `fork_point_snapshot_id`, and (for rebased forks) `rebased_from` (`source_namespace_id`, `resume_after_seq`, see [Merges](#merges)). |
 | `pool_id` | Immutable [pool](glossary.md#pool) ID whose prefix stores the namespace's content objects and upload records (see [File contents and ownership](#15-file-contents-and-ownership)). Generated on create, copied on fork. |
 | `status` | `initializing`, `active`, or `deleted`. |
-| `writer?` | Diagnostic writer block. |
+| `writer?` | Diagnostic writer block (`writer_id`, `acquired_at_ms`) of the claim that took `writer_epoch`. Present whenever `writer_epoch` is above 0, because a claim writes it and every later manifest copies it. A reader refuses a manifest whose `writer_epoch` is above 0 without one as corrupt. |
 | `folded_wal_no` | Highest local WAL number folded into this manifest's runs. |
 | `manifest_no` | Positive manifest number matching the object key. |
 | `publication_id` | A random [publication ID](glossary.md#publication-id) (`pub_` prefix) that each manifest put generates, even a put of content that an earlier put already tried. LoonFS never interprets it, and the rules that a manifest keeps against its basis don't read it. Because each put has its own ID, no two puts store the same payload checksum, so a publisher can tell its own put from another publication's (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)). |

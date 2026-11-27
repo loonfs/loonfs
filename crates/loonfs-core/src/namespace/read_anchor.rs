@@ -358,12 +358,14 @@ fn writer_anchor(anchor: NamespaceReadAnchor) -> CoreResult<WriterAnchor> {
 
 /// Fails when `manifest`, a manifest that a writer session's load read from
 /// the store, doesn't have the session's writer epoch. A higher epoch is
-/// another writer's claim and returns `writer_fenced`, and a lower epoch
-/// returns `namespace_corrupt`.
+/// another writer's claim and returns `writer_fenced` with that writer's
+/// writer block, and a lower epoch returns `namespace_corrupt`.
 ///
 /// A lower epoch means a corrupt store, because the session's epoch is in
 /// a claim manifest that the session published, and no manifest after a
 /// claim has a lower epoch than the claim (format spec, "Writer ownership").
+/// The decoding of a manifest refuses an epoch above zero without a writer
+/// block, so a higher epoch always has one.
 fn ensure_stored_writer_epoch(
     manifest: &NamespaceManifestPayload,
     acquired_writer: &AcquiredWriter,
@@ -373,7 +375,10 @@ fn ensure_stored_writer_epoch(
         Ordering::Greater => Err(CoreError::WriterFenced(WriterFence {
             fenced_epoch: acquired_writer.writer_epoch,
             active_epoch: manifest.writer_epoch,
-            active_writer: manifest.writer.clone(),
+            active_writer: manifest
+                .writer
+                .clone()
+                .expect("a decoded manifest with a writer epoch above zero has a writer block"),
         })),
         Ordering::Less => Err(CoreError::NamespaceCorrupt(format!(
             "manifest {} records writer epoch {}, below the writer epoch {} that this \

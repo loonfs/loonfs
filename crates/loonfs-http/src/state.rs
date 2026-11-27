@@ -11,7 +11,7 @@ use loonfs::{
 };
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
-use loonfs_types::{Context, MonotonicTimer, NamespaceId, SecretString};
+use loonfs_types::{Context, ErrorCode, MonotonicTimer, NamespaceId, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -138,9 +138,11 @@ pub struct HttpHandles {
     /// request uses a copy of the runtime that acts in the request's context.
     pub runtime: LoonFs<Writable>,
     /// The writer sessions that every write request opens its namespace's
-    /// writable handle through. Deleting a namespace drops its session, and
-    /// enabling or disabling its grep index marks the session for the host's
-    /// maintenance. A host usually passes a [`Namespaces`] table.
+    /// writable handle through. They're sessions of [`Self::runtime`], whose
+    /// [`LoonFs::wait_for_fenced_session`] the HTTP API waits on before it
+    /// sends a fenced request again. Deleting a namespace drops its session,
+    /// and enabling or disabling its grep index marks the session for the
+    /// host's maintenance. A host usually passes a [`Namespaces`] table.
     pub namespaces: Arc<dyn WriterSessions>,
     /// The handle that the namespace and pool maintenance job routes run
     /// their jobs with. The HTTP API mounts those routes only when
@@ -242,9 +244,52 @@ impl HttpState {
         self.runtime.with_context(context)
     }
 
+    /// Runs `request` on the host's writable handle for `namespace_id`,
+    /// acting in the request's `context`, and runs it once more on a new
+    /// handle when the first attempt returns `writer_fenced`.
+    ///
+    /// Every route that opens a writer session opens it here, so this is
+    /// the one place where the HTTP API sends a request again after a newer
+    /// writer fenced it. (A snapshot deletion of a deleted namespace opens a
+    /// session outside the host's table, because the table opens sessions of
+    /// active namespaces only. That deletion publishes nothing, so it can't
+    /// be fenced.) Before the second attempt, the call waits for the fenced
+    /// session's admitted commits and running fold to end, so the second
+    /// open starts a new session, whose first publication claims the
+    /// namespace. A second attempt that is fenced too returns its own
+    /// `writer_fenced`, whose details identify the newer writer.
+    ///
+    /// A request with a put whose outcome is unknown returns
+    /// `outcome_unknown`, whichever attempt sent the put. The first attempt
+    /// isn't sent again after an unknown outcome, because the publisher
+    /// settles a commit's attempts so that an unknown outcome stays the
+    /// result after any later failure, and a deletion ends at the unknown
+    /// outcome of its put. The second attempt's result is the reply.
+    pub(crate) async fn run_as_writer<T, F>(
+        &self,
+        namespace_id: &NamespaceId,
+        context: Context,
+        mut request: impl FnMut(Namespace<Writable>) -> F,
+    ) -> Result<T, ApiResponseError>
+    where
+        F: std::future::Future<Output = Result<T, ApiResponseError>>,
+    {
+        let first = match self.open_writer(namespace_id, context.clone()).await {
+            Ok(namespace) => request(namespace).await,
+            Err(error) => Err(error),
+        };
+        match first {
+            Err(error) if error.code() == ErrorCode::WriterFenced => {
+                self.runtime.wait_for_fenced_session(namespace_id).await;
+                request(self.open_writer(namespace_id, context).await?).await
+            }
+            settled => settled,
+        }
+    }
+
     /// Opens the host's writable handle for `namespace_id`, acting in the
     /// request's `context`.
-    pub(crate) async fn open_writer(
+    async fn open_writer(
         &self,
         namespace_id: &NamespaceId,
         context: Context,

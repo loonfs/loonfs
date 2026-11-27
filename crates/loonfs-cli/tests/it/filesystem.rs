@@ -501,10 +501,11 @@ fn concurrent_embedded_puts_commit_or_report_the_fence() {
     }
 
     // Four simultaneous processes: each is its own writer session, so they
-    // fence each other on acquisition. Fencing is terminal (there is no silent
-    // reacquisition), so the contract is honesty rather than recovery: every
-    // process either commits its put or reports `writer_fenced`, the last
-    // acquirer always commits, and a fenced put commits nothing.
+    // fence each other on acquisition. Each process sends a fenced put once
+    // more in a new session, and a put that is fenced again reports
+    // `writer_fenced`. So every process either commits its put or reports
+    // `writer_fenced`, the last acquirer always commits, and a fenced put
+    // commits nothing.
     let children: Vec<Child> = payloads
         .iter()
         .enumerate()

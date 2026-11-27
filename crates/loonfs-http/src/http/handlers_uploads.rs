@@ -88,25 +88,30 @@ pub(super) async fn create_upload(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateUploadBody, MAX_UPLOAD_CONTROL_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, context).await?;
-    // Decoding the body settled which transport this is and that it includes
-    // that transport's fields and no other's, so there is nothing left here
-    // to check before dispatching on it.
-    match request {
-        CreateUploadBody::DirectPut { size_bytes } => {
-            begin_direct_put_upload(&state, &namespace, &actor_id, size_bytes).await
-        }
-        CreateUploadBody::DirectMultipart { part_size_bytes } => {
-            begin_direct_multipart_upload(&state, &namespace, &actor_id, part_size_bytes).await
-        }
-        CreateUploadBody::ServiceProxied {} => {
-            let response = namespace
-                .create_upload(&actor_id)
-                .await
-                .map_err(ApiResponseError::runtime)?;
-            Ok(Json(response))
-        }
-    }
+    let (state_ref, request, actor_id) = (&*state, &request, &actor_id);
+    state
+        .run_as_writer(&namespace_id, context, |namespace| async move {
+            // Decoding the body settled which transport this is and that it
+            // includes that transport's fields and no other's, so there is
+            // nothing left here to check before dispatching on it.
+            match *request {
+                CreateUploadBody::DirectPut { size_bytes } => {
+                    begin_direct_put_upload(state_ref, &namespace, actor_id, size_bytes).await
+                }
+                CreateUploadBody::DirectMultipart { part_size_bytes } => {
+                    begin_direct_multipart_upload(state_ref, &namespace, actor_id, part_size_bytes)
+                        .await
+                }
+                CreateUploadBody::ServiceProxied {} => {
+                    let response = namespace
+                        .create_upload(actor_id)
+                        .await
+                        .map_err(ApiResponseError::runtime)?;
+                    Ok(Json(response))
+                }
+            }
+        })
+        .await
 }
 
 async fn begin_direct_put_upload(
@@ -256,11 +261,15 @@ pub(super) async fn sign_upload_parts(
         ));
     };
 
-    let namespace = state.open_writer(&namespace_id, context).await?;
-    let targets = namespace
-        .sign_upload_parts(&upload_id, &request.parts, &actor_id)
-        .await
-        .map_err(ApiResponseError::runtime)?;
+    let (upload_id_ref, parts, actor_id) = (&upload_id, &request.parts, &actor_id);
+    let targets = state
+        .run_as_writer(&namespace_id, context, |namespace| async move {
+            namespace
+                .sign_upload_parts(upload_id_ref, parts, actor_id)
+                .await
+                .map_err(ApiResponseError::runtime)
+        })
+        .await?;
     let parts = sign_parts(issuer, &targets).await?;
 
     Ok(Json(SignUploadPartsResponse {
@@ -463,7 +472,15 @@ pub(super) async fn put_upload_content(
     AppQuery(_): AppQuery<NoQuery>,
     body: UploadBodyStream,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, context).await?;
+    // A streamed body can't be sent twice, so only the open goes through
+    // the retry, and the upload streams once in the session it returns.
+    let namespace = state
+        .run_as_writer(
+            &namespace_id,
+            context,
+            |namespace| async move { Ok(namespace) },
+        )
+        .await?;
     let (stream, outcome) = body.into_stream();
     match namespace
         .put_upload_content_stream(&upload_id, stream, &actor_id)
@@ -523,11 +540,15 @@ pub(super) async fn complete_upload(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(completion): AppJson<CompleteUploadBody, MAX_COMPLETION_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, context).await?;
-    let completed = namespace
-        .complete_upload(&upload_id, completion, &actor_id)
-        .await
-        .map_err(ApiResponseError::runtime)?;
+    let (upload_id, completion, actor_id) = (&upload_id, &completion, &actor_id);
+    let completed = state
+        .run_as_writer(&namespace_id, context, |namespace| async move {
+            namespace
+                .complete_upload(upload_id, completion.clone(), actor_id)
+                .await
+                .map_err(ApiResponseError::runtime)
+        })
+        .await?;
     Ok(Json(with_content_token(
         completed.response,
         state.options.content_token_secret.expose(),
@@ -577,11 +598,15 @@ pub(super) async fn get_upload(
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, context).await?;
-    let mut view = namespace
-        .get_upload(&upload_id, &actor_id)
-        .await
-        .map_err(ApiResponseError::runtime)?;
+    let (upload_id, actor_id) = (&upload_id, &actor_id);
+    let mut view = state
+        .run_as_writer(&namespace_id, context, |namespace| async move {
+            namespace
+                .get_upload(upload_id, actor_id)
+                .await
+                .map_err(ApiResponseError::runtime)
+        })
+        .await?;
     if let Some(object_key) = &view.direct_put_object_key {
         let issuer = direct_put_issuer(&state).ok_or_else(|| {
             ApiResponseError::not_supported(
@@ -641,11 +666,15 @@ pub(super) async fn abort_upload(
     AppQuery(_): AppQuery<NoQuery>,
     NoBody: NoBody,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, context).await?;
-    let response = namespace
-        .abort_upload(&upload_id, &actor_id)
-        .await
-        .map_err(ApiResponseError::runtime)?;
+    let (upload_id, actor_id) = (&upload_id, &actor_id);
+    let response = state
+        .run_as_writer(&namespace_id, context, |namespace| async move {
+            namespace
+                .abort_upload(upload_id, actor_id)
+                .await
+                .map_err(ApiResponseError::runtime)
+        })
+        .await?;
     Ok(Json(response))
 }
 

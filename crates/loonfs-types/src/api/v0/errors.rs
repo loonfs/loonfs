@@ -89,7 +89,7 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub active_writer_epoch: Option<WriterEpoch>,
-    /// The writer of the current epoch, when the current manifest records a writer.
+    /// The writer of the current epoch, which every `writer_fenced` error includes.
     #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub active_writer: Option<ActiveWriter>,
@@ -287,11 +287,11 @@ pub struct CommittedReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ActiveWriter {
-    /// The writer of the current epoch. It's present when the current manifest records a writer.
+    /// The writer of the current epoch. It's present in every `writer_fenced` error.
     #[cfg_attr(feature = "openapi", schema(required = false))]
     pub active_writer_id: WriterId,
-    /// The time the current writer acquired its epoch, in Unix milliseconds. It's present when the
-    /// current manifest records a writer.
+    /// The time the current writer acquired its epoch, in Unix milliseconds. It's present in every
+    /// `writer_fenced` error.
     #[cfg_attr(feature = "openapi", schema(required = false))]
     pub active_acquired_at_ms: u64,
 }

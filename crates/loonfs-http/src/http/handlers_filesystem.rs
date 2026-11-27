@@ -645,34 +645,6 @@ pub(super) async fn create_commit(
         state.runtime.object_store().checksum_algorithm(),
     )
     .map_err(|error| error.with_commit_id(&commit_id))?;
-    // Failed and uncertain outcomes echo the idempotency key the caller can
-    // resubmit under (API spec, "Commit responses and safe retry").
-    let commit_id_for_errors = commit_id.clone();
-    let namespace = state
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .map_err(|error| ApiResponseError::runtime(error).with_commit_id(&commit_id))?;
-    // Every put in the request shares one preparation pass: a proof belongs
-    // to the content, not to the operation that names it.
-    let put_content_refs = operations
-        .iter()
-        .filter_map(FilesystemOperation::content_ref)
-        .collect::<Vec<_>>();
-    let put_content_preparation = if put_content_refs.is_empty() {
-        None
-    } else {
-        Some(
-            content_preparation_for_puts(
-                &namespace,
-                state.options.content_token_secret.expose(),
-                &put_content_refs,
-                &content_tokens,
-            )
-            .await
-            .map_err(|error| error.with_commit_id(&commit_id_for_errors))?,
-        )
-    };
     let request = CommitIntent {
         preconditions,
         commit_id,
@@ -681,29 +653,61 @@ pub(super) async fn create_commit(
         message,
         operations,
     };
-    let response_result = if let Some(preparation) = put_content_preparation {
-        let candidate = match preparation {
-            Ok(prepared_content) => {
-                CommitCandidate::with_inline_content(request, prepared_content, inline_content)
-            }
-            Err(rejections) => {
-                let rejections = rejections
-                    .into_iter()
-                    .map(|rejected| (rejected.content_id, rejected.error))
-                    .collect();
-                CommitCandidate::with_inline_content(request, Vec::new(), inline_content)
-                    .reject_content_preparation(ContentPreparationError::ContentToken(rejections))
-            }
-        };
-        namespace.commit_candidate(candidate).await
-    } else {
-        namespace.commit(request).await
-    };
-    let response = response_result.map_err(|error| {
-        ApiResponseError::runtime(error)
-            .with_commit_field_param()
-            .with_commit_id(&commit_id_for_errors)
-    })?;
+    // Every put in the request shares one preparation pass: a proof belongs
+    // to the content, not to the operation that refers to the content.
+    let put_content_refs = request
+        .operations
+        .iter()
+        .filter_map(FilesystemOperation::content_ref)
+        .collect::<Vec<_>>();
+    let (state_ref, request_ref, put_content_refs, content_tokens, inline_content) = (
+        &*state,
+        &request,
+        &put_content_refs,
+        &content_tokens,
+        &inline_content,
+    );
+    let response = state
+        .run_as_writer(&namespace_id, context, |namespace| async move {
+            let committed = if put_content_refs.is_empty() {
+                namespace.commit(request_ref.clone()).await
+            } else {
+                let preparation = content_preparation_for_puts(
+                    &namespace,
+                    state_ref.options.content_token_secret.expose(),
+                    put_content_refs,
+                    content_tokens,
+                )
+                .await?;
+                let candidate = match preparation {
+                    Ok(prepared_content) => CommitCandidate::with_inline_content(
+                        request_ref.clone(),
+                        prepared_content,
+                        inline_content.clone(),
+                    ),
+                    Err(rejections) => {
+                        let rejections = rejections
+                            .into_iter()
+                            .map(|rejected| (rejected.content_id, rejected.error))
+                            .collect();
+                        CommitCandidate::with_inline_content(
+                            request_ref.clone(),
+                            Vec::new(),
+                            inline_content.clone(),
+                        )
+                        .reject_content_preparation(
+                            ContentPreparationError::ContentToken(rejections),
+                        )
+                    }
+                };
+                namespace.commit_candidate(candidate).await
+            };
+            committed.map_err(|error| ApiResponseError::runtime(error).with_commit_field_param())
+        })
+        .await
+        // Failed and uncertain outcomes echo the idempotency key the caller
+        // can resubmit under (API spec, "Commit responses and safe retry").
+        .map_err(|error| error.with_commit_id(&request.commit_id))?;
     Ok(Json(response))
 }
 
