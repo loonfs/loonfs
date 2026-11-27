@@ -8,6 +8,7 @@ use super::candidates::{
 };
 use super::engine::CommitCandidate;
 use super::publish_view::PublishMetadataView;
+use super::session_epoch::SessionEpoch;
 use super::wal_payload_from_commit_plan;
 use crate::changes::committed_change_from_wal_record;
 use crate::error::{CoreError, Result};
@@ -107,18 +108,17 @@ pub(crate) struct PublicationClock<'a> {
 }
 
 /// Plans `candidates` against `view`, and publishes the accepted ones in one
-/// WAL object.
+/// WAL object, which it sends through `epoch` (see [`SessionEpoch::send_put`]).
 ///
-/// The batch calls `sending_wal_put` immediately before it sends its WAL put,
-/// so a batch that returns, or is dropped, while it's still planning never
-/// calls it.
+/// A batch that returns, or is dropped, while it's still planning sends no
+/// put, so the session keeps its epoch.
 pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     S: ObjectStore + ?Sized,
 >(
     candidates: &[CommitCandidate],
     view: &PublishMetadataView<'_, S>,
     clock: PublicationClock<'_>,
-    sending_wal_put: impl FnOnce(),
+    epoch: &SessionEpoch<'_>,
 ) -> PublishBatchReport {
     // The publisher puts a merge in a batch of its own, so the WAL object's
     // size bound applies to the merge alone, and no other commit shares a
@@ -231,8 +231,15 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     ) {
         return abort_batch(slots, &error);
     }
-    sending_wal_put();
-    if let Err(error) = publish_wal_object(view.store(), &wal).await {
+    let published = epoch
+        .send_put(publish_wal_object(view.store(), &wal), |published| {
+            !matches!(
+                published,
+                Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(_)))
+            )
+        })
+        .await;
+    if let Err(error) = published {
         let mut report = abort_batch(slots, &error);
         report.effect = PublishViewEffect::after_failed_put(&error);
         return report;
@@ -461,7 +468,7 @@ mod tests {
                 batch: &batch,
                 attempt,
             },
-            || {},
+            &SessionEpoch::new(&std::sync::Mutex::default(), view.acquired_writer.clone()),
         )
         .await;
 
@@ -528,7 +535,7 @@ mod tests {
                 batch: &batch,
                 attempt: batch.observe(),
             },
-            || {},
+            &SessionEpoch::new(&std::sync::Mutex::default(), view.acquired_writer.clone()),
         )
         .await;
 

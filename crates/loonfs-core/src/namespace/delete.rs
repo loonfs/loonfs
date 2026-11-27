@@ -1,13 +1,13 @@
 //! Namespace deletion status published as successive manifests.
 
 use crate::commit::publish_view::WriterPosition;
+use crate::commit::session_epoch::SessionEpoch;
 use crate::error::{CoreError, Result};
-use crate::manifest::publish::{ManifestChange, ManifestUpdate};
+use crate::manifest::publish::{ManifestChange, ManifestSender, ManifestUpdate};
 use crate::manifest::PublicationReport;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
-use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
@@ -25,10 +25,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// position's tail. After that fold, the position moves onto the fold's
     /// manifest by [`WriterPosition::move_to`], and the deletion drops the
     /// position when the position can't move.
+    ///
+    /// The tombstone's put is sent through `epoch` (see
+    /// [`SessionEpoch::send_put`]).
     pub(crate) async fn delete_namespace(
         &self,
         options: DeleteNamespaceOptions,
-        acquired_writer: AcquiredWriter,
+        epoch: SessionEpoch<'_>,
         position: Option<WriterPosition>,
         clock: &OperationClock,
     ) -> Result<PublicationReport<DeleteNamespaceResponse>> {
@@ -40,8 +43,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // lock, because a future that a closure returns can't borrow the
         // closure's own state.
         let position = Mutex::new(position);
-        self.update_manifest(basis, clock, |current: LoadedManifest| {
-            let acquired_writer = &acquired_writer;
+        let sender = ManifestSender::Session(&epoch);
+        self.update_manifest_as(basis, clock, sender, |current: LoadedManifest| {
+            let acquired_writer = epoch.writer();
             let position = &position;
             async move {
                 let held = position

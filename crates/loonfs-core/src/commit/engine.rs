@@ -4,6 +4,7 @@
 
 use super::batch::{PublishBatchReport, PublishViewEffect};
 use super::publish_view::WriterPosition;
+use super::session_epoch::SessionEpoch;
 use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::FloorObjectReport;
@@ -71,8 +72,8 @@ pub enum TailSource {
 pub enum WriterSessionStatus {
     /// No epoch: the session's next publish acquires one with a claim and a
     /// fence. A new session starts here, and so does a session from the
-    /// moment it sends a commit's WAL put until it learns the put's outcome
-    /// (format spec, "Failed and unknown outcomes").
+    /// moment it sends a commit's WAL put or a tombstone's put until it
+    /// learns the put's outcome (format spec, "Failed and unknown outcomes").
     #[default]
     Unacquired,
     /// Writer epoch acquired by a claim and a fence, and reused for the
@@ -272,7 +273,10 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// [`Self::publish_batch`]. Fenced sessions fail before accessing the store,
     /// and a takeover detected during manifest publication permanently fences the
     /// session. A deletion first folds the WAL tail under the namespace's run
-    /// policy. Both publications build on the position's manifest.
+    /// policy. Both publications build on the position's manifest. The
+    /// tombstone's put releases the session's epoch, as a commit's WAL put
+    /// does, so after an unknown outcome the session's next publication
+    /// claims a new epoch and writes a fence.
     ///
     /// An initializing namespace has no writer session, so its deletion is a
     /// plain manifest publication of its tombstone (see
@@ -335,7 +339,12 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         };
         let deleted = self
             .namespace
-            .delete_namespace(options, acquired_writer, self.writer_position(), &clock)
+            .delete_namespace(
+                options,
+                SessionEpoch::new(&self.position.session, acquired_writer),
+                self.writer_position(),
+                &clock,
+            )
             .await;
         self.position.invalidate_projection();
         deleted
@@ -556,13 +565,7 @@ impl PositionState {
             attempt,
         } = loaded;
         let wal_tail_discovered = publish_view.tail_discovered;
-        let acquired_writer = publish_view.acquired_writer.clone();
-        // The session releases its epoch immediately before it sends the
-        // put, so a publish future that is dropped or panics while the put
-        // is in flight leaves the session unacquired, and its next publish
-        // claims a new epoch (format spec, "Failed and unknown outcomes"). A
-        // future dropped while the batch is still planning sent no put, so
-        // the session keeps its epoch.
+        let epoch = SessionEpoch::new(&self.session, publish_view.acquired_writer.clone());
         let published = super::batch::publish_namespace_commits_batch_against_publish_view(
             candidates,
             &publish_view,
@@ -570,16 +573,11 @@ impl PositionState {
                 batch: clock,
                 attempt,
             },
-            || *self.lock_session() = WriterSessionStatus::Unacquired,
+            &epoch,
         )
         .await;
         let position = publish_view.into_position();
         let published = drop_replaced_basis(published);
-        // Every effect but an unknown outcome means that the session knows
-        // its put's outcome, or sent no put, so it takes its epoch back.
-        if !matches!(published.effect, PublishViewEffect::OutcomeUnknown) {
-            *self.lock_session() = WriterSessionStatus::Acquired(acquired_writer);
-        }
         let update = self.update_publish_tail_projection(
             &namespace.namespace_id,
             position,

@@ -1,5 +1,6 @@
 //! Publication through the next immutable manifest number.
 
+use crate::commit::session_epoch::SessionEpoch;
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::published::PublicationReport;
@@ -47,6 +48,17 @@ pub(crate) enum ManifestChange<T> {
     Next(Box<NamespaceManifestPayload>, T),
     Finished(T),
     Again,
+}
+
+/// Who sends a manifest put.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ManifestSender<'a> {
+    /// A process that sends the put without holding a writer epoch for it,
+    /// such as a fold, a claim, or a create.
+    Process,
+    /// A writer session, which sends the put under its epoch (see
+    /// [`SessionEpoch::send_put`]).
+    Session(&'a SessionEpoch<'a>),
 }
 
 /// What one call of [`NamespaceStore::update_manifest`] did: the response of
@@ -117,6 +129,23 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         basis: Option<Held<LoadedManifest>>,
         clock: &OperationClock,
+        change: F,
+    ) -> Result<ManifestUpdate<T>>
+    where
+        F: FnMut(LoadedManifest) -> Fut,
+        Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
+    {
+        self.update_manifest_as(basis, clock, ManifestSender::Process, change)
+            .await
+    }
+
+    /// Publishes the next manifest after the current one, as
+    /// [`Self::update_manifest`] does, with each put sent by `sender`.
+    pub(crate) async fn update_manifest_as<T, F, Fut>(
+        &self,
+        basis: Option<Held<LoadedManifest>>,
+        clock: &OperationClock,
+        sender: ManifestSender<'_>,
         mut change: F,
     ) -> Result<ManifestUpdate<T>>
     where
@@ -151,7 +180,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     let mut payload = *payload;
                     payload.manifest_no = super::fold::next_manifest_no_after(predecessor)?;
                     let outcome = self
-                        .publish_manifest_from(payload, clock, Some(&current))
+                        .publish_manifest_from(payload, clock, Some(&current), sender)
                         .await?;
                     let winner = match outcome {
                         ManifestPublicationOutcome::Published(published) => {
@@ -271,7 +300,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
         payload: NamespaceManifestPayload,
         clock: &OperationClock,
     ) -> Result<Held<LoadedManifest>> {
-        match self.publish_manifest_from(payload, clock, None).await? {
+        match self
+            .publish_manifest_from(payload, clock, None, ManifestSender::Process)
+            .await?
+        {
             ManifestPublicationOutcome::Published(basis) => Ok(basis),
             ManifestPublicationOutcome::Lost(current) => Err(existing_namespace(
                 self.namespace_id.clone(),
@@ -294,6 +326,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// After a put that succeeds, the call reads the manifest boundary (see
     /// [`Self::settle_against_boundary`]).
+    ///
+    /// A writer session's put is sent through its [`SessionEpoch`], and the
+    /// session takes its epoch back only when the call settles the put's
+    /// outcome (`Published` or `Lost`).
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
@@ -306,6 +342,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         mut payload: NamespaceManifestPayload,
         clock: &OperationClock,
         current: Option<&Held<LoadedManifest>>,
+        sender: ManifestSender<'_>,
     ) -> Result<ManifestPublicationOutcome> {
         payload.publication_id = PublicationId::generate();
         let manifest = encode_manifest(payload);
@@ -335,7 +372,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let object_key =
             metadata_manifest_object(namespace_id, &manifest.envelope().payload().manifest_no);
         let candidate = LoadedManifest {
-            object_key: object_key.clone(),
+            object_key,
             manifest_bytes: manifest.as_bytes().len() as u64,
             envelope: std::sync::Arc::new(manifest.envelope().clone()),
         };
@@ -359,15 +396,34 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
         assert_legal_successor(manifest.envelope().payload(), current);
         clock.ensure_metadata_publication_budget(namespace_id)?;
+        let sent = self.put_manifest(manifest, &candidate, current, expected_predecessor, clock);
+        match sender {
+            ManifestSender::Process => sent.await,
+            ManifestSender::Session(epoch) => epoch.send_put(sent, Result::is_ok).await,
+        }
+    }
+
+    /// Puts `manifest`, the encoding of `candidate`, with put-if-absent, and
+    /// settles the put's outcome (see [`Self::publish_manifest_from`]).
+    async fn put_manifest(
+        &self,
+        manifest: EncodedEnvelope<NamespaceManifestPayload>,
+        candidate: &LoadedManifest,
+        current: Option<&Held<LoadedManifest>>,
+        expected_predecessor: Option<ManifestNo>,
+        clock: &OperationClock,
+    ) -> Result<ManifestPublicationOutcome> {
+        let namespace_id = &self.namespace_id;
+        let object_key = candidate.object_key.as_str();
         let outcome = match self
             .store
-            .put_if_absent(&object_key, Bytes::from(manifest.into_bytes()))
+            .put_if_absent(object_key, Bytes::from(manifest.into_bytes()))
             .await
         {
             Ok(_) => {
                 let outcome = self
                     .settle_against_boundary(
-                        &candidate,
+                        candidate,
                         expected_predecessor,
                         current
                             .map(|current| current.boundary().clone())
@@ -380,25 +436,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     // published manifest.
                     super::load::cache_manifest(
                         &self.segment_cache,
-                        &candidate,
+                        candidate,
                         &Arc::new(runs_newest_first(candidate.payload())),
                     );
                 }
                 outcome
             }
             Err(ObjectStoreError::PreconditionFailed { .. }) => self
-                .classify_current_manifest(current, &candidate, expected_predecessor, clock)
+                .classify_current_manifest(current, candidate, expected_predecessor, clock)
                 .await?
                 .settled_after_conflict(namespace_id)?,
             Err(error @ ObjectStoreError::Transport { .. }) => {
-                self.settle_unconfirmed_put(
-                    &error,
-                    &candidate,
-                    current,
-                    expected_predecessor,
-                    clock,
-                )
-                .await?
+                self.settle_unconfirmed_put(&error, candidate, current, expected_predecessor, clock)
+                    .await?
             }
             Err(error) => {
                 tracing::error!(
@@ -407,7 +457,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     error = %error,
                     "manifest publication failed"
                 );
-                return Err(CoreError::store(&object_key, &error));
+                return Err(CoreError::store(object_key, &error));
             }
         };
         Ok(outcome)

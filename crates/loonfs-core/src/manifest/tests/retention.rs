@@ -1799,7 +1799,12 @@ async fn snapshot_verification_rejects_a_deleted_namespace() {
         .await
         .expect("writer");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .delete_namespace(Default::default(), acquired, None, &context.clock())
+        .delete_namespace(
+            Default::default(),
+            crate::commit::session_epoch::SessionEpoch::new(&std::sync::Mutex::default(), acquired),
+            None,
+            &context.clock(),
+        )
         .await
         .expect("delete");
 
