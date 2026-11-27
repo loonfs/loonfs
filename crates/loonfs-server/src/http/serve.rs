@@ -75,6 +75,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
         auth_policy,
         memory,
         grep_policy,
+        writer_id,
         maintenance_writer_id,
         ..
     } = config;
@@ -100,6 +101,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
     } = build_handles(
         &config,
         &memory,
+        writer_id,
         maintenance_writer_id.clone(),
         store,
         &metrics,
@@ -176,8 +178,9 @@ pub(super) struct RuntimeHandles {
 /// Builds the process runtime and its maintenance over one store and one
 /// metrics recorder.
 ///
-/// The runtime reads through one metadata cache built from the
-/// `[metadata_cache]` table, with an SSD tier if the table has an `ssd`
+/// The runtime's writer sessions record `writer_id` in the writer block of
+/// each namespace they claim. The runtime reads through one metadata cache
+/// built from the `[metadata_cache]` table, with an SSD tier if the table has an `ssd`
 /// table, and runs its publications, folds, and compactions
 /// under one execution budget built from the fold and compaction limits, the
 /// compaction input limit, and the `[publication]` totals. The execution budget reports
@@ -187,6 +190,7 @@ pub(super) struct RuntimeHandles {
 pub(super) async fn build_handles(
     config: &ServerConfig,
     memory: &MemorySizing,
+    writer_id: WriterId,
     maintenance_writer_id: WriterId,
     store: SharedObjectStore,
     metrics: &HttpMetrics,
@@ -206,7 +210,7 @@ pub(super) async fn build_handles(
     };
 
     let mut builder = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
-        .writer_id(config.writer_id.clone())
+        .writer_id(writer_id)
         .config(config.runtime_config())
         .execution_budget(config.execution_budget(memory, metrics.recorder()))
         .metadata_cache(memory.metadata_cache(ssd))
@@ -373,10 +377,13 @@ impl BuiltServer {
         // The first line a deployment sees. An idle server logs nothing until
         // a request arrives, so without this line a container stuck building
         // its store client or scanning its SSD cache and a container that
-        // never started look the same. This one says the config loaded.
+        // never started look the same. This one says the config loaded, and
+        // its writer ID lets an operator find this server from the writer
+        // block in a `writer_fenced` reply.
         tracing::info!(
             bind = %bind,
             store = store_kind.as_str(),
+            writer_id = %config.writer_id,
             "loonfs-server is starting"
         );
         let tls = tls_server_config(&config.config)?;

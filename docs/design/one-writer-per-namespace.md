@@ -78,7 +78,7 @@ A snapshot's record is a side record, so a snapshot of the current head needs a 
 
 ## The reply and one retry
 
-A request that finds a newer writer gets `writer_fenced`, whose details include the fenced epoch, the newer epoch, and the newer writer's writer block: its writer ID and when it claimed. The server's writer ID is unique to the process by default, because the server adds an ID that it generates at start to the configured `writer_id`.
+A request that finds a newer writer gets `writer_fenced`, whose details include the fenced epoch, the newer epoch, and the newer writer's writer block: its writer ID and when it claimed. The server's writer ID is unique to the process, because the server adds an ID that it generates at start to the configured `writer_id`.
 
 When a session finds that it's fenced, it cancels its compaction unit, so its drain ends once the requests in flight and any running fold finish. The server then retries the fenced request once in a new session, whose first publication claims again. A request is safe to send again when the fenced attempt wrote nothing that the retry could repeat, and the retry checks the request's identity or preconditions against the new state. That's true of every request that can be fenced:
 

@@ -43,6 +43,8 @@ kind = "local_fs"
 root = "/var/lib/loonfs/store"
 ```
 
+The `writer_id` is the start of the server's writer ID. LoonFS records the writer ID in a namespace's manifest when the server becomes the namespace's writer, and a `writer_fenced` error returns it to identify the newer writer. The server adds a hyphen and an ID that it generates when it starts, such as `loonfs-server-1-srv_3s0drmj8em84yb4mnetqkz2j0x`, so two servers started from one config, or one server after a restart, have different writer IDs. The configured `writer_id` can be up to 213 bytes, so that the server's writer ID stays within the 256-byte limit. The server logs its writer ID in its `loonfs-server is starting` line.
+
 Use `kind = "plaintext_behind_proxy"` only when a trusted proxy provides TLS. If LoonFS provides TLS directly, use this `[transport]` table instead:
 
 ```toml
