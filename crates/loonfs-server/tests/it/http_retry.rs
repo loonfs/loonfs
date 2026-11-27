@@ -543,7 +543,10 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
     );
 
     let host_c_target = NamespacePath::parse("demo", "/docs/host-c.txt").expect("host c target");
-    for (loser, winning_writer_id) in [
+    // A server's writer ID is its configured prefix and a suffix that it
+    // generated at start, and its later sessions write the same ID.
+    let mut winning_writer_ids = std::collections::BTreeMap::new();
+    for (loser, winning_writer_prefix) in [
         (&server_a, "loonfs-server-b"),
         (&server_b, "loonfs-server-a"),
         (&server_a, "loonfs-server-b"),
@@ -561,7 +564,17 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
                 );
                 let details = response.details.expect("fenced details");
                 let active_writer = details.active_writer.expect("the active writer");
-                assert_eq!(active_writer.active_writer_id.as_str(), winning_writer_id);
+                let winning_writer_id = active_writer.active_writer_id.as_str();
+                assert!(
+                    winning_writer_id.starts_with(&format!("{winning_writer_prefix}-srv_")),
+                    "{winning_writer_id}"
+                );
+                assert_eq!(
+                    winning_writer_ids
+                        .entry(winning_writer_prefix)
+                        .or_insert_with(|| winning_writer_id.to_owned()),
+                    winning_writer_id
+                );
                 let acquired_at_ms = active_writer.active_acquired_at_ms;
                 assert!(response.message.contains(&format!(
                     "(writer `{winning_writer_id}`, acquired at {acquired_at_ms} ms)"

@@ -147,12 +147,12 @@ Every error response uses this JSON envelope:
 ```json
 {
   "code": "writer_fenced",
-  "message": "writer session fenced: epoch 3 was fenced by epoch 4 (writer `server-b`, acquired at 1739459200000 ms)",
+  "message": "writer session fenced: epoch 3 was fenced by epoch 4 (writer `server-b-srv_3s0drmj8em84yb4mnetqkz2j0x`, acquired at 1739459200000 ms)",
   "request_id": "req_4k8m2v9qx7d3hn5tbwa6jc1rfe",
   "details": {
     "fenced_writer_epoch": 3,
     "active_writer_epoch": 4,
-    "active_writer_id": "server-b",
+    "active_writer_id": "server-b-srv_3s0drmj8em84yb4mnetqkz2j0x",
     "active_acquired_at_ms": 1739459200000
   }
 }
@@ -191,7 +191,7 @@ The codes that populate it:
 | --- | --- |
 | `namespace_not_found` | `namespace_id` identifies the missing namespace, including a fork referenced by a merge, rebase, replay, or next-merge-range request. |
 | `namespace_deleted` | `namespace_id` identifies the deleted namespace, including a fork's source or target, or a fork referenced by a merge, rebase, replay, or next-merge-range request. |
-| `writer_fenced` | `fenced_writer_epoch` and `active_writer_epoch`, plus `active_writer_id` and `active_acquired_at_ms` when the current manifest includes a writer block. Because writer IDs are process labels that two runs on one host can share, the acquisition timestamp distinguishes them. |
+| `writer_fenced` | `fenced_writer_epoch` and `active_writer_epoch`, plus `active_writer_id` and `active_acquired_at_ms` when the current manifest includes a writer block. Each run of the reference server has its own writer ID, but two runs of an embedded runtime can use the same writer ID, and the acquisition timestamp distinguishes them. |
 | `path_conflict` | `expected_inode_id` and `actual_inode_id` (absent when the path isn't bound), plus `precondition_index` for a failed request precondition. |
 | `stale_revision` | `inode_id`, `expected_revision_no`, and `actual_revision_no` (absent when the inode has no current revision or isn't visible), plus `precondition_index` for a failed request precondition. |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), and `actual_attributes_revision_no` (absent when the inode isn't visible), plus `precondition_index` for a failed request precondition. |

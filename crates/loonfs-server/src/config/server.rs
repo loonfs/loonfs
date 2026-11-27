@@ -37,6 +37,9 @@ pub struct ServerConfig {
     /// `LOONFS_CONTENT_TOKEN_SECRET`.
     #[serde(default)]
     pub content_token_secret: SecretString,
+    /// The start of the server's writer ID. The server adds a hyphen and an
+    /// ID that it generates when it starts, so each run of the server has a
+    /// writer ID of its own.
     pub writer_id: WriterId,
     /// Maximum public reads running at once. Reads past this limit wait.
     /// Defaults to the runtime's

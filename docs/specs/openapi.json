@@ -5107,7 +5107,7 @@
         "type": "integer"
       },
       "WriterId": {
-        "description": "A stable writer label that the embedding process supplies.",
+        "description": "The label of a writer, which a manifest's writer block records when the\nwriter claims a namespace.\n\nThe reference server adds an ID that it generates at start to the\nwriter ID in its config, so each run of the server has its own writer\nID. An embedded caller supplies the whole writer ID, so two runs can use\nthe same writer ID.",
         "type": "string"
       }
     },

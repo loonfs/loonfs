@@ -285,7 +285,13 @@ string_id! {
 pub const MAX_WRITER_ID_BYTES: usize = 256;
 
 string_id! {
-    /// A stable writer label that the embedding process supplies.
+    /// The label of a writer, which a manifest's writer block records when the
+    /// writer claims a namespace.
+    ///
+    /// The reference server adds an ID that it generates at start to the
+    /// writer ID in its config, so each run of the server has its own writer
+    /// ID. An embedded caller supplies the whole writer ID, so two runs can use
+    /// the same writer ID.
     WriterId,
     error = WriterIdValidationError,
     validate = |value: &str| {

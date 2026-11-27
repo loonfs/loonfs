@@ -35,6 +35,7 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
         let RuntimeHandles { runtime, .. } = build_handles(
             &config.config,
             &config.memory,
+            config.writer_id.clone(),
             config.maintenance_writer_id.clone(),
             store,
             &HttpMetrics::new(),

@@ -5,7 +5,7 @@ use crate::ServerError;
 use loonfs_test_support::EnvGuard;
 use loonfs_types::config::ConfigFieldError;
 use loonfs_types::env::CONTENT_TOKEN_SECRET_ENV;
-use loonfs_types::SecretString;
+use loonfs_types::{SecretString, GENERATED_ID_BODY_BYTES, MAX_WRITER_ID_BYTES};
 
 #[test]
 fn inline_content_defaults_and_overrides_keep_the_threshold_a_number() {
@@ -141,6 +141,60 @@ root = "/tmp/loonfs-server"
             expected,
             "{setting:?}"
         );
+    }
+}
+
+/// Checks that a server's writer ID is the configured `writer_id`, a hyphen,
+/// and an ID that each validation generates, so two servers started from one
+/// config have different writer IDs, and that a `writer_id` too long to take
+/// the suffix fails validation.
+#[test]
+fn a_server_writer_id_is_the_configured_prefix_and_a_generated_suffix() {
+    let source = |writer_id: &str| {
+        format!(
+            r#"
+bind = "127.0.0.1:9400"
+content_token_secret = "dev-content-token-secret"
+writer_id = "{writer_id}"
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#
+        )
+    };
+    let [first, second] =
+        [(); 2].map(|()| parse_server_config(&source("loonfs-server")).expect("valid config"));
+    for config in [&first, &second] {
+        let suffix = config
+            .writer_id
+            .as_str()
+            .strip_prefix("loonfs-server-srv_")
+            .expect("the writer ID starts with the configured prefix");
+        assert_eq!(suffix.len(), GENERATED_ID_BODY_BYTES, "{suffix}");
+        assert_eq!(config.config().writer_id.as_str(), "loonfs-server");
+        assert_eq!(
+            config.maintenance_writer_id.as_str(),
+            format!("{}-maintenance", config.writer_id)
+        );
+    }
+    assert_ne!(first.writer_id, second.writer_id);
+
+    // The self-hosting guide states this limit.
+    let longest_prefix =
+        MAX_WRITER_ID_BYTES - "-srv_".len() - GENERATED_ID_BODY_BYTES - "-maintenance".len();
+    assert_eq!(longest_prefix, 213);
+    parse_server_config(&source(&"w".repeat(longest_prefix))).expect("the longest prefix");
+    let too_long = "w".repeat(longest_prefix + 1);
+    match parse_server_config(&source(&too_long)).expect_err("a prefix too long for the suffix") {
+        ServerError::Config(ConfigFieldError::Invalid { field, reason }) => {
+            assert_eq!(field, "writer_id");
+            assert!(
+                reason.starts_with(&format!("{too_long:?} must be 213 bytes or fewer")),
+                "{reason}"
+            );
+        }
+        other => panic!("expected an invalid `writer_id`, got {other:?}"),
     }
 }
 
