@@ -7,6 +7,7 @@ use axum::http::Method;
 use loonfs_objectstore::layout::wal_no_of;
 use loonfs_test_support::clock::bounded;
 use loonfs_types::WalNo;
+use std::assert_matches;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -375,4 +376,234 @@ async fn a_fenced_deletion_is_retried_and_checks_its_expected_head_again() {
         "{}",
         error.message
     );
+}
+
+/// A host whose store keeps one WAL put waiting, a second host on the same
+/// store, and a namespace with a fork that has two commits, which a merge
+/// plans through.
+struct FencedRangeHosts {
+    _directory: tempfile::TempDir,
+    router: axum::Router,
+    state: HttpState,
+    other: HttpState,
+    blocking: Arc<BlockingStore<LocalFsStore>>,
+    target: Arc<Mutex<Option<(String, WalNo)>>>,
+    main: NamespaceId,
+    fork: NamespaceId,
+    planned_through_seq: u64,
+}
+
+impl FencedRangeHosts {
+    async fn new(name: &str) -> Self {
+        let directory = tempdir().expect("tempdir");
+        let target = Arc::new(Mutex::new(None::<(String, WalNo)>));
+        let blocking = Arc::new(BlockingStore::matching(
+            LocalFsStore::new(directory.path()).expect("store"),
+            {
+                let target = Arc::clone(&target);
+                move |operation| {
+                    let key = operation.key();
+                    OperationSelector::PutCreateIfAbsent.matches(operation.kind())
+                        && target
+                            .lock()
+                            .expect("the target lock should not be poisoned")
+                            .as_ref()
+                            .is_some_and(|(prefix, wal_no)| {
+                                key.starts_with(prefix.as_str()) && wal_no_of(key) == Some(*wal_no)
+                            })
+                }
+            },
+        ));
+        let (router, state, _) = test_app_with_sessions(
+            test_options(directory.path(), "first-host"),
+            options_with_store(blocking.clone()),
+        )
+        .await
+        .expect("host");
+        let (_, other, _) = test_app_with_sessions(
+            test_options(directory.path(), "winning-host"),
+            options_with_store(Arc::new(
+                LocalFsStore::new(directory.path()).expect("store"),
+            )),
+        )
+        .await
+        .expect("other host");
+        let [main, fork] = [name, &format!("{name}-branch")].map(namespace_id);
+        create_namespace(&state, &main).await;
+        create_directory(&router, &main, "/first").await;
+        state
+            .runtime
+            .fork_namespace(&main, &fork, &loonfs_test_support::test_actor())
+            .await
+            .expect("fork");
+        for path in ["/one", "/two"] {
+            create_directory(&router, &fork, path).await;
+        }
+        let planned_through_seq = head_seq(&state, &fork).await;
+        Self {
+            _directory: directory,
+            router,
+            state,
+            other,
+            blocking,
+            target,
+            main,
+            fork,
+            planned_through_seq,
+        }
+    }
+
+    /// Keeps the next WAL put to `namespace_id` waiting.
+    async fn hold_next_wal_put(&self, namespace_id: &NamespaceId) {
+        let wal_no = WalNo(wal_tip(&self.state, namespace_id).await + 1);
+        *self.target.lock().expect("target lock") =
+            Some((loonfs_objectstore::keys::wal_prefix(namespace_id), wal_no));
+        self.blocking.block_next();
+    }
+
+    /// Waits for the held put, lets the other host claim `namespace_id`, adds
+    /// a third commit to the fork, and releases the put, which then finds the
+    /// other host's claim.
+    async fn take_over_and_extend_the_fork(&self, namespace_id: &NamespaceId) {
+        bounded(Duration::from_secs(10), self.blocking.wait_until_blocked())
+            .await
+            .expect("the planned commit's put waits");
+        self.other
+            .namespaces
+            .open(namespace_id)
+            .await
+            .expect("winner")
+            .create_directory("/winner", &loonfs_test_support::test_actor())
+            .await
+            .expect("take over");
+        create_directory(&self.router, &self.fork, "/three").await;
+        assert!(head_seq(&self.state, &self.fork).await > self.planned_through_seq);
+        self.blocking.release();
+    }
+}
+
+#[tokio::test]
+async fn a_fenced_merge_or_replay_is_retried_through_the_range_that_its_first_plan_resolved() {
+    for route in ["merges", "replays"] {
+        let hosts = FencedRangeHosts::new(&format!("fenced-{route}")).await;
+        // A replay commits into a rebase's new fork, which this host claims
+        // first, as it claimed the merge's destination.
+        let target = match route {
+            "merges" => hosts.main.clone(),
+            _ => {
+                let new_fork = namespace_id(&format!("fenced-{route}-rebased"));
+                hosts
+                    .state
+                    .runtime
+                    .fork_namespace_for_rebase(
+                        &hosts.main,
+                        &hosts.fork,
+                        &new_fork,
+                        &loonfs_test_support::test_actor(),
+                    )
+                    .await
+                    .expect("rebase");
+                create_directory(&hosts.router, &new_fork, "/held").await;
+                new_fork
+            }
+        };
+        let epoch_before = writer_epoch(&hosts.state, &target).await;
+
+        // The request omits `through_seq`, so its plan resolves the range's
+        // end to the fork's head, and the plan's commit waits at its put.
+        hosts.hold_next_wal_put(&target).await;
+        let uri = format!("/v0/namespaces/{target}/{route}");
+        let body = serde_json::json!({
+            "source_namespace_id": hosts.fork,
+            "commit_id": format!("fenced-{route}"),
+        })
+        .to_string();
+        let request = tokio::spawn({
+            let router = hosts.router.clone();
+            async move { send(&router, Method::POST, &uri, body).await }
+        });
+        hosts.take_over_and_extend_the_fork(&target).await;
+
+        let (status, bytes) = request.await.expect("join the request");
+        assert_eq!(status, StatusCode::OK, "{route}: {bytes:?}");
+        let commit: loonfs_types::Commit = match route {
+            "merges" => serde_json::from_slice(&bytes).expect("merge"),
+            _ => {
+                serde_json::from_slice::<loonfs_types::ReplayForkResponse>(&bytes)
+                    .expect("replay")
+                    .commit
+            }
+        };
+        assert_eq!(commit.commit_id.as_str(), format!("fenced-{route}"));
+        let merge = commit.merge.expect("the merge record");
+        assert_eq!(
+            merge.source_through_seq.0, hosts.planned_through_seq,
+            "{route}"
+        );
+        // The other host's claim and this host's claim in the second attempt.
+        assert_eq!(writer_epoch(&hosts.state, &target).await, epoch_before + 2);
+    }
+}
+
+#[tokio::test]
+async fn a_fenced_merge_reports_the_request_that_its_first_plan_resolved() {
+    let hosts = FencedRangeHosts::new("fenced-embedded").await;
+    let open = || hosts.state.namespaces.open(&hosts.main);
+    let held = open().await.expect("open");
+    let fork_point_seq = held
+        .next_merge_range(&hosts.fork)
+        .await
+        .expect("next range")
+        .fork_point_seq;
+    let sent = loonfs::publish::MergeRequest {
+        source_namespace_id: hosts.fork.clone(),
+        through_seq: None,
+        after_seq: None,
+        commit_id: CommitId::parse("fenced-embedded").expect("commit id"),
+        actor_id: loonfs_test_support::test_actor(),
+        message: None,
+    };
+
+    hosts.hold_next_wal_put(&hosts.main).await;
+    let merge = tokio::spawn({
+        let sent = sent.clone();
+        async move { held.merge(sent).await }
+    });
+    hosts.take_over_and_extend_the_fork(&hosts.main).await;
+    let report = merge.await.expect("join the merge");
+    assert_matches!(
+        report.result,
+        Err(loonfs::Error::Core(loonfs::CoreError::WriterFenced(_)))
+    );
+    let resolved = report.request;
+    assert_eq!(resolved.commit_id, sent.commit_id);
+    assert_eq!(resolved.after_seq, Some(fork_point_seq));
+    assert_eq!(
+        resolved.through_seq,
+        Some(CommitSeq(hosts.planned_through_seq))
+    );
+
+    // The resolved request commits the first plan's range in a new session.
+    // A request with that range and the caller's request both find its
+    // receipt, so the second attempt's commit is the one that a request with
+    // an explicit range would make.
+    hosts
+        .state
+        .runtime
+        .wait_for_fenced_session(&hosts.main)
+        .await;
+    let reopened = open().await.expect("reopen");
+    let commit = reopened
+        .merge(resolved.clone())
+        .await
+        .result
+        .expect("merge again");
+    assert_eq!(commit.commit_id, sent.commit_id);
+    let range = commit.merge.as_ref().expect("the merge record");
+    assert_eq!(range.source_after_seq, fork_point_seq);
+    assert_eq!(range.source_through_seq.0, hosts.planned_through_seq);
+    for request in [resolved, sent] {
+        let replayed = reopened.merge(request).await;
+        assert_eq!(replayed.result.expect("receipt"), commit);
+    }
 }

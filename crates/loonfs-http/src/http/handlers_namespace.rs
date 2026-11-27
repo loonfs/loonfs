@@ -8,11 +8,13 @@ use super::query_params::{at_consistency, effective_page_limit, required_query_p
 use super::{AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
 use axum::Json;
-use loonfs::{Consistency, CreateNamespaceOptions, DeleteNamespaceOptions, MergeForkOptions};
+use futures::FutureExt;
+use loonfs::publish::{MergeReport, MergeRequest};
+use loonfs::{Consistency, CreateNamespaceOptions, DeleteNamespaceOptions, Namespace, Writable};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    CapabilityDocument, Commit, CommitSeq, CreateNamespaceRequest, EffectiveLimit,
+    CapabilityDocument, Commit, CommitSeq, Context, CreateNamespaceRequest, EffectiveLimit,
     ForkNamespaceForRebaseRequest, ForkNamespaceRequest, ListNamespacesResponse, MergeForkRequest,
     NamespaceId, NextMergeRangeResponse, ReplayForkRequest, ReplayForkResponse,
     API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
@@ -25,7 +27,7 @@ use loonfs_types::{
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// The JSON Pointers of the merge and replay request fields that a rejection can name.
 const MERGE_BODY_FIELDS: &[&str] = &["/source_namespace_id", "/through_seq"];
@@ -549,23 +551,22 @@ pub(super) async fn merge_fork(
         commit_id,
         message,
     } = request;
-    let options = MergeForkOptions {
-        commit_id: Some(commit_id.clone()),
-        message,
+    let request = MergeRequest {
+        source_namespace_id,
         through_seq,
+        after_seq: None,
+        commit_id,
+        actor_id,
+        message,
     };
-    let (options, source_namespace_id, actor_id) = (&options, &source_namespace_id, &actor_id);
-    let response = state
-        .run_as_writer(&namespace_id, context, |namespace| async move {
-            namespace
-                .merge_fork_with_options(source_namespace_id, actor_id, options)
-                .await
-                .map_err(|error| {
-                    ApiResponseError::runtime(error).with_body_field_params(MERGE_BODY_FIELDS)
-                })
-        })
-        .await
-        .map_err(|error| error.with_commit_id(&commit_id))?;
+    let response = run_merge_as_writer(
+        &state,
+        &namespace_id,
+        context,
+        request,
+        |namespace, request| async move { namespace.merge(request).await },
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -733,22 +734,67 @@ pub(super) async fn replay_fork(
         commit_id,
         message,
     } = request;
-    let options = MergeForkOptions {
-        commit_id: Some(commit_id.clone()),
-        message,
+    let request = MergeRequest {
+        source_namespace_id,
         through_seq,
+        after_seq: None,
+        commit_id,
+        actor_id,
+        message,
     };
-    let (options, source_namespace_id, actor_id) = (&options, &source_namespace_id, &actor_id);
-    let response = state
-        .run_as_writer(&namespace_id, context, |new_fork| async move {
-            new_fork
-                .replay_fork_with_options(source_namespace_id, actor_id, options)
-                .await
-                .map_err(|error| {
+    let response = run_merge_as_writer(
+        &state,
+        &namespace_id,
+        context,
+        request,
+        |new_fork, request| async move { new_fork.replay(request).await },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// Runs a merge or a replay commit of `request` through
+/// [`HttpState::run_as_writer`], and runs a second attempt with the request
+/// that the first attempt's [`MergeReport`] returned, so that the second plan
+/// applies the range that the first plan resolved.
+async fn run_merge_as_writer<T, F>(
+    state: &HttpState,
+    namespace_id: &NamespaceId,
+    context: Context,
+    request: MergeRequest,
+    merge: impl Fn(Namespace<Writable>, MergeRequest) -> F,
+) -> Result<T, ApiResponseError>
+where
+    F: std::future::Future<Output = MergeReport<T>> + Send,
+{
+    let commit_id = request.commit_id.clone();
+    let request = Mutex::new(request);
+    let (request, merge) = (&request, &merge);
+    state
+        .run_as_writer(namespace_id, context, |namespace| {
+            // Boxed so the router's `Send` check doesn't recurse through
+            // every engine future that the merge awaits.
+            let attempt = merge(namespace, lock_request(request).clone()).boxed();
+            async move {
+                let report = attempt.await;
+                // `run_as_writer` runs a second attempt only after
+                // `writer_fenced`, and that attempt sends the request as the
+                // first plan resolved it.
+                *lock_request(request) = report.request;
+                report.result.map_err(|error| {
                     ApiResponseError::runtime(error).with_body_field_params(MERGE_BODY_FIELDS)
                 })
+            }
         })
         .await
-        .map_err(|error| error.with_commit_id(&commit_id))?;
-    Ok(Json(response))
+        .map_err(|error| error.with_commit_id(&commit_id))
+}
+
+/// Locks the request that a merge's attempts share.
+fn lock_request(request: &Mutex<MergeRequest>) -> std::sync::MutexGuard<'_, MergeRequest> {
+    // A critical section under this lock only clones or replaces the request,
+    // so it can't panic and poison the lock.
+    request
+        .lock()
+        .expect("the merge request lock should not be poisoned")
 }

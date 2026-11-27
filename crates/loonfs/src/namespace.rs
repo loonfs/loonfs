@@ -22,6 +22,8 @@ mod uploads;
 mod writes;
 mod writes_by_inode;
 
+pub use merges::MergeReport;
+
 /// One namespace.
 ///
 /// Every mode reads it, and only [`Writable`] writes it.

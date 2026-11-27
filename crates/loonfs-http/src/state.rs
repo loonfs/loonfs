@@ -259,6 +259,15 @@ impl HttpState {
     /// namespace. A second attempt that is fenced too returns its own
     /// `writer_fenced`, whose details identify the newer writer.
     ///
+    /// `request` runs once for each attempt, so a handler resolves what
+    /// identifies the request before this call, such as the commit ID that
+    /// the request body includes and the content IDs of inline content. A
+    /// merge and a replay commit resolve their range in the first attempt's
+    /// plan, and the runtime returns the request with that range in its
+    /// [`loonfs::publish::MergeReport`]. Their routes run the second attempt
+    /// with that request, so the second plan applies the same range.
+    /// Preconditions and a deletion's expected head are evaluated again.
+    ///
     /// A request with a put whose outcome is unknown returns
     /// `outcome_unknown`, whichever attempt sent the put. The first attempt
     /// isn't sent again after an unknown outcome, because the publisher

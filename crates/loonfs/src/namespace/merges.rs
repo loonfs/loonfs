@@ -47,6 +47,18 @@ pub(crate) struct PlannedCommit<R = ()> {
     pub(crate) report: R,
 }
 
+/// What one call of [`Namespace::merge`] or [`Namespace::replay`] did: the
+/// request, with the range that its first plan resolved, and the result.
+#[derive(Debug)]
+pub struct MergeReport<T> {
+    /// The caller's request, with `after_seq` and `through_seq` set to the
+    /// range of the first plan, or the caller's request as it was when the
+    /// call failed before a plan resolved a range.
+    pub request: MergeRequest,
+    /// The merge's commit, or the replay commit's response, or the error.
+    pub result: Result<T>,
+}
+
 /// How the commit of a merge, or of a replay commit, ended.
 pub(crate) enum MergeOutcome<R = ()> {
     /// The namespace had committed a merge under the request's commit ID
@@ -156,27 +168,43 @@ impl Namespace<Writable> {
         actor: &ActorId,
         options: &MergeForkOptions,
     ) -> Result<Commit> {
-        trace::in_operation(
+        self.merge(MergeRequest {
+            source_namespace_id: source_namespace_id.clone(),
+            through_seq: options.through_seq,
+            after_seq: None,
+            commit_id: options.commit_id.clone().unwrap_or_else(CommitId::generate),
+            actor_id: actor.clone(),
+            message: options.message.clone(),
+        })
+        .await
+        .result
+    }
+
+    /// Merges the fork `request.source_namespace_id`'s commits into this
+    /// namespace as one commit, as [`Self::merge_fork_with_options`] does,
+    /// through `request.through_seq` or the fork's head, and after
+    /// `request.after_seq` or where the fork's next merge starts.
+    ///
+    /// A host that sends a fenced merge again in a new session uses this
+    /// form, because the report's request has the range that the first plan
+    /// resolved, and sending that request plans the same merge, as a plan
+    /// again after a stale plan does. A range that no longer starts where
+    /// the fork's next merge starts returns `merge_range_conflict`.
+    pub async fn merge(&self, mut request: MergeRequest) -> MergeReport<Commit> {
+        let result = trace::in_operation(
             operation_span!(self.core, "merge_fork", self.namespace_id),
             async {
-                let request = MergeRequest {
-                    source_namespace_id: source_namespace_id.clone(),
-                    through_seq: options.through_seq,
-                    after_seq: None,
-                    commit_id: options.commit_id.clone().unwrap_or_else(CommitId::generate),
-                    actor_id: actor.clone(),
-                    message: options.message.clone(),
-                };
                 let planned = self.plan_merge(&request, None).await?;
                 let (MergeOutcome::Found { commit, .. } | MergeOutcome::Committed { commit, .. }) =
-                    self.commit_merge(&request, planned, |request, reservation| {
+                    self.commit_merge(&mut request, planned, |request, reservation| {
                         Box::pin(async move { self.plan_merge(&request, Some(reservation)).await })
                     })
                     .await?;
                 Ok(commit)
             },
         )
-        .await
+        .await;
+        MergeReport { request, result }
     }
 
     /// Returns the merge that this namespace committed under the request's
@@ -292,7 +320,9 @@ impl Namespace<Writable> {
     /// [`CoreError::is_stale_plan`]), up to
     /// [`MAX_MERGE_PLANS`] plans in all. A later plan applies the first
     /// plan's range, so it never merges a longer range, and a merge of the
-    /// fork that committed in between returns `merge_range_conflict`.
+    /// fork that committed in between returns `merge_range_conflict`. The
+    /// call sets that range in `request`, so a caller that sends the request
+    /// again in a new session plans the same range.
     ///
     /// When the last plan's commit fails the same way, the call returns
     /// `store_contention`, with the cause `lost_race`. The failure is a
@@ -300,7 +330,7 @@ impl Namespace<Writable> {
     /// stated, so the caller's remedy is to send the same request again.
     pub(crate) async fn commit_merge<'a, R>(
         &'a self,
-        request: &MergeRequest,
+        request: &mut MergeRequest,
         mut planned: PlannedMerge<R>,
         mut replan: impl FnMut(MergeRequest, MergeReservation) -> BoxFuture<'a, Result<PlannedMerge<R>>>,
     ) -> Result<MergeOutcome<R>> {
@@ -317,6 +347,8 @@ impl Namespace<Writable> {
                 }
                 PlannedMerge::Candidate(planned) => *planned,
             };
+            request.after_seq = Some(record.source_after_seq);
+            request.through_seq = Some(record.source_through_seq);
             match self.submit_merge(candidate, &reservation).await {
                 Err(Error::Core(error)) if error.is_stale_plan() => {
                     if plans == MAX_MERGE_PLANS {
@@ -325,12 +357,7 @@ impl Namespace<Writable> {
                         }));
                     }
                     plans += 1;
-                    let request = MergeRequest {
-                        after_seq: Some(record.source_after_seq),
-                        through_seq: Some(record.source_through_seq),
-                        ..request.clone()
-                    };
-                    planned = replan(request, reservation).await?;
+                    planned = replan(request.clone(), reservation).await?;
                 }
                 result => return result.map(|commit| MergeOutcome::Committed { commit, report }),
             }
