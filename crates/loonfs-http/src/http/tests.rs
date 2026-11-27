@@ -3,6 +3,7 @@
 mod attribution;
 mod diff;
 mod expired_reads;
+mod fenced_retry;
 mod handler_panics;
 mod hosted_content_ref_access;
 mod http_access;

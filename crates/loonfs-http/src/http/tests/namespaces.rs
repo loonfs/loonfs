@@ -11,7 +11,7 @@ use loonfs_test_support::stores::BlockingStore;
 use std::assert_matches;
 use std::num::NonZeroU64;
 
-async fn send(
+pub(super) async fn send(
     router: &axum::Router,
     method: Method,
     uri: &str,
@@ -23,7 +23,11 @@ async fn send(
     (status, body)
 }
 
-async fn create_directory(router: &axum::Router, namespace_id: &NamespaceId, path: &str) {
+pub(super) async fn create_directory(
+    router: &axum::Router,
+    namespace_id: &NamespaceId,
+    path: &str,
+) {
     let body = serde_json::json!({
         "commit_id": format!("create{}", path.replace('/', "-")),
         "operations": [{"kind": "create_directory", "path": path}],
@@ -46,7 +50,7 @@ async fn create_direct_put_upload(
     (status, error.code)
 }
 
-async fn host(
+pub(super) async fn host(
     writer_id: &str,
 ) -> (
     tempfile::TempDir,
@@ -64,7 +68,7 @@ async fn host(
     (directory, router, state, namespaces)
 }
 
-async fn create_namespace(state: &HttpState, namespace_id: &NamespaceId) {
+pub(super) async fn create_namespace(state: &HttpState, namespace_id: &NamespaceId) {
     state
         .runtime
         .create_namespace(namespace_id, &loonfs_test_support::test_actor())
@@ -72,7 +76,7 @@ async fn create_namespace(state: &HttpState, namespace_id: &NamespaceId) {
         .expect("create namespace");
 }
 
-async fn writer_epoch(state: &HttpState, namespace_id: &NamespaceId) -> u64 {
+pub(super) async fn writer_epoch(state: &HttpState, namespace_id: &NamespaceId) -> u64 {
     loonfs_core::test_support::namespace_store(state.runtime.object_store().as_ref(), namespace_id)
         .load_read_state()
         .await
@@ -364,7 +368,8 @@ async fn concurrent_opens_drop_a_fenced_session_once_and_keep_other_sessions_and
 }
 
 #[tokio::test]
-async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends() {
+async fn requests_that_find_their_session_fenced_during_a_fold_wait_for_it_and_share_one_new_session(
+) {
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("ending");
     let blocking = Arc::new(BlockingStore::new(
@@ -408,29 +413,50 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
         .create_directory("/winner", &loonfs_test_support::test_actor())
         .await
         .expect("take over");
+    let winning_epoch = writer_epoch(&state, &namespace_id).await;
 
-    let uri = format!("/v0/namespaces/{namespace_id}/commits");
-    let body = serde_json::json!({
-        "commit_id": "during-ending",
-        "operations": [{"kind": "create_directory", "path": "/after"}],
+    // The request finds the fence, and its second attempt waits for the
+    // fenced session's fold before it opens a new session.
+    let commit = |commit_id: &str| {
+        let router = router.clone();
+        let uri = format!("/v0/namespaces/{namespace_id}/commits");
+        let body = serde_json::json!({
+            "commit_id": commit_id,
+            "operations": [{"kind": "create_directory", "path": format!("/{commit_id}")}],
+        })
+        .to_string();
+        tokio::spawn(async move { send(&router, Method::POST, &uri, body).await })
+    };
+    let request = commit("during-ending");
+    loonfs_test_support::clock::bounded(std::time::Duration::from_secs(10), async {
+        while old.session_status() != NamespaceSessionStatus::Fenced {
+            tokio::task::yield_now().await;
+        }
     })
-    .to_string();
-    let (status, bytes) = send(&router, Method::POST, &uri, body.clone()).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    let error: loonfs_types::ErrorResponse = serde_json::from_slice(&bytes).expect("fenced error");
-    assert_eq!(error.code, ErrorCode::WriterFenced.as_str());
-    let (status, bytes) = send(&router, Method::POST, &uri, body.clone()).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    let error: loonfs_types::ErrorResponse = serde_json::from_slice(&bytes).expect("fenced error");
-    assert_eq!(error.code, ErrorCode::WriterFenced.as_str());
-    assert!(namespaces.held_ids().is_empty());
+    .await
+    .expect("the request finds the fence");
+    // A second request finds the fenced session still draining, waits in
+    // the same way, and then shares the first request's new session.
+    let second = commit("while-draining");
+    loonfs_test_support::clock::bounded(std::time::Duration::from_secs(10), async {
+        while !namespaces.held_ids().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the second request's open drops the fenced session");
+    assert!(!request.is_finished(), "the request waits for the fold");
+    assert!(
+        !second.is_finished(),
+        "the second request waits for the fold"
+    );
 
     blocking.release();
-    state.runtime.drain().await.expect("old work ends");
-    assert_eq!(
-        send(&router, Method::POST, &uri, body).await.0,
-        StatusCode::OK
-    );
+    for request in [request, second] {
+        let (status, bytes) = request.await.expect("join the request");
+        assert_eq!(status, StatusCode::OK, "{bytes:?}");
+    }
+    assert_eq!(writer_epoch(&state, &namespace_id).await, winning_epoch + 1);
     let replacement = state
         .namespaces
         .open(&namespace_id)

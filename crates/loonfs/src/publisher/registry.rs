@@ -200,33 +200,42 @@ impl NamespaceSession {
         let publisher = &self.publisher;
         let drained_commits = publisher.close_session()?;
         publisher.compaction_cancellation.cancel();
-        publisher.forget_if_ended();
-        publisher.wait_for_worker().await;
-        if let Err(error) = publisher.wait_for_fold().await {
-            phase_event!(
-                publisher.context.runtime_core,
-                Phase::WalFold,
-                publisher.namespace_id,
-                tracing::Level::WARN,
-                error = %error.public_message(),
-                "wal fold failed while the namespace session closed"
-            );
-        }
-        if let Err(error) = publisher.wait_for_compaction().await {
-            phase_event!(
-                publisher.context.runtime_core,
-                Phase::MetadataCompaction,
-                publisher.namespace_id,
-                tracing::Level::WARN,
-                error = %error.public_message(),
-                "metadata compaction failed while the namespace session closed"
-            );
-        }
-        publisher.forget_if_ended();
+        publisher.end_session_work().await;
         Ok(CloseNamespaceReport {
             drained_commits,
             fenced: publisher.session_is_fenced(),
         })
+    }
+}
+
+impl NamespacePublisher {
+    /// Waits for the work of a session that admits no more work (its
+    /// admitted work, the running fold, and the cancelled compaction), and
+    /// removes the session's entry once that work has ended.
+    async fn end_session_work(&self) {
+        self.forget_if_ended();
+        self.wait_for_worker().await;
+        if let Err(error) = self.wait_for_fold().await {
+            phase_event!(
+                self.context.runtime_core,
+                Phase::WalFold,
+                self.namespace_id,
+                tracing::Level::WARN,
+                error = %error.public_message(),
+                "wal fold failed while the namespace session ended"
+            );
+        }
+        if let Err(error) = self.wait_for_compaction().await {
+            phase_event!(
+                self.context.runtime_core,
+                Phase::MetadataCompaction,
+                self.namespace_id,
+                tracing::Level::WARN,
+                error = %error.public_message(),
+                "metadata compaction failed while the namespace session ended"
+            );
+        }
+        self.forget_if_ended();
     }
 }
 
@@ -365,6 +374,24 @@ impl PublisherRegistry {
             .publisher
             .sessions(sessions);
         Ok(session)
+    }
+
+    /// Waits until the namespace's session in this runtime, if it's fenced,
+    /// has finished its work and left the table, so that the next
+    /// [`Self::open_session`] starts a new session instead of returning the
+    /// fence. A session that isn't fenced is left alone.
+    ///
+    /// The fence cancelled the session's compaction (see
+    /// [`NamespacePublisher::release_engine`]), and a fenced session admits
+    /// and starts nothing more, so the wait ends once the commits it admitted
+    /// and a running fold end.
+    pub(crate) async fn wait_for_fenced_session(&self, namespace_id: &NamespaceId) {
+        let Some(publisher) = self.live_publisher(namespace_id) else {
+            return;
+        };
+        if publisher.session_is_fenced() {
+            publisher.end_session_work().await;
+        }
     }
 
     /// Tells the namespace's publisher how a mutation outside the publisher

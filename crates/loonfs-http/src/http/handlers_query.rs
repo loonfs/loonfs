@@ -217,8 +217,18 @@ pub(super) async fn enable_grep_index(
     AppQuery(_): AppQuery<NoQuery>,
     NoBody: NoBody,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    let _handle = state.open_writer(&namespace_id, Context::Service).await?;
-    let outcome = worker.enable(&namespace_id).await.map_err(map_grep_error)?;
+    let (worker_ref, namespace_id_ref) = (&worker, &namespace_id);
+    let outcome = state
+        .run_as_writer(&namespace_id, Context::Service, |session| async move {
+            // The session stays open while the worker publishes the index's
+            // entry.
+            let _session = session;
+            worker_ref
+                .enable(namespace_id_ref)
+                .await
+                .map_err(map_grep_error)
+        })
+        .await?;
     state.namespaces.mark_index_dirty(&namespace_id);
     match outcome {
         GrepEnableOutcome::Enabled { .. } | GrepEnableOutcome::AlreadyEnabled { .. } => {}
@@ -315,11 +325,18 @@ pub(super) async fn disable_grep_index(
     AppQuery(_): AppQuery<NoQuery>,
     NoBody: NoBody,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    let _handle = state.open_writer(&namespace_id, Context::Service).await?;
-    let outcome = worker
-        .disable(&namespace_id)
-        .await
-        .map_err(map_grep_error)?;
+    let (worker_ref, namespace_id_ref) = (&worker, &namespace_id);
+    let outcome = state
+        .run_as_writer(&namespace_id, Context::Service, |session| async move {
+            // The session stays open while the worker publishes the index's
+            // entry.
+            let _session = session;
+            worker_ref
+                .disable(namespace_id_ref)
+                .await
+                .map_err(map_grep_error)
+        })
+        .await?;
     state.namespaces.mark_index_dirty(&namespace_id);
     match outcome {
         GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {}

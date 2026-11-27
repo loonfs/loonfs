@@ -758,10 +758,7 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
     };
     assert_eq!(fence.active_epoch, rival.writer_epoch);
     assert_eq!(fence.fenced_epoch, WriterEpoch(rival.writer_epoch.0 - 1));
-    assert_eq!(
-        fence.active_writer.as_ref().map(|writer| &writer.writer_id),
-        Some(&rival.writer_id),
-    );
+    assert_eq!(fence.active_writer.writer_id, rival.writer_id);
     let boundary = loonfs_objectstore::keys::boundary(&namespace_id);
     let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id);
     let operations = store.take();

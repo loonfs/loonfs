@@ -15,7 +15,7 @@ Requests through an embedded profile work as follows:
 - **Downloads.** An interrupted download starts again from the beginning, through any profile. Progress for a single-file `loonfs get` counts the bytes received, but doesn't show a total.
 - **Uploads.** A file upload records its prepared commit request. If you rerun the command after the process restarts, the rerun submits that request again and renews its content token through the upload session, so the file isn't uploaded again.
 
-If another writer [fences](../../docs/specs/glossary.md#fence) an embedded profile's [writer session](../../docs/specs/glossary.md#writer-session), that session can't be used again. The request fails with `writer_fenced`, the CLI doesn't resubmit it, and the embedded host drops its handle. A later request starts a new writer session, and that session's first publication takes the namespace back. If a request tries to open the namespace while the old session's work is still ending, it fails with the same `writer_fenced`. A request made after that work ends can open the namespace.
+If another writer [fences](../../docs/specs/glossary.md#fence) an embedded profile's [writer session](../../docs/specs/glossary.md#writer-session), that session can't be used again. The embedded host drops its handle and sends the request once more, as a server does: the second attempt waits for the old session's work to end and starts a new writer session, and that session's first publication takes the namespace back. If another writer fences the new session too, the request fails with `writer_fenced`.
 
 If one namespace is fenced again and again, its traffic is being sent to two writers. Send all of that namespace's traffic to one writer.
 

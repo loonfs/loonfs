@@ -248,7 +248,11 @@ impl Family {
     ) -> Result<Commit> {
         let (MergeOutcome::Found { commit, .. } | MergeOutcome::Committed { commit, .. }) = self
             .main
-            .commit_merge(request, PlannedMerge::Candidate(Box::new(planned)), replan)
+            .commit_merge(
+                &mut request.clone(),
+                PlannedMerge::Candidate(Box::new(planned)),
+                replan,
+            )
             .await?;
         Ok(commit)
     }

@@ -162,13 +162,7 @@ async fn a_fenced_delete_names_the_active_writer_and_epoch() {
         namespace_writer_a.delete().await,
         "a fenced session must not delete the namespace",
     );
-    assert_eq!(
-        fence
-            .active_writer
-            .as_ref()
-            .map(|writer| writer.writer_id.as_str()),
-        Some("writer-b")
-    );
+    assert_eq!(fence.active_writer.writer_id.as_str(), "writer-b");
     assert_eq!(fence.active_epoch, head_after_fencing.writer_epoch);
 }
 
@@ -241,13 +235,7 @@ async fn a_delete_after_another_writers_delete_is_fenced_and_a_new_session_finds
         namespace_writer_a.delete().await,
         "the session finds another writer's tombstone",
     );
-    assert_eq!(
-        fence
-            .active_writer
-            .as_ref()
-            .map(|writer| writer.writer_id.as_str()),
-        Some("writer-b")
-    );
+    assert_eq!(fence.active_writer.writer_id.as_str(), "writer-b");
     assert_eq!(
         namespace_writer_a.session_status(),
         loonfs::NamespaceSessionStatus::Fenced

@@ -1233,7 +1233,7 @@
         "description": "The machine-readable identifiers and state that explain an error response.\n\nEvery field is optional.",
         "properties": {
           "active_acquired_at_ms": {
-            "description": "The time the current writer acquired its epoch, in Unix milliseconds. It's present when the\ncurrent manifest records a writer.",
+            "description": "The time the current writer acquired its epoch, in Unix milliseconds. It's present in every\n`writer_fenced` error.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1244,7 +1244,7 @@
           },
           "active_writer_id": {
             "$ref": "#/components/schemas/WriterId",
-            "description": "The writer of the current epoch. It's present when the current manifest records a writer."
+            "description": "The writer of the current epoch. It's present in every `writer_fenced` error."
           },
           "actual_access_revision_no": {
             "$ref": "#/components/schemas/AccessRevisionNo",

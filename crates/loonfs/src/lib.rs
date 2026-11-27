@@ -150,10 +150,12 @@ pub mod engine {
 /// Commit types used by integrations that submit classified mutations to
 /// the runtime publisher.
 ///
-/// Server handlers build [`publish::CommitIntent`] values, and lower-level
-/// integrations may submit [`publish::CommitCandidate`] values directly.
-/// Most embedded applications do not need this module.
+/// Server handlers build [`publish::CommitIntent`] and
+/// [`publish::MergeRequest`] values, and lower-level integrations may submit
+/// [`publish::CommitCandidate`] values directly. Most embedded applications
+/// do not need this module.
 pub mod publish {
+    pub use crate::namespace::MergeReport;
     pub use loonfs_core::limits::{
         MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_MESSAGE_BYTES, MAX_COMMIT_OPERATIONS,
         MAX_COMMIT_PRECONDITIONS,
@@ -163,6 +165,7 @@ pub mod publish {
         CommitCandidate, CommitIntent, ContentPreparationError, FilesystemOperation, InlineContent,
         PreparedContent,
     };
+    pub use loonfs_core::MergeRequest;
 }
 
 /// Content-preparation proof types used by server integrations.

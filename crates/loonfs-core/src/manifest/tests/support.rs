@@ -939,7 +939,10 @@ pub(crate) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         fork_basis: None,
         pool_id: loonfs_test_support::ids::numbered_pool_id(1),
         status: loonfs_types::format::control::NamespaceStatus::Active {},
-        writer: None,
+        writer: Some(loonfs_types::format::control::WriterBlock {
+            writer_id: loonfs_test_support::ids::writer_id("writer"),
+            acquired_at_ms: 1_000,
+        }),
         folded_wal_no: loonfs_types::WalNo(0),
         namespace_id: namespace_id.clone(),
         manifest_no,
