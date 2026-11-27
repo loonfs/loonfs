@@ -55,13 +55,15 @@ fn with_held<T>(
 }
 const DAY_MS: u64 = 24 * 60 * MINUTE_MS;
 
-/// Returns the idle fold age, in milliseconds, of the runtime that `config`
-/// builds, and zero when the runtime doesn't fold idle tails.
-fn idle_fold_after_ms(config: &TestConfig) -> u64 {
-    config
-        .runtime
-        .idle_fold_after_ms
-        .map_or(0, std::num::NonZeroU64::get)
+/// A fold age longer than any test's clock runs, for a test whose tail
+/// stays unfolded below the fold thresholds.
+const LONG_FOLD_AGE_MS: std::num::NonZeroU64 =
+    std::num::NonZeroU64::new(loonfs::MAX_TAIL_COMMIT_AGE_MS - 1).unwrap();
+
+/// Returns the fold age, in milliseconds, of the runtime that `config`
+/// builds.
+fn fold_age_ms(config: &TestConfig) -> u64 {
+    config.runtime.fold_age_ms.get()
 }
 
 /// A server's runtime and scheduler over `store`, reading `clock`.
@@ -304,10 +306,10 @@ fn local_store(root: &std::path::Path) -> Arc<LocalFsStore> {
 }
 
 #[tokio::test]
-async fn a_restart_then_one_sweep_folds_an_idle_tail_and_collects_garbage() {
+async fn a_restart_then_one_sweep_folds_a_tail_past_the_fold_age_and_collects_garbage() {
     let directory = tempdir().expect("tempdir");
     let store: SharedObjectStore = local_store(directory.path());
-    let namespace_id = namespace_id("idle-tail");
+    let namespace_id = namespace_id("aged-tail");
     let (writer, now_ms) = seed_writer(&store).await;
     seed_unfolded_tail(&writer, &namespace_id).await;
     writer
@@ -331,7 +333,7 @@ async fn a_restart_then_one_sweep_folds_an_idle_tail_and_collects_garbage() {
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
         tail,
-        "a tail that is not yet idle stays unfolded"
+        "a tail younger than the fold age stays unfolded"
     );
     assert_eq!(
         server.counter("loonfs.gc.reclaimed", &[("category", "deleted_manifests")]),
@@ -821,11 +823,11 @@ impl SchedulerServer {
         .expect("a call that keeps retry state")
     }
 
-    /// When the held session's last metadata step said its tail's idle fold
-    /// comes due.
-    fn idle_fold_due_at_ms(&self, namespace_id: &NamespaceId) -> Option<u64> {
+    /// When the held session's last metadata step said its tail reaches the
+    /// fold age.
+    fn fold_due_at_ms(&self, namespace_id: &NamespaceId) -> Option<u64> {
         with_held(&self.scheduler.inner.namespaces, namespace_id, |held| {
-            held.host_state.idle_fold_due_at_ms
+            held.host_state.fold_due_at_ms
         })
         .expect("a held session")
     }
@@ -901,7 +903,7 @@ async fn a_failing_metadata_step_waits_its_interval() {
     config.scheduler.gc_interval_ms = const { std::num::NonZeroU64::new(30 * DAY_MS).unwrap() };
     // The tail is due from the first run, so each metadata step folds it
     // and reaches the failing store.
-    config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
+    config.runtime.fold_age_ms = std::num::NonZeroU64::MIN;
     let (store, server, namespace_id, held) =
         held_failing_server(directory.path(), &config, OperationSelector::Any).await;
     store.fail_all();
@@ -949,7 +951,8 @@ async fn a_failing_collection_backs_off_from_one_interval_to_an_hour() {
     const WAIT_SECONDS: [u64; 12] = [5, 10, 20, 40, 80, 160, 320, 640, 1_280, 2_560, 3_600, 3_600];
     let directory = tempdir().expect("tempdir");
     let mut config = scheduler_config(None);
-    config.runtime.idle_fold_after_ms = None;
+    // The first run folds the tail, so only collection is left due.
+    config.runtime.fold_age_ms = std::num::NonZeroU64::MIN;
     let (store, server, namespace_id, _held) =
         held_failing_server(directory.path(), &config, OperationSelector::List).await;
     server
@@ -975,7 +978,7 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
     let directory = tempdir().expect("tempdir");
     let mut config = scheduler_config(None);
     // The first run folds the tail, so only collection is left due.
-    config.runtime.idle_fold_after_ms = Some(std::num::NonZeroU64::MIN);
+    config.runtime.fold_age_ms = std::num::NonZeroU64::MIN;
     let (store, server, namespace_id, held) =
         held_failing_server(directory.path(), &config, OperationSelector::List).await;
     let namespaces = &server.scheduler.inner.namespaces;

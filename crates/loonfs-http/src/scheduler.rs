@@ -50,10 +50,11 @@ pub struct SchedulerState {
     indexed_seq: Option<CommitSeq>,
     collected_seq: Option<CommitSeq>,
     collected_at_ms: u64,
-    /// When the tail's idle fold comes due, on the scheduler's monotonic
-    /// timer, as the last metadata step that succeeded reported it (see
+    /// When the tail's oldest commit reaches the fold age, on the
+    /// scheduler's monotonic timer, as the last metadata step that succeeded
+    /// reported it (see
     /// [`MetadataMaintenanceReport::next_due_at_ms`](loonfs::MetadataMaintenanceReport::next_due_at_ms)).
-    idle_fold_due_at_ms: Option<u64>,
+    fold_due_at_ms: Option<u64>,
     /// The highest seq the session had committed when its last metadata
     /// step started, whether or not that step succeeded, and `None` before
     /// the first step. A commit since then can leave work in the tail that
@@ -72,7 +73,7 @@ impl HostState for SchedulerState {
             indexed_seq: None,
             collected_seq: None,
             collected_at_ms: opened_at_ms,
-            idle_fold_due_at_ms: None,
+            fold_due_at_ms: None,
             last_step_seq: None,
             metadata_retry: StepRetry::default(),
             index_retry: StepRetry::default(),
@@ -113,12 +114,13 @@ pub(crate) struct StepRetry {
 /// first due step of collection, index, and close. A session without a
 /// position gets no metadata step, because it isn't writing and the
 /// sweep maintains its namespace's metadata. The one exception is a step
-/// from the store once the session's tail reaches the idle fold age that its
-/// last step reported, or once it has committed since that step, so that the
-/// tail of a session whose position was dropped before the scheduler saw the
-/// position is dated too. A metadata step that leaves work unfinished runs
-/// again `metadata_retry_interval_ms` later, or sooner when the step
-/// reported an earlier idle fold. A collection runs once the session's
+/// that reads the store. It runs when the tail's oldest commit reaches the
+/// fold age, at the time that the session's last step reported, or once the
+/// session has committed since that step, so that the tail of a session
+/// whose position was dropped before the scheduler saw the position is dated
+/// too. A metadata step that leaves work unfinished runs again
+/// `metadata_retry_interval_ms` later, or sooner when the tail's oldest
+/// commit reaches the fold age first. A collection runs once the session's
 /// published seq has moved and `gc_interval_ms` has elapsed, and it comes
 /// before the index step, so a session with index work at every interval
 /// still collects.

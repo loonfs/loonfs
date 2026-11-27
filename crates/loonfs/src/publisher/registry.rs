@@ -178,10 +178,7 @@ impl NamespaceSession {
     }
 
     pub(crate) fn last_published_seq(&self) -> Option<CommitSeq> {
-        self.publisher
-            .lock_state()
-            .last_published
-            .map(|last| last.seq)
+        self.publisher.lock_state().last_published_seq
     }
 
     /// Whether the session has a writer position.

@@ -1,8 +1,8 @@
 //! Metadata retry, collection, and close costs for held sessions.
 
 use super::{
-    held_ids, idle_fold_after_ms, list_count, scheduler_config, seed_unfolded_tail, seed_writer,
-    SchedulerServer, SweepReport, DAY_MS,
+    fold_age_ms, held_ids, list_count, scheduler_config, seed_unfolded_tail, seed_writer,
+    SchedulerServer, SweepReport, DAY_MS, LONG_FOLD_AGE_MS, MINUTE_MS,
 };
 use crate::scheduler::retries::MaintenanceCall;
 use crate::WriterSessions as _;
@@ -23,10 +23,10 @@ use tempfile::tempdir;
 /// Checks that a session that never published gets no metadata step, that a
 /// run of the session steps right after a commit reads the waiting tail from
 /// the session's position without a store request, that the step waits for
-/// its retry time, and that the run at the idle fold age folds the tail,
+/// its retry time, and that the run at the fold age folds the tail,
 /// after which the session steps cost nothing.
 #[tokio::test]
-async fn session_steps_fold_idle_tails_from_the_position_and_then_cost_nothing() {
+async fn session_steps_fold_tails_at_the_fold_age_from_the_position_and_then_cost_nothing() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -98,7 +98,7 @@ async fn session_steps_fold_idle_tails_from_the_position_and_then_cost_nothing()
         assert!(server.wal_tail_objects(&namespace_id).await > 0);
         server
             .run_steps_after(
-                idle_fold_after_ms(&config) - config.scheduler.metadata_retry_interval_ms.get(),
+                fold_age_ms(&config) - config.scheduler.metadata_retry_interval_ms.get(),
             )
             .await;
         assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
@@ -118,9 +118,9 @@ async fn session_steps_fold_idle_tails_from_the_position_and_then_cost_nothing()
 }
 
 /// Checks that the session steps leave a quiet session's tail of 3 MiB of inline
-/// values, below the fold triggers, until the tail reaches the idle fold age.
+/// values, below the fold triggers, until the tail reaches the fold age.
 #[tokio::test]
-async fn session_steps_leave_a_tail_below_the_fold_triggers_until_it_is_idle() {
+async fn session_steps_leave_a_tail_below_the_fold_triggers_until_its_fold_age() {
     const MIB: usize = 1024 * 1024;
     const VALUE_BYTES: usize = 256 * 1024;
     let directory = tempdir().expect("tempdir");
@@ -168,15 +168,132 @@ async fn session_steps_leave_a_tail_below_the_fold_triggers_until_it_is_idle() {
         .await;
     assert!(
         server.metadata_left_due(&namespace_id),
-        "the tail waits for its idle fold age"
+        "the tail waits for its fold age"
     );
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
         tail_objects,
         "a tail below the fold triggers stays unfolded"
     );
-    server.run_steps_after(idle_fold_after_ms(&config)).await;
+    server.run_steps_after(fold_age_ms(&config)).await;
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a tail of fences alone never comes due by age, and that the
+/// session steps fold a tail once its oldest commit reaches the fold age,
+/// without another commit, while the tail's newest commit is younger.
+#[tokio::test]
+async fn a_tail_whose_oldest_commit_reaches_the_fold_age_folds_without_another_commit() {
+    let directory = tempdir().expect("tempdir");
+    let config = scheduler_config(None);
+    let server = SchedulerServer::start(super::local_store(directory.path()), &config, 0).await;
+    let namespace_id = namespace_id("oldest-commit");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create");
+    let held = server
+        .scheduler
+        .inner
+        .namespaces
+        .open(&namespace_id)
+        .await
+        .expect("open");
+    // The delete claims the namespace, so it writes a fence, and then
+    // commits nothing, because the path doesn't exist.
+    held.delete_path("/missing", &test_actor())
+        .await
+        .expect_err("a delete of a missing path");
+    assert_eq!(server.wal_tail_objects(&namespace_id).await, 1);
+    server.run_steps_after(2 * fold_age_ms(&config)).await;
+    assert!(
+        server.metadata_caught_up(&namespace_id).await,
+        "a tail of fences alone has no fold age"
+    );
+    assert_eq!(server.wal_tail_objects(&namespace_id).await, 1);
+
+    held.put_file("/first", b"data", &test_actor())
+        .await
+        .expect("publish");
+    let due_at_ms = server.runtime.now_ms() + fold_age_ms(&config);
+    server.run_steps_after(10 * MINUTE_MS).await;
+    held.put_file("/second", b"data", &test_actor())
+        .await
+        .expect("publish");
+    let interval_ms = config.scheduler.maintenance_interval_ms.get();
+    while server.runtime.now_ms() + interval_ms < due_at_ms {
+        server.run_steps_after(interval_ms).await;
+    }
+    assert!(
+        server.wal_tail_objects(&namespace_id).await > 1,
+        "the tail waits while its oldest commit is younger than the fold age"
+    );
+    server
+        .run_steps_after(due_at_ms - server.runtime.now_ms())
+        .await;
+    assert_eq!(
+        server.wal_tail_objects(&namespace_id).await,
+        0,
+        "the step at the oldest commit's fold age folds the tail"
+    );
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that the session steps fold the tail of a writer that commits
+/// every 10 minutes, whose newest commit is never 15 minutes old, so that
+/// its oldest unfolded commit is never older than the 15-minute fold age.
+/// The commits at 0 and 10 minutes fold at 15, the commits at 20 and 30 at
+/// 35, and the commits at 40 and 50 at 55.
+#[tokio::test]
+async fn a_writer_that_commits_every_ten_minutes_still_folds_at_the_fold_age() {
+    const COMMITS: u64 = 6;
+    let directory = tempdir().expect("tempdir");
+    let config = scheduler_config(None);
+    assert_eq!(fold_age_ms(&config), 15 * MINUTE_MS);
+    let store = super::local_store(directory.path());
+    let server = SchedulerServer::start(store, &config, 0).await;
+    let namespace_id = namespace_id("ten-minute-writer");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create");
+    let held = server
+        .scheduler
+        .inner
+        .namespaces
+        .open(&namespace_id)
+        .await
+        .expect("open");
+    let mut folds = 0;
+    for index in 0..COMMITS {
+        held.put_file(&format!("/note-{index}"), b"data", &test_actor())
+            .await
+            .expect("publish");
+        for _ in 0..10 {
+            let had_tail = server.wal_tail_objects(&namespace_id).await > 0;
+            server.run_steps_after(MINUTE_MS).await;
+            let diagnostics = server
+                .maintenance
+                .diagnostics(&namespace_id)
+                .await
+                .expect("namespace diagnostics");
+            if let Some(committed_at_ms) = diagnostics.wal_tail_oldest_commit_at_ms {
+                assert!(
+                    server.runtime.now_ms() - committed_at_ms <= fold_age_ms(&config),
+                    "{diagnostics:?}"
+                );
+            } else if had_tail {
+                folds += 1;
+            }
+        }
+    }
+    assert_eq!(
+        folds, 3,
+        "the tail folds once its oldest commit is 15 minutes old"
+    );
     server.runtime.shutdown().await.expect("shutdown");
 }
 
@@ -261,14 +378,14 @@ async fn a_metadata_step_waits_for_the_sessions_fold_instead_of_folding_the_tail
     server.runtime.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a sweep folds every idle tail: the tail of a held session
+/// Checks that a sweep folds every tail past the fold age: the tail of a held session
 /// with a writer position, the tail of a held session without a
 /// position, and the tail of a namespace without a session. The session
 /// without a position never published, so the session steps run no
 /// metadata step for it, and its tail, which an earlier writer left, waits
 /// for the sweep.
 #[tokio::test]
-async fn a_sweep_folds_every_idle_tail() {
+async fn a_sweep_folds_every_tail_past_the_fold_age() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -305,13 +422,13 @@ async fn a_sweep_folds_every_idle_tail() {
         "the session steps run no metadata step for a session without a position"
     );
     assert!(server.wal_tail_objects(&positioned).await > 0);
-    server.clock.advance_ms(idle_fold_after_ms(&config));
+    server.clock.advance_ms(fold_age_ms(&config));
     assert!(server.scheduler.run_sweep().await.complete);
     for namespace_id in [&positioned, &unpositioned, &unheld] {
         assert_eq!(
             server.wal_tail_objects(namespace_id).await,
             0,
-            "the sweep folds the idle tail of {namespace_id}"
+            "the sweep folds the tail of {namespace_id}"
         );
     }
     server.runtime.shutdown().await.expect("shutdown");
@@ -422,7 +539,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(Some(GrepWorkerConfig::default()));
-    config.runtime.idle_fold_after_ms = None;
+    config.runtime.fold_age_ms = LONG_FOLD_AGE_MS;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let moved = namespace_id("moved");
     let quiet = namespace_id("quiet");
@@ -505,7 +622,8 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(Some(GrepWorkerConfig::default()));
-    config.runtime.idle_fold_after_ms = None;
+    // The first run folds the tail, so nothing is left due.
+    config.runtime.fold_age_ms = std::num::NonZeroU64::MIN;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespaces = &server.scheduler.inner.namespaces;
     let namespace_id = namespace_id("idle-close");
@@ -727,7 +845,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
     ));
     let mut config = scheduler_config(None);
     config.scheduler.idle_session_close_after_ms = std::num::NonZeroU64::MIN;
-    config.runtime.idle_fold_after_ms = std::num::NonZeroU64::new(60_000);
+    config.runtime.fold_age_ms = const { std::num::NonZeroU64::new(60_000).unwrap() };
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespaces = &server.scheduler.inner.namespaces;
     let aborted = namespace_id("aborted-upload");
@@ -778,9 +896,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
     assert!(server.wal_tail_objects(&unfolded).await > 0);
     store.reset();
     server
-        .run_steps_after(
-            idle_fold_after_ms(&config) - config.scheduler.maintenance_interval_ms.get() - 1,
-        )
+        .run_steps_after(fold_age_ms(&config) - config.scheduler.maintenance_interval_ms.get() - 1)
         .await;
     assert!(
         store.take().is_empty(),
@@ -846,7 +962,8 @@ async fn a_session_that_maintained_itself_leaves_the_session_steps_nothing_to_do
 }
 
 /// Checks that the session steps read the runtime's paused timer, so a held session's
-/// tail folds and the session closes exactly when that timer says each is idle.
+/// tail folds when that timer says its oldest commit reaches the fold age, and the
+/// session closes exactly when that timer says the session is idle.
 #[tokio::test]
 async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does() {
     let directory = tempdir().expect("tempdir");
@@ -855,7 +972,7 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(None);
-    config.runtime.idle_fold_after_ms = std::num::NonZeroU64::new(60_000);
+    config.runtime.fold_age_ms = const { std::num::NonZeroU64::new(60_000).unwrap() };
     // The runtime's timer starts a day ahead of the system timer, so a host
     // that read a second timer would disagree with it.
     let server = SchedulerServer::start(store.clone(), &config, DAY_MS).await;
@@ -877,32 +994,28 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
         .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
     assert_eq!(
-        server.idle_fold_due_at_ms(&namespace_id),
-        Some(DAY_MS + idle_fold_after_ms(&config)),
-        "the step reports the idle fold on the runtime's timer"
+        server.fold_due_at_ms(&namespace_id),
+        Some(DAY_MS + fold_age_ms(&config)),
+        "the step reports the fold age on the runtime's timer"
     );
     assert!(server.wal_tail_objects(&namespace_id).await > 0);
     store.reset();
     server
-        .run_steps_after(
-            idle_fold_after_ms(&config) - config.scheduler.maintenance_interval_ms.get() - 1,
-        )
+        .run_steps_after(fold_age_ms(&config) - config.scheduler.maintenance_interval_ms.get() - 1)
         .await;
     assert!(
         store.take().is_empty(),
-        "the tail is not idle yet on the runtime's timer"
+        "the tail is younger than the fold age on the runtime's timer"
     );
     server.run_steps_after(1).await;
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
         0,
-        "the tail folds once it is idle"
+        "the tail folds once its oldest commit reaches the fold age"
     );
 
     server
-        .run_steps_after(
-            config.scheduler.idle_session_close_after_ms.get() - idle_fold_after_ms(&config),
-        )
+        .run_steps_after(config.scheduler.idle_session_close_after_ms.get() - fold_age_ms(&config))
         .await;
     assert_eq!(
         held_ids(namespaces).len(),

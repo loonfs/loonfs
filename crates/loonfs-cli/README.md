@@ -811,8 +811,9 @@ Behavior notes
 
   Embedded profiles don't run maintenance on a schedule. During a write,
   LoonFS folds the namespace's WAL tail when the tail reaches the
-  threshold, and compacts metadata after the fold. Everything else needs
-  a one-off command: `loonfs maintenance metadata` folds an idle tail,
+  threshold or its oldest commit reaches the fold age, and compacts
+  metadata after the fold. Everything else needs a one-off command:
+  `loonfs maintenance metadata` folds a tail past the fold age,
   `loonfs maintenance gc` collects the namespace's garbage,
   `loonfs maintenance pool gc` collects the namespace's pool, and
   `loonfs maintenance index enable` brings the grep index up to the

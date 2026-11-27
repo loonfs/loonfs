@@ -3335,7 +3335,7 @@ async fn a_metadata_call_with_nothing_to_fold_takes_no_fold_permit() {
     assert_eq!(
         maintained.response.outcome,
         crate::MetadataMaintenanceOutcome::Due,
-        "the tail waits for its idle fold age"
+        "the tail waits for its fold age"
     );
     assert!(maintained.next_due_at_ms.is_some());
     drop(permits);

@@ -508,12 +508,11 @@ async fn two_servers_share_one_store_and_retry_a_fenced_request_in_a_new_session
         Some("two-server-smoke"),
     )
     .expect("store");
-    let writer_epoch = || async {
+    let writer_state = || async {
         loonfs_core::test_support::namespace_store(&store, &namespace_id("demo"))
             .load_read_state()
             .await
             .expect("read head")
-            .writer_epoch
     };
     let client_a = server_a.client.clone();
     let client_b = server_b.client.clone();
@@ -558,14 +557,35 @@ async fn two_servers_share_one_store_and_retry_a_fenced_request_in_a_new_session
     // sends the request once more in a new session, whose claim raises the
     // writer epoch.
     let host_c_target = NamespacePath::parse("demo", "/docs/host-c.txt").expect("host c target");
-    for loser in [&server_a, &server_b, &server_a, &server_b] {
-        let before = writer_epoch().await;
+    // A server's writer ID is its configured prefix and a suffix that it
+    // generated at start, and its later sessions write the same ID.
+    let mut writer_ids = std::collections::BTreeMap::new();
+    for (loser, writer_prefix) in [
+        (&server_a, "loonfs-server-a"),
+        (&server_b, "loonfs-server-b"),
+        (&server_a, "loonfs-server-a"),
+        (&server_b, "loonfs-server-b"),
+    ] {
+        let before = writer_state().await;
         loser
             .client
             .put_file_with_options(&host_c_target, b"another write\n", &replace_file_options())
             .await
             .expect("the fenced request takes the namespace back in a new session");
-        assert_eq!(writer_epoch().await.0, before.0 + 1);
+        let after = writer_state().await;
+        assert_eq!(after.writer_epoch.0, before.writer_epoch.0 + 1);
+        let writer = after.writer.expect("the claim's writer block");
+        let writer_id = writer.writer_id.as_str();
+        assert!(
+            writer_id.starts_with(&format!("{writer_prefix}-srv_")),
+            "{writer_id}"
+        );
+        assert_eq!(
+            writer_ids
+                .entry(writer_prefix)
+                .or_insert_with(|| writer_id.to_owned()),
+            writer_id
+        );
     }
 
     // Fencing gates writes only; server A still reads the moved file.

@@ -147,12 +147,12 @@ Every error response uses this JSON envelope:
 ```json
 {
   "code": "writer_fenced",
-  "message": "writer session fenced: epoch 3 was fenced by epoch 4 (writer `server-b`, acquired at 1739459200000 ms)",
+  "message": "writer session fenced: epoch 3 was fenced by epoch 4 (writer `server-b-srv_3s0drmj8em84yb4mnetqkz2j0x`, acquired at 1739459200000 ms)",
   "request_id": "req_4k8m2v9qx7d3hn5tbwa6jc1rfe",
   "details": {
     "fenced_writer_epoch": 3,
     "active_writer_epoch": 4,
-    "active_writer_id": "server-b",
+    "active_writer_id": "server-b-srv_3s0drmj8em84yb4mnetqkz2j0x",
     "active_acquired_at_ms": 1739459200000
   }
 }
@@ -191,7 +191,7 @@ The codes that populate it:
 | --- | --- |
 | `namespace_not_found` | `namespace_id` identifies the missing namespace, including a fork referenced by a merge, rebase, replay, or next-merge-range request. |
 | `namespace_deleted` | `namespace_id` identifies the deleted namespace, including a fork's source or target, or a fork referenced by a merge, rebase, replay, or next-merge-range request. |
-| `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, `active_writer_id` and `active_acquired_at_ms`, from the writer block of the claim that took the namespace. Because writer IDs are process labels that two runs on one host can share, the acquisition timestamp distinguishes them. |
+| `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, `active_writer_id` and `active_acquired_at_ms`, from the writer block of the claim that took the namespace. Each run of the reference server has its own writer ID, but two runs of an embedded runtime can use the same writer ID, and the acquisition timestamp distinguishes them. |
 | `path_conflict` | `expected_inode_id` and `actual_inode_id` (absent when the path isn't bound), plus `precondition_index` for a failed request precondition. |
 | `stale_revision` | `inode_id`, `expected_revision_no`, and `actual_revision_no` (absent when the inode has no current revision or isn't visible), plus `precondition_index` for a failed request precondition. |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), and `actual_attributes_revision_no` (absent when the inode isn't visible), plus `precondition_index` for a failed request precondition. |
@@ -792,7 +792,7 @@ A `metadata` job [folds](glossary.md#fold) the WAL tail when due and then [compa
 The `metadata` response reports `compaction_units` (units published by this call) and `outcome`:
 
 - `caught_up`: nothing is due, and nothing can become due without a new commit.
-- `due`: more work remains or couldn't be confirmed (for example, the job stopped early, or the WAL tail is below the fold threshold and hasn't gone idle yet). Callers run another `metadata` job later.
+- `due`: more work remains or couldn't be confirmed (for example, the job stopped early, or the WAL tail is below the fold threshold and its oldest commit hasn't reached the [fold age](glossary.md#fold-age) yet). Callers run another `metadata` job later.
 
 ```json
 {"kind":"metadata","namespace_id":"demo","outcome":"caught_up","compaction_units":2}
@@ -806,7 +806,7 @@ If any published unit hit a limit and skipped part of its work, the response inc
 
 Because compaction units can take minutes, the reference server exempts maintenance jobs from its request deadline. Clients send `run_maintenance_job` once (it's `not_idempotent`) and schedule another call after a `due` outcome.
 
-In a `metadata` job, `max_wal_tail_objects` overrides the WAL-object fold threshold while the WAL-byte threshold and idle fold still apply (0 or values above the write-rejection threshold return `invalid_request`). A tail below the count threshold still folds once its newest commit is at least as old as the server's idle period (15 minutes by default, measured on the server's clock, unless disabled, see [Recovery material and maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). Metadata jobs never prune replay history, which requires `kind: "retention"`.
+In a `metadata` job, `max_wal_tail_objects` overrides the WAL-object fold threshold while the WAL-byte threshold and the [fold age](glossary.md#fold-age) still apply (0 or values above the write-rejection threshold return `invalid_request`). A tail below the count threshold still folds once its oldest commit is at least as old as the server's fold age (15 minutes by default, measured on the server's clock, see [Recovery material and maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). Metadata jobs never prune replay history, which requires `kind: "retention"`.
 
 #### Retention jobs
 
@@ -1267,6 +1267,7 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
 | `retention_floor_seq` | Current retention floor. |
 | `current_manifest_no` | Current manifest number, present from namespace creation. |
 | `wal_tail_objects` | WAL tip minus the current manifest's folded WAL number, including fences. |
+| `wal_tail_oldest_commit_at_ms` | Time of the oldest commit after the current manifest, in Unix milliseconds. Absent when the tail has no commit (a tail of fences alone has none). A control plane reads it to see whether a fold is due by age. |
 | `live_snapshots` | Count of snapshots unexpired when the diagnostics read began (including non-expiring snapshots). |
 
 ```json
@@ -1278,6 +1279,7 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
   "retention_floor_seq": 120,
   "current_manifest_no": 410,
   "wal_tail_objects": 3,
+  "wal_tail_oldest_commit_at_ms": 1752623400000,
   "live_snapshots": 2
 }
 ```

@@ -3358,6 +3358,12 @@
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "wal_tail_oldest_commit_at_ms": {
+            "description": "The time of the oldest visible commit after the current manifest, in Unix milliseconds. Absent\nwhen that tail has no commit, such as a tail of fences alone.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -5107,7 +5113,7 @@
         "type": "integer"
       },
       "WriterId": {
-        "description": "A stable writer label that the embedding process supplies.",
+        "description": "The label of a writer, which a manifest's writer block records when the\nwriter claims a namespace.\n\nThe reference server adds an ID that it generates at start to the\nwriter ID in its config, so each run of the server has its own writer\nID. An embedded caller supplies the whole writer ID, so two runs can use\nthe same writer ID.",
         "type": "string"
       }
     },

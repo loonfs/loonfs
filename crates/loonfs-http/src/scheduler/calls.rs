@@ -55,7 +55,7 @@ impl Scheduler {
                 self.maintain_index(grep, &namespace_id, entry, seq).await;
             }
             // The advance reads only folded commits, so it runs after the
-            // metadata call, which can fold an idle tail.
+            // metadata call, which can fold a tail at its fold age.
             self.advance_retention(maintenance, &namespace_id, entry)
                 .await;
         }
@@ -97,13 +97,13 @@ impl Scheduler {
             .and_then(|report| report.next_due_at_ms);
         // A caught-up session whose position shows nothing due costs nothing
         // to ask again. A step without a position read the store, so
-        // it waits for the retry interval. A tail that waits for its idle
-        // fold age is asked again at that age if it comes first.
+        // it waits for the retry interval. A tail that waits for its fold
+        // age is asked again at that age if it comes first.
         let positioned = entry.is_some_and(|entry| {
             let mut held = lock(entry);
             held.host_state.last_step_seq = seq.flatten();
             if outcome.is_ok() {
-                held.host_state.idle_fold_due_at_ms = next_due_at_ms;
+                held.host_state.fold_due_at_ms = next_due_at_ms;
             }
             held.handle.has_current_writer_position()
         });

@@ -9,7 +9,9 @@ use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_http::AuthPolicy;
 use loonfs_types::config::{non_blank, validate_non_empty, ConfigFieldError};
 use loonfs_types::env::{AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV};
-use loonfs_types::{SecretString, WriterId};
+use loonfs_types::{
+    generated_id, SecretString, WriterId, GENERATED_ID_BODY_BYTES, MAX_WRITER_ID_BYTES,
+};
 use std::env;
 use std::fs;
 use std::net::SocketAddr;
@@ -28,6 +30,10 @@ pub struct ValidatedServerConfig {
     pub(crate) auth_policy: AuthPolicy,
     pub(crate) memory: MemorySizing,
     pub(crate) grep_policy: GramIndexBuildPolicy,
+    /// The server's writer ID: the configured `writer_id`, a hyphen, and an
+    /// ID that [`ServerConfig::validate`] generates, so two servers started
+    /// from one config write different writer blocks.
+    pub(crate) writer_id: WriterId,
     pub(crate) maintenance_writer_id: WriterId,
 }
 
@@ -83,7 +89,10 @@ impl ServerConfig {
 
     /// Checks every setting, and returns the config with the values that
     /// the checks derive: the bind address, the auth policy, the memory
-    /// sizing, the grep build policy, and the maintenance writer ID.
+    /// sizing, the grep build policy, and the writer IDs.
+    ///
+    /// Each call generates a new suffix for the server's writer ID, and a
+    /// server validates its config once when it starts.
     pub fn validate(self) -> Result<ValidatedServerConfig> {
         let bind = validate_socket_addr("bind", &self.bind)?;
         let auth_policy = self.auth_policy(&bind)?;
@@ -123,13 +132,7 @@ impl ServerConfig {
             validate_non_empty("metadata_cache.ssd.directory", &ssd.directory)?;
         }
         self.store.validate()?;
-        let maintenance_writer_id = WriterId::parse(format!("{}-maintenance", self.writer_id))
-            .map_err(|error| {
-                ServerError::Config(ConfigFieldError::Invalid {
-                    field: "writer_id",
-                    reason: error.to_string(),
-                })
-            })?;
+        let (writer_id, maintenance_writer_id) = self.writer_ids()?;
 
         let cgroup_limit = if self.memory_limit_bytes.is_none() && cfg!(target_os = "linux") {
             read_cgroup_memory_limit(&[
@@ -146,6 +149,7 @@ impl ServerConfig {
             auth_policy,
             memory,
             grep_policy,
+            writer_id,
             maintenance_writer_id,
         })
     }
@@ -233,6 +237,48 @@ pub(super) fn validate_positive(field: &'static str, value: u64) -> Result<()> {
         field,
         reason: "must be greater than zero".to_owned(),
     }))
+}
+
+/// The prefix of the ID that the server generates for its writer ID.
+const GENERATED_WRITER_ID_PREFIX: &str = "srv";
+
+/// The end of the maintenance writer ID, after the server's writer ID.
+const MAINTENANCE_WRITER_ID_SUFFIX: &str = "-maintenance";
+
+/// Most bytes of the configured `writer_id`: the writer ID limit minus the
+/// hyphen and the generated ID that the server adds, and minus the end of the
+/// maintenance writer ID.
+const MAX_CONFIGURED_WRITER_ID_BYTES: usize = MAX_WRITER_ID_BYTES
+    - 1
+    - GENERATED_WRITER_ID_PREFIX.len()
+    - 1
+    - GENERATED_ID_BODY_BYTES
+    - MAINTENANCE_WRITER_ID_SUFFIX.len();
+
+impl ServerConfig {
+    /// Returns the server's writer ID and its maintenance writer ID, and
+    /// rejects a configured `writer_id` too long to take the generated ID.
+    fn writer_ids(&self) -> Result<(WriterId, WriterId)> {
+        let configured = self.writer_id.as_str();
+        if configured.len() > MAX_CONFIGURED_WRITER_ID_BYTES {
+            return Err(ServerError::Config(ConfigFieldError::Invalid {
+                field: "writer_id",
+                reason: format!(
+                    "{configured:?} must be {MAX_CONFIGURED_WRITER_ID_BYTES} bytes or fewer, \
+                     because the server adds a generated ID to it"
+                ),
+            }));
+        }
+        let writer_id = WriterId::parse(format!(
+            "{configured}-{}",
+            generated_id(GENERATED_WRITER_ID_PREFIX)
+        ))
+        .expect("a configured writer ID within its limit should take the generated ID");
+        let maintenance_writer_id =
+            WriterId::parse(format!("{writer_id}{MAINTENANCE_WRITER_ID_SUFFIX}"))
+                .expect("a configured writer ID within its limit should take both suffixes");
+        Ok((writer_id, maintenance_writer_id))
+    }
 }
 
 fn validate_socket_addr(field: &'static str, value: &str) -> Result<SocketAddr> {

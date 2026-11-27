@@ -73,7 +73,7 @@ impl Scheduler {
     ///
     /// The metadata step runs when its retry time has come and the session has
     /// a writer position, and once when the session's tail reaches the
-    /// idle fold age that its last step reported, whatever the position (see
+    /// fold age that its last step reported, whatever the position (see
     /// [`metadata_due`]). A session without a position isn't writing,
     /// so otherwise the sweep maintains its namespace's metadata, as it does
     /// for a namespace without a session. Collection comes before the index
@@ -343,9 +343,9 @@ pub(super) fn held_ids(
 
 /// Returns whether a held session's metadata step is due at `now_ms`: its
 /// retry time has come, and the session has a writer position, or
-/// its tail has reached the idle fold age that its last step reported, or
+/// its tail has reached the fold age that its last step reported, or
 /// the session has committed since its last step. A step without a position
-/// reads the store, so it runs only for that idle fold, or once to date a
+/// reads the store, so it runs only for that fold, or once to date a
 /// tail that no step has seen, and its own report replaces the due time.
 fn metadata_due(held: &HeldNamespace<SchedulerState>, positioned: bool, now_ms: u64) -> bool {
     let state = &held.host_state;
@@ -353,6 +353,6 @@ fn metadata_due(held: &HeldNamespace<SchedulerState>, positioned: bool, now_ms: 
         && (positioned
             || held.handle.last_published_seq() != state.last_step_seq
             || state
-                .idle_fold_due_at_ms
+                .fold_due_at_ms
                 .is_some_and(|due_at_ms| now_ms >= due_at_ms))
 }

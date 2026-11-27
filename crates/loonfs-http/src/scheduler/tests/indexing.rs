@@ -1,7 +1,8 @@
 //! Index lifecycle changes and unfinished index work on held entries.
 
 use super::{
-    held_ids, idle_fold_after_ms, scheduler_config, seed_writer, with_held, SchedulerServer,
+    fold_age_ms, held_ids, scheduler_config, seed_writer, with_held, SchedulerServer,
+    LONG_FOLD_AGE_MS,
 };
 use crate::WriterSessions as _;
 use loonfs::{CommitSeq, SharedObjectStore};
@@ -24,7 +25,7 @@ async fn session_steps_index_publishes_and_lifecycle_changes_then_cost_nothing()
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(Some(GrepWorkerConfig::default()));
-    config.runtime.idle_fold_after_ms = None;
+    config.runtime.fold_age_ms = LONG_FOLD_AGE_MS;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("index-changes");
     server
@@ -204,10 +205,10 @@ async fn a_session_written_at_every_interval_is_indexed_at_every_interval_and_st
             "run {index} leaves the session open"
         );
     }
-    server.run_steps_after(idle_fold_after_ms(&config)).await;
+    server.run_steps_after(fold_age_ms(&config)).await;
     assert!(
         held_ids(namespaces).is_empty(),
-        "once the commits stop, the run that folds the idle tail closes the session"
+        "once the commits stop, the run that folds the tail at its fold age closes the session"
     );
     server.runtime.shutdown().await.expect("shutdown");
 }
@@ -348,7 +349,8 @@ async fn pending_reorganization_keeps_an_idle_session_open() {
         max_files_per_step: 1,
         ..GrepWorkerConfig::default()
     }));
-    config.runtime.idle_fold_after_ms = None;
+    // The first run folds the tail, so only the index step is left due.
+    config.runtime.fold_age_ms = std::num::NonZeroU64::MIN;
     let mut server = SchedulerServer::start(store.clone(), &config, 0).await;
     let policy = &mut Arc::get_mut(&mut server.scheduler.inner)
         .expect("one sweep")

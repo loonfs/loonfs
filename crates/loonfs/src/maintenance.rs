@@ -166,6 +166,7 @@ impl Maintenance {
             retention_floor_seq: diagnostics.retention_floor_seq,
             current_manifest_no: Some(diagnostics.current_manifest_no),
             wal_tail_objects: diagnostics.wal_tail_objects,
+            wal_tail_oldest_commit_at_ms: diagnostics.wal_tail_oldest_commit_at_ms,
             live_snapshots,
         }
     }
@@ -185,9 +186,8 @@ impl Maintenance {
     /// unfolded WAL bytes, at a quarter of the inline tail limit in inline
     /// content bytes (see
     /// [`fold_at_inline_bytes`](loonfs_core::limits::fold_at_inline_bytes)),
-    /// or once the tail's newest commit reaches the
-    /// runtime's idle fold age (see
-    /// [`RuntimeConfig::idle_fold_after_ms`](crate::RuntimeConfig::idle_fold_after_ms)).
+    /// or once the tail's oldest commit reaches the runtime's fold age (see
+    /// [`RuntimeConfig::fold_age_ms`](crate::RuntimeConfig::fold_age_ms)).
     /// The check reads the position of this runtime's writer session when
     /// the session has one, and otherwise the tail that it loads from the
     /// store.
@@ -283,9 +283,8 @@ impl Maintenance {
     /// under `options`, based on the state this call read. It is
     /// [`MetadataMaintenanceOutcome::Due`] at a work limit, after lost races,
     /// on fencing or cancellation, when a compaction unit does not finish,
-    /// or while a tail waits for the idle fold age. When the wait for the
-    /// idle fold age is the only work left, the report says when the fold
-    /// comes due.
+    /// or while a tail waits for the fold age. When the wait for the fold
+    /// age is the only work left, the report says when the fold comes due.
     pub async fn maintain_metadata_while_due_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -309,19 +308,19 @@ impl Maintenance {
                 }
                 fold = self.fold_when_due(namespace_id, options) => fold?,
             };
-            let (idle_fold_due_at_ms, observed) = match fold {
+            let (fold_due_at_ms, observed) = match fold {
                 NamespaceFold::NotDue {
-                    idle_fold_due_at_ms,
+                    fold_due_at_ms,
                     observed,
-                } => (idle_fold_due_at_ms, observed),
+                } => (fold_due_at_ms, observed),
                 NamespaceFold::Folded(_) => (None, None),
             };
             let mut response = self
                 .compact_namespace(namespace_id, observed, cancellation)
                 .await?;
-            let next_due_at_ms = idle_fold_due_at_ms
-                .filter(|_| response.outcome == MetadataMaintenanceOutcome::CaughtUp);
-            if idle_fold_due_at_ms.is_some() {
+            let next_due_at_ms =
+                fold_due_at_ms.filter(|_| response.outcome == MetadataMaintenanceOutcome::CaughtUp);
+            if fold_due_at_ms.is_some() {
                 response.outcome = MetadataMaintenanceOutcome::Due;
             }
             Ok(MetadataMaintenanceReport {

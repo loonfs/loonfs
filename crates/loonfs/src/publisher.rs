@@ -196,18 +196,13 @@ struct NamespacePublisherState {
     /// queued when its last batch settled, so the next request publishes
     /// immediately.
     last_publish: Option<Observation>,
-    last_published: Option<LastPublish>,
+    /// The seq of the newest commit this session published, and `None`
+    /// before its first.
+    last_published_seq: Option<CommitSeq>,
     /// The candidates this namespace last added to the runtime's count of
     /// queued candidates, which [`NamespacePublisher::count_queued`] keeps
     /// equal to the candidates in `queue`.
     counted_candidates: usize,
-}
-
-/// The newest commit this session published, and when it published it.
-#[derive(Debug, Clone, Copy)]
-struct LastPublish {
-    seq: CommitSeq,
-    at_ms: u64,
 }
 
 impl NamespacePublisherState {
@@ -255,7 +250,7 @@ impl NamespacePublisher {
                 compaction: None,
                 next_task_id: 0,
                 last_publish: None,
-                last_published: None,
+                last_published_seq: None,
                 counted_candidates: 0,
             })),
             engine: Arc::new(AsyncMutex::new(engine)),
@@ -479,12 +474,6 @@ impl NamespacePublisher {
         self.context
             .runtime_core
             .invalidate_namespace_read_cache(&self.namespace_id);
-    }
-
-    /// Returns when this session last published, on the runtime's monotonic
-    /// clock, or `None` before its first publish.
-    pub(super) fn last_published_at_ms(&self) -> Option<u64> {
-        self.lock_state().last_published.map(|last| last.at_ms)
     }
 
     pub(super) fn namespace_deleted(&self) -> CoreError {

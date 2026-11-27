@@ -5,7 +5,7 @@ use crate::ServerError;
 use loonfs_test_support::EnvGuard;
 use loonfs_types::config::ConfigFieldError;
 use loonfs_types::env::CONTENT_TOKEN_SECRET_ENV;
-use loonfs_types::SecretString;
+use loonfs_types::{SecretString, GENERATED_ID_BODY_BYTES, MAX_WRITER_ID_BYTES};
 
 #[test]
 fn inline_content_defaults_and_overrides_keep_the_threshold_a_number() {
@@ -109,10 +109,11 @@ root = "/tmp/loonfs-server"
     );
 }
 
-/// Checks that an absent idle fold age takes the runtime's default, and that
-/// zero turns the rule off.
+/// Checks that an absent fold age takes the runtime's default, that a set
+/// one reaches the runtime, and that zero and a fold age at
+/// `MAX_TAIL_COMMIT_AGE_MS` are refused.
 #[test]
-fn the_runtime_takes_the_idle_fold_age_or_its_default() {
+fn the_runtime_takes_the_fold_age_or_its_default_below_the_tail_commit_age_bound() {
     let config = |setting: &str| {
         parse_server_config(&format!(
             r#"
@@ -126,21 +127,86 @@ kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
         ))
-        .expect("valid config")
     };
+    let bound = loonfs::MAX_TAIL_COMMIT_AGE_MS;
     for (setting, expected) in [
-        ("", Some(loonfs::DEFAULT_IDLE_FOLD_AFTER_MS)),
-        (
-            "idle_fold_after_ms = 60000",
-            std::num::NonZeroU64::new(60_000),
-        ),
-        ("idle_fold_after_ms = 0", None),
+        ("".to_owned(), loonfs::DEFAULT_FOLD_AGE_MS.get()),
+        ("fold_age_ms = 60000".to_owned(), 60_000),
+        (format!("fold_age_ms = {}", bound - 1), bound - 1),
     ] {
         assert_eq!(
-            config(setting).config().runtime_config().idle_fold_after_ms,
+            config(&setting)
+                .expect("valid config")
+                .config()
+                .runtime_config()
+                .fold_age_ms
+                .get(),
             expected,
             "{setting:?}"
         );
+    }
+    let error = config("fold_age_ms = 0").expect_err("a zero fold age");
+    assert!(
+        matches!(&error, ServerError::ConfigDecode(message) if message.contains("fold_age_ms")),
+        "{error:?}"
+    );
+    assert_invalid_field(
+        config(&format!("fold_age_ms = {bound}")).expect_err("a fold age at the bound"),
+        "fold_age_ms",
+    );
+}
+
+/// Checks that a server's writer ID is the configured `writer_id`, a hyphen,
+/// and an ID that each validation generates, so two servers started from one
+/// config have different writer IDs, and that a `writer_id` too long to take
+/// the suffix fails validation.
+#[test]
+fn a_server_writer_id_is_the_configured_prefix_and_a_generated_suffix() {
+    let source = |writer_id: &str| {
+        format!(
+            r#"
+bind = "127.0.0.1:9400"
+content_token_secret = "dev-content-token-secret"
+writer_id = "{writer_id}"
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#
+        )
+    };
+    let [first, second] =
+        [(); 2].map(|()| parse_server_config(&source("loonfs-server")).expect("valid config"));
+    for config in [&first, &second] {
+        let suffix = config
+            .writer_id
+            .as_str()
+            .strip_prefix("loonfs-server-srv_")
+            .expect("the writer ID starts with the configured prefix");
+        assert_eq!(suffix.len(), GENERATED_ID_BODY_BYTES, "{suffix}");
+        assert_eq!(config.config().writer_id.as_str(), "loonfs-server");
+        assert_eq!(
+            config.maintenance_writer_id.as_str(),
+            format!("{}-maintenance", config.writer_id)
+        );
+    }
+    assert_ne!(first.writer_id, second.writer_id);
+
+    // The self-hosting guide states this limit.
+    let longest_prefix =
+        MAX_WRITER_ID_BYTES - "-srv_".len() - GENERATED_ID_BODY_BYTES - "-maintenance".len();
+    assert_eq!(longest_prefix, 213);
+    parse_server_config(&source(&"w".repeat(longest_prefix))).expect("the longest prefix");
+    let too_long = "w".repeat(longest_prefix + 1);
+    match parse_server_config(&source(&too_long)).expect_err("a prefix too long for the suffix") {
+        ServerError::Config(ConfigFieldError::Invalid { field, reason }) => {
+            assert_eq!(field, "writer_id");
+            assert!(
+                reason.starts_with(&format!("{too_long:?} must be 213 bytes or fewer")),
+                "{reason}"
+            );
+        }
+        other => panic!("expected an invalid `writer_id`, got {other:?}"),
     }
 }
 

@@ -11,14 +11,19 @@ use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStor
 use std::assert_matches;
 use std::sync::Arc;
 
+/// Checks that a runtime without a session folds a short tail once the
+/// tail's oldest commit reaches the runtime's fold age, while a newer commit
+/// in the tail is younger, and that a runtime with a longer fold age leaves
+/// the tail.
 #[tokio::test]
-async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
+async fn a_fresh_runtime_folds_a_short_tail_once_its_oldest_commit_reaches_the_fold_age() {
     const COMMITTED_AT_MS: u64 = 1_750_000_000_000;
+    const NEWER_COMMIT_AFTER_MS: u64 = 10 * 60 * 1_000;
     let directory = tempfile::tempdir().expect("directory");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(directory.path()).expect("local store"));
     let clock = Arc::new(ManualClock::new(COMMITTED_AT_MS));
-    let namespace_id = namespace_id("idle-tail");
+    let namespace_id = namespace_id("aged-tail");
     let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("departed-writer"))
         .wall_clock(clock.clone())
@@ -36,20 +41,26 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         .put_file("/file.txt", b"body", &loonfs_test_support::test_actor())
         .await
         .expect("write file");
+    clock.set_ms(COMMITTED_AT_MS + NEWER_COMMIT_AFTER_MS);
+    namespace
+        .put_file("/newer.txt", b"newer", &loonfs_test_support::test_actor())
+        .await
+        .expect("write a newer file");
     writer.shutdown().await.expect("writer shutdown");
     drop(writer);
 
-    let disabled = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("idle-off-worker"))
+    let fold_age_ms = loonfs::DEFAULT_FOLD_AGE_MS.get();
+    let patient = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("patient-worker"))
         .wall_clock(clock.clone())
         .config(loonfs::RuntimeConfig {
-            idle_fold_after_ms: None,
+            fold_age_ms: std::num::NonZeroU64::new(fold_age_ms + 1).expect("a nonzero fold age"),
             ..loonfs::RuntimeConfig::default()
         })
         .build()
         .await
-        .expect("maintenance without idle folds")
-        .maintenance(loonfs_test_support::ids::writer_id("idle-off-worker"));
+        .expect("maintenance with a longer fold age")
+        .maintenance(loonfs_test_support::ids::writer_id("patient-worker"));
     let maintenance = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("fresh-worker"))
         .wall_clock(clock.clone())
@@ -57,9 +68,8 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         .await
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("fresh-worker"));
-    let idle_ms = loonfs::DEFAULT_IDLE_FOLD_AFTER_MS.get();
 
-    clock.set_ms(COMMITTED_AT_MS + idle_ms - 1);
+    clock.set_ms(COMMITTED_AT_MS + fold_age_ms - 1);
     assert_eq!(
         maintenance
             .maintain_metadata(&namespace_id)
@@ -67,23 +77,23 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
             .expect("young tail")
             .wal_fold,
         None,
-        "a tail younger than the idle period waits"
+        "a tail whose oldest commit is younger than the fold age waits"
     );
-    clock.set_ms(COMMITTED_AT_MS + idle_ms);
+    clock.set_ms(COMMITTED_AT_MS + fold_age_ms);
     assert_eq!(
-        disabled
+        patient
             .maintain_metadata(&namespace_id)
             .await
-            .expect("idle rule off")
+            .expect("longer fold age")
             .wal_fold,
         None,
-        "a runtime without an idle fold age leaves a short tail"
+        "a runtime with a longer fold age leaves a short tail"
     );
     assert_matches!(
         maintenance
             .maintain_metadata(&namespace_id)
             .await
-            .expect("idle fold")
+            .expect("fold at the fold age")
             .wal_fold,
         Some(FoldWalResponse {
             outcome: FoldWalOutcome::Published,
