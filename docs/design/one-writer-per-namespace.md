@@ -85,12 +85,12 @@ A request that finds a newer writer gets `writer_fenced`, whose details include 
 
 When a session finds that it's fenced, it cancels its compaction unit, so its drain ends once the requests in flight and any running fold finish. The server then retries the fenced request once in a new session, whose first publication claims again. A request is safe to send again when the fenced attempt wrote nothing that the retry could repeat, and the retry checks the request's identity or preconditions against the new state. That's true of every request that can be fenced:
 
-- **A commit, a merge and a replay.** `writer_fenced` comes from a discovery before the put or after a collision, so the fenced attempt's put wasn't written (a claim that finds a newer epoch returns `writer_fenced` before the commit's put). An earlier put of the request whose outcome was unknown is either replayed by the new fence's discovery or can't be written above the fence, and the retry's receipt check, with the same `commit_id` and fingerprint, replays it if it committed. Preconditions are evaluated again.
+- **A commit, a merge and a replay.** `writer_fenced` comes from a discovery before the put or after a collision, so the fenced attempt's put wasn't written (a claim that finds a newer epoch returns `writer_fenced` before the commit's put). If the retry wrote its fence, an earlier put of the request whose outcome was unknown is either replayed by that fence's discovery or can't be written above the fence, and the retry's receipt check, with the same `commit_id` and fingerprint, replays it if it committed. A retry fenced between its claim manifest and its fence leaves no fence above that earlier put, which can still be written. Preconditions are evaluated again.
 - **A namespace deletion.** The tombstone is its last put, so a fenced deletion wrote none, and the retry checks `expected_head_seq` again while it keeps the lane.
 - **A maintenance job and an install.** Each plans from the current state, so a repeat publishes at most what is due, and an install checks its inputs again.
 - **A snapshot and a fork.** One that claims is fenced during its fold, before it writes its snapshot record or the fork's manifest 1. A snapshot whose verification finds a claim marks its candidate deleted first, as a failed creation does. A snapshot with nothing to fold doesn't claim, so it isn't fenced, and a successor at its verification means it tries again.
 
-Reads and uploads never get `writer_fenced`. If the retry is displaced too, the client gets the reply, which identifies the newer writer, and a metric records each displacement.
+Reads and uploads never get `writer_fenced`. If the retry is displaced too, the client gets the reply, which identifies the newer writer, and a metric records each displacement. When a put of the request had an unknown outcome, the server returns `outcome_unknown` instead, as the publisher does for any failure after an unknown outcome, because that put can still commit.
 
 The core has no other way to choose which process writes a namespace: no timer, liveness check, delay, lease, or directory of writers. Placement is up to whatever sends requests to servers.
 
@@ -101,7 +101,7 @@ A control plane uses four operations:
 - **Claim.** A server claims a namespace on first use, when a request first needs to change it. There is no claim route.
 - **Release.** A route that closes the namespace's session for a planned move. The close rejects new work with `writer_session_closed`, drains the admitted commits, cancels the compaction unit, waits for a running fold, and writes nothing. It doesn't fold. The next writer pays one claim (2 puts and about 6 + k reads for a tail of k WAL objects, about 200 ms), reads the unfolded tail once, and starts with cold caches.
 - **Maintain.** The maintenance jobs (`metadata`, `retention`, `retention_window` and `install`) and the routes that enable and disable the grep index run as the writer on the server that receives them, which claims first when it isn't the writer.
-- **The reply.** `writer_fenced` after the one retry, as above.
+- **The reply.** `writer_fenced` after the one retry, or `outcome_unknown` when a put of the request had an unknown outcome, as above.
 
 To see what needs work, a control plane uses the reads that exist. The namespace diagnostics route reports the head, the floor, the manifest number and the number of unfolded WAL objects, but not the tail's age. The manifest records the retention window, and a worker's planner reports whether a compaction unit is due in the manifest that it read. A `metadata` job runs as the writer and so claims, which makes it an action, not a read.
 
