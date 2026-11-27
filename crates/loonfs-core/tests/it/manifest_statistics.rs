@@ -114,10 +114,19 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
                 .activity,
             initial.activity
         );
-        let input = cached.then(|| engine.writer_position().expect("the position's tail"));
+        let input = if cached {
+            engine.writer_position().expect("the position's tail")
+        } else {
+            // A new session claims the namespace and loads the tail from the
+            // store.
+            NamespaceCommitEngine::new(namespace_store(&store, &ns), context.writer_id.clone())
+                .load_position()
+                .await
+                .expect("a new session's position")
+        };
         namespace_store(&store, &ns)
-            .fold_wal_tail(
-                input.clone(),
+            .fold_wal_tail_from(
+                &input,
                 &loonfs_core::time::OperationClock::start(
                     0,
                     std::sync::Arc::new(StdMonotonicTimer::default()),
@@ -139,8 +148,8 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         assert_eq!(folded.inode_record_count, 5); // Root, two directories, two files.
                                                   // A stale cached fold and a fresh engine both see already-covered activity.
         namespace_store(&store, &ns)
-            .fold_wal_tail(
-                input,
+            .fold_wal_tail_from(
+                &input,
                 &loonfs_core::time::OperationClock::start(
                     0,
                     std::sync::Arc::new(StdMonotonicTimer::default()),

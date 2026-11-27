@@ -73,9 +73,7 @@ runtime|publisher::tests::session_compaction::closing_a_session_cancels_its_comp
 runtime|publisher::tests::session_compaction::shutdown_drains_session_compactions
 runtime|publisher::tests::session_compaction::a_runtime_runs_no_more_compactions_at_once_than_its_compaction_limit
 runtime|publisher::tests::session_compaction::closing_a_session_does_not_wait_for_another_sessions_compaction
-core|manifest::tests::fold_races::a_fold_that_loses_to_a_compaction_reads_no_wal_object
 core|manifest::tests::fold_races::a_fold_that_loses_to_a_fold_still_takes_the_cold_path
-core|manifest::tests::fold_races::a_fold_survives_repeated_window_changes
 core|manifest::tests::fold_races::a_retried_fold_leaves_the_session_where_an_unraced_fold_does
 core|manifest::tests::fold_races::a_snapshot_that_loses_its_fold_to_a_window_change_reads_no_wal_object
 runtime|execution_budget::tests::runtimes_sharing_a_budget_never_exceed_its_limits
@@ -83,7 +81,7 @@ runtime|execution_budget::tests::an_idle_runtime_strands_no_capacity
 runtime|execution_budget::tests::shutting_down_one_runtime_leaves_the_budget_usable
 runtime|execution_budget::tests::admitted_bytes_are_shared_and_refunded
 runtime|execution_budget::tests::one_namespace_id_in_two_stores_is_charged_separately
-runtime|publisher::tests::snapshot_folds::creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded
+runtime|publisher::tests::snapshot_folds::creations_wait_for_a_fold_permit_when_they_fold
 runtime|publisher::tests::snapshot_folds::creations_started_together_fold_one_at_a_time_at_a_limit_of_one
 runtime|publisher::tests::snapshot_folds::dropped_creations_return_their_fold_permits
 http|scheduler::tests::a_parked_namespace_does_not_hold_up_later_pages

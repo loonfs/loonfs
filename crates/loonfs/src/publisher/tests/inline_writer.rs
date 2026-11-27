@@ -702,8 +702,9 @@ async fn a_put_and_an_append_over_the_wal_object_budget_stay_in_the_wal() {
     for fold in [false, true] {
         if fold {
             writer
-                .maintenance(loonfs_test_support::ids::writer_id("folder"))
-                .fold_wal(&namespace)
+                .open_namespace(&namespace)
+                .expect("open namespace")
+                .fold_wal()
                 .await
                 .expect("fold");
         }
@@ -1250,14 +1251,17 @@ async fn wal_bytes_make_automatic_and_explicit_folds_due_before_wal_object_count
             writer.mode.publisher.wal_tail_bytes(&namespace).await,
             "the store and the session's position count the same WAL bytes"
         );
-        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+        let maintenance = writer.clone();
         let options = MaintainMetadataOptions::default();
         if mode == "explicit" {
             // The session's position shows the tail's WAL bytes, so the
             // explicit step finds a fold due, and it waits for the
             // namespace's fold lock or for a permit, behind the session's
             // fold. A step that found nothing due would return at once.
-            let step = maintenance.maintain_metadata_with_options(&namespace, &options);
+            let handle = maintenance
+                .open_namespace(&namespace)
+                .expect("open namespace");
+            let step = handle.maintain_metadata_with_options(&options);
             tokio::pin!(step);
             for _ in 0..100 {
                 assert!(
@@ -1278,7 +1282,9 @@ async fn wal_bytes_make_automatic_and_explicit_folds_due_before_wal_object_count
         // The fold moved the session's position to its manifest, so the next
         // metadata step finds nothing left to fold.
         let again = maintenance
-            .maintain_metadata_with_options(&namespace, &options)
+            .open_namespace(&namespace)
+            .expect("open namespace")
+            .maintain_metadata_with_options(&options)
             .await
             .expect("metadata step after the fold");
         assert_eq!(again.wal_fold, None);
@@ -1347,12 +1353,15 @@ async fn a_metadata_step_without_a_current_position_counts_the_wal_bytes_that_it
     writer
         .mode
         .publisher
-        .drop_session_position(&namespace)
+        .live_publisher(&namespace)
+        .expect("a live session")
+        .drop_position()
         .await;
     assert!(writer.mode.publisher.current_position(&namespace).is_none());
     let step = writer
-        .maintenance(loonfs_test_support::ids::writer_id("maintenance"))
-        .maintain_metadata_with_options(&namespace, &MaintainMetadataOptions::default())
+        .open_namespace(&namespace)
+        .expect("open namespace")
+        .maintain_metadata_with_options(&MaintainMetadataOptions::default())
         .await
         .expect("metadata step");
     assert_matches!(
@@ -1487,9 +1496,12 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
         )
         .await
         .expect("first inline commit");
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let maintenance = writer.clone();
     store.hold_next();
-    let fold = maintenance.fold_wal(&namespace);
+    let namespace_2 = maintenance
+        .open_namespace(&namespace)
+        .expect("open namespace");
+    let fold = namespace_2.fold_wal();
     let publish_after_fold = async {
         bounded(Duration::from_secs(10), store.wait_until_held())
             .await

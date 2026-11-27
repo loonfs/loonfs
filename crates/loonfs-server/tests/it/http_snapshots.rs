@@ -2,7 +2,6 @@
 
 use crate::common::http_split_support::test_config;
 use crate::common::start_server;
-use loonfs_server::JobMode;
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
@@ -295,7 +294,7 @@ async fn http_user_and_maintenance_snapshot_listings_list_the_same_snapshot() {
         "snapshot-inventory",
         "snapshot-inventory",
     );
-    config.maintenance = JobMode::ServeOnly;
+    config.sweep_store = false;
     let harness = start_server(config).await;
     let namespace = namespace_id("inventory");
     harness

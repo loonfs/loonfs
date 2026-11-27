@@ -2,11 +2,11 @@
 
 use crate::common::{
     control, default_block_cache, drive_worker_step, drive_worker_to_current, grep_with,
-    page_request, publish_same_content_files, request, worker, writable_namespace,
+    page_request, publish_same_content_files, request, writable_namespace, GrepHost,
 };
 use loonfs::{
-    DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId, PutFileOptions,
-    ReadOnly, SharedObjectStore, Writable,
+    DestinationBehavior, LoonFs, MaintainMetadataOptions, NamespaceId, PutFileOptions, ReadOnly,
+    SharedObjectStore, Writable,
 };
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{GrepError, GrepService};
@@ -107,7 +107,7 @@ struct PlanlessBoundaryFixture {
     store: SharedObjectStore,
     namespace_id: NamespaceId,
     writer: LoonFs<Writable>,
-    maintenance: Maintenance,
+    maintenance: LoonFs<Writable>,
 }
 
 async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
@@ -126,23 +126,15 @@ async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
         .build()
         .await
         .expect("build writer");
-    let maintenance = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "planless-boundary-maintenance",
-        ))
-        .build()
-        .await
-        .expect("build maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id(
-            "planless-boundary-maintenance",
-        ));
+    crate::common::share_writer(&store, &writer);
+    let maintenance = writer.clone();
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
-    let worker = worker(&store).await;
-    worker.enable(&namespace_id).await.expect("enable grep");
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable grep");
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
     PlanlessBoundaryFixture {
         _temp_dir: temp_dir,
         store,
@@ -183,12 +175,11 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
     let materialized_head = control::head(&fixture.store, &fixture.namespace_id).await;
     fixture
         .maintenance
-        .maintain_metadata_with_options(
-            &fixture.namespace_id,
-            &MaintainMetadataOptions {
-                max_wal_tail_objects: std::num::NonZeroU64::MIN,
-            },
-        )
+        .open_namespace(&fixture.namespace_id)
+        .expect("open namespace")
+        .maintain_metadata_with_options(&MaintainMetadataOptions {
+            max_wal_tail_objects: std::num::NonZeroU64::MIN,
+        })
         .await
         .expect("fold materialized commit");
     let materialized_manifest =
@@ -262,12 +253,11 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
         .expect("write materialized revision");
     fixture
         .maintenance
-        .maintain_metadata_with_options(
-            &fixture.namespace_id,
-            &MaintainMetadataOptions {
-                max_wal_tail_objects: std::num::NonZeroU64::MIN,
-            },
-        )
+        .open_namespace(&fixture.namespace_id)
+        .expect("open namespace")
+        .maintain_metadata_with_options(&MaintainMetadataOptions {
+            max_wal_tail_objects: std::num::NonZeroU64::MIN,
+        })
         .await
         .expect("fold materialized revision");
     namespace
@@ -309,10 +299,10 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         max_mid_runs: nonzero_usize(2),
         ..GramIndexBuildPolicy::default()
     };
-    let worker = worker(&store).await;
+    let host = GrepHost::new(&store).await;
 
-    worker.enable(&namespace_id).await.expect("enable grep");
-    drive_worker_to_current(&worker, &namespace_id, policy).await;
+    host.enable_of(&namespace_id).await.expect("enable grep");
+    drive_worker_to_current(&host, &namespace_id, policy).await;
 
     let reorganized_corpus: [(&str, &[u8]); 10] = [
         ("/docs/indexed.txt", b"indexed-needle\n"),
@@ -331,7 +321,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
             .put_file(path, content, &loonfs_test_support::test_actor())
             .await
             .expect("write reorganized corpus file");
-        drive_worker_step(&worker, &namespace_id, policy).await;
+        drive_worker_step(&host, &namespace_id, policy).await;
     }
 
     // Every file adds a delta run, because each one writes `content_revisions`
@@ -346,7 +336,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
             )
             .await
             .expect("write mid-run filler");
-        drive_worker_step(&worker, &namespace_id, policy).await;
+        drive_worker_step(&host, &namespace_id, policy).await;
     }
 
     // One final indexed delta supplies enough false-positive candidates to
@@ -359,7 +349,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         b"budget-needle without the final letter\n",
     )
     .await;
-    drive_worker_step(&worker, &namespace_id, policy).await;
+    drive_worker_step(&host, &namespace_id, policy).await;
     assert_eq!(
         gram_segment_levels(&store, &namespace_id).await,
         BTreeSet::from([0, 1, 2]),

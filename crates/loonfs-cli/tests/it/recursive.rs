@@ -943,9 +943,7 @@ async fn a_recursive_put_finishes_the_folds_it_started_before_returning() {
         .await
         .expect("build runtime");
         let tail = reader
-            .maintenance(loonfs_test_support::ids::writer_id(
-                "tail-reader-maintenance",
-            ))
+            .maintenance()
             .diagnostics(&namespace_id)
             .await
             .expect("diagnostics")

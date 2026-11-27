@@ -12,9 +12,14 @@ use crate::{
 use futures::future::BoxFuture;
 use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::WriterPosition;
-use loonfs_core::{Administrator, FloorObjectReport, Phase, PublicationReport};
+use loonfs_core::{
+    Administrator, ExtensionBasis, ExtensionPublication, FloorObjectReport, Phase,
+    PublicationReport,
+};
+use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::Commit;
 use loonfs_types::{CommitSeq, NamespaceId};
+use loonfs_types::{ExtensionName, RetentionWindow, SetRetentionWindowResponse};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -66,6 +71,11 @@ pub(super) struct RegistryShared {
     /// contain panics to keep the registry usable, so this (not a task
     /// join error) is what a drain reports.
     pub(super) panicked_units: AtomicUsize,
+    /// A narrowed per-segment row budget for the sessions' compaction units,
+    /// for the tests that need many compacted segments (see
+    /// [`PublisherRegistry::narrow_segment_row_budget`]).
+    #[cfg(test)]
+    segment_row_budget: Mutex<Option<std::num::NonZeroUsize>>,
 }
 
 pub(super) struct RegistryState {
@@ -173,6 +183,64 @@ impl NamespaceSession {
         self.publisher.submit_delete(options, administrator).await
     }
 
+    /// Submits an advance of the retention floor to `target`, planned from
+    /// `planned`, to this session's queue, which orders the advance like a
+    /// deletion: commits admitted before it publish first, and commits
+    /// admitted after it are validated against the new floor. A session that
+    /// admits no more work or is fenced returns its error.
+    pub(crate) async fn submit_retention_advance(
+        &self,
+        planned: LoadedManifest,
+        target: CommitSeq,
+    ) -> Result<FloorObjectReport> {
+        self.publisher
+            .submit_retention_advance(planned, target)
+            .await
+    }
+
+    /// Sets the namespace's retention window as this session (see
+    /// [`NamespaceStore::set_retention_window_from`](loonfs_core::NamespaceStore::set_retention_window_from)).
+    ///
+    /// The change publishes as the session's fold and compaction units do:
+    /// it starts from the session's position, which claims the writer epoch
+    /// first when the session has none (see
+    /// [`NamespacePublisher::writer_position`]), and puts its manifest without
+    /// the engine, so no commit waits for it. The caller records the manifest
+    /// that the report includes, through
+    /// [`PublisherRegistry::finish_publication`].
+    pub(crate) async fn set_retention_window(
+        &self,
+        retention_window_ms: Option<RetentionWindow>,
+    ) -> Result<PublicationReport<SetRetentionWindowResponse>> {
+        let position = self.publisher.writer_position().await?;
+        self.publisher
+            .context
+            .runtime_core
+            .namespace_store(&self.publisher.namespace_id)
+            .set_retention_window_from(&position, retention_window_ms)
+            .await
+            .map_err(Error::from)
+    }
+
+    /// Publishes an extension's change as this session (see
+    /// [`NamespaceStore::publish_extension_from`](loonfs_core::NamespaceStore::publish_extension_from)),
+    /// the way [`Self::set_retention_window`] publishes a window change.
+    pub(crate) async fn publish_extension(
+        &self,
+        basis: &ExtensionBasis,
+        name: &ExtensionName,
+        entry: ExtensionEntry,
+    ) -> Result<PublicationReport<ExtensionPublication>> {
+        let position = self.publisher.writer_position().await?;
+        self.publisher
+            .context
+            .runtime_core
+            .namespace_store(&self.publisher.namespace_id)
+            .publish_extension_from(&position, basis, name, entry)
+            .await
+            .map_err(Error::from)
+    }
+
     pub(crate) fn state(&self) -> NamespaceSessionStatus {
         self.publisher.session_status()
     }
@@ -244,6 +312,13 @@ impl RegistryShared {
         lock_state(&self.state)
     }
 
+    /// Returns the narrowed row budget of the sessions' compaction units, if
+    /// a test set one.
+    #[cfg(test)]
+    pub(super) fn segment_row_budget(&self) -> Option<std::num::NonZeroUsize> {
+        *lock_state(&self.segment_row_budget)
+    }
+
     fn live_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {
         self.lock_state()
             .sessions
@@ -308,6 +383,8 @@ impl PublisherRegistry {
                     turns: HashMap::new(),
                 }),
                 panicked_units: AtomicUsize::new(0),
+                #[cfg(test)]
+                segment_row_budget: Mutex::new(None),
             }),
         }
     }
@@ -478,23 +555,15 @@ impl PublisherRegistry {
         self.shared.live_publisher(namespace_id)
     }
 
-    /// Submits an advance of the retention floor to `target`, planned from
-    /// `planned`, to the queue of the namespace's writer session in this
-    /// runtime, and returns `None` without submitting when the runtime has
-    /// no writer session for the namespace that admits work and isn't
-    /// fenced.
+    /// Narrows the rows one segment that the sessions' compaction units
+    /// write may contain, so a namespace a test can build in seconds
+    /// compacts into many segments.
     ///
-    /// The queue orders the advance like a deletion: commits admitted before
-    /// it publish first, and commits admitted after it are validated against
-    /// the new floor.
-    pub(crate) async fn submit_retention_advance(
-        &self,
-        namespace_id: &NamespaceId,
-        planned: LoadedManifest,
-        target: CommitSeq,
-    ) -> Option<Result<FloorObjectReport>> {
-        let publisher = self.live_publisher(namespace_id)?;
-        publisher.submit_retention_advance(planned, target).await
+    /// Test-only: folds keep the shipped segment shape, and planning and
+    /// publishing are the shipped path either way.
+    #[cfg(test)]
+    pub(crate) fn narrow_segment_row_budget(&self, max_rows_per_segment: std::num::NonZeroUsize) {
+        *lock_state(&self.shared.segment_row_budget) = Some(max_rows_per_segment);
     }
 
     /// Returns the writer sessions that this runtime's reads start from.
@@ -514,14 +583,6 @@ impl PublisherRegistry {
         let publisher = self.live_publisher(namespace_id)?;
         let slot = publisher.lock_engine().await;
         slot.wal_tail_bytes()
-    }
-
-    /// Drops the position of the namespace's writer session in this
-    /// runtime, if the runtime has one, once no other task has the session's
-    /// engine locked. The session's next unit runs discovery, and a fold
-    /// without a position loads the tail from the store.
-    pub(crate) async fn drop_session_position(&self, namespace_id: &NamespaceId) {
-        self.shared.drop_position(namespace_id).await;
     }
 
     /// Returns the namespace's writer position (see

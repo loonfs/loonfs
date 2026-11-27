@@ -170,7 +170,7 @@ fn check_config_accepts_a_valid_config_and_names_what_it_validated() {
     );
     assert_eq!(
         stdout.trim(),
-        "config ok: bind 127.0.0.1:9400, store local_fs, maintenance serve_and_maintain"
+        "config ok: bind 127.0.0.1:9400, store local_fs, serve_maintenance_api true, sweep_store true"
     );
     // The documented caveat: constructing a local-fs store creates its root.
     assert!(store_root.is_dir(), "local-fs check creates the store root");
@@ -208,7 +208,7 @@ root = "{}"
     );
     assert_eq!(
         stdout.trim(),
-        "config ok: bind 127.0.0.1:9400, store local_fs, maintenance serve_and_maintain"
+        "config ok: bind 127.0.0.1:9400, store local_fs, serve_maintenance_api true, sweep_store true"
     );
     assert!(!stdout.contains("inline-config-token"), "{stdout}");
     assert!(!stdout.contains("inline-content-secret"), "{stdout}");
@@ -371,7 +371,7 @@ fn check_config_accepts_a_valid_tls_identity() {
     );
     assert_eq!(
         stdout.trim(),
-        "config ok: bind 127.0.0.1:9400, store local_fs, maintenance serve_and_maintain"
+        "config ok: bind 127.0.0.1:9400, store local_fs, serve_maintenance_api true, sweep_store true"
     );
 }
 
@@ -392,7 +392,9 @@ fn check_config_does_not_bind_the_port() {
     );
     assert_eq!(
         stdout.trim(),
-        format!("config ok: bind {bind}, store local_fs, maintenance serve_and_maintain")
+        format!(
+            "config ok: bind {bind}, store local_fs, serve_maintenance_api true, sweep_store true"
+        )
     );
     drop(listener);
 }

@@ -146,7 +146,10 @@ async fn a_sessions_floor_object_orders_its_restores_around_the_floor() {
     assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
     let folded = engine
         .namespace
-        .fold_wal_tail(engine.writer_position(), &context("writer").clock())
+        .fold_wal_tail_from(
+            &engine.writer_position().expect("a writer position"),
+            &context("writer").clock(),
+        )
         .await
         .expect("fold")
         .current;
@@ -199,5 +202,103 @@ async fn a_sessions_floor_object_has_no_check_after_its_put() {
                 matches!(operation, RecordedOperation::Head { key } if key.starts_with(&manifests))
             }),
         "{operations:?}"
+    );
+}
+
+/// Checks that an advance puts its floor object at the session's tip, that
+/// a session without its writer epoch claims it first, and that a session
+/// that another claim displaced writes no floor object: its put collides
+/// with the claim's fence, the writer's load that follows finds the claim,
+/// and the advance returns `writer_fenced`.
+#[tokio::test]
+async fn an_advance_puts_its_floor_object_at_the_sessions_tip_or_returns_writer_fenced() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("fenced-floor").expect("valid namespace id");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context("writer"))
+        .create()
+        .await
+        .expect("bootstrap");
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context("writer").writer_id,
+    );
+    let (_, first_seq) = delete(&mut engine, "first").await;
+    let (_, second_seq) = delete(&mut engine, "second").await;
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let planned = namespace.load_current_manifest().await.expect("planned");
+
+    // A new session of the same writer has no epoch, so it claims first.
+    let mut claiming = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context("writer").writer_id,
+    );
+    let epoch_before = namespace
+        .load_read_state()
+        .await
+        .expect("head")
+        .writer_epoch;
+    let report = claiming
+        .publish_floor_object(&planned, first_seq, &context("writer").clock())
+        .await
+        .expect("the claiming session's floor object");
+    assert_eq!(report.retention_floor_seq, first_seq);
+    let head = namespace.load_read_state().await.expect("head");
+    assert_eq!(
+        head.writer_epoch.0,
+        epoch_before.0 + 1,
+        "the session claims"
+    );
+    assert_eq!(
+        head.wal_no,
+        claiming
+            .writer_position()
+            .expect("a position")
+            .read_basis()
+            .head
+            .wal_no,
+        "the floor object is at the session's tip"
+    );
+    assert_eq!(
+        head.retention_floor_seq, first_seq,
+        "the head's floor is the target"
+    );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test reads the WAL object at the tip to check its body"
+    )]
+    let tip = {
+        store
+            .get(
+                &loonfs_objectstore::keys::wal_object(&namespace_id, &head.wal_no),
+                None,
+            )
+            .await
+            .expect("get the object at the tip")
+            .expect("the object at the tip exists")
+    };
+    assert_eq!(
+        loonfs_types::format::wal::decode_wal_object_envelope_zstd(&tip)
+            .expect("decode the object at the tip")
+            .payload()
+            .body,
+        loonfs_types::format::wal::WalObjectBody::Floor {
+            retention_floor_seq: first_seq
+        },
+        "the object at the tip is the floor object"
+    );
+
+    // The first session was displaced by that claim. Its put at its tip
+    // collides with the claim's fence, and the writer's load after the
+    // collision finds the higher epoch.
+    let fenced = engine
+        .publish_floor_object(&planned, second_seq, &context("writer").clock())
+        .await
+        .expect_err("a displaced session's advance");
+    assert_matches!(fenced, CoreError::WriterFenced(_));
+    assert_eq!(
+        namespace.load_read_state().await.expect("head").wal_no,
+        head.wal_no,
+        "the displaced session writes no floor object"
     );
 }

@@ -34,7 +34,6 @@ pub struct ValidatedServerConfig {
     /// ID that [`ServerConfig::validate`] generates, so two servers started
     /// from one config write different writer blocks.
     pub(crate) writer_id: WriterId,
-    pub(crate) maintenance_writer_id: WriterId,
 }
 
 impl ValidatedServerConfig {
@@ -49,10 +48,11 @@ impl ValidatedServerConfig {
     /// It names the address, provider, and maintenance settings.
     pub fn check_summary(&self) -> String {
         format!(
-            "config ok: bind {}, store {}, maintenance {}",
+            "config ok: bind {}, store {}, serve_maintenance_api {}, sweep_store {}",
             self.config.bind.trim(),
             self.config.store.kind().as_str(),
-            self.config.maintenance.as_str()
+            self.config.serve_maintenance_api,
+            self.config.sweep_store
         )
     }
 }
@@ -118,13 +118,11 @@ impl ServerConfig {
                 reason,
             })
         };
-        self.grep
-            .worker
+        let grep_worker = self.grep.map(|grep| grep.worker).unwrap_or_default();
+        grep_worker
             .validate()
             .map_err(|error| invalid_grep(error.to_string()))?;
-        let grep_policy = self
-            .grep
-            .worker
+        let grep_policy = grep_worker
             .build_policy()
             .map_err(|error| invalid_grep(error.to_string()))?;
         validate_non_empty("content_token_secret", self.content_token_secret.expose())?;
@@ -132,7 +130,7 @@ impl ServerConfig {
             validate_non_empty("metadata_cache.ssd.directory", &ssd.directory)?;
         }
         self.store.validate()?;
-        let (writer_id, maintenance_writer_id) = self.writer_ids()?;
+        let writer_id = self.writer_id()?;
 
         let cgroup_limit = if self.memory_limit_bytes.is_none() && cfg!(target_os = "linux") {
             read_cgroup_memory_limit(&[
@@ -150,7 +148,6 @@ impl ServerConfig {
             memory,
             grep_policy,
             writer_id,
-            maintenance_writer_id,
         })
     }
 
@@ -242,23 +239,15 @@ pub(super) fn validate_positive(field: &'static str, value: u64) -> Result<()> {
 /// The prefix of the ID that the server generates for its writer ID.
 const GENERATED_WRITER_ID_PREFIX: &str = "srv";
 
-/// The end of the maintenance writer ID, after the server's writer ID.
-const MAINTENANCE_WRITER_ID_SUFFIX: &str = "-maintenance";
-
 /// Most bytes of the configured `writer_id`: the writer ID limit minus the
-/// hyphen and the generated ID that the server adds, and minus the end of the
-/// maintenance writer ID.
-const MAX_CONFIGURED_WRITER_ID_BYTES: usize = MAX_WRITER_ID_BYTES
-    - 1
-    - GENERATED_WRITER_ID_PREFIX.len()
-    - 1
-    - GENERATED_ID_BODY_BYTES
-    - MAINTENANCE_WRITER_ID_SUFFIX.len();
+/// hyphen and the generated ID that the server adds.
+const MAX_CONFIGURED_WRITER_ID_BYTES: usize =
+    MAX_WRITER_ID_BYTES - 1 - GENERATED_WRITER_ID_PREFIX.len() - 1 - GENERATED_ID_BODY_BYTES;
 
 impl ServerConfig {
-    /// Returns the server's writer ID and its maintenance writer ID, and
-    /// rejects a configured `writer_id` too long to take the generated ID.
-    fn writer_ids(&self) -> Result<(WriterId, WriterId)> {
+    /// Returns the server's writer ID, and rejects a configured `writer_id`
+    /// too long to take the generated ID.
+    fn writer_id(&self) -> Result<WriterId> {
         let configured = self.writer_id.as_str();
         if configured.len() > MAX_CONFIGURED_WRITER_ID_BYTES {
             return Err(ServerError::Config(ConfigFieldError::Invalid {
@@ -269,15 +258,11 @@ impl ServerConfig {
                 ),
             }));
         }
-        let writer_id = WriterId::parse(format!(
+        Ok(WriterId::parse(format!(
             "{configured}-{}",
             generated_id(GENERATED_WRITER_ID_PREFIX)
         ))
-        .expect("a configured writer ID within its limit should take the generated ID");
-        let maintenance_writer_id =
-            WriterId::parse(format!("{writer_id}{MAINTENANCE_WRITER_ID_SUFFIX}"))
-                .expect("a configured writer ID within its limit should take both suffixes");
-        Ok((writer_id, maintenance_writer_id))
+        .expect("a configured writer ID within its limit should take the generated ID"))
     }
 }
 

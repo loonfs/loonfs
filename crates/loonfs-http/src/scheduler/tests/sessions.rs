@@ -11,7 +11,8 @@ use loonfs_grep::GrepWorkerConfig;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
-    write_keys, BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordingStore,
+    write_keys, BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation,
+    RecordingStore,
 };
 use loonfs_test_support::test_actor;
 use loonfs_types::ChecksumAlgorithm;
@@ -277,6 +278,7 @@ async fn a_writer_that_commits_every_ten_minutes_still_folds_at_the_fold_age() {
             server.run_steps_after(MINUTE_MS).await;
             let diagnostics = server
                 .maintenance
+                .maintenance()
                 .diagnostics(&namespace_id)
                 .await
                 .expect("namespace diagnostics");
@@ -488,12 +490,15 @@ async fn session_steps_finish_more_than_sixteen_metadata_units_without_another_p
             .expect("publish");
         server
             .maintenance
-            .fold_wal(&namespace_id)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold");
     }
     let before = server
         .maintenance
+        .maintenance()
         .diagnostics(&namespace_id)
         .await
         .expect("diagnostics")
@@ -504,6 +509,7 @@ async fn session_steps_finish_more_than_sixteen_metadata_units_without_another_p
         .await;
     let after = server
         .maintenance
+        .maintenance()
         .diagnostics(&namespace_id)
         .await
         .expect("diagnostics")
@@ -945,7 +951,6 @@ async fn a_session_that_maintained_itself_leaves_the_session_steps_nothing_to_do
     let scheduler = super::Scheduler::new(
         scheduler_config(None).scheduler,
         namespaces,
-        Some(writer_id("maintenance")),
         None,
         &recorder,
     );
@@ -1030,22 +1035,20 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
     server.runtime.shutdown().await.expect("shutdown");
 }
 
-/// Checks that the scheduler of a host that doesn't maintain the store, such
-/// as the reference server in `serve_only` or `disabled` mode, closes a
-/// session that passes
-/// `idle_session_close_after_ms` or ends early, without a store request and
-/// without folding the WAL tail, and that its sweep lists nothing.
+/// Checks that the scheduler of a host that doesn't sweep the store, such as
+/// the reference server with `sweep_store = false`, closes a session that
+/// ends early without a store request, folds an open session's tail as its
+/// writer before the session passes `idle_session_close_after_ms`, and that
+/// its sweep lists nothing.
 #[tokio::test]
-async fn a_scheduler_without_maintenance_closes_idle_and_ended_sessions_without_store_requests() {
-    use crate::JobMode;
-
+async fn a_scheduler_that_sweeps_nothing_closes_idle_and_ended_sessions_without_store_requests() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
     let mut config = scheduler_config(None);
-    config.maintenance = JobMode::ServeOnly;
+    config.scheduler.sweep_store = false;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespaces = &server.scheduler.inner.namespaces;
 
@@ -1088,13 +1091,21 @@ async fn a_scheduler_without_maintenance_closes_idle_and_ended_sessions_without_
         "an idle session closes once past `idle_session_close_after_ms`"
     );
     assert!(
-        store.take().is_empty(),
-        "closing an idle session makes no store request"
+        !store
+            .take()
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::List { .. })),
+        "the session's own fold at the fold age lists nothing"
     );
     assert_eq!(
         server.wal_tail_objects(&idle_ns).await,
+        0,
+        "the idle session folds its own tail before it closes"
+    );
+    assert_eq!(
+        server.wal_tail_objects(&ended_ns).await,
         2,
-        "the close doesn't fold the WAL tail (fence + commit remain)"
+        "the ended session's tail waits for its next writer (fence + commit)"
     );
     store.take();
     assert_eq!(

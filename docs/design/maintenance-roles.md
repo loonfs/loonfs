@@ -1,5 +1,7 @@
 # Maintenance roles
 
+[One writer per namespace](one-writer-per-namespace.md) replaces this note.
+
 This note describes which processes can publish a namespace's manifests and delete its objects, and what fences a rival. A namespace has two roles:
 
 - The "writer" commits and deletes the namespace, under the [writer epoch](../specs/glossary.md#writer-epoch).

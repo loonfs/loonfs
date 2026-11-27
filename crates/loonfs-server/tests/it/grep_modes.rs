@@ -4,13 +4,13 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
-use loonfs::{LoonFs, Writable};
+use loonfs::{LoonFs, Namespace, Writable};
 use loonfs_grep::entry::{GrepEntry, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::SharedObjectStore;
-use loonfs_server::{app, AppConfig, JobMode, ServerConfig, StoreConfig};
+use loonfs_server::{app, AppConfig, ServerConfig, StoreConfig};
 use loonfs_types::GrepIndex;
 use loonfs_types::{
     CapabilityDocument, CommitSeq, ErrorResponse, GrepResponse, NamespaceId,
@@ -30,7 +30,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     let temp_dir = tempdir().expect("store tempdir");
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "disabled").await;
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::Disabled)
+        test_config(temp_dir.path(), None)
             .validate()
             .expect("validate the test config"),
         AppConfig::default(),
@@ -94,7 +94,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
 
 #[tokio::test]
 async fn gc_reports_only_the_core_counts_where_the_deployment_maintains_no_index() {
-    for mode in [JobMode::Disabled, JobMode::ServeOnly] {
+    for mode in [None] {
         let temp_dir = tempdir().expect("store tempdir");
         let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "unmaintained").await;
         let (router, server) = app(
@@ -131,7 +131,7 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
     let temp_dir = tempdir().expect("store tempdir");
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "query-grammar").await;
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::ServeOnly)
+        test_config(temp_dir.path(), Some(true))
             .validate()
             .expect("validate the test config"),
         AppConfig::default(),
@@ -207,12 +207,9 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
 #[tokio::test]
 async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     let temp_dir = tempdir().expect("store tempdir");
-    let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "both").await;
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
+    let (store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "both").await;
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::ServeAndMaintain)
+        test_config(temp_dir.path(), Some(true))
             .validate()
             .expect("validate the test config"),
         AppConfig::default(),
@@ -274,10 +271,14 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     .await;
     assert_eq!(again.status, active.status);
 
-    // The file is written through a writer of its own, so this server holds no
-    // session that saw the publish: the index stays where it was until the
-    // next sweep.
-    namespace
+    // The file is written through the server's runtime directly, past the
+    // scheduler's held sessions, so no session step saw the publish: the
+    // index stays where it was until the next sweep.
+    server
+        .http
+        .runtime
+        .open_namespace(&namespace_id)
+        .expect("open the namespace on the server's runtime")
         .put_file(
             "/note.txt",
             b"automatic needle\n",
@@ -410,9 +411,14 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
             .expect("write backfill file");
     }
 
-    let worker = grep_worker(&store, "restart-worker").await;
-    worker.enable(&stale).await.expect("enable stale namespace");
-    drive_worker_to_current(&worker, &stale, GramIndexBuildPolicy::default()).await;
+    // The worker publishes as the seed writer's sessions, so the writes
+    // below stay on the namespaces' writer.
+    let worker = grep_worker(&store).await;
+    worker
+        .enable(&stale_writer)
+        .await
+        .expect("enable stale namespace");
+    drive_worker_to_current(&worker, &stale_writer, GramIndexBuildPolicy::default()).await;
     stale_writer
         .put_file(
             "/tail.txt",
@@ -423,11 +429,11 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
         .expect("write unindexed tail");
 
     worker
-        .enable(&backfill)
+        .enable(&backfill_writer)
         .await
         .expect("enable backfill namespace");
     worker
-        .steps(&backfill, 0)
+        .steps(&backfill_writer, 0)
         .build_step(GramIndexBuildPolicy {
             max_files_per_step: NonZeroUsize::MIN,
             ..GramIndexBuildPolicy::default()
@@ -444,7 +450,7 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     // Nothing in this process has touched either namespace: one sweep
     // carries both indexes to their heads.
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::ServeAndMaintain)
+        test_config(temp_dir.path(), Some(true))
             .validate()
             .expect("validate the test config"),
         AppConfig::default(),
@@ -477,109 +483,18 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
 }
 
 #[tokio::test]
-async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
-    let temp_dir = tempdir().expect("store tempdir");
-    let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "serve-only").await;
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::ServeOnly)
-            .validate()
-            .expect("validate the test config"),
-        AppConfig::default(),
-    )
-    .await
-    .expect("build app");
-    assert!(!maintains_grep_index(&server));
-
-    // The document says the same thing the routes do: searches yes,
-    // maintenance no.
-    let capabilities = capabilities(&router).await;
-    assert!(capabilities.supports(FEATURE_QUERY_GREP));
-    assert!(capabilities
-        .api_groups
-        .iter()
-        .any(|api_group| api_group == API_GROUP_QUERY_V0));
-    assert!(
-        !capabilities
-            .features
-            .contains_key(FEATURE_MAINTENANCE_GREP_INDEX),
-        "a deployment that refuses every index-maintenance route must not advertise that it \
-         maintains one"
-    );
-
-    // Every route that would mutate a grep manifest belongs where the index is
-    // maintained, so this deployment refuses all three.
-    for path in maintenance_grep_paths(&namespace_id) {
-        let error = assert_not_supported(
-            &router,
-            Method::POST,
-            &path,
-            None,
-            FEATURE_MAINTENANCE_GREP_INDEX,
-        )
-        .await;
-        assert!(
-            error.message.contains("does not maintain"),
-            "{}",
-            error.message
-        );
-    }
-    // Reading the index's lifecycle is maintaining it: a deployment that
-    // maintains nothing has no authority over the state it would report.
-    let error = assert_not_supported(
-        &router,
-        Method::GET,
-        &status_path(&namespace_id),
-        None,
-        FEATURE_MAINTENANCE_GREP_INDEX,
-    )
-    .await;
-    assert!(
-        error.message.contains("does not maintain"),
-        "{}",
-        error.message
-    );
-
-    let worker = grep_worker(&store, "external-grep-worker").await;
-    worker.enable(&namespace_id).await.expect("enable grep");
-    namespace
-        .put_file(
-            "/note.txt",
-            b"external needle\n",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write file");
-    sweep(&server).await;
-    assert_eq!(
-        lifecycle_of(&store, &namespace_id).await.active_watermark(),
-        None,
-        "a deployment that maintains nothing must leave the backfill where it was"
-    );
-
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    let response = grep(&router, &namespace_id, "external needle").await;
-    assert_eq!(response.matches.len(), 1);
-    assert_eq!(response.built_through_seq, CommitSeq(1));
-    server
-        .http
-        .runtime
-        .shutdown()
-        .await
-        .expect("settle the server writer");
-}
-
-#[tokio::test]
 async fn an_invalid_grep_pattern_reports_the_pattern_param() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "bad-pattern").await;
-    let worker = grep_worker(&store, "bad-pattern-grep-worker").await;
-    worker.enable(&namespace_id).await.expect("enable grep");
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let worker = grep_worker(&store).await;
+    let session = grep_writer(&store, "bad-pattern-grep-worker")
+        .await
+        .open_namespace(&namespace_id)
+        .expect("open the namespace");
+    worker.enable(&session).await.expect("enable grep");
+    drive_worker_to_current(&worker, &session, GramIndexBuildPolicy::default()).await;
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::ServeOnly)
+        test_config(temp_dir.path(), Some(true))
             .validate()
             .expect("validate the test config"),
         AppConfig::default(),
@@ -608,14 +523,14 @@ async fn an_invalid_grep_pattern_reports_the_pattern_param() {
 }
 
 #[tokio::test]
-async fn maintain_only_keeps_the_index_built_without_serving_searches() {
+async fn a_server_that_serves_no_queries_keeps_the_index_built() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "maintain-only").await;
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
-        test_config(temp_dir.path(), JobMode::MaintainOnly)
+        test_config(temp_dir.path(), Some(false))
             .validate()
             .expect("validate the test config"),
         AppConfig::default(),
@@ -686,77 +601,6 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .expect("settle the server writer");
 }
 
-#[tokio::test]
-async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
-    let temp_dir = tempdir().expect("store tempdir");
-    let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "manual-maintenance").await;
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    let (router, server) = app(
-        ServerConfig {
-            maintenance: JobMode::ServeOnly,
-            ..test_config(temp_dir.path(), JobMode::ServeAndMaintain)
-        }
-        .validate()
-        .expect("validate the test config"),
-        AppConfig::default(),
-    )
-    .await
-    .expect("build app");
-    assert!(
-        maintains_grep_index(&server),
-        "a serve-only deployment still serves the index routes"
-    );
-    let report = server.scheduler.run_sweep().await;
-    assert_eq!(
-        (report.namespaces, report.complete),
-        (0, false),
-        "serve-only mode sweeps nothing"
-    );
-
-    namespace
-        .put_file(
-            "/note.txt",
-            b"unscheduled needle\n",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write file");
-    // Every index route still answers: serve-only maintenance withdraws the
-    // scheduler, not the operator's reach.
-    assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
-    assert_matches!(
-        index_status(&router, &namespace_id).await.status,
-        loonfs_types::GrepIndexStatus::Backfilling { .. },
-        "the enable published a backfill this deployment left for someone else"
-    );
-
-    assert_eq!(
-        lifecycle_of(&store, &namespace_id).await.active_watermark(),
-        None,
-        "nothing here schedules the backfill it published"
-    );
-
-    // An assigned host (or an operator) finishes the backfill from here.
-    let worker = grep_worker(&store, "assigned-grep-host").await;
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    assert_eq!(watermark(&store, &namespace_id).await, CommitSeq(1));
-    assert_eq!(
-        grep(&router, &namespace_id, "unscheduled needle")
-            .await
-            .matches
-            .len(),
-        1
-    );
-    server
-        .http
-        .runtime
-        .shutdown()
-        .await
-        .expect("settle the server writer");
-}
-
 async fn seed_namespace(
     root: &Path,
     name: &str,
@@ -781,7 +625,9 @@ async fn seed_namespace(
     (store, writer, namespace_id)
 }
 
-fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
+/// Returns the test config with no `[grep]` table for `None`, and with a
+/// table whose `serve_queries` is `serve_queries` otherwise.
+fn test_config(store_root: &Path, serve_queries: Option<bool>) -> ServerConfig {
     let mut config = crate::common::test_config(
         StoreConfig::LocalFs(LocalFsStoreConfig {
             root: store_root.display().to_string(),
@@ -789,9 +635,13 @@ fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
         }),
         "test-token",
         "test-content-token-secret",
-        &format!("grep-mode-{mode:?}"),
+        &format!("grep-mode-{serve_queries:?}"),
     );
-    config.grep.mode = mode;
+    config.grep = serve_queries.map(|serve_queries| loonfs_server::GrepConfig {
+        serve_queries,
+        max_cache_bytes: None,
+        worker: Default::default(),
+    });
     config.max_concurrent_maintenance = const { NonZeroUsize::new(2).unwrap() };
     config
 }
@@ -823,7 +673,7 @@ async fn lifecycle_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> 
 
 /// This namespace's grep entry in its current manifest.
 async fn entry_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> GrepEntry {
-    grep_worker(store, "entry-reader")
+    grep_worker(store)
         .await
         .entry(namespace_id)
         .await
@@ -933,17 +783,17 @@ async fn grep(router: &Router, namespace_id: &NamespaceId, pattern: &str) -> Gre
 
 async fn drive_worker_to_current(
     worker: &GrepWorker<SharedObjectStore>,
-    namespace_id: &NamespaceId,
+    namespace: &Namespace<Writable>,
     policy: GramIndexBuildPolicy,
 ) {
     for _ in 0..64 {
         let build = worker
-            .steps(namespace_id, 0)
+            .steps(namespace, 0)
             .build_step(policy)
             .await
             .expect("build step");
         let fold = worker
-            .steps(namespace_id, 0)
+            .steps(namespace, 0)
             .reorganize_step(policy)
             .await
             .expect("fold step");
@@ -990,25 +840,29 @@ async fn response_json<T: DeserializeOwned>(response: axum::response::Response) 
 
 const API_SPEC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/api.md");
 
-/// A grep worker over the same handles the server composes.
-async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
+/// A grep worker over the same handles the server composes, which reads
+/// through a read-only runtime and publishes through the writer sessions of
+/// `writer`, which the caller passes to its publishing calls.
+async fn grep_worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
     let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await
         .expect("build reader");
-    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id(actor))
-        .build()
-        .await
-        .expect("build writer");
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(actor));
     GrepWorker::new(
         store.clone(),
         reader,
-        maintenance,
         loonfs_grep::GrepStepBudget::default(),
     )
+}
+
+/// Builds a writer runtime named `actor` over `store`.
+async fn grep_writer(store: &SharedObjectStore, actor: &str) -> LoonFs<Writable> {
+    LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id(actor))
+        .build()
+        .await
+        .expect("build writer")
 }
 
 /// The api.md section 2.1 example is the reference deployment's document with

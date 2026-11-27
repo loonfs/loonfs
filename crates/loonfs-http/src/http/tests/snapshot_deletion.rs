@@ -35,7 +35,7 @@ async fn snapshot_deletes_are_idempotent_and_the_snapshot_inventory_is_read_only
     ));
     let mut config = test_options(directory.path(), "snapshot-deletion-writer");
     config.http.serves_maintenance = true;
-    config.grep = JobMode::Disabled;
+    config.grep = GrepHandles::Disabled;
     let (router, state) = test_app(config, options_with_store(store.clone()))
         .await
         .expect("app");
@@ -110,7 +110,7 @@ async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
     ));
     let mut config = test_options(directory.path(), "deleted-snapshot-writer");
     config.http.serves_maintenance = true;
-    config.grep = JobMode::Disabled;
+    config.grep = GrepHandles::Disabled;
     let (router, state) = test_app(config, options_with_store(store.clone()))
         .await
         .expect("app");

@@ -14,38 +14,100 @@ use crate::{
     GC_GRACE_WINDOW_MS,
 };
 use loonfs_types::SystemWallClock;
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// A wall clock that reads the same time on every call.
-#[derive(Debug)]
-struct FixedWallClock {
-    now_ms: u64,
+/// A wall clock that reads the system clock plus an offset that a test sets,
+/// so a test can date its writer's retention advance past the grace window
+/// of every commit that it made.
+#[derive(Debug, Default)]
+pub struct OffsetWallClock {
+    offset_ms: AtomicU64,
 }
 
-impl WallClock for FixedWallClock {
+impl OffsetWallClock {
+    /// Runs `work` with the clock [`GC_GRACE_WINDOW_MS`] ahead of the system
+    /// clock, so a retention advance in `work` can pass every commit made
+    /// before the call, and then sets the clock back to the system clock.
+    pub async fn past_the_grace_window<T>(&self, work: impl Future<Output = T>) -> T {
+        self.offset_ms.store(GC_GRACE_WINDOW_MS, Ordering::SeqCst);
+        let output = work.await;
+        self.offset_ms.store(0, Ordering::SeqCst);
+        output
+    }
+}
+
+impl WallClock for OffsetWallClock {
     fn now_ms(&self) -> u64 {
-        self.now_ms
+        SystemWallClock.now_ms() + self.offset_ms.load(Ordering::SeqCst)
     }
 }
 
 /// Builds a maintenance handle on `store` whose wall clock is a grace window
-/// ahead.
+/// ahead of the system clock.
 ///
-/// The clock is [`GC_GRACE_WINDOW_MS`] ahead of the system
-/// clock, so a retention advance through the handle can pass every commit
-/// made before the call.
+/// A collection through the handle can delete what every write made before
+/// the call left behind. Collection runs in any process, so the handle
+/// needs no writer session.
 pub async fn maintenance_past_the_grace_window(store: SharedObjectStore) -> Maintenance {
-    let clock = FixedWallClock {
-        now_ms: SystemWallClock.now_ms() + GC_GRACE_WINDOW_MS,
-    };
+    let clock = OffsetWallClock::default();
+    clock.offset_ms.store(GC_GRACE_WINDOW_MS, Ordering::SeqCst);
     let writer_id = test_writer_id("retention-maintenance");
     LoonFs::builder_with_store(store, crate::Context::Service)
-        .writer_id(writer_id.clone())
+        .writer_id(writer_id)
         .wall_clock(Arc::new(clock))
         .build()
         .await
-        .expect("build the retention maintenance handle")
-        .maintenance(writer_id)
+        .expect("build the collection handle")
+        .maintenance()
+}
+
+/// Folds the WAL tail of `namespace_id` and advances its retention floor to
+/// the folded head through a writer session of a new runtime on `store`.
+///
+/// The runtime's wall clock is a grace window ahead, so the advance can pass
+/// every commit made before the call.
+///
+/// The session claims the namespace first, so a writer session of the
+/// namespace in another runtime is fenced, as a server's is when another
+/// server runs a maintenance job on its namespace. The runtime drains before
+/// the call returns.
+pub async fn advance_retention_floor_past_the_grace_window(
+    store: SharedObjectStore,
+    namespace_id: &crate::NamespaceId,
+) -> crate::Result<crate::AdvanceRetentionResponse> {
+    let (runtime, clock) = writer_with_offset_clock(store, "retention-advance").await;
+    let namespace = runtime.open_namespace(namespace_id)?;
+    let advanced = clock
+        .past_the_grace_window(async {
+            namespace.fold_wal().await?;
+            namespace.advance_retention_floor().await
+        })
+        .await;
+    drop(namespace);
+    runtime.shutdown().await?;
+    advanced
+}
+
+/// Builds a writer on `store` as `writer_id`, with no minimum interval
+/// between its publications, whose wall clock is the returned clock.
+pub async fn writer_with_offset_clock(
+    store: SharedObjectStore,
+    writer_id: &str,
+) -> (LoonFs<Writable>, Arc<OffsetWallClock>) {
+    let clock = Arc::new(OffsetWallClock::default());
+    let writer = LoonFs::builder_with_store(store, crate::Context::Service)
+        .writer_id(test_writer_id(writer_id))
+        .wall_clock(Arc::clone(&clock) as Arc<dyn WallClock>)
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..crate::RuntimeConfig::default()
+        })
+        .build()
+        .await
+        .expect("build writer");
+    (writer, clock)
 }
 
 /// Builds a writer on `store` as `writer_id`, with no minimum interval

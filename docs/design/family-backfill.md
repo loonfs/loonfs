@@ -50,7 +50,7 @@ A reader checks a manifest's version before it decodes the manifest (see [Envelo
 
 ## Failures
 
-A backfill is abandoned under the same input checks and deadline as any compaction (see [Streaming compaction](../specs/format.md#104-streaming-compaction)). A failed backfill publishes no manifest, and garbage collection deletes its output segments (see [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules)). It keeps no durable progress, so any process can run it again from a basis that step 1 accepts.
+A backfill is abandoned under the same input checks and deadline as any compaction (see [Streaming compaction](../specs/format.md#104-streaming-compaction)). A failed backfill publishes no manifest, and garbage collection deletes its output segments (see [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules)). It keeps no durable progress, so the namespace's writer can run it again from a basis that step 1 accepts.
 
 A backfill doesn't delete a source's rows. Once the current manifest has the second version, a replaced source leaves the current manifest through an ordinary base compaction, under a manifest version that no longer defines the source. That compaction doesn't wait for snapshots, because a snapshot keeps the segments that its manifest lists.
 

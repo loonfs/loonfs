@@ -82,8 +82,8 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
 
     let input = position;
     let response = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(
-            Some(input),
+        .fold_wal_tail_from(
+            &input,
             &crate::time::OperationClock::start(
                 0,
                 Arc::new(crate::time::StdMonotonicTimer::default()),

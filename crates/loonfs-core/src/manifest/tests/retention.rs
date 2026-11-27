@@ -175,10 +175,10 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         },
         ..crate::test_support::namespace_store(&store, &namespace_id)
     }
-    .fold_wal_tail(
-        None,
-        &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
-    )
+    .fixture_writer_session()
+    .await
+    .expect("the writer's session")
+    .fold()
     .await
     .expect("fold the commits");
     let manifest = crate::test_support::namespace_store(&store, &namespace_id)
@@ -748,6 +748,10 @@ async fn a_cutoff_or_a_window_older_than_the_grace_window_reads_the_commits_once
         .with_segment_cache()
         .engine();
         engine
+            .namespace
+            .fixture_writer_session()
+            .await
+            .expect("the fixture's writer session")
             .set_retention_window(retention_window_ms)
             .await
             .expect("set the window");
@@ -806,7 +810,7 @@ async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine();
-    let set_window = |window_ms: Option<u64>| engine.set_retention_window(window_ms.map(window));
+    let mut session = engine.commit_engine();
 
     // Each step sets the namespace's window, then advances at five grace
     // windows. The cutoffs are five grace windows minus the window, and all
@@ -819,7 +823,8 @@ async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_
         (None, CommitSeq(2)),
         (Some(grace_ms), CommitSeq(3)),
     ] {
-        let set = set_window(namespace_window_ms)
+        let set = session
+            .set_retention_window(namespace_window_ms.map(window))
             .await
             .expect("set the window");
         assert_eq!(
@@ -828,7 +833,8 @@ async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_
         );
         let before = current_manifest_no(&store, &namespace_id).await;
         assert!(
-            set_window(namespace_window_ms)
+            session
+                .set_retention_window(namespace_window_ms.map(window))
                 .await
                 .expect("set the same window")
                 .published
@@ -1155,65 +1161,6 @@ async fn publish_one<S: ObjectStore>(
         .expect("one result")
 }
 
-/// Checks the second example of a retention advance in the WAL: a process
-/// without a writer session creates a floor object at the tip, and a writer
-/// session in another process then commits a restore of a deletion below
-/// the new floor. The session's put collides with the floor object, the
-/// session replays the floor object, and the restore returns
-/// `not_deleted`. The session isn't fenced, and its next commit is written
-/// above the floor object.
-#[tokio::test]
-async fn a_session_that_collides_with_a_floor_object_replays_it_and_isnt_fenced() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    bootstrap_namespace(&store, &namespace_id, &test_context())
-        .await
-        .expect("bootstrap");
-    let mut writer = NamespaceCommitEngine::new(
-        crate::test_support::namespace_store(&store, &namespace_id),
-        test_context().writer_id,
-    );
-    let (gone, deletion_seq) = create_and_delete(&mut writer, "gone").await;
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let planned = namespace
-        .load_current_manifest()
-        .await
-        .expect("load the planned manifest");
-
-    let report = namespace
-        .publish_floor_object(&planned, deletion_seq)
-        .await
-        .expect("create the floor object");
-    assert_eq!(report.retention_floor_seq, deletion_seq);
-    assert_eq!(report.manifest_retention_floor_seq, CommitSeq(0));
-    let floor_object = namespace.load_read_state().await.expect("read the head");
-    let restore_deleted = || FilesystemOperation::RestoreDeleted {
-        inode_id: gone,
-        deletion_seq,
-        destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
-    };
-    let collided = publish_one(&mut writer, restore_deleted())
-        .await
-        .expect_err("the put collides with the floor object");
-    assert_eq!(collided.code(), ErrorCode::StoreContention, "{collided:?}");
-    let refused = publish_one(&mut writer, restore_deleted())
-        .await
-        .expect_err("the restore is below the replayed floor");
-    assert_eq!(refused.code(), ErrorCode::NotDeleted, "{refused:?}");
-    publish_directories(&mut writer, "next", 1).await;
-
-    let head = namespace.load_read_state().await.expect("read the head");
-    assert_eq!(head.wal_no.0, floor_object.wal_no.0 + 1);
-    assert_eq!(head.writer_epoch, planned.payload().writer_epoch);
-    assert_eq!(head.retention_floor_seq, deletion_seq);
-    assert_eq!(
-        read_floor_seq(&store, &namespace_id).await,
-        CommitSeq(0),
-        "no manifest records the floor before a fold"
-    );
-}
-
 /// Checks that a view that replays a floor object reports the floor before
 /// any manifest records it, so the change feed refuses a start below the
 /// floor. The fold that covers the floor object publishes the higher of its
@@ -1243,8 +1190,8 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
     publish_directories(&mut writer, "after", 1).await;
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let planned = namespace.load_current_manifest().await.expect("planned");
-    namespace
-        .publish_floor_object(&planned, deletion_seq)
+    writer
+        .publish_floor_object(&planned, deletion_seq, &namespace.start_clock())
         .await
         .expect("create the floor object");
 
@@ -1272,10 +1219,7 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
             if retention_floor_seq == deletion_seq
     );
 
-    namespace
-        .fold_wal_tail(None, &namespace.start_clock())
-        .await
-        .expect("fold the floor object");
+    writer.fold().await.expect("fold the floor object");
     assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
     let head = namespace.load_read_state().await.expect("read the head");
     let lower = WalObjectPayload {
@@ -1300,16 +1244,16 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
         .await
         .expect("put a floor object with a lower floor");
     namespace
-        .fold_wal_tail(None, &namespace.start_clock())
+        .fold_as_test_writer()
         .await
         .expect("fold the lower floor object");
     assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
 }
 
-/// Checks that two processes that advance the same namespace to different
-/// floors leave the higher floor, in either order. An advance whose target
-/// another process's floor object already reached writes nothing, and the
-/// fold after both advances publishes the higher floor.
+/// Checks that two advances of one writer session to different floors leave
+/// the higher floor, in either order. An advance whose target the session's
+/// earlier floor object already reached writes nothing, and the fold after
+/// both advances publishes the higher floor.
 #[tokio::test]
 async fn two_advances_to_different_floors_leave_the_higher_floor() {
     for (first, second) in [(CommitSeq(2), CommitSeq(1)), (CommitSeq(1), CommitSeq(2))] {
@@ -1335,73 +1279,21 @@ async fn two_advances_to_different_floors_leave_the_higher_floor() {
             .expect("read the head")
             .wal_no;
 
-        namespace
-            .publish_floor_object(&planned, first)
+        writer
+            .publish_floor_object(&planned, first, &namespace.start_clock())
             .await
             .expect("the first advance");
-        let report = namespace
-            .publish_floor_object(&planned, second)
+        let report = writer
+            .publish_floor_object(&planned, second, &namespace.start_clock())
             .await
             .expect("the second advance");
         assert_eq!(report.retention_floor_seq, CommitSeq(2));
         let head = namespace.load_read_state().await.expect("read the head");
         let floor_objects = if first > second { 1 } else { 2 };
         assert_eq!(head.wal_no.0, tip.0 + floor_objects);
-        namespace
-            .fold_wal_tail(None, &namespace.start_clock())
-            .await
-            .expect("fold");
+        writer.fold().await.expect("fold");
         assert_eq!(read_floor_seq(&store, &namespace_id).await, CommitSeq(2));
     }
-}
-
-/// Checks that a floor object that a process without a writer session puts
-/// after the namespace's deletion returns `namespace_deleted`. The process
-/// reads the tip, and while its put waits, the writer session folds the tail
-/// and publishes the tombstone. The put is then written at the number after
-/// the folded tip, which the tombstone doesn't fold, so only the tombstone
-/// itself shows that the floor object is in a deleted namespace.
-#[tokio::test]
-async fn a_floor_object_put_after_the_namespace_is_deleted_returns_namespace_deleted() {
-    use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector};
-
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    bootstrap_namespace(&store, &namespace_id, &test_context())
-        .await
-        .expect("bootstrap");
-    let mut writer = NamespaceCommitEngine::new(
-        crate::test_support::namespace_store(&store, &namespace_id),
-        test_context().writer_id,
-    );
-    publish_directories(&mut writer, "dir", 2).await;
-    let planned = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("load the planned manifest");
-    let parked = std::sync::Arc::new(BlockingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(wal_prefix(&namespace_id)),
-        OperationSelector::PutCreateIfAbsent,
-    ));
-    parked.block_next();
-    let advancing = crate::test_support::namespace_store(parked.clone(), &namespace_id);
-    let (advanced, ()) = tokio::join!(
-        advancing.publish_floor_object(&planned, CommitSeq(1)),
-        async {
-            parked.wait_until_blocked().await;
-            writer
-                .delete_namespace(
-                    &crate::test_support::administrator_of(&store, &namespace_id),
-                    Default::default(),
-                )
-                .await
-                .expect("the writer session deletes the namespace");
-            parked.release();
-        }
-    );
-    assert_matches!(advanced, Err(CoreError::NamespaceDeleted { .. }));
 }
 
 /// Reads the files one snapshot keeps at the test clock, or the error that
@@ -2135,12 +2027,13 @@ async fn snapshots_append_past_the_threshold_and_compaction_drains() {
 }
 
 /// Checks that a compaction unit is abandoned when it finds an input segment
-/// of its basis missing and a newer manifest replaced the basis, and that
-/// the same missing segment of the current manifest returns
-/// `namespace_corrupt`.
+/// of its position's manifest missing and a newer manifest replaced that
+/// manifest, and that the same missing segment of the current manifest
+/// returns `namespace_corrupt`.
 ///
-/// To replace the basis, another process compacts the same runs, and a
-/// collection then deletes the segments that only the replaced basis lists.
+/// To replace the manifest, another writer claims the namespace and compacts
+/// the same runs, and a collection then deletes the segments that only the
+/// replaced manifest lists.
 #[tokio::test]
 async fn a_unit_whose_replaced_basis_lost_an_input_segment_is_abandoned() {
     for replaced in [true, false] {
@@ -2159,14 +2052,15 @@ async fn a_unit_whose_replaced_basis_lost_an_input_segment_is_abandoned() {
             publish_directories(&mut writer, prefix, 2).await;
             writer.fold().await.expect("fold");
         }
+        let position = writer.load_position().await.expect("the writer's position");
         let basis = namespace
             .load_current_basis(crate::test_support::observed_now())
             .await
             .expect("the unit's basis");
         let basis_segments = run_segment_object_keys(basis.manifest().envelope());
         let lost = if replaced {
-            // Another process compacts the same runs, and a collection deletes
-            // the segments that only the replaced basis lists.
+            // Another writer compacts the same runs, and a collection deletes
+            // the segments that only the replaced manifest lists.
             let (_, published) =
                 crate::test_support::compact_every_group(&store, &namespace_id).await;
             assert!(published > 0, "the other process compacts the runs");
@@ -2193,8 +2087,8 @@ async fn a_unit_whose_replaced_basis_lost_an_input_segment_is_abandoned() {
         )
         .with_run_policy(crate::test_support::one_delta_run_policy())
         .engine()
-        .compact_metadata_unit(
-            basis,
+        .compact_metadata_unit_from(
+            &position,
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await;
@@ -2595,6 +2489,13 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
         )
         .await
         .expect("seed file");
+    let position = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    )
+    .load_position()
+    .await
+    .expect("the session's position");
     let manifest_before = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
@@ -2617,7 +2518,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     );
     let overrun = OperationClock::start(0, clock);
     let Err(error) = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(None, &overrun)
+        .fold_wal_tail_from(&position, &overrun)
         .await
     else {
         panic!("over-budget publication must abort");

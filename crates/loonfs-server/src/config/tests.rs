@@ -185,24 +185,19 @@ root = "/tmp/loonfs-server"
             .expect("the writer ID starts with the configured prefix");
         assert_eq!(suffix.len(), GENERATED_ID_BODY_BYTES, "{suffix}");
         assert_eq!(config.config().writer_id.as_str(), "loonfs-server");
-        assert_eq!(
-            config.maintenance_writer_id.as_str(),
-            format!("{}-maintenance", config.writer_id)
-        );
     }
     assert_ne!(first.writer_id, second.writer_id);
 
     // The self-hosting guide states this limit.
-    let longest_prefix =
-        MAX_WRITER_ID_BYTES - "-srv_".len() - GENERATED_ID_BODY_BYTES - "-maintenance".len();
-    assert_eq!(longest_prefix, 213);
+    let longest_prefix = MAX_WRITER_ID_BYTES - "-srv_".len() - GENERATED_ID_BODY_BYTES;
+    assert_eq!(longest_prefix, 225);
     parse_server_config(&source(&"w".repeat(longest_prefix))).expect("the longest prefix");
     let too_long = "w".repeat(longest_prefix + 1);
     match parse_server_config(&source(&too_long)).expect_err("a prefix too long for the suffix") {
         ServerError::Config(ConfigFieldError::Invalid { field, reason }) => {
             assert_eq!(field, "writer_id");
             assert!(
-                reason.starts_with(&format!("{too_long:?} must be 213 bytes or fewer")),
+                reason.starts_with(&format!("{too_long:?} must be 225 bytes or fewer")),
                 "{reason}"
             );
         }

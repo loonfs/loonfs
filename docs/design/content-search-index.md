@@ -68,7 +68,7 @@ namespaces/{owner_namespace_id}/extensions/grep/
 
 The index's state is grep's entry in the namespace manifest (see [Extensions](../specs/format.md#124-extensions)). The entry contains the lifecycle state, the index's runs with their segment descriptors, and any in-progress reorganization. Grep assigns the index's run numbers itself, one above the largest number in its entry. Every core publication copies the entry forward, so the index needs no manifests, manifest boundary, or discovery of its own. [Grep across a pool](grep-across-a-pool.md) explains why.
 
-A run of index steps changes a copy of the entry in memory (the "pending entry") and publishes the change in a manifest of its own:
+A run of index steps changes a copy of the entry in memory (the "pending entry") and publishes the change in a manifest of its own, as the namespace's writer, so a process that isn't the writer claims the namespace first (see [One writer per namespace](one-writer-per-namespace.md)):
 
 1. The run loads the current manifest.
 2. Each step writes its segments and records its change in the pending entry.

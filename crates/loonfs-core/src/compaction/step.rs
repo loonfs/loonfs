@@ -15,6 +15,7 @@
 use super::group_compaction::run_metadata_compaction;
 use super::plan::{plan_compaction, select_family_group, MetadataCompactionSpec};
 use super::publication::{input_segment_keys, CompactionPublication};
+use crate::commit::publish_view::WriterPosition;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
@@ -61,7 +62,7 @@ pub enum CompactionUnitOutcome {
     Abandoned,
 }
 
-impl<S: ObjectStore> NamespaceEngine<S, Writable> {
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Checks `manifest`'s descriptors for a compaction unit that is due
     /// under the namespace's run policy, without reading the store.
     pub fn metadata_compaction_due(&self, manifest: &LoadedManifest) -> bool {
@@ -73,11 +74,18 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         )
         .is_some()
     }
+}
 
-    /// Runs one metadata compaction unit.
+impl<S: ObjectStore> NamespaceEngine<S, Writable> {
+    /// Runs one metadata compaction unit of a writer session.
     ///
-    /// The unit plans from `basis`, a manifest that the caller already has,
-    /// and reads its input runs without the cache. The walk that builds a base
+    /// The unit plans from the manifest of `position`, the session's
+    /// position, so only a writer session compacts (see
+    /// [`NamespaceCommitEngine::load_position`](crate::publish::NamespaceCommitEngine::load_position)).
+    /// A position whose manifest is missing from the store and at or below
+    /// the manifest boundary returns `head_moved`, and the session plans
+    /// again from a new position. The unit reads its input runs without the
+    /// cache. The walk that builds a base
     /// compaction's kept inode filter reads through the cache. The unit
     /// compacts the whole window that the namespace's run policy selects,
     /// whatever the number of rows its runs list, and the compaction checks
@@ -94,12 +102,19 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         skip_all,
         fields(phase = Phase::MetadataCompactionStep.as_str(), key_class = "manifest")
     )]
-    pub async fn compact_metadata_unit(
+    pub async fn compact_metadata_unit_from(
         &self,
-        basis: Held<LoadedManifest>,
+        position: &WriterPosition,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<CompactionUnitOutcome> {
         let compaction = self.namespace.start_clock();
+        let Some(basis) = self.namespace.load_position_basis(position).await? else {
+            return Err(CoreError::HeadMoved(format!(
+                "manifest `{}` of the writer position is missing and at or below the manifest \
+                 boundary",
+                position.read_basis().basis.manifest().manifest_no
+            )));
+        };
         let current = basis.manifest();
         let payload = current.payload();
         ensure_namespace_live(&payload.namespace_id, payload.status)?;

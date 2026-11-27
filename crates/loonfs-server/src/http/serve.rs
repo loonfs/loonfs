@@ -3,7 +3,9 @@
 
 use super::host_routes::router;
 use super::tls::{self, TlsListener};
-use crate::config::{MemorySizing, ServerConfig, TransportConfig, ValidatedServerConfig};
+use crate::config::{
+    GrepConfig, MemorySizing, ServerConfig, TransportConfig, ValidatedServerConfig,
+};
 use crate::{Result, ServerError};
 use axum::serve::ListenerExt as _;
 use axum::Router;
@@ -40,8 +42,8 @@ const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL"
 #[derive(Clone)]
 pub struct AppState {
     pub http: HttpState,
-    /// The maintenance scheduler, which runs only the close step when the
-    /// config doesn't maintain. [`app`] does not start it.
+    /// The maintenance scheduler, which sweeps the store only when the
+    /// config sets `sweep_store`. [`app`] does not start it.
     pub scheduler: Scheduler,
 }
 
@@ -76,7 +78,6 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
         memory,
         grep_policy,
         writer_id,
-        maintenance_writer_id,
         ..
     } = config;
     memory.log();
@@ -102,7 +103,6 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
         &config,
         &memory,
         writer_id,
-        maintenance_writer_id.clone(),
         store,
         &metrics,
         std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
@@ -111,13 +111,12 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
     // The worker runs on the runtime's own instrumented client, so the
     // grep-owned traffic is measured like every other request instead of
     // escaping on a second, raw client.
-    let grep_worker = || {
+    let grep_worker = |grep: GrepConfig| {
         GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
-            maintenance.clone(),
             loonfs_grep::GrepStepBudget::new(
-                std::num::NonZeroUsize::new(config.grep.worker.max_concurrent_steps)
+                std::num::NonZeroUsize::new(grep.worker.max_concurrent_steps)
                     .expect("validated grep step limit should be nonzero"),
             ),
         )
@@ -127,16 +126,15 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             loonfs::DecodedBlockCacheConfig::new(memory.grep.bytes),
         ))))
     };
-    let grep_service = config.grep.mode.serves().then(grep_service);
-    let grep_worker = config.grep.mode.maintains().then(grep_worker);
+    let grep_service = config
+        .grep
+        .filter(|grep| grep.serve_queries)
+        .map(|_| grep_service());
+    let grep_worker = config.grep.map(grep_worker);
     let namespaces = Arc::new(Namespaces::<SchedulerState>::new(runtime.clone()));
     let scheduler = Scheduler::new(
         config.scheduler_config(),
         Arc::clone(&namespaces),
-        config
-            .maintenance
-            .maintains()
-            .then_some(maintenance_writer_id),
         grep_worker
             .as_ref()
             .map(|worker| GrepIndexing::new(worker.clone(), grep_policy)),
@@ -144,7 +142,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
     );
     let http = HttpState::new(
         HttpConfig {
-            serves_maintenance: config.maintenance.serves(),
+            serves_maintenance: config.serve_maintenance_api,
             max_download_bytes: Some(config.runtime_config().max_read_content_bytes),
             max_upload_bytes: Some(config.max_upload_bytes.get()),
             max_concurrent_uploads: config.max_concurrent_uploads.get(),
@@ -191,7 +189,6 @@ pub(super) async fn build_handles(
     config: &ServerConfig,
     memory: &MemorySizing,
     writer_id: WriterId,
-    maintenance_writer_id: WriterId,
     store: SharedObjectStore,
     metrics: &HttpMetrics,
     metrics_jsonl_path: Option<OsString>,
@@ -220,7 +217,7 @@ pub(super) async fn build_handles(
         builder = builder.object_store_metrics_recorder(Arc::clone(samples));
     }
     let runtime = builder.build().await.map_err(invalid_runtime)?;
-    let maintenance = runtime.maintenance(maintenance_writer_id);
+    let maintenance = runtime.maintenance();
 
     Ok(RuntimeHandles {
         runtime,

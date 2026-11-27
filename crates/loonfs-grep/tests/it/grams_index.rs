@@ -85,7 +85,7 @@ async fn a_worker_policy_bounds_each_build_step() {
     let namespace_id = NamespaceId::parse("grams-config-policy").expect("namespace id");
 
     let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
-    let host = GrepHost::new(&store, "grams-config-maintenance").await;
+    let host = GrepHost::new(&store).await;
     let policy = GramIndexBuildPolicy {
         max_files_per_step: nonzero_usize(3),
         ..GramIndexBuildPolicy::default()
@@ -94,7 +94,7 @@ async fn a_worker_policy_bounds_each_build_step() {
     host.enable_grep_index(&namespace_id).await.expect("enable");
     // Materialize the empty backfill so the steps below run pure WAL
     // catch-up, where the file budget maps one-to-one onto the puts.
-    drive_worker_step(&host.worker, &namespace_id, policy).await;
+    drive_worker_step(&host, &namespace_id, policy).await;
 
     let mut put_seqs = Vec::new();
     for index in 0..5u32 {
@@ -109,7 +109,7 @@ async fn a_worker_policy_bounds_each_build_step() {
         put_seqs.push(result.committed_seq);
     }
 
-    drive_worker_step(&host.worker, &namespace_id, policy).await;
+    drive_worker_step(&host, &namespace_id, policy).await;
     let after_first = grams_built_through_seq(&store, &namespace_id).await;
     assert_eq!(
         after_first, put_seqs[2],
@@ -123,7 +123,7 @@ async fn a_worker_policy_bounds_each_build_step() {
         ..policy
     };
     raw_store.reset();
-    drive_worker_step(&host.worker, &namespace_id, byte_policy).await;
+    drive_worker_step(&host, &namespace_id, byte_policy).await;
     let after_second = grams_built_through_seq(&store, &namespace_id).await;
     assert_eq!(
         after_second, put_seqs[3],
@@ -131,7 +131,7 @@ async fn a_worker_policy_bounds_each_build_step() {
     );
     assert_eq!(raw_store.count(OperationSelector::Get), 0);
 
-    drive_worker_step(&host.worker, &namespace_id, byte_policy).await;
+    drive_worker_step(&host, &namespace_id, byte_policy).await;
     assert_eq!(
         grams_built_through_seq(&store, &namespace_id).await,
         put_seqs[4]
@@ -169,8 +169,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-thousand-maintenance").await;
-    let first_worker = &host.worker;
+    crate::common::share_writer(&store, &writer);
+    let host = GrepHost::new(&store).await;
 
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -180,8 +180,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .open_namespace(&namespace_id)
         .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
-    first_worker
-        .steps(&namespace_id, 0)
+    host.steps_of(&namespace_id, 0)
         .build_step(GramIndexBuildPolicy::default())
         .await
         .expect("materialize empty backfill");
@@ -231,8 +230,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
 
     raw_store.reset();
     raw_store.inner().reset();
-    let first = first_worker
-        .steps(&namespace_id, 0)
+    let first = host
+        .steps_of(&namespace_id, 0)
         .build_step(policy)
         .await
         .expect("first bounded build");
@@ -293,12 +292,11 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
 
     // Simulate a crash: the fresh worker has no in-memory collection state and
     // can resume only from the published manifest cursor.
-    let resumed_host = GrepHost::new(&store, "grams-resumed-worker").await;
-    let resumed_worker = &resumed_host.worker;
+    let resumed_host = GrepHost::new(&store).await;
     raw_store.reset();
     raw_store.inner().reset();
-    let second = resumed_worker
-        .steps(&namespace_id, 0)
+    let second = resumed_host
+        .steps_of(&namespace_id, 0)
         .build_step(policy)
         .await
         .expect("resumed bounded build");
@@ -398,7 +396,7 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
     let namespace_id = NamespaceId::parse("grams-tiered").expect("namespace id");
 
     let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
-    let host = GrepHost::new(&store, "grams-tiered-maintenance").await;
+    let host = GrepHost::new(&store).await;
 
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
@@ -413,7 +411,7 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
             )
             .await
             .expect("write file");
-        drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+        drive_worker_step(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
         expected_paths.push(path);
 
         let response = host
@@ -460,7 +458,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     let namespace_id = NamespaceId::parse("grams-cache").expect("namespace id");
 
     let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
-    let host = GrepHost::new(&store, "grams-cache-maintenance").await;
+    let host = GrepHost::new(&store).await;
 
     namespace
         .put_file(
@@ -481,7 +479,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
 
     host.enable_grep_index(&namespace_id).await.expect("enable");
     for _ in 0..2 {
-        drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+        drive_worker_step(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
     let before_first = raw_store.count(OperationSelector::Read);
@@ -532,10 +530,11 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .build()
         .await
         .expect("build writer");
+    crate::common::share_writer(&store, &writer);
     // The test deletes bravo's content object after a healthy query, so the
     // reader must not keep that object in its cache, or the second
     // query would read the cached bytes instead of failing.
-    let host = GrepHost::with_reader(&store, "grams-fault-maintenance", |builder| {
+    let host = GrepHost::with_reader(&store, |builder| {
         builder.metadata_cache(MetadataCache::builder().max_content_object_bytes(0).build())
     })
     .await;
@@ -567,7 +566,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
 
     host.enable_grep_index(&namespace_id).await.expect("enable");
     for _ in 0..2 {
-        drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+        drive_worker_step(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
     let healthy = host
         .grep(&namespace_id, &request("needle"), first_page())
@@ -638,7 +637,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     // The test counts content GETs at the store, so the reader runs without
     // a content object cache, which would otherwise serve the small
     // candidates.
-    let host = GrepHost::with_reader(&store, "grams-oversized-maintenance", |builder| {
+    let host = GrepHost::with_reader(&store, |builder| {
         builder.metadata_cache(MetadataCache::builder().max_content_object_bytes(0).build())
     })
     .await;
@@ -654,12 +653,14 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     // A fold writes alpha's inline bytes to a content object, so verifying
     // alpha reads that object from the store.
     host.maintenance
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the WAL");
     host.enable_grep_index(&namespace_id).await.expect("enable");
     for _ in 0..2 {
-        drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+        drive_worker_step(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
     // Oversized and full of matches: were it ever fetched and scanned, it
@@ -751,7 +752,7 @@ async fn a_query_during_an_incomplete_reorganization_returns_every_match() {
     let namespace_id = NamespaceId::parse("grams-shared-cache").expect("namespace id");
 
     let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
-    let host = GrepHost::new(&store, "grams-shared-cache-maintenance").await;
+    let host = GrepHost::new(&store).await;
 
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
@@ -764,8 +765,7 @@ async fn a_query_during_an_incomplete_reorganization_returns_every_match() {
             )
             .await
             .expect("write file");
-        host.worker
-            .steps(&namespace_id, 0)
+        host.steps_of(&namespace_id, 0)
             .build_step(GramIndexBuildPolicy::default())
             .await
             .expect("build delta segment");
@@ -779,8 +779,7 @@ async fn a_query_during_an_incomplete_reorganization_returns_every_match() {
     };
     let gets_before_reorganization = raw_store.count(OperationSelector::Read);
     let reorganization = host
-        .worker
-        .steps(&namespace_id, 0)
+        .steps_of(&namespace_id, 0)
         .reorganize_step(reorganize_policy)
         .await
         .expect("partial reorganization");
@@ -823,7 +822,7 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
     let namespace_id = NamespaceId::parse("grams-reorganization-fan-out").expect("namespace id");
 
     let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
-    let host = GrepHost::new(&store, "grams-fan-out-maintenance").await;
+    let host = GrepHost::new(&store).await;
 
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
@@ -840,8 +839,7 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
             .await
             .expect("write file");
         assert_matches!(
-            host.worker
-                .steps(&namespace_id, 0)
+            host.steps_of(&namespace_id, 0)
                 .build_step(policy)
                 .await
                 .expect("grep build step"),
@@ -856,11 +854,10 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
         index_segment_keys(),
     ));
     let watched_store: loonfs::SharedObjectStore = watched.clone();
-    let reorganizer = GrepHost::new(&watched_store, "grams-fan-out-reorganizer").await;
+    let reorganizer = GrepHost::new(&watched_store).await;
     assert_matches!(
         reorganizer
-            .worker
-            .steps(&namespace_id, 0)
+            .steps_of(&namespace_id, 0)
             .reorganize_step(policy)
             .await
             .expect("grep reorganization step"),

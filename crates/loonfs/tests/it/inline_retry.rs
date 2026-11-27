@@ -154,8 +154,9 @@ async fn retained_receipt_replays(state: ReceiptState) {
         .expect("revoke access");
     if matches!(state, ReceiptState::Folded | ReceiptState::ManifestOnly) {
         writer
-            .maintenance(loonfs_test_support::ids::writer_id("inline-retry"))
-            .fold_wal(&namespace())
+            .open_namespace(&namespace())
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold receipts");
     }

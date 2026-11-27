@@ -12,10 +12,15 @@ pub(crate) enum MaintenanceCommand {
     ///
     /// A compaction unit can take minutes, so the command can too. It
     /// stops after 16 compaction units. A `due` outcome means that work
-    /// remains, and a later job continues it.
+    /// remains, and a later job continues it. On an embedded profile, the
+    /// command runs as the namespace's writer, so it fences a server that
+    /// writes the namespace.
     Metadata(MaintenanceMetadataArgs),
     /// Fold the WAL tail whatever its length, and compact metadata until
     /// nothing is due.
+    ///
+    /// On an embedded profile, the command runs as the namespace's writer,
+    /// so it fences a server that writes the namespace.
     Fold,
     /// List the snapshot inventory: every snapshot, user snapshots and fork snapshots.
     Snapshot {
@@ -59,8 +64,14 @@ pub(crate) enum MaintenanceSnapshotCommand {
 pub(crate) enum MaintenanceIndexCommand {
     /// Enable the grep index and wait for its backfill to reach the
     /// sequence the namespace was at when this command started.
+    ///
+    /// On an embedded profile, the command runs as the namespace's writer,
+    /// so it fences a server that writes the namespace.
     Enable(MaintenanceIndexEnableArgs),
     /// Disable the grep index.
+    ///
+    /// On an embedded profile, the command runs as the namespace's writer,
+    /// so it fences a server that writes the namespace.
     Disable,
     /// Show whether the grep index is disabled, backfilling, or active.
     Status,
@@ -74,13 +85,17 @@ pub(crate) enum MaintenanceRetentionCommand {
     /// Whatever the target, the floor doesn't pass a commit that's less than
     /// 24 hours old, and the output shows the floor that the advance reached.
     /// A later base compaction keeps every file revision above the floor and
-    /// each file's newest revision at or below it.
+    /// each file's newest revision at or below it. On an embedded profile,
+    /// the command runs as the namespace's writer, so it fences a server
+    /// that writes the namespace.
     Advance(MaintenanceRetentionAdvanceArgs),
     /// Set or clear the namespace's retention window.
     ///
     /// The server's maintenance sweep keeps this much of the namespace's
     /// history. Once the namespace's window is cleared, the sweep doesn't
-    /// advance the namespace's floor.
+    /// advance the namespace's floor. On an embedded profile, the command
+    /// runs as the namespace's writer, so it fences a server that writes
+    /// the namespace.
     Window(MaintenanceRetentionWindowArgs),
 }
 

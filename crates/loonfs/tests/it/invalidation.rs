@@ -191,8 +191,9 @@ async fn a_session_behind_another_writer(
         .await
         .expect("writer a puts a file");
     writer_a
-        .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
-        .fold_wal(namespace_id)
+        .open_namespace(namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("writer a folds its tail");
     writer_a
@@ -392,10 +393,9 @@ async fn a_cached_view_at_the_boundary_loads_the_newest_manifest() {
         put(path).await.expect(path);
         writer.drain().await.expect("drain");
         writer
-            .maintenance(loonfs_test_support::ids::writer_id(
-                "collected-successor-writer",
-            ))
-            .fold_wal(&namespace_id)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold the WAL");
     }
@@ -494,8 +494,9 @@ async fn a_refresh_probes_the_wal_before_the_manifest() {
     let (entry, ()) = futures::join!(namespace.stat("/next.txt"), async {
         recording.inner().wait_until_blocked().await;
         writer
-            .maintenance(loonfs_test_support::ids::writer_id("probe-order-writer"))
-            .fold_wal(&namespace_id)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold the WAL");
         store
@@ -564,8 +565,9 @@ async fn a_warm_read_rediscovers_when_its_wal_probe_finds_a_collected_gap() {
         put(path).await.expect(path);
     }
     writer
-        .maintenance(loonfs_test_support::ids::writer_id("collected-gap-writer"))
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the WAL");
     put("/four.txt").await.expect("put after the fold");
@@ -760,8 +762,9 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
         .expect("read at the writer's position");
 
     writer
-        .maintenance(loonfs_test_support::ids::writer_id("maintained-writer"))
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the tail into a new manifest");
     let file = namespace

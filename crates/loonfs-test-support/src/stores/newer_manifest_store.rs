@@ -15,7 +15,7 @@ use loonfs_types::format::manifest::{
 };
 use loonfs_types::{NamespaceId, PublicationId};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Publishes the next manifest of a namespace before each selected operation
@@ -26,7 +26,8 @@ pub struct NewerManifestInterceptor {
     namespace_id: NamespaceId,
     keys: KeyPredicate,
     operation: OperationSelector,
-    armed: AtomicBool,
+    /// How many more selected operations get a publication first.
+    remaining: AtomicUsize,
     /// Stays locked across each publication's requests, because a WAL read
     /// sends GETs concurrently, and two publications at once would put the
     /// same manifest number.
@@ -40,7 +41,7 @@ impl fmt::Debug for NewerManifestInterceptor {
             .debug_struct("NewerManifestInterceptor")
             .field("namespace_id", &self.namespace_id)
             .field("operation", &self.operation)
-            .field("armed", &self.armed)
+            .field("remaining", &self.remaining)
             .field("published", &self.published)
             .finish_non_exhaustive()
     }
@@ -73,7 +74,7 @@ impl<S> InterceptStore<S, NewerManifestInterceptor> {
                 namespace_id,
                 keys,
                 operation,
-                armed: AtomicBool::new(false),
+                remaining: AtomicUsize::new(0),
                 publishing: tokio::sync::Mutex::new(()),
                 published: AtomicUsize::new(0),
             },
@@ -82,7 +83,13 @@ impl<S> InterceptStore<S, NewerManifestInterceptor> {
 
     /// Starts publishing before each selected operation.
     pub fn arm(&self) {
-        self.interceptor().armed.store(true, Ordering::SeqCst);
+        self.arm_for(usize::MAX);
+    }
+
+    /// Starts publishing before each of the next `count` selected
+    /// operations, and then stops.
+    pub fn arm_for(&self, count: usize) {
+        self.interceptor().remaining.store(count, Ordering::SeqCst);
     }
 
     /// Returns how many manifests the wrapper has published.
@@ -96,9 +103,14 @@ impl Interceptor for NewerManifestInterceptor {
     type Guard = ();
 
     async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
-        if self.armed.load(Ordering::SeqCst)
-            && self.keys.matches(context.key())
+        if self.keys.matches(context.key())
             && self.operation.matches(context.kind())
+            && self
+                .remaining
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
         {
             let _publishing = self.publishing.lock().await;
             publish_next_manifest(self.rival.as_ref(), &self.namespace_id, |_| {}).await;

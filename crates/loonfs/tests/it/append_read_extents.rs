@@ -34,7 +34,7 @@ async fn warm_read_of_an_appended_file_gets_every_extent_at_once() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let maintenance = writer.maintenance(writer_id("append-read-maintenance"));
+    let maintenance = writer.clone();
     let mut expected = Vec::new();
     for line_no in 0..LINES {
         let line = vec![b'a' + line_no; usize_from_u64(LINE_BYTES)];
@@ -47,7 +47,12 @@ async fn warm_read_of_an_appended_file_gets_every_extent_at_once() {
                 .expect("append");
         }
         expected.extend_from_slice(&line);
-        maintenance.fold_wal(&namespace_id).await.expect("fold");
+        maintenance
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .fold_wal()
+            .await
+            .expect("fold");
     }
 
     let watched = Arc::new(ConcurrencyWatchStore::new(

@@ -289,10 +289,8 @@ async fn a_deleted_namespace_keeps_its_snapshot_inventory_and_snapshot_delete() 
         .build()
         .await
         .expect("build post-delete runtime");
-    let maintenance = observer.maintenance(loonfs_test_support::ids::writer_id(
-        "snapshot-tombstone-observer",
-    ));
-    let listed = collect_snapshot_records(&maintenance, &source)
+    let maintenance = observer.clone();
+    let listed = collect_snapshot_records(&maintenance.maintenance(), &source)
         .await
         .expect("list snapshots on deleted namespace");
     // The user snapshot, the fork snapshot, and the fork's temporary snapshot.
@@ -317,7 +315,7 @@ async fn a_deleted_namespace_keeps_its_snapshot_inventory_and_snapshot_delete() 
         ErrorCode::SnapshotNotFound,
     );
     assert_core_error_kind(
-        maintenance.diagnostics(&source).await,
+        maintenance.maintenance().diagnostics(&source).await,
         ErrorCode::NamespaceDeleted,
     );
     assert_core_error_kind(
@@ -471,8 +469,8 @@ async fn an_expired_snapshot_is_not_found_and_not_listed_but_stays_in_the_invent
         reader.get_snapshot(&snapshot.snapshot_id).await,
         ErrorCode::SnapshotNotFound,
     );
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("snapshot-expiry"));
-    let snapshots = collect_snapshot_records(&maintenance, &source)
+    let maintenance = writer.clone();
+    let snapshots = collect_snapshot_records(&maintenance.maintenance(), &source)
         .await
         .expect("list snapshots");
     assert_eq!(snapshots.snapshots.len(), 1);
@@ -691,8 +689,9 @@ async fn a_fork_point_snapshot_reads_a_revision_that_the_sources_tail_replaced()
         .fork_point_snapshot_id;
     // The source folds its tail, then a later revision, so the compaction
     // has two runs to combine.
-    fs.maintenance
-        .fold_wal(&source)
+    fs.namespace_writer(&source)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the source's tail");
     fs.put_file_with_options(&source, "/file.txt", b"later", &actor, &replace)
@@ -700,14 +699,15 @@ async fn a_fork_point_snapshot_reads_a_revision_that_the_sources_tail_replaced()
         .expect("put a later revision");
     // The floor advances to the folded head, so the later revision is folded
     // first, and the compaction keeps only that revision.
-    fs.maintenance
-        .fold_wal(&source)
+    fs.namespace_writer(&source)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the later revision");
     fs.advance_retention_floor(&source)
         .await
         .expect("advance the floor to the head");
-    compact_until_done(&fs.maintenance, &source).await;
+    compact_until_done(&fs.namespace_writer(&source).expect("open namespace")).await;
 
     // A fresh reader reads the compacted manifest instead of a cached view.
     let reader = loonfs::test_support::fresh_reader(store(temp_dir.path())).await;

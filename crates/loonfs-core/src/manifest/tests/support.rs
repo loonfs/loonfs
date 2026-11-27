@@ -310,7 +310,7 @@ pub(super) fn compact_rows_with_retention(
 }
 
 /// Runs a unit over a plan made earlier, against the current manifest, the
-/// way `NamespaceEngine::compact_metadata_unit` runs the plan it makes.
+/// way `NamespaceEngine::compact_metadata_unit_from` runs the plan it makes.
 ///
 /// For a test that has to do something between the plan and the compaction, which
 /// stands for other publications during a long compaction.

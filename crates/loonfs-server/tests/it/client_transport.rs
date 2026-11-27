@@ -15,8 +15,8 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
         "client-router",
         "client-router",
     );
-    config.maintenance = loonfs_server::JobMode::ServeOnly;
-    config.grep.mode = loonfs_server::JobMode::Disabled;
+    config.sweep_store = false;
+    config.grep = None;
     let (router, state) = loonfs_server::app(
         config.validate().expect("validate the test config"),
         loonfs_server::AppConfig::default(),

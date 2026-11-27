@@ -183,8 +183,9 @@ async fn an_append_in_a_fork_starts_a_chain_the_fork_creates() {
     for fold in [false, true] {
         if fold {
             writer
-                .maintenance(loonfs_test_support::ids::writer_id("folder"))
-                .fold_wal(&fork)
+                .open_namespace(&fork)
+                .expect("open namespace")
+                .fold_wal()
                 .await
                 .expect("fold the fork");
         }

@@ -1,8 +1,8 @@
 //! The diff route: its pages, the parameters it rejects, and its error when
 //! the diff starts below the retention floor.
 
+use super::fixtures::GrepHandles;
 use super::fixtures::{self, test_app, test_options, TestAppOptions};
-use crate::JobMode;
 use axum::http::StatusCode;
 use loonfs::{DestinationBehavior, PutFileOptions, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -69,7 +69,7 @@ async fn fixture() -> Fixture {
 impl Fixture {
     async fn router(&self) -> axum::Router {
         let mut options = test_options(self.directory.path(), "diff");
-        options.grep = JobMode::Disabled;
+        options.grep = GrepHandles::Disabled;
         test_app(
             options,
             TestAppOptions {
@@ -152,19 +152,19 @@ async fn a_diff_below_the_floor_returns_its_from_seq_and_the_floor() {
     // engine's clock is that far ahead of the writer's.
     let clock = Arc::new(ManualClock::at_system_time());
     clock.advance_ms(loonfs::GC_GRACE_WINDOW_MS);
-    let maintenance = loonfs_core::NamespaceWriterEngine::writer(
+    let other_writer = loonfs_core::NamespaceWriterEngine::writer(
         loonfs_core::test_support::namespace_store_with_wall_clock(
             fixture.store.clone(),
             &namespace_id("demo"),
             clock,
         ),
-        writer_id("maintainer"),
+        writer_id("other-writer"),
     );
-    maintenance
+    other_writer
         .fold_in_new_session()
         .await
         .expect("fold the writes");
-    let floor = maintenance
+    let floor = other_writer
         .advance_retention_floor(loonfs_core::RetentionTarget::Head)
         .await
         .expect("advance the floor")

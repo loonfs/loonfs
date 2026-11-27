@@ -2,7 +2,7 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs::test_support::maintenance_past_the_grace_window;
+use loonfs::test_support::advance_retention_floor_past_the_grace_window;
 use loonfs_client::{
     ClientError, CopyOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions,
 };
@@ -298,9 +298,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         )
         .await
         .expect("create snapshot");
-    let advanced = maintenance_past_the_grace_window(harness.store.clone())
-        .await
-        .advance_retention_floor(&namespace)
+    let advanced = advance_retention_floor_past_the_grace_window(harness.store.clone(), &namespace)
         .await
         .expect("advance the retention floor");
     assert!(

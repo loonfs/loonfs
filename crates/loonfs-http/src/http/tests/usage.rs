@@ -2,8 +2,9 @@
 //! namespace route.
 
 use super::direct_download::LoopbackIssuer;
+use super::fixtures::GrepHandles;
 use super::fixtures::{self, test_app, test_options, TestAppOptions};
-use crate::{HttpState, JobMode, UsageRecorder, UsageReport};
+use crate::{HttpState, UsageRecorder, UsageReport};
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode};
 use futures::StreamExt as _;
@@ -64,7 +65,7 @@ async fn fixture(name: &str) -> Fixture {
     let directory = tempfile::tempdir().expect("tempdir");
     let usage = Arc::new(RecordingUsage::default());
     let mut options = test_options(directory.path(), name);
-    options.grep = JobMode::Disabled;
+    options.grep = GrepHandles::Disabled;
     let (router, state) = test_app(
         options,
         TestAppOptions {

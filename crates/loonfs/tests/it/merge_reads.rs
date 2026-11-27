@@ -46,9 +46,7 @@ async fn a_cold_merge_reads_a_forks_inode_and_binding_segments_in_a_few_data_get
     let [source, fork] = ["cold-merge-source", "cold-merge-fork"].map(namespace_id);
     let actor = loonfs_test_support::test_actor();
     let writer = writer(store.clone(), "cold-merge-writer").await;
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
-        "cold-merge-maintenance",
-    ));
+    let maintenance = writer.clone();
     writer
         .create_namespace(&source, &actor)
         .await
@@ -87,12 +85,19 @@ async fn a_cold_merge_reads_a_forks_inode_and_binding_segments_in_a_few_data_get
             .await
             .expect("commit batch");
         through_seq = Some(commit.committed_seq);
-        maintenance.fold_wal(&fork).await.expect("fold batch");
+        maintenance
+            .open_namespace(&fork)
+            .expect("open namespace")
+            .fold_wal()
+            .await
+            .expect("fold batch");
     }
     for pass in 0.. {
         assert!(pass < 16, "compaction catches up");
         let report = maintenance
-            .maintain_metadata_while_due(&fork, &MaintenanceCancellation::new())
+            .open_namespace(&fork)
+            .expect("open namespace")
+            .maintain_metadata_while_due(&MaintenanceCancellation::new())
             .await
             .expect("compact");
         if report.response.outcome == MetadataMaintenanceOutcome::CaughtUp {
@@ -104,7 +109,9 @@ async fn a_cold_merge_reads_a_forks_inode_and_binding_segments_in_a_few_data_get
         .await
         .expect("a later directory");
     maintenance
-        .fold_wal(&fork)
+        .open_namespace(&fork)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the later directory");
     // Each segment's data blocks end where its filter and index blocks

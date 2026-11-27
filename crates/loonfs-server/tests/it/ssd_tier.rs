@@ -4,7 +4,7 @@
 use crate::common::http_split_support::*;
 use crate::common::{collect_path_entries, scrape, series, start_graceful_server};
 use loonfs_client::NamespacePath;
-use loonfs_server::{JobMode, MetadataCacheConfig, MetadataCacheSsdConfig, ServerConfig};
+use loonfs_server::{MetadataCacheConfig, MetadataCacheSsdConfig, ServerConfig};
 use loonfs_test_support::ids::namespace_id;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -38,7 +38,7 @@ fn segment_gets(scrape: &BTreeMap<String, f64>) -> f64 {
 /// read, and a miss on those would say nothing about the tier.
 fn config_with_ssd_tier(store_root: &Path, ssd_root: &Path, writer_id: &str) -> ServerConfig {
     ServerConfig {
-        maintenance: JobMode::ServeOnly,
+        sweep_store: false,
         metadata_cache: MetadataCacheConfig {
             ssd: Some(MetadataCacheSsdConfig {
                 directory: ssd_root.display().to_string(),
@@ -150,7 +150,7 @@ async fn a_restarted_server_reads_its_metadata_blocks_from_the_ssd_tier() {
     second.shut_down().await;
 
     let without_tier = start_graceful_server(ServerConfig {
-        maintenance: JobMode::ServeOnly,
+        sweep_store: false,
         ..test_config(store_root.clone(), "ssd-tier-without", "ssd-tier")
     })
     .await;

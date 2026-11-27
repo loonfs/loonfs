@@ -300,23 +300,28 @@ impl LoonFs<Writable> {
         .await;
     }
 
-    /// Returns the maintenance capability of this runtime, acting as
-    /// `writer_id`.
+    /// Returns the maintenance capability of this runtime that needs no
+    /// writer session: diagnostics, the check of what maintenance a
+    /// namespace has due, the snapshot inventory, and garbage collection.
     ///
-    /// Maintenance shares this runtime's store client, caches, and
-    /// publication service, so fold decisions see the inline bytes of the
-    /// sessions this runtime keeps. Its folds and compactions take their
-    /// permits from the runtime's [`ExecutionBudget`].
-    /// Operations that mutate durable control state record `writer_id`. A
-    /// process that only maintains builds a writable runtime and never opens
-    /// a namespace.
-    pub fn maintenance(&self, writer_id: WriterId) -> Maintenance {
-        Maintenance::new(
-            self.core.clone(),
-            self.mode.publisher.clone(),
-            Arc::clone(&self.mode.writer),
-            writer_id,
-        )
+    /// Maintenance shares this runtime's store client, caches, and execution
+    /// budget. It publishes no manifest and writes no WAL object. Folds,
+    /// compaction, retention, and extension entries are published by a
+    /// namespace's writer session, through the methods of
+    /// [`Namespace<Writable>`](crate::Namespace), so a process that
+    /// maintains a namespace opens it.
+    pub fn maintenance(&self) -> Maintenance {
+        Maintenance::new(self.core.clone())
+    }
+
+    /// Narrows the rows one segment that this runtime's compaction units
+    /// write may contain, so a namespace a test can build in seconds
+    /// compacts into many segments.
+    #[cfg(test)]
+    pub(crate) fn narrow_segment_row_budget(&self, max_rows_per_segment: std::num::NonZeroUsize) {
+        self.mode
+            .publisher
+            .narrow_segment_row_budget(max_rows_per_segment);
     }
 
     /// Closes publication admission before shutdown drains, and cancels the
@@ -524,7 +529,9 @@ impl LoonFs<Writable> {
     /// one. When a commit in the tail that `fork` read is older than
     /// [`MAX_TAIL_COMMIT_AGE_MS`](loonfs_core::limits::MAX_TAIL_COMMIT_AGE_MS),
     /// `fork` writes nothing, and the call releases its permit, folds the
-    /// source through the namespace's one fold path, and runs `fork` again,
+    /// source as a writer session of the source in this runtime, which
+    /// claims the source when the session has no writer epoch, and runs
+    /// `fork` again,
     /// up to `MAX_CONTENTION_ATTEMPTS` times in all, and then returns
     /// `store_contention`. The fold runs without the fork's permit, so
     /// the two folds never hold permits at the same time.
@@ -554,10 +561,8 @@ impl LoonFs<Writable> {
                 match outcome {
                     ForkOutcome::Created(created) => return Ok(created),
                     ForkOutcome::SourceTailTooOld => {
-                        self.mode
-                            .publisher
-                            .fold_namespace(source_namespace_id, FoldWhen::Always)
-                            .await?;
+                        let source = self.mode.publisher.open_session(source_namespace_id)?;
+                        source.fold(FoldWhen::Always).await?;
                     }
                 }
             }
@@ -627,7 +632,7 @@ mod tests {
             .put_file("/file.txt", b"body", &actor)
             .await
             .expect("a commit in the source's tail");
-        let maintenance = runtime.maintenance(loonfs_test_support::ids::writer_id("fork-writer"));
+        let maintenance = runtime.maintenance();
         let manifest_and_tail = || async {
             let diagnostics = maintenance
                 .diagnostics(&source_id)
@@ -776,8 +781,9 @@ mod tests {
         let source = source_with_a_tail().await;
         source
             .runtime
-            .maintenance(loonfs_test_support::ids::writer_id("fork-writer"))
-            .fold_wal(&namespace_id("source"))
+            .open_namespace(&namespace_id("source"))
+            .expect("open the source")
+            .fold_wal()
             .await
             .expect("fold the source");
         let runtime = crate::test_support::writer(source.store.clone(), "cold-writer").await;

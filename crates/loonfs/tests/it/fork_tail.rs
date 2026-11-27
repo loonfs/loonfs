@@ -36,7 +36,11 @@ async fn forked_tail() -> ForkedTail {
             .await
             .expect("put a folded file");
     }
-    fs.maintenance.fold_wal(&source).await.expect("fold");
+    fs.namespace_writer(&source)
+        .expect("open namespace")
+        .fold_wal()
+        .await
+        .expect("fold");
     fs.put_file(&source, "/file.txt", b"first", &actor)
         .await
         .expect("put the first revision");
@@ -123,8 +127,9 @@ async fn a_fork_folds_the_sources_tail_into_itself_and_the_source_publishes_noth
         .await
         .expect("the fork's first commit");
     assert_eq!(own.committed_seq.0, source.head_seq.0 + 1);
-    fs.maintenance
-        .fold_wal(&forked.fork)
+    fs.namespace_writer(&forked.fork)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("the fork's first fold");
     let reader = loonfs::test_support::fresh_reader(store(forked.temp_dir.path())).await;
@@ -162,8 +167,9 @@ async fn the_forks_fold_and_the_sources_fold_write_their_own_span_objects() {
     let pool_id = loonfs_core::test_support::load_pool_id(&objects, &forked.source).await;
     let forks = loonfs_core::test_support::span_object_keys(&objects, &pool_id, &content_id).await;
     assert_eq!(forks.len(), 1, "the fork's fold writes the source's pieces");
-    fs.maintenance
-        .fold_wal(&forked.source)
+    fs.namespace_writer(&forked.source)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the source");
     let both = loonfs_core::test_support::span_object_keys(&objects, &pool_id, &content_id).await;
@@ -312,9 +318,10 @@ async fn a_fork_folds_a_source_whose_tail_has_a_commit_older_than_the_max_age() 
         .put_file("/a.txt", b"a", &actor)
         .await
         .expect("a commit in the source's tail");
-    let maintenance = runtime.maintenance(writer_id("fork-age"));
+    let maintenance = runtime.clone();
     let source_manifest_no = || async {
         maintenance
+            .maintenance()
             .diagnostics(&source_id)
             .await
             .expect("the source's diagnostics")
@@ -387,9 +394,11 @@ async fn a_fork_from_a_stale_position_checks_the_tail_that_it_reads() {
         .put_file("/a.txt", b"a", &actor)
         .await
         .expect("A's commit");
-    let maintenance = a.maintenance(writer_id("fork-age-a"));
+    let maintenance = a.clone();
     maintenance
-        .fold_wal(&source_id)
+        .open_namespace(&source_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold A's commit");
     b.open_namespace(&source_id)
@@ -398,6 +407,7 @@ async fn a_fork_from_a_stale_position_checks_the_tail_that_it_reads() {
         .await
         .expect("B's commit");
     let before = maintenance
+        .maintenance()
         .diagnostics(&source_id)
         .await
         .expect("the source's diagnostics")
@@ -409,6 +419,7 @@ async fn a_fork_from_a_stale_position_checks_the_tail_that_it_reads() {
         .await
         .expect("the fork");
     let after = maintenance
+        .maintenance()
         .diagnostics(&source_id)
         .await
         .expect("the source's diagnostics")
@@ -427,4 +438,63 @@ async fn a_fork_from_a_stale_position_checks_the_tail_that_it_reads() {
     for (path, bytes) in [("/a.txt", b"a"), ("/b.txt", b"b")] {
         assert_eq!(fork.read_file(path).await.expect(path).bytes, bytes);
     }
+}
+
+/// Checks that a fork in a runtime that isn't the source's writer claims the
+/// source to fold its tail only when the tail has a commit older than
+/// `MAX_TAIL_COMMIT_AGE_MS`, and otherwise folds the tail into the fork
+/// without a claim, so the source's writer session isn't displaced.
+#[tokio::test]
+async fn a_fork_of_a_quiet_writers_head_claims_the_source_only_for_an_old_tail() {
+    let actor = loonfs_test_support::test_actor();
+    for old in [false, true] {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = store(temp_dir.path());
+        let writer = loonfs::test_support::writer(store.clone(), "quiet-source").await;
+        let [source, fork] = ["quiet-source", "quiet-fork"].map(namespace_id);
+        writer
+            .create_namespace(&source, &actor)
+            .await
+            .expect("create the source");
+        let session = writer.open_namespace(&source).expect("open the source");
+        session
+            .put_file("/tail.txt", b"tail", &actor)
+            .await
+            .expect("a commit in the source's tail");
+        let epoch = writer_epoch(&store, &source).await;
+        let (forker, clock) =
+            loonfs::test_support::writer_with_offset_clock(store.clone(), "forker").await;
+        let forked = forker.fork_namespace(&source, &fork, &actor);
+        // The grace window is longer than the max age, so the forker's clock
+        // finds the commit too old.
+        let forked = if old {
+            clock.past_the_grace_window(forked).await
+        } else {
+            forked.await
+        };
+        forked.expect("fork the source's head");
+        assert_eq!(
+            writer_epoch(&store, &source).await,
+            epoch + u64::from(old),
+            "old tail: {old}"
+        );
+        let next = session.put_file("/next.txt", b"next", &actor).await;
+        if old {
+            assert_eq!(
+                next.expect_err("the claim displaces the writer").code(),
+                loonfs::ErrorCode::WriterFenced
+            );
+        } else {
+            next.expect("the writer keeps its session");
+        }
+        let forked_file = forker
+            .open_namespace(&fork)
+            .expect("open the fork")
+            .read_file("/tail.txt")
+            .await
+            .expect("the fork has the tail's file");
+        assert_eq!(forked_file.bytes, b"tail", "old tail: {old}");
+        forker.shutdown().await.expect("shut down the forker");
+    }
+    const { assert!(MAX_TAIL_COMMIT_AGE_MS < loonfs::GC_GRACE_WINDOW_MS) };
 }

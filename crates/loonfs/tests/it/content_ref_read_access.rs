@@ -99,17 +99,10 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
     create_namespace(&writer, &source, Some("administrator")).await;
     create_namespace(&writer, &destination, Some("administrator")).await;
     let private_ref = publish_inline(&writer, &source).await;
-    loonfs::LoonFs::builder_with_store(recording.clone(), loonfs::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id(
-            loonfs_test_support::test_actor().as_str(),
-        ))
-        .build()
-        .await
-        .expect("maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id(
-            loonfs_test_support::test_actor().as_str(),
-        ))
-        .fold_wal(&source)
+    writer
+        .open_namespace(&source)
+        .expect("open the source")
+        .fold_wal()
         .await
         .expect("materialize private content");
     let reader = writer.read_only().with_context(subject("stranger").into());

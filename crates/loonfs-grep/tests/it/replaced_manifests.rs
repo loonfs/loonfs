@@ -35,14 +35,14 @@ async fn a_query_at_a_collected_cached_head_reads_the_newest_manifest() {
         .await
         .expect("commit the first file");
     writer.drain().await.expect("drain");
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(&format!(
-        "{namespace_id}-writer"
-    )));
+    let maintenance = writer.clone();
     maintenance
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the first file");
-    let host = GrepHost::new(&store, "grep-collected-head-host").await;
+    let host = GrepHost::new(&store).await;
     host.enable_grep_index(&namespace_id)
         .await
         .expect("enable grep");
@@ -88,7 +88,9 @@ async fn a_query_at_a_collected_cached_head_reads_the_newest_manifest() {
         head_seq = Some(commit.committed_seq);
         writer.drain().await.expect("drain");
         maintenance
-            .fold_wal(namespace_id)
+            .open_namespace(namespace_id)
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold the WAL");
     }
@@ -151,7 +153,7 @@ async fn a_query_at_a_cached_head_whose_index_segment_was_deleted_reads_the_newe
         .await
         .expect("commit the first file");
     writer.drain().await.expect("drain");
-    let host = GrepHost::new(&store, "grep-replaced-segment-host").await;
+    let host = GrepHost::new(&store).await;
     host.enable_grep_index(&namespace_id)
         .await
         .expect("enable grep");
@@ -183,7 +185,7 @@ async fn a_query_at_a_cached_head_whose_index_segment_was_deleted_reads_the_newe
         max_delta_runs: nonzero_usize(1),
         ..GramIndexBuildPolicy::default()
     };
-    drive_worker_to_current(&host.worker, &namespace_id, policy).await;
+    drive_worker_to_current(&host, &namespace_id, policy).await;
     let current_keys = current_index_segment_keys(&store, &namespace_id).await;
     for key in &replaced_keys {
         assert!(!current_keys.contains(key), "{key} was replaced");
@@ -231,7 +233,7 @@ async fn a_query_whose_current_manifest_lists_a_missing_index_segment_is_corrupt
         .await
         .expect("commit the file");
     writer.drain().await.expect("drain");
-    let host = GrepHost::new(&store, "grep-missing-segment-host").await;
+    let host = GrepHost::new(&store).await;
     host.enable_grep_index(&namespace_id)
         .await
         .expect("enable grep");

@@ -388,8 +388,8 @@ impl NamespacePublisher {
     /// Enqueues an advance of the retention floor to `target`, planned from
     /// `planned`, which creates its floor object after the work admitted
     /// before it and before the work admitted after it (format spec,
-    /// "Advancing the retention floor"). Returns `None`, and enqueues
-    /// nothing, when the session admits no more work or is fenced.
+    /// "Advancing the retention floor"). Returns the session's error, and
+    /// enqueues nothing, when the session admits no more work or is fenced.
     ///
     /// An advance queued behind another advance that's still waiting joins
     /// it, and the joined advance moves the floor to the higher of the two
@@ -398,17 +398,12 @@ impl NamespacePublisher {
         &self,
         planned: LoadedManifest,
         target: CommitSeq,
-    ) -> Option<Result<FloorObjectReport>> {
+    ) -> Result<FloorObjectReport> {
         let (sender, receiver) = oneshot::channel();
         {
             let mut state = self.lock_state();
-            let Ok(_session) = self.admitted_session(&state) else {
-                return None;
-            };
-            let permit = match self.context.admission.acquire(&self.namespace_id, 0) {
-                Ok(permit) => permit,
-                Err(error) => return Some(Err(error.into())),
-            };
+            let _session = self.admitted_session(&state)?;
+            let permit = self.context.admission.acquire(&self.namespace_id, 0)?;
             let sender = AdmittedWaiter::new(sender, &permit);
             match state.queue.back_mut() {
                 Some(WorkItem::RetentionAdvance(pending)) => {
@@ -428,12 +423,12 @@ impl NamespacePublisher {
             }
             self.spawn_worker_if_idle(&mut state);
         }
-        Some(receiver.await.unwrap_or_else(|_| {
+        receiver.await.unwrap_or_else(|_| {
             Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(
                 "publisher task stopped mid-advance".to_owned(),
             ))
             .into())
-        }))
+        })
     }
 
     fn trace_enqueue(&self, queue_depth: usize, reason: &'static str) {

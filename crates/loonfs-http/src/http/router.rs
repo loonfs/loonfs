@@ -267,8 +267,8 @@ async fn route_not_found() -> ApiResponseError {
 async fn maintenance_not_served() -> ApiResponseError {
     ApiResponseError::new(
         ErrorCode::RouteNotFound,
-        "this deployment does not serve the maintenance API group; set `maintenance` to \
-         `serve_only` or `serve_and_maintain`",
+        "this deployment does not serve the maintenance API group; set \
+         `serve_maintenance_api` to `true`",
     )
 }
 

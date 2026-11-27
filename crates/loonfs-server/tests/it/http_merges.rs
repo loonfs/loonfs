@@ -4,7 +4,7 @@
 
 use crate::common::http_split_support::test_config;
 use crate::common::{start_server, TestServer};
-use loonfs::test_support::maintenance_past_the_grace_window;
+use loonfs::test_support::advance_retention_floor_past_the_grace_window;
 use loonfs_client::{ClientError, MergeForkOptions, NamespacePath};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
@@ -124,10 +124,7 @@ impl Family {
     /// Folds `namespace` and advances its retention floor to the folded
     /// head, and returns the floor.
     async fn advance_floor(&self, namespace: &NamespaceId) -> CommitSeq {
-        let maintenance = maintenance_past_the_grace_window(self.harness.store.clone()).await;
-        maintenance.fold_wal(namespace).await.expect("fold");
-        maintenance
-            .advance_retention_floor(namespace)
+        advance_retention_floor_past_the_grace_window(self.harness.store.clone(), namespace)
             .await
             .expect("advance the floor")
             .retention_floor_seq

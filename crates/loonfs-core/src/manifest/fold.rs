@@ -10,6 +10,7 @@ use crate::metadata::MetadataView;
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::held::Held;
+use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::runs::flatten_manifest_segments;
@@ -115,21 +116,23 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .expect("layout lock should not be poisoned"))
     }
 
-    /// Folds the WAL tail and publishes the next manifest as the maintainer.
+    /// Folds the WAL tail from `position`, a writer session's position, and
+    /// publishes the next manifest.
     ///
     /// The manifest copies the writer epoch from its predecessor, and its
     /// retention floor is the higher of its predecessor's floor and the
     /// floors of the floor objects that the fold covers (format spec,
     /// "Publishing a manifest"). A tail of floor objects and no commits is
-    /// folded too, into a manifest with no new run. A writer session passes the tail
-    /// it keeps as `held`, whatever its age, and every other caller passes
-    /// `None`, which loads the tail from the store. A `held` tail whose
-    /// manifest is missing from the store and at or below the manifest
-    /// boundary is discarded, and the tail is loaded from the store too (see
-    /// `load_held_manifest`). The publication's first attempt starts
-    /// from the manifest that the tail was read above, and each later attempt
-    /// starts from the manifest that the attempt before it found (see
-    /// `update_manifest`).
+    /// folded too, into a manifest with no new run. The position is the
+    /// session's, whatever its age, and only a writer session has one (see
+    /// [`NamespaceCommitEngine`](crate::publish::NamespaceCommitEngine)), so
+    /// every fold is a writer session's. A position whose manifest is
+    /// missing from the store and at or below the manifest boundary returns
+    /// `head_moved`, so the session drops the position and its next fold
+    /// loads the tail with the writer's load (see `load_held_manifest`). The
+    /// publication's first attempt starts from the position's manifest, and
+    /// each later attempt starts from the manifest that the attempt before
+    /// it found (see `update_manifest`).
     /// A current manifest that folds the tail finishes the fold, and any other
     /// manifest after the fold's own predecessor makes the fold rebuild against
     /// it. The rebuild keeps the tail it read when the manifest is at the same
@@ -140,12 +143,18 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// the same way (see [`SegmentKeeper::load_error`](crate::segment::SegmentKeeper::load_error)). A missing
     /// segment of the current manifest returns `namespace_corrupt`. A
     /// namespace tombstone stops the fold.
-    pub async fn fold_wal_tail(
+    pub async fn fold_wal_tail_from(
         &self,
-        held: Option<WriterPosition>,
+        position: &WriterPosition,
         clock: &OperationClock,
     ) -> Result<FoldedWalTail> {
-        let projection = self.load_head_projection(held, clock).await?;
+        let manifest_no = position.read_basis().basis.manifest().manifest_no;
+        let Some(projection) = self.load_position_projection(position.clone()).await? else {
+            return Err(CoreError::HeadMoved(format!(
+                "manifest `{manifest_no}` of the writer position is missing and at or below the \
+                 manifest boundary"
+            )));
+        };
         let basis = projection
             .basis
             .decoded(projection.manifest_segments.loaded_manifest());
@@ -196,33 +205,44 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// `held`, a writer session's position, whatever its age, or what a
     /// discovery finds when `held` is `None` or its manifest is missing from
     /// the store and at or below the manifest boundary (see
-    /// `load_held_manifest`).
+    /// `load_held_manifest`). A fork reads its source's head here, and
+    /// publishes nothing on the source.
     pub(crate) async fn load_head_projection(
         &self,
         held: Option<WriterPosition>,
         clock: &OperationClock,
     ) -> Result<ManifestProjection<'_, S>> {
         let held = match held {
-            Some(held) => self
-                .load_held_manifest(
-                    held.read_basis().basis.manifest(),
-                    held.basis.boundary().clone(),
-                )
-                .await?
-                .map(|decoded| {
-                    let segments = self.segments(decoded, self.keeper(KeptBy::Current));
-                    (held, segments.segments)
-                }),
+            Some(held) => self.load_position_projection(held).await?,
             None => None,
         };
         match held {
-            Some((held, manifest_segments)) => Ok(ManifestProjection {
-                basis: held.basis,
-                manifest_segments,
-                tail_state: held.tail,
-            }),
+            Some(projection) => Ok(projection),
             None => self.load_fold_projection(clock.observe()).await,
         }
+    }
+
+    /// Returns the manifest and the WAL tail of `held`, a writer session's
+    /// position, or `None` when its manifest is missing from the store and
+    /// at or below the manifest boundary (see `load_held_manifest`).
+    async fn load_position_projection(
+        &self,
+        held: WriterPosition,
+    ) -> Result<Option<ManifestProjection<'_, S>>> {
+        let decoded = self
+            .load_held_manifest(
+                held.read_basis().basis.manifest(),
+                held.basis.boundary().clone(),
+            )
+            .await?;
+        Ok(decoded.map(|decoded| {
+            let segments = self.segments(decoded, self.keeper(KeptBy::Current));
+            ManifestProjection {
+                basis: held.basis,
+                manifest_segments: segments.segments,
+                tail_state: held.tail,
+            }
+        }))
     }
 
     pub(super) async fn load_manifest_projection(
@@ -363,7 +383,26 @@ impl FoldedWalTail {
         }
     }
 
+    /// Returns the fold of `anchor`'s tail as already current, or `None`
+    /// when the anchor has a WAL object above its manifest's
+    /// `folded_wal_no`.
+    ///
+    /// A fold whose tail has no WAL object publishes nothing, so a process
+    /// that reads such a tail returns this without claiming the namespace.
+    pub fn current_when_no_wal_object(anchor: &NamespaceReadAnchor) -> Option<Self> {
+        let manifest = anchor.current_manifest();
+        (manifest.folded_wal_no() == anchor.read_state.wal_no).then(|| {
+            Self::new(
+                &manifest.payload().namespace_id,
+                anchor.read_state.seq,
+                anchor.held().clone(),
+                FoldWalOutcome::AlreadyCurrent,
+            )
+        })
+    }
+
     /// The manifest this fold published, or `None` when it published none.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn published(&self) -> Option<Held<LoadedManifest>> {
         (self.response.outcome == FoldWalOutcome::Published).then(|| self.current.clone())
     }

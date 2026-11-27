@@ -1,7 +1,7 @@
 //! Runtime handles, options and requests for HTTP API tests.
 
 use crate::{
-    AuthPolicy, HttpConfig, HttpHandles, HttpMetrics, HttpState, JobMode, Namespaces, UsageRecorder,
+    AuthPolicy, HttpConfig, HttpHandles, HttpMetrics, HttpState, Namespaces, UsageRecorder,
 };
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -20,13 +20,35 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tower::ServiceExt as _;
 
+/// The grep handles of a test app: none, the query service alone, or the
+/// query service and the worker that builds the index as each namespace's
+/// writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GrepHandles {
+    Disabled,
+    ServeOnly,
+    ServeAndBuild,
+}
+
+impl GrepHandles {
+    /// Whether the app serves grep queries.
+    pub(crate) fn serves(self) -> bool {
+        matches!(self, Self::ServeOnly | Self::ServeAndBuild)
+    }
+
+    /// Whether the app has the worker that builds the index.
+    pub(crate) fn builds(self) -> bool {
+        matches!(self, Self::ServeAndBuild)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct TestOptions {
     pub(super) http: HttpConfig,
     /// The runtime's inline content policy, which the HTTP API reads from the
     /// runtime.
     pub(super) inline_content: InlineContentPolicy,
-    pub(super) grep: JobMode,
+    pub(super) grep: GrepHandles,
     pub(super) writer_id: WriterId,
     pub(super) store: SharedObjectStore,
 }
@@ -39,6 +61,9 @@ pub(super) struct TestAppOptions {
     pub(super) max_staleness_ms: Option<u64>,
     /// The runtime's monotonic timer, or the system timer when `None`.
     pub(super) monotonic_timer: Option<Arc<dyn MonotonicTimer>>,
+    /// The runtime's wall clock, which dates its commits, or the system
+    /// clock when `None`.
+    pub(super) wall_clock: Option<Arc<dyn loonfs::WallClock>>,
     /// The runtime's execution budget, or the default when `None`.
     pub(super) execution_budget: Option<loonfs::ExecutionBudget>,
     /// The WAL objects that make a writer session's own fold due, or the
@@ -62,7 +87,7 @@ pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
             auth_policy: AuthPolicy::BearerToken("test-token".into()),
         },
         inline_content: InlineContentPolicy::default(),
-        grep: JobMode::ServeAndMaintain,
+        grep: GrepHandles::ServeAndBuild,
         writer_id: WriterId::parse(writer_id).expect("writer id"),
         store: Arc::new(LocalFsStore::with_key_prefix(root, Some("http-tests")).expect("store")),
     }
@@ -103,6 +128,10 @@ pub(super) async fn test_app_with_sessions(
         Some(timer) => builder.monotonic_timer(timer),
         None => builder,
     };
+    let builder = match inputs.wall_clock {
+        Some(clock) => builder.wall_clock(clock),
+        None => builder,
+    };
     let builder = match inputs.session_fold_at_wal_objects {
         Some(objects) => builder.session_fold_at_wal_objects(objects),
         None => builder,
@@ -119,15 +148,11 @@ pub(super) async fn test_app_with_sessions(
         .metrics_recorder(metrics.recorder())
         .build()
         .await?;
-    let maintenance = runtime.maintenance(
-        WriterId::parse(format!("{}-maintenance", config.writer_id))
-            .expect("a suffixed writer id should stay valid"),
-    );
+    let maintenance = runtime.maintenance();
     let grep_worker = || {
         GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
-            maintenance.clone(),
             loonfs_grep::GrepStepBudget::default(),
         )
     };
@@ -138,7 +163,7 @@ pub(super) async fn test_app_with_sessions(
         Arc::new(GrepService::new(cache))
     };
     let grep_service = config.grep.serves().then(grep_service);
-    let grep_worker = config.grep.maintains().then(grep_worker);
+    let grep_worker = config.grep.builds().then(grep_worker);
     let namespaces = Arc::new(Namespaces::<()>::new(runtime.clone()));
     let state = HttpState::new(
         options,

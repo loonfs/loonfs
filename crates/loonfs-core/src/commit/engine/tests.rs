@@ -272,7 +272,10 @@ async fn a_commit_that_cannot_check_its_manifest_returns_the_load_error() {
         .remove(0)
         .expect("first commit");
     let folded = crate::test_support::namespace_store(&failing, &namespace_id)
-        .fold_wal_tail(engine.writer_position(), &writer.clock())
+        .fold_wal_tail_from(
+            &engine.writer_position().expect("a writer position"),
+            &writer.clock(),
+        )
         .await
         .expect("fold");
     engine.move_position_onto(folded.current);
@@ -577,60 +580,6 @@ async fn writer_after_one_publish<'a>(
     (engine, timer, writer)
 }
 
-/// Checks that a quiet writer whose next WAL number another process took
-/// with a floor object collides with the floor object, drops its position,
-/// and runs discovery on its next publication, which writes the commit
-/// above the floor object, against the new floor.
-#[tokio::test]
-async fn a_quiet_writer_whose_next_number_is_a_floor_object_commits_above_it() {
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = gated_store(&directory, KeyPredicate::new(|_| false));
-    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-    for name in ["beta", "gamma", "delta"] {
-        publish_one(&mut engine, &writer, name).await;
-    }
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let tip = engine
-        .writer_position()
-        .expect("a position")
-        .read_basis()
-        .head
-        .wal_no;
-    let planned = namespace.load_current_manifest().await.expect("planned");
-    namespace
-        .publish_floor_object(&planned, CommitSeq(1))
-        .await
-        .expect("another process creates a floor object");
-
-    timer.advance_ms(QUIET_HOUR_MS);
-    store.reset();
-    let deadline = OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer));
-    let collided = engine
-        .publish_batch(vec![create_dir("zeta", "zeta")], &deadline)
-        .await;
-    assert_matches!(
-        collided.results.as_slice(),
-        [Err(CoreError::WalPublish(
-            crate::wal::WalPublishError::NumberTaken
-        ))]
-    );
-    let operations = store.take();
-    assert!(
-        matches!(operations.as_slice(), [put] if is_wal_put(put, &namespace_id)),
-        "the put is the only request before the collision: {operations:?}"
-    );
-    assert!(engine.writer_position().is_none());
-
-    let retried = engine
-        .publish_batch(vec![create_dir("zeta", "zeta")], &deadline)
-        .await;
-    retried.results[0].as_ref().expect("the retry commits");
-    let position = engine.writer_position().expect("a position");
-    assert_eq!(position.read_basis().head.wal_no.0, tip.0 + 2);
-    assert_eq!(position.retention_floor_seq(), CommitSeq(1));
-}
-
 /// Checks that a writer that commits every few minutes for an hour, against
 /// a manifest that nothing replaces, sends its WAL put and no other request
 /// on each commit, so it never checks its tip and never reads its WAL tail
@@ -783,143 +732,6 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
     );
 }
 
-/// Checks that a quiet writer commits with its put alone over another
-/// process's fold of its tail, and that a reader of the newest manifest
-/// replays the commit.
-#[tokio::test]
-async fn a_quiet_writer_commits_above_another_process_fold() {
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = gated_store(&directory, KeyPredicate::new(|_| false));
-    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(
-            None,
-            &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .expect("another process folds");
-
-    timer.advance_ms(QUIET_HOUR_MS);
-    store.reset();
-    publish_one(&mut engine, &writer, "beta").await;
-    let operations = store.take();
-    assert!(
-        matches!(operations.as_slice(), [put] if is_wal_put(put, &namespace_id)),
-        "{operations:?}"
-    );
-    let loaded = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_read_state()
-        .await
-        .expect("head");
-    assert_eq!(
-        engine
-            .read_position()
-            .expect("published")
-            .read_basis()
-            .head
-            .seq,
-        loaded.seq,
-        "a reader replays the commit"
-    );
-}
-
-/// Checks the first writer rule: a session with tip `t` whose manifest
-/// probe finds another process's fold of a floor object at `t + 1` drops its
-/// position instead of moving onto the fold, and its next commit is written
-/// above `t + 1`, against the floor that the fold recorded.
-#[tokio::test]
-async fn a_session_drops_its_position_at_a_fold_past_its_tip() {
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = gated_store(&directory, KeyPredicate::new(|_| false));
-    let (mut engine, _timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-    let before = engine.writer_position().expect("a position");
-    let tip = before.read_basis().head.wal_no;
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let planned = namespace.load_current_manifest().await.expect("planned");
-    namespace
-        .publish_floor_object(&planned, CommitSeq(1))
-        .await
-        .expect("another process creates a floor object");
-    let folded = namespace
-        .fold_wal_tail(
-            None,
-            &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .expect("another process folds the floor object")
-        .current;
-    assert_eq!(
-        folded.manifest().folded_wal_no(),
-        tip.successor().expect("next WAL number")
-    );
-
-    let newest = namespace
-        .same_epoch_manifests_above(before.basis(), crate::test_support::observed_now())
-        .await
-        .expect("the probe's walk")
-        .expect("the fold has the session's epoch");
-    engine.move_position_onto(newest);
-    assert!(
-        engine.writer_position().is_none(),
-        "the session drops its position"
-    );
-    publish_one(&mut engine, &writer, "beta").await;
-    let position = engine.writer_position().expect("a position");
-    assert_eq!(position.read_basis().head.wal_no.0, tip.0 + 2);
-    assert_eq!(position.retention_floor_seq(), CommitSeq(1));
-}
-
-/// Checks that a writer at the write stop whose fold finds its tail already
-/// folded by another process moves its position onto that process's
-/// manifest, so the writer's next commit succeeds.
-#[tokio::test]
-async fn a_writer_at_the_write_stop_moves_onto_another_process_fold_of_its_tail() {
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = gated_store(&directory, KeyPredicate::new(|_| false));
-    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-    let mut index = 0;
-    while engine.wal_tail_objects() < Some(crate::limits::MAX_UNFOLDED_WAL_OBJECTS) {
-        index += 1;
-        publish_one(&mut engine, &writer, &format!("dir-{index}")).await;
-    }
-    let refused = engine
-        .publish_batch(
-            vec![create_dir("refused", "refused")],
-            &OperationClock::start(writer.now_ms, timer.clone()),
-        )
-        .await;
-    assert_matches!(
-        refused.results.as_slice(),
-        [Err(error)] if error.code() == ErrorCode::MaintenanceRequired
-    );
-    let deadline = OperationClock::start(0, timer.clone());
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let fold = |input| namespace.fold_wal_tail(input, &deadline);
-    let input = engine.writer_position().expect("tail");
-    let other = fold(None).await.expect("another process folds");
-    assert_eq!(other.response.outcome, crate::FoldWalOutcome::Published);
-    let folded = fold(Some(input)).await.expect("the session's fold");
-    assert_eq!(
-        folded.response.outcome,
-        crate::FoldWalOutcome::AlreadyCurrent
-    );
-    engine.move_position_onto(folded.current);
-    assert_eq!(
-        engine
-            .read_position()
-            .expect("the position moved")
-            .read_basis()
-            .basis
-            .manifest(),
-        &other.current.manifest().manifest()
-    );
-    assert_eq!(engine.wal_tail_objects(), Some(0));
-    publish_one(&mut engine, &writer, "after").await;
-}
-
 /// Creates a writer that folds three times and moves its position after
 /// each fold, and then runs a compaction unit that publishes the next
 /// manifest.
@@ -940,7 +752,7 @@ async fn writer_after_own_compaction<'a>(
         publish_one(&mut engine, &writer, name).await;
         let input = engine.writer_position().expect("retained tail");
         let folded = crate::test_support::namespace_store(store, namespace_id)
-            .fold_wal_tail(Some(input), &OperationClock::start(0, timer.clone()))
+            .fold_wal_tail_from(&input, &OperationClock::start(0, timer.clone()))
             .await
             .expect("own fold");
         engine.move_position_onto(folded.current);
@@ -957,7 +769,10 @@ async fn writer_after_own_compaction<'a>(
         fixture
     }
     .engine()
-    .compact_from_current()
+    .compact_metadata_unit_from(
+        &before,
+        &crate::compaction::MetadataCompactionCancellation::default(),
+    )
     .await
     .expect("own compaction");
     let manifest = match compacted {
@@ -1106,16 +921,15 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     publish_one(&mut engine, &writer, "beta").await;
-    // A maintenance call in the writer's runtime, which shares the writer's
-    // segment cache, folds the tail through beta. The writer then commits
-    // gamma on the manifest that the fold replaced.
-    let folded = crate::NamespaceStore {
-        segment_cache: Arc::clone(&engine.namespace.segment_cache),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    }
-    .fold_wal_tail(None, &OperationClock::start(0, timer.clone()))
-    .await
-    .expect("fold");
+    // The session folds the tail through beta from the position that reads
+    // start from, as a runtime's fold does beside the session's commits. The
+    // writer then commits gamma on the manifest that the fold replaced.
+    let input = engine.writer_position().expect("a position");
+    let folded = engine
+        .namespace
+        .fold_wal_tail_from(&input, &OperationClock::start(0, timer.clone()))
+        .await
+        .expect("fold");
     let published = folded.published().expect("the fold publishes a manifest");
     publish_one(&mut engine, &writer, "gamma").await;
 
@@ -1167,51 +981,42 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     );
 }
 
-/// Checks that a manifest this runtime published two numbers above the
-/// position's manifest, over another process's fold, moves the position with
-/// the commit after that fold as its tail, and that the start of the
-/// publication becomes the position's last successor check.
+/// Checks that a manifest that the session published two numbers above the
+/// position's manifest, over the session's own fold from an earlier position,
+/// moves the position with the commit after that fold as its tail, and that
+/// the start of the publication becomes the position's last successor check.
 #[tokio::test]
-async fn a_manifest_published_over_another_process_fold_moves_the_position() {
+async fn a_manifest_published_over_the_sessions_own_fold_moves_the_position() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     publish_one(&mut engine, &writer, "beta").await;
-    let basis = engine
-        .writer_position()
-        .expect("position")
-        .read_basis()
-        .basis
-        .clone();
-    // Another process folds the tail through beta, and the writer then
+    let input = engine.writer_position().expect("position");
+    let basis = input.read_basis().basis.clone();
+    // The session folds the tail through beta from that position, as a
+    // runtime's fold does beside the session's commits, and the writer then
     // commits gamma on the manifest that the fold replaced.
-    let folded = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(None, &OperationClock::start(0, timer.clone()))
+    let folded = engine
+        .namespace
+        .fold_wal_tail_from(&input, &OperationClock::start(0, timer.clone()))
         .await
         .expect("fold");
     assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
     publish_one(&mut engine, &writer, "gamma").await;
     timer.advance_ms(10);
-    let changed = crate::test_support::change_retention_window(
-        &{
-            let mut fixture = crate::test_support::NamespaceFixture::new(
-                &store,
-                &namespace_id,
-                &crate::test_support::writer_at("test-writer", 0),
-            );
-            fixture.namespace.timer = timer.clone();
-            fixture
-        }
-        .engine(),
-    )
-    .await;
+    let window_ms = 2 * crate::limits::GC_GRACE_WINDOW_MS;
+    let changed = engine
+        .set_retention_window(loonfs_types::RetentionWindow::new(window_ms).ok())
+        .await
+        .expect("change the retention window")
+        .published
+        .expect("a new window publishes a manifest");
     assert_eq!(
         changed.manifest().manifest().manifest_no.0,
         basis.manifest_no().0 + 2
     );
 
-    engine.move_position_onto(changed.clone());
     let moved = engine.writer_position().expect("the position moved");
     assert_eq!(
         moved.read_basis().basis.manifest(),
@@ -1247,23 +1052,17 @@ async fn a_window_change_over_a_manifest_without_runs_keeps_the_root_directory()
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
-    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+    let (mut engine, _, writer) = writer_after_one_publish(&store, &namespace_id).await;
     let before = engine.writer_position().expect("position");
-    let changed = crate::test_support::change_retention_window(
-        &{
-            let mut fixture = crate::test_support::NamespaceFixture::new(
-                &store,
-                &namespace_id,
-                &crate::test_support::writer_at("test-writer", 0),
-            );
-            fixture.namespace.timer = timer.clone();
-            fixture
-        }
-        .engine(),
-    )
-    .await;
+    let changed = engine
+        .set_retention_window(
+            loonfs_types::RetentionWindow::new(2 * crate::limits::GC_GRACE_WINDOW_MS).ok(),
+        )
+        .await
+        .expect("change the retention window")
+        .published
+        .expect("a new window publishes a manifest");
 
-    engine.move_position_onto(changed.clone());
     let moved = engine.writer_position().expect("the position moved");
     assert_eq!(
         moved.read_basis().basis.manifest(),
@@ -1415,7 +1214,10 @@ pub(super) async fn advance_in_session<S: ObjectStore>(
     assert_eq!(report.retention_floor_seq, target, "the floor moves");
     let folded = engine
         .namespace
-        .fold_wal_tail(engine.writer_position(), &clock)
+        .fold_wal_tail_from(
+            &engine.writer_position().expect("a writer position"),
+            &clock,
+        )
         .await
         .expect("fold")
         .current;

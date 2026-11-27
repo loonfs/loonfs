@@ -7,6 +7,7 @@ use super::{GramIndexBuildPolicy, GrepBuildOutcome, GrepReorganizeOutcome, GrepW
 use crate::entry::{grep_extension_name, GrepEntry, GrepEntryError, GrepIndexStatus};
 use crate::{GrepError, Result};
 use loonfs::engine::{ExtensionBasis, ExtensionPublication};
+use loonfs::{Namespace, Writable};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::NamespaceId;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -76,7 +77,7 @@ impl PublicationCounts {
 
 /// The change that a run's steps made to grep's entry since the manifest
 /// that the change builds on.
-pub(super) struct PendingEntry {
+pub(crate) struct PendingEntry {
     pub(super) basis: ExtensionBasis,
     /// The entry that the basis lists, or `None` when grep was never enabled
     /// or when a disable replaces an invalid entry (see
@@ -95,7 +96,7 @@ impl PendingEntry {
     /// In a fork, the change clears a reorganization that the fork inherited
     /// from its source (see [`GrepEntry::without_inherited_reorganize`]), so
     /// the fork's first change publishes the entry without it.
-    fn new(basis: ExtensionBasis) -> Result<Self> {
+    pub(crate) fn new(basis: ExtensionBasis) -> Result<Self> {
         match decode_published(&basis) {
             Ok(published) => Ok(Self::from_published(basis, published)),
             Err(error) => Err(invalid_entry(&basis, error)),
@@ -146,12 +147,12 @@ impl PendingEntry {
 
     /// Returns the entry that the basis lists, or `None` when grep was never
     /// enabled or when disabling replaces an entry that grep rejects.
-    pub(super) fn published(&self) -> Option<&GrepEntry> {
+    pub(crate) fn published(&self) -> Option<&GrepEntry> {
         self.published.as_ref()
     }
 
     /// Returns the pending entry when the index is enabled.
-    pub(super) fn enabled_entry(&self) -> Option<&GrepEntry> {
+    pub(crate) fn enabled_entry(&self) -> Option<&GrepEntry> {
         self.entry
             .as_ref()
             .filter(|entry| !matches!(entry.status(), GrepIndexStatus::Disabled {}))
@@ -217,6 +218,8 @@ fn invalid_entry(basis: &ExtensionBasis, error: GrepEntryError) -> GrepError {
 /// collector.
 pub struct GrepSteps<'w, S> {
     pub(super) worker: &'w GrepWorker<S>,
+    /// The namespace's writer session, which publishes the run's changes.
+    namespace: Namespace<Writable>,
     pub(super) namespace_id: NamespaceId,
     publish_interval_ms: u64,
     pending: Option<PendingEntry>,
@@ -225,12 +228,13 @@ pub struct GrepSteps<'w, S> {
 impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
     pub(super) fn new(
         worker: &'w GrepWorker<S>,
-        namespace_id: &NamespaceId,
+        namespace: &Namespace<Writable>,
         publish_interval_ms: u64,
     ) -> Self {
         Self {
             worker,
-            namespace_id: namespace_id.clone(),
+            namespace: namespace.clone(),
+            namespace_id: namespace.id().clone(),
             publish_interval_ms,
             pending: None,
         }
@@ -281,17 +285,14 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
     }
 
     /// Returns the pending change, and when nothing is pending, starts one
-    /// from the current manifest with `start`.
+    /// with `start` from the current manifest, which the read-only handle
+    /// loads, so the load opens no writer session.
     async fn pending_from(
         &mut self,
         start: fn(ExtensionBasis) -> Result<PendingEntry>,
     ) -> Result<&mut PendingEntry> {
         if self.pending.is_none() {
-            let basis = self
-                .worker
-                .maintenance
-                .load_extension_basis(&self.namespace_id)
-                .await?;
+            let basis = self.worker.load_basis(&self.namespace_id).await?;
             self.pending = Some(start(basis)?);
         }
         Ok(self
@@ -336,19 +337,16 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
             .as_ref()
             .expect("a changed pending change should have an entry");
         let publication = self
-            .worker
-            .maintenance
+            .namespace
             .publish_extension(&pending.basis, &grep_extension_name(), entry.encode())
             .await?;
         let counts = &self.worker.publications;
         match publication {
-            ExtensionPublication::Published(basis) => {
-                let first_put = pending.basis.manifest().manifest_no.successor().ok()
-                    == Some(basis.manifest().manifest_no);
-                let outcome = if first_put {
-                    &counts.published
-                } else {
+            ExtensionPublication::Published { basis, rebuilt } => {
+                let outcome = if rebuilt {
                     &counts.rebuilt
+                } else {
+                    &counts.published
                 };
                 outcome.fetch_add(1, Ordering::Relaxed);
                 self.pending = Some(PendingEntry::new(basis)?);

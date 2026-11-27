@@ -142,8 +142,9 @@ async fn an_explicit_fold_from_a_live_session_puts_on_its_basis_with_no_request_
         Duration::from_secs(10),
         fixture
             .writer
-            .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
-            .fold_wal(&fixture.namespace_id),
+            .open_namespace(&fixture.namespace_id)
+            .expect("open namespace")
+            .fold_wal(),
     )
     .await
     .expect("the fold returns")
@@ -171,11 +172,11 @@ async fn a_retention_advance_from_a_live_session_checks_the_position_and_folds_o
         move |builder| builder.wall_clock(clock)
     })
     .await;
-    let maintenance = fixture
-        .writer
-        .maintenance(loonfs_test_support::ids::writer_id("writer-a"));
+    let maintenance = fixture.writer.clone();
     maintenance
-        .fold_wal(&fixture.namespace_id)
+        .open_namespace(&fixture.namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the first commit");
     fixture.writer.drain().await.expect("drain");
@@ -189,7 +190,10 @@ async fn a_retention_advance_from_a_live_session_checks_the_position_and_folds_o
     fixture.reset_requests();
     let advanced = bounded(
         Duration::from_secs(10),
-        maintenance.advance_retention_floor(&fixture.namespace_id),
+        maintenance
+            .open_namespace(&fixture.namespace_id)
+            .expect("open namespace")
+            .advance_retention_floor(),
     )
     .await
     .expect("the advance returns")

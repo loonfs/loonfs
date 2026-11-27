@@ -3,9 +3,7 @@
 //! folds and commits never wait for that compaction, and how two calls'
 //! compaction units take turns.
 
-use loonfs::{
-    ActorId, LoonFs, Maintenance, MaintenanceCancellation, Namespace, RuntimeConfig, Writable,
-};
+use loonfs::{ActorId, LoonFs, MaintenanceCancellation, Namespace, RuntimeConfig, Writable};
 use loonfs_test_support::clock::bounded;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -56,14 +54,19 @@ async fn backlog(name: &str) -> Backlog {
         .await
         .expect("create");
     let held = runtime.open_namespace(&namespace_id).expect("open");
-    let maintenance = runtime.maintenance(writer_id("compaction-calls"));
+    let maintenance = runtime.clone();
     // One fold per commit leaves more delta runs than one compaction unit
     // merges.
     for index in 0..2 * DEFAULT_MAX_DELTA_RUNS.get() {
         held.put_file(&format!("/note-{index}"), b"data", &actor)
             .await
             .expect("publish");
-        maintenance.fold_wal(&namespace_id).await.expect("fold");
+        maintenance
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .fold_wal()
+            .await
+            .expect("fold");
     }
     Backlog {
         store,
@@ -75,10 +78,6 @@ async fn backlog(name: &str) -> Backlog {
 }
 
 impl Backlog {
-    fn maintenance(&self) -> Maintenance {
-        self.runtime.maintenance(writer_id("compaction-calls"))
-    }
-
     /// Commits files until the tail reaches the fold trigger, so the session
     /// starts its fold, and waits for that fold.
     async fn publish_over_the_fold_trigger(&self) {
@@ -103,8 +102,11 @@ async fn a_close_returns_during_a_hosts_compaction_and_stops_it_after_its_unit()
     let backlog = backlog("closing").await;
     backlog.store.block_next();
     let cancellation = MaintenanceCancellation::new();
-    let maintenance = backlog.maintenance();
-    let call = maintenance.maintain_metadata_while_due(backlog.held.id(), &cancellation);
+    let maintenance = backlog.runtime.clone();
+    let handle = maintenance
+        .open_namespace(backlog.held.id())
+        .expect("open namespace");
+    let call = handle.maintain_metadata_while_due(&cancellation);
     tokio::pin!(call);
     tokio::select! {
         _ = &mut call => panic!("the call finished without reading a segment"),
@@ -144,8 +146,11 @@ async fn a_sessions_fold_runs_while_a_hosts_metadata_call_compacts() {
         .expect("fork");
     backlog.store.block_next();
     let cancellation = MaintenanceCancellation::new();
-    let maintenance = backlog.maintenance();
-    let call = maintenance.maintain_metadata_while_due(backlog.held.id(), &cancellation);
+    let maintenance = backlog.runtime.clone();
+    let namespace_2 = maintenance
+        .open_namespace(backlog.held.id())
+        .expect("open namespace");
+    let call = namespace_2.maintain_metadata_while_due(&cancellation);
     tokio::pin!(call);
     tokio::select! {
         _ = &mut call => panic!("the call finished without reading a segment"),
@@ -158,6 +163,7 @@ async fn a_sessions_fold_runs_while_a_hosts_metadata_call_compacts() {
     .await
     .expect("the commit and the session's fold don't wait for the call");
     let diagnostics = backlog
+        .runtime
         .maintenance()
         .diagnostics(backlog.held.id())
         .await
@@ -193,17 +199,23 @@ async fn two_metadata_calls_plan_their_units_from_each_others_manifests() {
         .fork_namespace(namespace_id, &copy_id, &backlog.actor)
         .await
         .expect("fork");
-    let maintenance = backlog.maintenance();
+    let maintenance = backlog.runtime.clone();
     backlog.recording.reset();
     backlog.store.block_next();
     let cancellation = MaintenanceCancellation::new();
-    let first = maintenance.maintain_metadata_while_due(namespace_id, &cancellation);
+    let namespace_3 = maintenance
+        .open_namespace(namespace_id)
+        .expect("open namespace");
+    let first = namespace_3.maintain_metadata_while_due(&cancellation);
     tokio::pin!(first);
     tokio::select! {
         _ = &mut first => panic!("the first call finished without reading a segment"),
         () = backlog.store.wait_until_blocked() => {}
     }
-    let second = maintenance.maintain_metadata_while_due(namespace_id, &cancellation);
+    let namespace_4 = maintenance
+        .open_namespace(namespace_id)
+        .expect("open namespace");
+    let second = namespace_4.maintain_metadata_while_due(&cancellation);
     let release = async {
         for _ in 0..100 {
             tokio::task::yield_now().await;

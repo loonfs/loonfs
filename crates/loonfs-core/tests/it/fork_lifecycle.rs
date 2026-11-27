@@ -1142,12 +1142,12 @@ async fn inode_rows<S: ObjectStore + ?Sized>(store: &S, namespace_id: &Namespace
 }
 
 /// Checks that a fork's base compactions remove the rows of a deletion that
-/// the fork inherited with no writer session ever opened in the fork,
-/// because the fork's retention floor starts at its fork point, so every
-/// inherited deletion has expired. The source keeps
+/// the fork inherited, before any commit in the fork, because the fork's
+/// retention floor starts at its fork point, so every inherited deletion has
+/// expired. The compactions run as the fork's writer, which claims the fork. The source keeps
 /// its rows, and the fork's first write commits right after the fork point.
 #[tokio::test]
-async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
+async fn a_fork_removes_an_inherited_deletions_rows_in_its_writers_first_compaction() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = default_writer();
@@ -1207,8 +1207,9 @@ async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
     let after_compaction = head_state(&store, &fork_namespace_id).await;
     assert_eq!(after_compaction.seq, fork_head.seq);
     assert_eq!(
-        after_compaction.writer_epoch, fork_head.writer_epoch,
-        "no writer session ran in the fork"
+        after_compaction.writer_epoch.0,
+        fork_head.writer_epoch.0 + 1,
+        "the fork's compaction runs as the fork's writer, which claims the fork first"
     );
 
     let first_write = NamespaceFixture::new(&store, &fork_namespace_id, &context)

@@ -2,8 +2,8 @@
 //! reached.
 
 use super::direct_download::LoopbackIssuer;
+use super::fixtures::GrepHandles;
 use super::fixtures::{test_app, test_options, TestAppOptions};
-use crate::JobMode;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use loonfs::{DeleteDirectoryBehavior, DeleteOptions, SharedObjectStore};
@@ -68,19 +68,19 @@ async fn expire_old(store: &SharedObjectStore) -> (String, String) {
     // engine's clock is that far ahead of the writer's.
     let clock = Arc::new(ManualClock::at_system_time());
     clock.advance_ms(loonfs::GC_GRACE_WINDOW_MS);
-    let maintenance = loonfs_core::NamespaceWriterEngine::writer(
+    let other_writer = loonfs_core::NamespaceWriterEngine::writer(
         loonfs_core::test_support::namespace_store_with_wall_clock(
             store.clone(),
             &namespace_id,
             clock,
         ),
-        writer_id("maintainer"),
+        writer_id("other-writer"),
     );
-    maintenance
+    other_writer
         .fold_in_new_session()
         .await
         .expect("fold the deletion");
-    let advanced = maintenance
+    let advanced = other_writer
         .advance_retention_floor(loonfs_core::RetentionTarget::Seq(deletion.committed_seq))
         .await
         .expect("advance the floor to the deletion");
@@ -97,7 +97,7 @@ async fn an_expired_subtree_is_an_unknown_inode_on_every_inode_route() {
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let (kept, notes) = expire_old(&store).await;
     let mut options = test_options(directory.path(), "expired-reads");
-    options.grep = JobMode::Disabled;
+    options.grep = GrepHandles::Disabled;
     let (router, _state) = test_app(
         options,
         TestAppOptions {

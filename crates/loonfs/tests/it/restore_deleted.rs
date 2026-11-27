@@ -820,7 +820,7 @@ async fn a_deleted_file_keeps_its_newest_revision_at_the_floor_and_a_restore_bri
         .expect("fold the restore");
     // The base compaction applies the floor: the file keeps its newest
     // revision at the floor and loses the older one.
-    compact_until_done(&fs.maintenance, &namespace_id).await;
+    compact_until_done(&fs.namespace_writer(&namespace_id).expect("open namespace")).await;
     let reader = fresh_reader(store(temp_dir.path())).await;
     let namespace = reader.namespace(&namespace_id);
     assert_eq!(

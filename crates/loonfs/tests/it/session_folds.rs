@@ -6,8 +6,8 @@
 //! operation folds the tail itself, once.
 
 use loonfs::{
-    ActorId, LoonFs, MaintainMetadataOptions, Maintenance, MaintenanceCancellation, Namespace,
-    NamespaceId, RuntimeConfig, Writable,
+    ActorId, LoonFs, MaintainMetadataOptions, MaintenanceCancellation, Namespace, NamespaceId,
+    RuntimeConfig, Writable,
 };
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -46,9 +46,9 @@ struct Family {
 enum Operation {
     /// A snapshot of the fork.
     Snapshot,
-    /// [`Maintenance::fold_wal`] on the fork.
+    /// [`Namespace::fold_wal`](loonfs::Namespace::fold_wal) on the fork.
     FoldWal,
-    /// [`Maintenance::maintain_metadata_while_due_with_options`] on the fork,
+    /// [`Namespace::maintain_metadata_while_due_with_options`](loonfs::Namespace::maintain_metadata_while_due_with_options) on the fork,
     /// the call that the HTTP `metadata` job makes, with a fold threshold of
     /// one WAL object.
     Metadata,
@@ -136,8 +136,8 @@ impl Family {
         output
     }
 
-    fn maintenance(&self) -> Maintenance {
-        self.runtime.maintenance(writer_id("session-folds"))
+    fn maintenance(&self) -> LoonFs<Writable> {
+        self.runtime.clone()
     }
 
     /// Runs `operation` on the fork.
@@ -154,8 +154,10 @@ impl Family {
                     .expect("the snapshot");
             }
             Operation::FoldWal => {
-                self.maintenance()
-                    .fold_wal(fork_id)
+                self.runtime
+                    .open_namespace(fork_id)
+                    .expect("open namespace")
+                    .fold_wal()
                     .await
                     .expect("the fold");
             }
@@ -163,9 +165,10 @@ impl Family {
                 let options = MaintainMetadataOptions {
                     max_wal_tail_objects: NonZeroU64::MIN,
                 };
-                self.maintenance()
+                self.runtime
+                    .open_namespace(fork_id)
+                    .expect("open namespace")
                     .maintain_metadata_while_due_with_options(
-                        fork_id,
                         &MaintenanceCancellation::new(),
                         &options,
                     )
@@ -220,7 +223,8 @@ async fn folds_of_a_namespace_wait_for_its_sessions_fold() {
 }
 
 /// Checks that each operation that folds a fork without a session in the
-/// runtime folds the fork's tail itself, once. The fork writes one file
+/// runtime folds the fork's tail itself, once, after the new session's claim
+/// of the fork. The fork writes one file
 /// fewer than its fold trigger, so its session ends with the whole tail
 /// unfolded. A snapshot needs the fork's session, and a fork of the fork
 /// folds the tail into itself, so neither is one of the operations.
@@ -246,8 +250,8 @@ async fn folds_of_a_namespace_without_a_session_fold_its_tail_once() {
         );
         assert_eq!(
             write_keys(&operations, &KeyPredicate::manifest(family.fork.id())).len(),
-            1,
-            "{operation:?}: one fold of the fork"
+            2,
+            "{operation:?}: the new session's claim and one fold of the fork"
         );
         family.runtime.shutdown().await.expect("shutdown");
     }
@@ -265,7 +269,10 @@ async fn a_delete_waits_for_a_requested_fold() {
     family.store.reset();
     family.blocking.block_next();
     let maintenance = family.maintenance();
-    let folded = maintenance.fold_wal(family.fork.id());
+    let handle = maintenance
+        .open_namespace(family.fork.id())
+        .expect("open namespace");
+    let folded = handle.fold_wal();
     tokio::pin!(folded);
     tokio::select! {
         _ = &mut folded => panic!("the requested fold finished without writing content"),
@@ -304,7 +311,7 @@ async fn a_session_folds_at_the_publication_that_finds_its_oldest_commit_past_th
         .await
         .expect("create");
     let namespace = runtime.open_namespace(&namespace_id).expect("open");
-    let maintenance = runtime.maintenance(writer_id("fold-age-session"));
+    let maintenance = runtime.clone();
     let fold_age_ms = RuntimeConfig::default().fold_age_ms.get();
     // The first commit is the oldest, and each later one comes 5 minutes
     // after the one before it, except the last two, which come 1 ms apart
@@ -320,6 +327,7 @@ async fn a_session_folds_at_the_publication_that_finds_its_oldest_commit_past_th
             .expect("publish");
         runtime.drain().await.expect("drain");
         let tail = maintenance
+            .maintenance()
             .diagnostics(&namespace_id)
             .await
             .expect("diagnostics")
@@ -339,6 +347,7 @@ async fn a_session_folds_at_the_publication_that_finds_its_oldest_commit_past_th
     runtime.drain().await.expect("drain");
     assert_eq!(
         maintenance
+            .maintenance()
             .diagnostics(&namespace_id)
             .await
             .expect("diagnostics")

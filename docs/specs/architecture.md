@@ -114,6 +114,8 @@ An expired snapshot continues protecting its manifest until garbage collection r
 
 ## Maintenance and deletion
 
+The namespace's writer runs every maintenance operation that publishes a manifest or writes a WAL object: folds, compaction, extension entries, retention window changes, and retention advances. A process that needs one of them claims the namespace first, so it becomes the writer. Garbage collection runs in any process.
+
 | Operation | What it does |
 | --- | --- |
 | Fold | Moves committed WAL tail records into new metadata segments and publishes the next manifest. |

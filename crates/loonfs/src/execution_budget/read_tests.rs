@@ -9,7 +9,7 @@ use crate::{
     StreamRange, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
+use loonfs_test_support::ids::{namespace_id, test_actor};
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::EffectiveLimit;
 use std::future::Future;
@@ -257,9 +257,7 @@ async fn commits_folds_and_snapshot_folds_complete_while_a_read_holds_the_only_s
     });
     finish(fixture.store.wait_until_blocked()).await;
     fixture.assert_counts(1, 0);
-    let maintenance = fixture
-        .runtime
-        .maintenance(writer_id("read-budget-maintenance"));
+    let maintenance = fixture.runtime.clone();
     finish(
         fixture
             .namespace
@@ -267,9 +265,14 @@ async fn commits_folds_and_snapshot_folds_complete_while_a_read_holds_the_only_s
     )
     .await
     .expect("commit");
-    finish(maintenance.fold_wal(fixture.namespace.id()))
-        .await
-        .expect("fold");
+    finish(
+        maintenance
+            .open_namespace(fixture.namespace.id())
+            .expect("open namespace")
+            .fold_wal(),
+    )
+    .await
+    .expect("fold");
     finish(
         fixture
             .namespace
@@ -287,10 +290,12 @@ async fn commits_folds_and_snapshot_folds_complete_while_a_read_holds_the_only_s
     )
     .await
     .expect("snapshot fold");
-    finish(maintenance.compact_metadata(
-        fixture.namespace.id(),
-        &crate::MaintenanceCancellation::new(),
-    ))
+    finish(
+        maintenance
+            .open_namespace(fixture.namespace.id())
+            .expect("open namespace")
+            .compact_metadata(&crate::MaintenanceCancellation::new()),
+    )
     .await
     .expect("compaction");
     fixture.assert_counts(1, 0);

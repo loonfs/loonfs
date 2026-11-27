@@ -94,89 +94,6 @@ async fn the_read_position_follows_each_commit() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a check of the position that finds two manifests of the
-/// position's writer epoch after it (another runtime's fold and a retention
-/// window change) loads each of them, reads the manifest boundary, and moves
-/// the position once, onto the newer one, with the tail that the fold left.
-#[tokio::test]
-async fn a_check_moves_the_position_onto_the_newest_manifest_it_walks_to() {
-    let temp_dir = tempdir().expect("tempdir");
-    let recording = Arc::new(RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::any(),
-    ));
-    let store = recording.clone() as SharedStore;
-    let (writer, namespace) = published_namespace(store.clone()).await;
-    let namespace_id = namespace.id().clone();
-    let before = writer
-        .core
-        .writer_position(&namespace_id)
-        .expect("a position after a commit");
-    let peer = test_writer_with_interval(store, 0).await;
-    let maintenance = peer.maintenance(loonfs_test_support::ids::writer_id("peer"));
-    maintenance
-        .fold_wal(&namespace_id)
-        .await
-        .expect("the peer's fold");
-    maintenance
-        .set_retention_window(
-            &namespace_id,
-            loonfs_types::RetentionWindow::new(30 * 86_400_000).ok(),
-        )
-        .await
-        .expect("the peer's window change");
-    let base = before.read_basis().basis().manifest_no();
-    let numbers: Vec<_> = std::iter::successors(Some(base), |number| number.successor().ok())
-        .take(4)
-        .collect();
-
-    recording.reset();
-    writer
-        .core
-        .checked_writer_position(&namespace_id, None)
-        .await
-        .expect("the check");
-    let manifest =
-        |number| loonfs_objectstore::keys::metadata_manifest_object(&namespace_id, number);
-    let requests: Vec<_> = recording
-        .take()
-        .into_iter()
-        .map(|operation| {
-            (
-                matches!(operation, RecordedOperation::Head { .. }),
-                operation.key().to_owned(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        requests,
-        [
-            (true, manifest(&numbers[1])),
-            (false, manifest(&numbers[1])),
-            (false, manifest(&numbers[2])),
-            (false, manifest(&numbers[3])),
-            (false, loonfs_objectstore::keys::boundary(&namespace_id)),
-        ],
-        "the successor check, the walk's loads, and the boundary read"
-    );
-    let after = writer
-        .core
-        .writer_position(&namespace_id)
-        .expect("the position moved");
-    assert_eq!(after.read_basis().basis().manifest_no(), numbers[2]);
-    assert_eq!(
-        after.read_basis().head().seq,
-        before.read_basis().head().seq
-    );
-    assert_eq!(
-        after.read_basis().head().folded_wal_no,
-        before.read_basis().head().wal_no
-    );
-    assert_eq!(after.wal_tail_objects(), 0);
-    peer.shutdown().await.expect("peer shutdown");
-    writer.shutdown().await.expect("shutdown");
-}
-
 /// Checks that a fold through maintenance moves the position to the fold's
 /// manifest at the same head.
 #[tokio::test]
@@ -190,8 +107,9 @@ async fn a_fold_moves_the_read_position_to_its_manifest() {
         .writer_position(&namespace_id)
         .expect("a position after a commit");
     let folded = writer
-        .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold");
     assert_eq!(folded.outcome, FoldWalOutcome::Published);
@@ -244,16 +162,24 @@ async fn an_advance_moves_the_sessions_position_onto_its_manifest() {
         namespace.commit_candidate(CommitCandidate::new(create_directory_request(name, name)))
     };
     let before = commit("before").await.expect("commit");
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
-    maintenance.fold_wal(&namespace_id).await.expect("fold");
+    let maintenance = writer.clone();
+    maintenance
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
+        .await
+        .expect("fold");
     let epoch = writer_epoch(&store, &namespace_id).await;
     clock.advance_ms(crate::GC_GRACE_WINDOW_MS);
     let advanced = maintenance
-        .advance_retention_floor(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .advance_retention_floor()
         .await
         .expect("advance the floor");
     assert_eq!(advanced.retention_floor_seq, before.committed_seq);
     let diagnostics = maintenance
+        .maintenance()
         .diagnostics(&namespace_id)
         .await
         .expect("diagnostics");
@@ -411,15 +337,10 @@ async fn a_fold_moves_the_read_position_before_the_engine_is_released() {
         .writer_position(&namespace_id)
         .expect("a position after a commit");
     let engine = namespace.session().publisher.lock_engine().await;
-    let folded = bounded(
-        Duration::from_secs(10),
-        writer
-            .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
-            .fold_wal(&namespace_id),
-    )
-    .await
-    .expect("the fold doesn't wait for the engine")
-    .expect("fold");
+    let folded = bounded(Duration::from_secs(10), namespace.fold_wal())
+        .await
+        .expect("the fold doesn't wait for the engine")
+        .expect("fold");
     assert_eq!(folded.outcome, FoldWalOutcome::Published);
     let moved = writer
         .core
@@ -439,7 +360,7 @@ async fn a_fold_moves_the_read_position_before_the_engine_is_released() {
 /// the session's engine is idle, so later reads find no position to move.
 ///
 /// Another writer claims the namespace, and a fold through this runtime's
-/// maintenance then folds over the claim, so the fold's manifest has the
+/// session then folds over the claim, so the fold's manifest has the
 /// other writer's epoch.
 #[tokio::test]
 async fn a_read_position_that_cannot_follow_a_publication_is_removed_by_the_next_read() {
@@ -459,9 +380,8 @@ async fn a_read_position_that_cannot_follow_a_publication_is_removed_by_the_next
         )))
         .await
         .expect("the rival takes over the namespace");
-    let folded = writer
-        .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
-        .fold_wal(namespace.id())
+    let folded = namespace
+        .fold_wal()
         .await
         .expect("a fold over the rival's claim");
     assert_eq!(folded.outcome, FoldWalOutcome::Published);
@@ -510,11 +430,7 @@ async fn a_fold_of_an_idle_session_leaves_no_copy_of_the_folded_tail() {
             .all(|tail| tail.is_some_and(|(objects, _)| objects > 0)),
         "the commit is in both stored tails"
     );
-    let folded = writer
-        .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
-        .fold_wal(namespace.id())
-        .await
-        .expect("fold");
+    let folded = namespace.fold_wal().await.expect("fold");
     assert_eq!(folded.outcome, FoldWalOutcome::Published);
     assert_eq!(
         stored_tails(&namespace),
@@ -541,11 +457,7 @@ async fn a_commit_that_puts_back_its_position_after_a_fold_stores_no_folded_tail
         ))),
         async {
             store.wait_until_blocked().await;
-            let folded = writer
-                .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
-                .fold_wal(&namespace_id)
-                .await
-                .expect("fold");
+            let folded = namespace.fold_wal().await.expect("fold");
             assert_eq!(folded.outcome, FoldWalOutcome::Published);
             store.release();
         }
@@ -572,15 +484,10 @@ async fn the_release_after_a_fold_brings_both_stored_positions_up_to_it() {
     let (writer, namespace) = published_namespace(store).await;
     let namespace_id = namespace.id().clone();
     let engine = namespace.session().publisher.lock_engine().await;
-    let folded = bounded(
-        Duration::from_secs(10),
-        writer
-            .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
-            .fold_wal(&namespace_id),
-    )
-    .await
-    .expect("the fold doesn't wait for the engine")
-    .expect("fold");
+    let folded = bounded(Duration::from_secs(10), namespace.fold_wal())
+        .await
+        .expect("the fold doesn't wait for the engine")
+        .expect("fold");
     assert_eq!(folded.outcome, FoldWalOutcome::Published);
     let checked = writer
         .core
@@ -742,9 +649,12 @@ async fn a_read_during_an_explicit_fold_keeps_the_read_position() {
         .core
         .writer_position(&namespace_id)
         .expect("a position after a commit");
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
+    let maintenance = writer.clone();
     store.hold_next();
-    let (folded, ()) = futures::join!(maintenance.fold_wal(&namespace_id), async {
+    let handle = maintenance
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let (folded, ()) = futures::join!(handle.fold_wal(), async {
         store.wait_until_held().await;
         let from_position = reads_from(&recorder, "position");
         namespace.stat("/docs").await.expect("stat during the fold");
@@ -856,8 +766,9 @@ async fn a_fold_that_finds_the_manifest_current_keeps_an_unused_sessions_cached_
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let folded = writer
-        .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold");
     assert_eq!(folded.outcome, FoldWalOutcome::AlreadyCurrent);

@@ -2298,6 +2298,10 @@ impl Interceptor for WindowChangesBeforeManifestPuts {
                 &test_context(),
             )
             .engine()
+            .namespace
+            .fixture_writer_session()
+            .await
+            .expect("the fixture's writer session")
             .set_retention_window(Some(window_ms))
             .await
             .expect("the rival changes the window");
@@ -2902,8 +2906,13 @@ fn publication_requests(namespace: &NamespaceId, next: ManifestNo) -> Vec<(&'sta
 }
 
 /// Checks that a compaction unit loads nothing to plan, publishes on the
-/// manifest it planned from with its put and no request before it, and reads
-/// the manifest boundary after the put.
+/// manifest of its session's position with its put and no request before
+/// it, and reads the manifest boundary after the put.
+///
+/// The test installs a segment cache in the fixture's namespace, as a
+/// runtime has one, so the unit takes its position's manifest from the cache
+/// that the session's load filled. (A fixture's namespace has no segment
+/// cache by default.)
 #[tokio::test]
 async fn a_unit_loads_no_manifest_to_plan() {
     use loonfs_test_support::stores::RecordingStore;
@@ -2912,26 +2921,37 @@ async fn a_unit_loads_no_manifest_to_plan() {
     let namespace = NamespaceId::parse("unit-requests").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
     seed_bindings_workload(&store, &namespace).await;
-    let current = current_manifest_number(&store, &namespace).await;
-    let basis = crate::test_support::namespace_store(&store, &namespace)
-        .load_current_basis(crate::test_support::observed_now())
-        .await
-        .expect("current manifest");
-    let next = current.successor().expect("next manifest number");
     let store = RecordingStore::new(store, KeyPredicate::any());
-    let outcome = {
+    let engine = {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace,
             &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.run_policy = compact_everything_policy();
+        fixture.namespace.segment_cache =
+            std::sync::Arc::new(crate::segment::MetadataSegmentCache::unshared(64 << 20));
         fixture
     }
-    .engine()
-    .compact_metadata_unit(basis, &MetadataCompactionCancellation::default())
-    .await
-    .expect("run a compaction unit");
+    .engine();
+    // The session's claim and its load of the position come before the unit.
+    let position = engine
+        .commit_engine()
+        .load_position()
+        .await
+        .expect("the session's position");
+    let next = position
+        .read_basis()
+        .basis
+        .manifest()
+        .manifest_no
+        .successor()
+        .expect("next manifest number");
+    store.reset();
+    let outcome = engine
+        .compact_metadata_unit_from(&position, &MetadataCompactionCancellation::default())
+        .await
+        .expect("run a compaction unit");
     assert_matches!(
         outcome,
         CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest().manifest().manifest_no == next

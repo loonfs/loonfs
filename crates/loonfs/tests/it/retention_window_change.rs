@@ -35,11 +35,9 @@ struct Fixture {
     clock: Arc<ManualClock>,
     namespace_id: NamespaceId,
     a: LoonFs<Writable>,
-    a_name: String,
     /// A's handle on its writer session, which keeps the session open.
     a_session: Namespace<Writable>,
     b: LoonFs<Writable>,
-    b_name: String,
     /// The manifest that A's position is on.
     position: ManifestNo,
 }
@@ -100,8 +98,9 @@ async fn fixture(name: &str, a_caches_manifests: bool, snapshot: bool) -> Fixtur
             .await
             .expect("put");
     }
-    a.maintenance(writer_id(&a_name))
-        .fold_wal(&namespace_id)
+    a.open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold A's tail");
     if snapshot {
@@ -127,10 +126,8 @@ async fn fixture(name: &str, a_caches_manifests: bool, snapshot: bool) -> Fixtur
         clock,
         namespace_id,
         a,
-        a_name,
         a_session: namespace,
         b,
-        b_name,
         position: position.manifest().manifest_no,
     }
 }
@@ -139,8 +136,9 @@ impl Fixture {
     /// Sets the namespace's retention window through runtime B.
     async fn set_window_in_b(&self, window_ms: Option<u64>) {
         self.b
-            .maintenance(writer_id(&self.b_name))
-            .set_retention_window(&self.namespace_id, window_ms.map(window))
+            .open_namespace(&self.namespace_id)
+            .expect("open namespace")
+            .set_retention_window(window_ms.map(window))
             .await
             .expect("set the window in B");
     }
@@ -149,13 +147,11 @@ impl Fixture {
     /// advance that a host's sweep makes.
     async fn advance_by_window_in_a(&self) -> loonfs::Result<loonfs::AdvanceRetentionResponse> {
         self.a
-            .maintenance(writer_id(&self.a_name))
-            .advance_retention_floor_with_options(
-                &self.namespace_id,
-                &AdvanceRetentionFloorOptions {
-                    target: RetentionTarget::Window,
-                },
-            )
+            .open_namespace(&self.namespace_id)
+            .expect("open namespace")
+            .advance_retention_floor_with_options(&AdvanceRetentionFloorOptions {
+                target: RetentionTarget::Window,
+            })
             .await
     }
 
@@ -163,7 +159,7 @@ impl Fixture {
     /// the store.
     async fn floor(&self) -> CommitSeq {
         self.b
-            .maintenance(writer_id(&self.b_name))
+            .maintenance()
             .diagnostics(&self.namespace_id)
             .await
             .expect("diagnostics")
@@ -224,7 +220,7 @@ async fn a_cleared_window_stops_an_advance_from_a_snapshot_kept_position_after_a
     fixture.clock.advance_ms(GC_GRACE_WINDOW_MS + 1);
     fixture
         .b
-        .maintenance(writer_id(&fixture.b_name))
+        .maintenance()
         .gc(&fixture.namespace_id)
         .await
         .expect("collect");
@@ -258,19 +254,19 @@ async fn a_longer_window_bounds_an_advance_from_a_cached_stale_position() {
 }
 
 /// Checks that a window-based advance through A, after B took the namespace
-/// over, plans from the namespace's current head, writes its floor object
-/// with B's writer epoch, and leaves A's runtime without a panicked task.
+/// over, plans from the namespace's current head, and that A's floor object
+/// returns `writer_fenced` instead of moving the floor, with no new writer
+/// epoch and no panicked task in A's runtime.
 ///
-/// B opens the namespace, which claims the writer epoch, and commits two
-/// files dated as old as A's commits, and then folds them. A's position is
-/// still on its own fold's manifest. The advance's check of the position
-/// finds a manifest of a higher writer epoch and drops the position, so the
-/// advance plans from the current manifest, whose head is B's last commit.
-/// A's runtime then finds A's session fenced when it loads the namespace for
-/// the floor object, and it creates the floor object as a process without a
-/// session does.
+/// B opens the namespace, which claims the writer epoch, commits two files
+/// dated as old as A's commits, and folds them. A's position is still on its
+/// own fold's manifest. The advance's check of the position finds a manifest
+/// of a higher writer epoch and drops the position, so the advance plans
+/// from the current manifest, whose head is B's last commit. A's session
+/// then finds itself fenced when it loads the namespace for the floor
+/// object, and only the namespace's writer, B, puts floor objects.
 #[tokio::test]
-async fn an_advance_after_a_takeover_plans_from_the_current_head() {
+async fn an_advance_after_a_takeover_returns_writer_fenced() {
     let fixture = fixture("takeover", true, false).await;
     fixture
         .clock
@@ -280,29 +276,23 @@ async fn an_advance_after_a_takeover_plans_from_the_current_head() {
         .b
         .open_namespace(&fixture.namespace_id)
         .expect("open the namespace in B");
-    let mut b_head = CommitSeq(0);
     for index in 0..2 {
-        b_head = b_session
+        b_session
             .put_file(&format!("/b{index}.txt"), b"file", &actor)
             .await
-            .expect("put through B")
-            .committed_seq;
+            .expect("put through B");
     }
-    fixture
-        .b
-        .maintenance(writer_id(&fixture.b_name))
-        .fold_wal(&fixture.namespace_id)
-        .await
-        .expect("fold B's tail");
+    b_session.fold_wal().await.expect("fold B's tail");
     let b_epoch = crate::common::writer_epoch(&fixture.store, &fixture.namespace_id).await;
+    let floor = fixture.floor().await;
     fixture.clock.advance_ms(2 * DAY_MS + GC_GRACE_WINDOW_MS);
     assert!(fixture.a_session.has_current_writer_position());
-    let advanced = fixture
+    let fenced = fixture
         .advance_by_window_in_a()
         .await
-        .expect("the advance succeeds");
-    assert_eq!(advanced.retention_floor_seq, b_head);
-    assert_eq!(fixture.floor().await, b_head);
+        .expect_err("A is no longer the namespace's writer");
+    assert_eq!(fenced.code(), loonfs::ErrorCode::WriterFenced, "{fenced:?}");
+    assert_eq!(fixture.floor().await, floor, "the floor doesn't move");
     assert_eq!(
         crate::common::writer_epoch(&fixture.store, &fixture.namespace_id).await,
         b_epoch,

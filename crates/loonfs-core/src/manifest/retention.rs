@@ -1,9 +1,10 @@
-//! Retention floor advancement through a floor object in the WAL, and the
-//! namespace's retention window through a verified successor manifest.
+//! The plan of a retention floor advance, which a writer session's floor
+//! object records in the WAL, and the namespace's retention window through a
+//! verified successor manifest.
 
 use super::publish::ManifestChange;
 use super::published::PublicationReport;
-use crate::engine::{NamespaceEngine, Writable};
+use crate::commit::publish_view::WriterPosition;
 use crate::error::Result;
 use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::metadata::manifest_index::commits_after_page;
@@ -123,69 +124,34 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
-    /// Advances the retention floor to `target` by creating a floor object
-    /// at the WAL tip, for a process without a writer session for the
-    /// namespace (format spec, "Advancing the retention floor").
+    /// Publishes the manifest after the manifest of `position`, a writer
+    /// session's position, with the retention window set to
+    /// `retention_window_ms`, or cleared when it's `None`, and nothing else
+    /// changed (format spec, "Advancing the retention floor").
     ///
-    /// The call first checks that the segments of `planned`, the manifest
-    /// that the advance was planned from, exist. Each attempt then runs
-    /// discovery, and when the view's floor is below `target`, puts a floor
-    /// object at the number after the tip with put-if-absent, with the
-    /// writer epoch of the manifest that the attempt's discovery loaded.
-    /// After a put that succeeds, the attempt checks whether the floor object
-    /// is live, and a dead floor object, or a put that finds the number
-    /// taken, starts the next attempt, as a fence's put does. The attempts
-    /// stop when the publication budget runs out or after
-    /// `MAX_UNFOLDED_WAL_OBJECTS` attempts, and the call then returns
-    /// `store_contention`. The call claims no epoch and writes
-    /// nothing when the view's floor is already at or above `target`. An
-    /// unknown put outcome returns `outcome_unknown`, and a deleted namespace
-    /// returns `namespace_deleted`.
-    pub async fn publish_floor_object(
-        &self,
-        planned: &LoadedManifest,
-        target: CommitSeq,
-    ) -> Result<FloorObjectReport> {
-        self.current_segments(planned)
-            .segments
-            .verify_segments_exist()
-            .await?;
-        self.publish_floor_object_at_tip(target).await
-    }
-
-    /// Creates a floor object for `target` at the WAL tip that each attempt's
-    /// discovery finds, as [`Self::publish_floor_object`] describes, after
-    /// the caller has checked the planned manifest's segments.
-    pub(crate) async fn publish_floor_object_at_tip(
-        &self,
-        target: CommitSeq,
-    ) -> Result<FloorObjectReport> {
-        let anchor = self.put_floor_object(target).await?;
-        Ok(FloorObjectReport {
-            retention_floor_seq: anchor.retention_floor_seq(),
-            manifest_retention_floor_seq: anchor.current_manifest().retention_floor_seq(),
-        })
-    }
-}
-
-impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Sets the namespace's retention window, or clears it when
-    /// `retention_window_ms` is `None`, through a successor manifest that changes
-    /// nothing else (format spec, "Advancing the retention floor").
+    /// The publication builds on the position's manifest, or on the newest
+    /// manifest when the position's manifest is missing from the store and
+    /// at or below the manifest boundary. If the manifest that the change is
+    /// published over already has the requested window, the call publishes
+    /// nothing. The report includes the manifest that records the change,
+    /// which the session records as its newest published manifest, as it
+    /// records a fold's (see
+    /// [`NamespaceCommitEngine::published_manifest`](crate::publish::NamespaceCommitEngine::published_manifest)).
     ///
-    /// If the current manifest already has the requested window, the call
-    /// publishes nothing. The report includes the manifest that records the
-    /// change.
-    pub async fn set_retention_window(
+    /// Only a writer session's position can call this, so the change is
+    /// published only while the session has its epoch, and the put doesn't
+    /// wait for the session's commits.
+    pub async fn set_retention_window_from(
         &self,
+        position: &WriterPosition,
         retention_window_ms: Option<RetentionWindow>,
     ) -> Result<PublicationReport<SetRetentionWindowResponse>> {
         let retention_window_ms = retention_window_ms.map(NonZeroU64::from);
-        let clock = self.namespace.start_clock();
+        let clock = self.start_clock();
+        let basis = self.load_position_basis(position).await?;
         let update = self
-            .namespace
             .update_live_manifest(
-                None,
+                basis,
                 &clock,
                 |mut payload: NamespaceManifestPayload| async move {
                     if payload.retention_window_ms == retention_window_ms {
@@ -197,7 +163,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             )
             .await?;
         Ok(update.into_report().map(|()| SetRetentionWindowResponse {
-            namespace_id: self.namespace.namespace_id.clone(),
+            namespace_id: self.namespace_id.clone(),
             retention_window_ms: retention_window_ms.map(NonZeroU64::get),
         }))
     }

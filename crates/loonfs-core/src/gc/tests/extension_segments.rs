@@ -24,6 +24,10 @@ async fn publish_run(
         crate::test_support::NamespaceFixture::new(store, namespace_id, &context(1_000)).engine();
     let basis = engine.load_extension_basis().await.expect("basis");
     let published = engine
+        .namespace
+        .fixture_writer_session()
+        .await
+        .expect("the fixture's writer session")
         .publish_extension(
             &basis,
             &grep(),

@@ -166,8 +166,7 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
 pub(super) async fn grep_queries_not_served() -> ApiResponseError {
     ApiResponseError::not_supported(
         FEATURE_QUERY_GREP,
-        "this deployment does not serve grep queries; set `[grep].mode` to `serve_only` \
-         or `serve_and_maintain`",
+        "this deployment does not serve grep queries; set `[grep].serve_queries` to `true`",
     )
 }
 
@@ -176,8 +175,7 @@ pub(super) async fn grep_queries_not_served() -> ApiResponseError {
 pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
     ApiResponseError::not_supported(
         FEATURE_MAINTENANCE_GREP_INDEX,
-        "this deployment does not maintain the grep index; set `[grep].mode` to \
-         `maintain_only` or `serve_and_maintain`, or maintain the index on another deployment",
+        "this deployment does not maintain the grep index; add a `[grep]` table to its config",
     )
 }
 
@@ -196,7 +194,7 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
         tag = "maintenance",
         summary = "Enable the grep index",
-        description = "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill at the next maintenance interval and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence whose files the backfill reads, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
+        description = "Enables the namespace's grep index. The server publishes the change as the namespace's writer, so it claims the namespace first when it isn't the writer, and the reference server's writer in another process is fenced. The server keeps the namespace's session and starts the backfill at the next maintenance interval, and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence whose files the backfill reads, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
         params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index enabled or already enabled", body = GrepIndex),
@@ -217,16 +215,10 @@ pub(super) async fn enable_grep_index(
     AppQuery(_): AppQuery<NoQuery>,
     NoBody: NoBody,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    let (worker_ref, namespace_id_ref) = (&worker, &namespace_id);
+    let worker_ref = &worker;
     let outcome = state
         .run_as_writer(&namespace_id, Context::Service, |session| async move {
-            // The session stays open while the worker publishes the index's
-            // entry.
-            let _session = session;
-            worker_ref
-                .enable(namespace_id_ref)
-                .await
-                .map_err(map_grep_error)
+            worker_ref.enable(&session).await.map_err(map_grep_error)
         })
         .await?;
     state.namespaces.mark_index_dirty(&namespace_id);
@@ -304,7 +296,7 @@ async fn read_grep_index_status(
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
         tag = "maintenance",
         summary = "Disable the grep index",
-        description = "Disables the namespace's grep index by publishing a namespace manifest whose grep entry lists no segments. Index maintenance stops when a step reads the disabled entry, and garbage collection reclaims the segments later. Repeating the request has the same result. If the grep entry is corrupt, the request replaces it with a disabled entry, so the index can be enabled again. If the entry has another version of the grep format, the request returns `index_corrupt` and leaves the entry unchanged. A deployment that doesn't maintain the grep index returns `not_supported`.",
+        description = "Disables the namespace's grep index by publishing a namespace manifest whose grep entry lists no segments. The server publishes it as the namespace's writer, so it claims the namespace first when it isn't the writer. Index maintenance stops when a step reads the disabled entry, and garbage collection reclaims the segments later. Repeating the request has the same result. If the grep entry is corrupt, the request replaces it with a disabled entry, so the index can be enabled again. If the entry has another version of the grep format, the request returns `index_corrupt` and leaves the entry unchanged. A deployment that doesn't maintain the grep index returns `not_supported`.",
         params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index disabled or already disabled", body = GrepIndex),
@@ -325,16 +317,10 @@ pub(super) async fn disable_grep_index(
     AppQuery(_): AppQuery<NoQuery>,
     NoBody: NoBody,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    let (worker_ref, namespace_id_ref) = (&worker, &namespace_id);
+    let worker_ref = &worker;
     let outcome = state
         .run_as_writer(&namespace_id, Context::Service, |session| async move {
-            // The session stays open while the worker publishes the index's
-            // entry.
-            let _session = session;
-            worker_ref
-                .disable(namespace_id_ref)
-                .await
-                .map_err(map_grep_error)
+            worker_ref.disable(&session).await.map_err(map_grep_error)
         })
         .await?;
     state.namespaces.mark_index_dirty(&namespace_id);

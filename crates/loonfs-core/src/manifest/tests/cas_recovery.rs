@@ -356,84 +356,6 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
     }
 }
 
-/// Checks that an advance without a writer session creates a floor object
-/// and then folds it, each with put-if-absent, and claims no epoch. The
-/// fold of a tail with the floor object and no commits publishes a manifest
-/// that changes nothing but the floor and the folded WAL number, and
-/// writers read the new floor.
-#[tokio::test]
-async fn an_advance_without_a_session_creates_a_floor_object_and_folds_it() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let context = test_context();
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .create()
-        .await
-        .expect("bootstrap");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .write_file_bytes("/file", b"data", None)
-        .await
-        .expect("write");
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_as_test_writer()
-        .await
-        .expect("fold");
-    let before = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current");
-    store.reset();
-    let advanced = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(context.now_ms),
-        ),
-    )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
-    .await
-    .expect("advance")
-    .response;
-    // The floor object and the fold.
-    assert_eq!(store.counts().create_if_absent_puts, 2);
-    assert_eq!(store.counts().compare_and_swaps, 0);
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let after = namespace.load_current_manifest().await.expect("current");
-    let mut expected = before.payload().clone();
-    expected.manifest_no = expected.manifest_no.successor().expect("next");
-    expected.folded_wal_no = expected.folded_wal_no.successor().expect("next");
-    expected.retention_floor_seq = before.payload().head_seq;
-    expected.publication_id = after.payload().publication_id.clone();
-    assert_eq!(after.payload(), &expected);
-    assert_eq!(advanced.retention_floor_seq, before.payload().head_seq);
-    let expected = after.payload().clone();
-    let anchor = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_read_anchor(crate::test_support::observed_now())
-        .await
-        .expect("writer floor");
-    assert_eq!(anchor.retention_floor_seq(), expected.head_seq);
-    store.reset();
-    crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(context.now_ms),
-        ),
-    )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
-    .await
-    .expect("already advanced");
-    assert_eq!(store.counts().puts, 0);
-}
-
 /// Checks that a manifest put that succeeds, followed by a read of the
 /// manifest boundary that fails, returns `outcome_unknown` for the
 /// manifest's key.
@@ -739,7 +661,9 @@ async fn an_ambiguous_window_change_confirms_its_own_put() {
 
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("window-change").expect("namespace");
-    let change_key = metadata_manifest_object(&namespace_id, &ManifestNo(3));
+    // The change's session claims the namespace at manifest 3, so the change
+    // is manifest 4.
+    let change_key = metadata_manifest_object(&namespace_id, &ManifestNo(4));
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::new(move |key| key == change_key),
@@ -753,7 +677,7 @@ async fn an_ambiguous_window_change_confirms_its_own_put() {
         .await
         .expect("create");
     // The change was written, and the read-back finds the change's own
-    // publication ID, so the change publishes manifest 3 and no other.
+    // publication ID, so the change publishes manifest 4 and no other.
     let changed = crate::test_support::change_retention_window(
         &crate::test_support::NamespaceFixture::new(
             &store,
@@ -764,7 +688,7 @@ async fn an_ambiguous_window_change_confirms_its_own_put() {
     )
     .await;
     assert_eq!(store.remaining(), 0, "the change's put lost its response");
-    assert_eq!(changed.manifest().payload().manifest_no, ManifestNo(3));
+    assert_eq!(changed.manifest().payload().manifest_no, ManifestNo(4));
     let current = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
@@ -918,7 +842,10 @@ async fn a_fold_that_finds_another_fold_after_a_lost_put_keeps_its_position_chec
     // that fold, before this fold's clock starts.
     let folded_namespace = crate::test_support::namespace_store(&local, &namespace_id);
     folded_namespace
-        .fold_wal_tail(None, &folded_namespace.start_clock())
+        .fixture_writer_session()
+        .await
+        .expect("the writer's session")
+        .fold()
         .await
         .expect("another process's fold");
     crate::test_support::change_retention_window(
@@ -944,8 +871,8 @@ async fn a_fold_that_finds_another_fold_after_a_lost_put_keeps_its_position_chec
     );
     store.fail_next(1);
     let folded = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(
-            Some(position),
+        .fold_wal_tail_from(
+            &position,
             &crate::time::OperationClock::start(
                 0,
                 Arc::new(crate::time::StdMonotonicTimer::default()),

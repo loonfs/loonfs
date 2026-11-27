@@ -6,7 +6,7 @@ mod merges_after_rebase;
 mod split_replays;
 
 use super::super::merges::{PlannedCommit, PlannedMerge};
-use crate::test_support::maintenance_past_the_grace_window;
+use crate::test_support::writer_with_offset_clock;
 use crate::{
     ActorId, CommitId, DeleteOptions, ErrorCode, LoonFs, Maintenance, MergeForkOptions,
     NamespaceId, PutFileOptions, ReplayForkResponse, Writable,
@@ -62,7 +62,7 @@ async fn a_replay_and_its_retry_fold_nothing() {
         commit_id: Some(CommitId::parse("replay").expect("commit id")),
         ..MergeForkOptions::default()
     };
-    let maintenance = rebase.maintenance();
+    let maintenance = runtime.maintenance();
     let unfolded = manifest_nos(&maintenance, [&fork_id, &rebase_id]).await;
     let replayed = rebase
         .replay_fork_with_options(&fork_id, &actor(), &options)
@@ -209,11 +209,7 @@ async fn a_fresh_runtime_returns_a_committed_replay_commits_conflict_report() {
 async fn a_rebase_of_a_fork_below_its_own_floor_creates_nothing() {
     let directory = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let runtime = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
-        .writer_id(writer_id("rebase-writer"))
-        .build()
-        .await
-        .expect("runtime");
+    let (runtime, clock) = writer_with_offset_clock(store.clone(), "rebase-writer").await;
     let [main_id, fork_id, rebase_id] = ["main", "main-fork", "main-rebase"].map(namespace_id);
     runtime
         .create_namespace(&main_id, &actor())
@@ -231,11 +227,10 @@ async fn a_rebase_of_a_fork_below_its_own_floor_creates_nothing() {
             .await
             .expect("write in the fork");
     }
-    let maintenance = fork.maintenance();
-    maintenance.fold_wal(&fork_id).await.expect("fold the fork");
-    maintenance_past_the_grace_window(store)
-        .await
-        .advance_retention_floor(&fork_id)
+    let maintenance = runtime.maintenance();
+    fork.fold_wal().await.expect("fold the fork");
+    clock
+        .past_the_grace_window(fork.advance_retention_floor())
         .await
         .expect("advance the fork's floor");
     main.put_file("/later.txt", b"later", &actor())

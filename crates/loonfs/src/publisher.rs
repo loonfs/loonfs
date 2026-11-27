@@ -21,6 +21,7 @@
 //! writable [`Namespace`](crate::Namespace).
 
 mod admission;
+mod compaction;
 mod delete_barrier;
 mod folds;
 pub(crate) mod metrics;
@@ -34,8 +35,10 @@ mod write_stop;
 use crate::runtime_core::{ReadPositionSlot, RuntimeCore};
 use crate::{CoreError, SharedObjectStore, WriterState};
 use admission::PublicationAdmission;
+#[cfg(test)]
+pub(crate) use compaction::MAX_COMPACTION_UNITS_PER_CALL;
 use folds::NamespaceTurns;
-pub(crate) use folds::{FoldWhen, NamespaceFold};
+pub(crate) use folds::{fold_due, FoldDue, FoldWhen, NamespaceFold, WalTailState};
 use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::{
     NamespaceCommitEngine, WriterSessionStatus, WriterSessionStatusGuard, WriterSessionStatusView,

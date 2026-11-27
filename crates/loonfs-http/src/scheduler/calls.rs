@@ -12,12 +12,12 @@ use crate::scheduler::Scheduler;
 use crate::scheduler::SchedulerInner;
 use crate::scheduler::SchedulerState;
 use crate::scheduler::MAX_GREP_STEPS_PER_INDEX_STEP;
-use crate::HeldNamespace;
+use crate::{HeldNamespace, WriterSessions};
 use futures::FutureExt as _;
 use loonfs::SharedObjectStore;
 use loonfs::{
     AdvanceRetentionFloorOptions, CommitSeq, ErrorCode, Maintenance, MetadataMaintenanceOutcome,
-    NamespaceId, PoolId, RetentionTarget,
+    Namespace, NamespaceId, PoolId, RetentionTarget, Writable,
 };
 use loonfs_grep::{
     GrepBuildOutcome, GrepError, GrepProgress, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps,
@@ -29,9 +29,13 @@ use tokio::sync::SemaphorePermit;
 
 impl Scheduler {
     /// Runs the steps of one namespace for a sweep, and returns the result of
-    /// its collection, or `None` when the collection failed or didn't run. A
-    /// namespace whose metadata call returns `namespace_deleted` or
-    /// `namespace_not_found` gets only its collection.
+    /// its collection, or `None` when the collection failed or didn't run.
+    ///
+    /// The metadata, index, and retention steps run on the namespace's
+    /// writable handle: the held one, or for a namespace without a held
+    /// session, one that the sweep opens only when reads show maintenance
+    /// due (see [`Self::sweep_writer`]). A namespace that the check or the
+    /// metadata call finds deleted or missing gets only its collection.
     pub(super) async fn sweep_namespace(
         &self,
         maintenance: &Maintenance,
@@ -41,24 +45,28 @@ impl Scheduler {
         let (claim, _permit) = self
             .claim(&namespace_id, Overlap::LeaveRetentionAdvance)
             .await?;
+        let writer = self.sweep_writer(maintenance, &namespace_id).await;
         let entry = inner.namespaces.entry(&namespace_id);
         let entry = entry.as_deref();
         let seq = entry.and_then(|entry| lock(entry).handle.last_published_seq());
         // The call records its own failure. The index call and the advance
         // of a namespace that the call finds gone can only find it gone too.
-        let gone = self
-            .maintain_metadata(maintenance, &namespace_id, entry)
-            .await
-            .is_err_and(|code| code.is_namespace_gone());
-        if !gone {
-            if let Some(grep) = &inner.grep {
-                self.maintain_index(grep, &namespace_id, entry, seq).await;
+        if let Ok(Some(writer)) = &writer {
+            let gone = self
+                .maintain_metadata(writer, &namespace_id, entry)
+                .await
+                .is_err_and(|code| code.is_namespace_gone());
+            if !gone {
+                if let Some(grep) = &inner.grep {
+                    self.maintain_index(grep, writer, &namespace_id, entry, seq)
+                        .await;
+                }
+                // The advance reads only folded commits, so it runs after the
+                // metadata call, which can fold a tail at its fold age.
+                self.advance_retention(writer, &namespace_id, entry).await;
             }
-            // The advance reads only folded commits, so it runs after the
-            // metadata call, which can fold a tail at its fold age.
-            self.advance_retention(maintenance, &namespace_id, entry)
-                .await;
         }
+        drop(writer);
         let collected = match self.gc(maintenance, &namespace_id, entry, seq).await {
             Ok(collected) => Some(collected),
             Err(code) => code.is_namespace_gone().then(Collected::default),
@@ -67,12 +75,63 @@ impl Scheduler {
         collected
     }
 
-    /// Makes one metadata call, and returns its outcome, or the code that it
-    /// failed with. Unfinished work, or a failure, leaves the call due again
-    /// after `metadata_retry_interval_ms`.
-    pub(super) async fn maintain_metadata(
+    /// Returns the writable handle that a sweep runs a namespace's steps on:
+    /// the held session's, or for a namespace without a held session, a
+    /// session that the table opens once
+    /// [`Maintenance::due_maintenance`] shows maintenance due, or the grep
+    /// worker shows index work (see [`GrepWorker::index_due`](loonfs_grep::GrepWorker::index_due)). Returns
+    /// `None` for a namespace with nothing due, so the sweep writes nothing
+    /// to it, and the code that the check or the open failed with
+    /// otherwise, after it records the failure as a metadata call's.
+    async fn sweep_writer(
         &self,
         maintenance: &Maintenance,
+        namespace_id: &NamespaceId,
+    ) -> Result<Option<Namespace<Writable>>, ErrorCode> {
+        let inner = &self.inner;
+        if let Some(entry) = inner.namespaces.entry(namespace_id) {
+            return Ok(Some(lock(&entry).handle.clone()));
+        }
+        let failure = |error: loonfs::Error| CallFailure::error(error.code(), error);
+        let opened = async {
+            let due = maintenance
+                .due_maintenance(namespace_id)
+                .await
+                .map_err(failure)?
+                .any();
+            let index_due = match &inner.grep {
+                Some(grep) if !due => grep
+                    .worker
+                    .index_due(namespace_id, grep.policy)
+                    .await
+                    .map_err(|error| CallFailure::error(error.code(), error))?,
+                _ => false,
+            };
+            if !due && !index_due {
+                return Ok(None);
+            }
+            inner
+                .namespaces
+                .open(namespace_id)
+                .await
+                .map(Some)
+                .map_err(failure)
+        };
+        let result = contain(opened).await;
+        let code = result.as_ref().err().map(CallFailure::code);
+        match self.record_call(namespace_id, None, MaintenanceCall::Metadata, result, 0) {
+            Some(writer) => Ok(writer),
+            None => Err(code.expect("a call without output failed")),
+        }
+    }
+
+    /// Makes one metadata call on `writer`, the namespace's writable handle,
+    /// and returns its outcome, or the code that it failed with. Unfinished
+    /// work, or a failure, leaves the call due again after
+    /// `metadata_retry_interval_ms`.
+    pub(super) async fn maintain_metadata(
+        &self,
+        writer: &Namespace<Writable>,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SchedulerState>>>,
     ) -> Result<MetadataMaintenanceOutcome, ErrorCode> {
@@ -82,8 +141,8 @@ impl Scheduler {
         // step again.
         let seq = entry.map(|entry| lock(entry).handle.last_published_seq());
         let result = contain(
-            maintenance
-                .maintain_metadata_while_due(namespace_id, &inner.stop)
+            writer
+                .maintain_metadata_while_due(&inner.stop)
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
         .await;
@@ -126,11 +185,12 @@ impl Scheduler {
         outcome
     }
 
-    /// Makes one index call, and returns whether it found the namespace
-    /// gone.
+    /// Makes one index call on `writer`, the namespace's writable handle,
+    /// and returns whether it found the namespace gone.
     pub(super) async fn maintain_index(
         &self,
         grep: &GrepIndexing,
+        writer: &Namespace<Writable>,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SchedulerState>>>,
         seq: Option<CommitSeq>,
@@ -145,7 +205,7 @@ impl Scheduler {
         // Boxed so the spawned scheduler's `Send` check does not recurse
         // through every engine future the index steps await.
         let result = contain(
-            self.build_index(grep, namespace_id)
+            self.build_index(grep, writer)
                 .boxed()
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
@@ -206,14 +266,15 @@ impl Scheduler {
     pub(super) async fn finish_claim(&self, mut claimed: ClaimedNamespace<'_>) {
         // Each turn makes the advance that one sweep left while these steps
         // had the namespace, so the loop turns once for each sweep that
-        // overlaps the steps. Only a scheduler with a maintenance handle
-        // sweeps, so only that scheduler finds an advance left.
+        // overlaps the steps. Only the steps of a held session overlap a
+        // sweep, so the advance runs on the held session's handle.
         while claimed.release_unless_retention_due() {
-            if let Some(maintenance) = &self.inner.maintenance {
-                let entry = self.inner.namespaces.entry(&claimed.namespace_id);
-                self.advance_retention(maintenance, &claimed.namespace_id, entry.as_deref())
-                    .await;
-            }
+            let Some(entry) = self.inner.namespaces.entry(&claimed.namespace_id) else {
+                continue;
+            };
+            let writer = lock(&entry).handle.clone();
+            self.advance_retention(&writer, &claimed.namespace_id, Some(&entry))
+                .await;
         }
     }
 
@@ -288,20 +349,19 @@ impl Scheduler {
 
     /// Advances the namespace's retention floor to the last commit at or
     /// before the current time minus the namespace's retention window, with
-    /// the same advance as the `retention` job. A namespace without a window
-    /// keeps its floor. A deleted namespace returns
-    /// `namespace_deleted`, which isn't a failure.
+    /// the same advance as the `retention` job, on `writer`, the namespace's
+    /// writable handle. A namespace without a window keeps its floor. A
+    /// deleted namespace returns `namespace_deleted`, which isn't a failure.
     ///
-    /// A floor that moves is recorded in a floor object in the WAL, through
-    /// the namespace's writer session in this host when the host has one,
-    /// and the advance then folds the namespace, so a manifest records the
-    /// floor. The advance opens no session and fences no writer. For
-    /// when the deletions below the new floor expire, and when their rows are
-    /// removed, see [Advancing the floor on a
+    /// A floor that moves is recorded in a floor object that the writer
+    /// session puts in the WAL, and the advance then folds the namespace, so
+    /// a manifest records the floor. For when the deletions below the new
+    /// floor expire, and when their rows are removed, see [Advancing the
+    /// floor on a
     /// schedule](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#advancing-the-floor-on-a-schedule).
     async fn advance_retention(
         &self,
-        maintenance: &Maintenance,
+        writer: &Namespace<Writable>,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SchedulerState>>>,
     ) {
@@ -315,8 +375,8 @@ impl Scheduler {
         // Boxed so the spawned scheduler's `Send` check does not recurse
         // through every engine future the advance awaits.
         let result = contain(
-            maintenance
-                .advance_retention_floor_with_options(namespace_id, &options)
+            writer
+                .advance_retention_floor_with_options(&options)
                 .boxed()
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
@@ -339,12 +399,11 @@ impl Scheduler {
     async fn build_index(
         &self,
         grep: &GrepIndexing,
-        namespace_id: &NamespaceId,
+        writer: &Namespace<Writable>,
     ) -> Result<bool, GrepError> {
-        let mut steps = grep.worker.steps(
-            namespace_id,
-            self.inner.config.maintenance_interval_ms.get(),
-        );
+        let mut steps = grep
+            .worker
+            .steps(writer, self.inner.config.maintenance_interval_ms.get());
         // A grep step changes the pending entry only once it succeeds, so the
         // index step publishes the grep steps before a failed one, and then
         // reports the failure.

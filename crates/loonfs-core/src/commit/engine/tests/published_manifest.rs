@@ -37,7 +37,7 @@ async fn a_commit_planned_before_a_fold_is_in_the_tail_above_the_folds_manifest(
     let fold = async {
         store.wait_until_blocked().await;
         let folded = crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal_tail(Some(planned.clone()), &writer.clock())
+            .fold_wal_tail_from(&planned, &writer.clock())
             .await
             .expect("fold");
         published.record(&folded.current);
@@ -111,7 +111,7 @@ async fn two_publications_during_a_put_move_the_position_onto_the_second() {
     let publications = async {
         store.wait_until_blocked().await;
         let folded = crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal_tail(Some(planned.clone()), &writer.clock())
+            .fold_wal_tail_from(&planned, &writer.clock())
             .await
             .expect("fold");
         published.record(&folded.current);
@@ -235,8 +235,13 @@ async fn publish_while_a_fold_publishes(
     let beta = engine.publish_batch(vec![create_dir("beta", "beta")], &clock);
     let fold = async {
         store.held.notified().await;
+        // The runtime's fold, as a session of the writer's epoch that
+        // doesn't wait for `engine`.
         let folded = crate::test_support::namespace_store(local, &namespace_id)
-            .fold_wal_tail(None, &writer.clock())
+            .fixture_writer_session()
+            .await
+            .expect("the writer's session")
+            .fold()
             .await
             .expect("fold");
         assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);

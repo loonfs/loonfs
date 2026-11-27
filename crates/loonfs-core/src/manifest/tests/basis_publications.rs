@@ -69,37 +69,10 @@ fn manifests(namespace_id: &NamespaceId, first: u64, last: u64) -> Vec<String> {
         .collect()
 }
 
-/// Checks that a publication from a basis loaded more than the revalidation
-/// bound ago sends its manifest put with no request before it, and one read
-/// of the manifest boundary after it.
-#[tokio::test]
-async fn a_publication_from_an_old_basis_puts_with_no_request_first() {
-    let directory = tempdir().expect("directory");
-    let (store, namespace_id) = created_namespace(directory.path()).await;
-    crate::test_support::namespace_store(store.inner(), &namespace_id)
-        .raise_boundary(ManifestNo(1))
-        .await
-        .expect("raise the boundary");
-    let basis = current_basis(store.inner(), &namespace_id).await;
-    let clock = Arc::new(ManualClock::new(0));
-    clock.advance_ms(READ_REVALIDATION_BOUND_MS + 1);
-    let deadline = OperationClock::start(0, clock);
-    let published = republish(&store, &namespace_id, Some(basis), &deadline).await;
-    assert_eq!(published.manifest().manifest_no, ManifestNo(3));
-    assert_eq!(
-        control_requests(&namespace_id, &store.take()),
-        vec![
-            (
-                "put",
-                metadata_manifest_object(&namespace_id, &ManifestNo(3))
-            ),
-            ("get", boundary(&namespace_id)),
-        ]
-    );
-}
-
-/// Checks that a publication whose put loses to two manifests that another
-/// process published probes above its basis (one HEAD request for the next
+/// Checks that a publication whose put loses to three manifests that the
+/// test support's same-epoch publisher puts (its claim of the new namespace
+/// and two window changes, as the session's own publications), probes above
+/// its basis (one HEAD request for the next
 /// number, which exists, and then one window of numbers above that), loads
 /// only the newest manifest, reads the manifest boundary, and publishes on
 /// it.
@@ -139,7 +112,7 @@ async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest(
             newest.expect("two window changes")
         }
     );
-    assert_eq!(published.manifest().manifest_no, ManifestNo(5));
+    assert_eq!(published.manifest().manifest_no, ManifestNo(6));
     assert_eq!(
         published.payload().retention_window_ms,
         newest.manifest().payload().retention_window_ms,
@@ -153,12 +126,41 @@ async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest(
             .into_iter()
             .map(|key| ("head", key)),
     );
-    expected.extend([("get", manifest(4)), ("get", boundary(&namespace_id))]);
+    expected.extend([("get", manifest(5)), ("get", boundary(&namespace_id))]);
     // The next attempt builds on that manifest without a request first.
-    expected.extend([("put", manifest(5)), ("get", boundary(&namespace_id))]);
+    expected.extend([("put", manifest(6)), ("get", boundary(&namespace_id))]);
     assert_eq!(
         control_requests(&namespace_id, &gate.inner().take()),
         expected
+    );
+}
+
+/// Checks that a publication from a basis loaded more than the revalidation
+/// bound ago sends its manifest put with no request before it, and one read
+/// of the manifest boundary after it.
+#[tokio::test]
+async fn a_publication_from_an_old_basis_puts_with_no_request_first() {
+    let directory = tempdir().expect("directory");
+    let (store, namespace_id) = created_namespace(directory.path()).await;
+    crate::test_support::namespace_store(store.inner(), &namespace_id)
+        .raise_boundary(ManifestNo(1))
+        .await
+        .expect("raise the boundary");
+    let basis = current_basis(store.inner(), &namespace_id).await;
+    let clock = Arc::new(ManualClock::new(0));
+    clock.advance_ms(READ_REVALIDATION_BOUND_MS + 1);
+    let deadline = OperationClock::start(0, clock);
+    let published = republish(&store, &namespace_id, Some(basis), &deadline).await;
+    assert_eq!(published.manifest().manifest_no, ManifestNo(3));
+    assert_eq!(
+        control_requests(&namespace_id, &store.take()),
+        vec![
+            (
+                "put",
+                metadata_manifest_object(&namespace_id, &ManifestNo(3))
+            ),
+            ("get", boundary(&namespace_id)),
+        ]
     );
 }
 

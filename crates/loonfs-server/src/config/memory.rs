@@ -260,7 +260,7 @@ impl ServerConfig {
         ) as usize;
         let share =
             |percent: usize| limit.map(|_| (managed as u128 * percent as u128 / 100) as usize);
-        let serves_grep = self.grep.mode.serves();
+        let serves_grep = self.grep.is_some_and(|grep| grep.serve_queries);
         let memory = MemorySizing {
             limit: limit.map(|bytes| {
                 MemoryTerm::new(
@@ -295,7 +295,7 @@ impl ServerConfig {
             ),
             grep: MemoryTerm::new(
                 "grep.max_cache_bytes",
-                self.grep.max_cache_bytes,
+                self.grep.and_then(|grep| grep.max_cache_bytes),
                 share(if serves_grep { 10 } else { 0 }),
                 loonfs_grep::DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
             ),

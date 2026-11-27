@@ -29,7 +29,7 @@ The core garbage collector (`loonfs maintenance gc`) collects the index's segmen
 
 ```toml
 [grep]
-mode = "serve_and_maintain"
+serve_queries = true
 max_files_per_step = 256
 max_content_bytes_per_step = 67108864
 max_concurrent_steps = 2

@@ -12,7 +12,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
+    KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::manifest::decode_namespace_manifest_json;
 use std::assert_matches;
@@ -171,9 +171,7 @@ async fn namespace_diagnostics_count_unexpired_snapshots_only() {
     clock.advance_ms(1_000);
 
     let diagnostics = writer
-        .maintenance(loonfs_test_support::ids::writer_id(
-            "diagnostic-snapshot-count",
-        ))
+        .maintenance()
         .diagnostics(&source)
         .await
         .expect("read diagnostics");
@@ -416,17 +414,15 @@ fn the_typed_wrappers_are_single_action_steps() {
         .advance_retention_floor_blocking(&namespace_id)
         .expect("advance retention");
     assert_eq!(advanced.retention_floor_seq, snapshot.captured_seq);
+    let handle = fs.namespace_writer(&namespace_id).expect("open namespace");
     let retention = fs
         .advance_retention_floor_blocking(&namespace_id)
         .expect("retention-only step");
     assert_eq!(retention.retention_floor_seq, advanced.retention_floor_seq);
 
     block_on(fs.maintenance.gc(&namespace_id)).expect("GC run");
-    block_on(
-        fs.maintenance
-            .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new()),
-    )
-    .expect("metadata compaction run");
+    block_on(handle.compact_metadata(&loonfs::MaintenanceCancellation::new()))
+        .expect("metadata compaction run");
     assert_eq!(
         fs.namespace_diagnostics_blocking(&namespace_id)
             .expect("status")
@@ -510,13 +506,11 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
 
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
         .expect("create namespace");
+    let namespace = fs.namespace_writer(&namespace_id).expect("open namespace");
     assert_eq!(
-        block_on(
-            fs.maintenance
-                .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
-        )
-        .expect("compact an empty namespace")
-        .compaction,
+        block_on(namespace.compact_metadata(&loonfs::MaintenanceCancellation::new()))
+            .expect("compact an empty namespace")
+            .compaction,
         MetadataCompactionOutcome::NotNeeded
     );
 
@@ -540,12 +534,9 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
     // The call publishes the unit that the planner chooses, as the next
     // maintenance pass would.
     assert_matches!(
-        block_on(
-            fs.maintenance
-                .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
-        )
-        .expect("plan a compaction")
-        .compaction,
+        block_on(namespace.compact_metadata(&loonfs::MaintenanceCancellation::new()))
+            .expect("plan a compaction")
+            .compaction,
         MetadataCompactionOutcome::Published { .. }
     );
     assert_ne!(
@@ -567,130 +558,6 @@ fn create_directory_request(commit_id: &str, absolute_path: &str) -> CommitInten
             parents: false,
         },
     )
-}
-
-/// Checks that two runtimes compacting one namespace at once both finish
-/// without an error and keep the namespace's logical state, and that the
-/// unit whose manifest put loses to the other unit's publication of the same
-/// window reports `Abandoned`. A third runtime, opened after both units end,
-/// reads the state with empty caches, so every segment it reads comes from
-/// the store.
-#[tokio::test]
-async fn two_runtimes_compacting_one_namespace_keep_its_state_and_the_loser_abandons() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = store(temp_dir.path());
-    let namespace_id = namespace_id("demo");
-    let parked = Arc::new(BlockingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-        OperationSelector::PutCreateIfAbsent,
-    ));
-    let first =
-        open_compacting_runtime_with_async(parked.clone(), "first", |builder| builder).await;
-    let second =
-        open_compacting_runtime_with_async(store.clone(), "second", |builder| builder).await;
-    second
-        .writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    second
-        .namespace_writer(&namespace_id)
-        .expect("open namespace")
-        .create_directory("/dir", &loonfs_test_support::test_actor())
-        .await
-        .expect("create a directory");
-    for path in ["/file-0", "/dir/file-1", "/dir/file-2"] {
-        second
-            .put_file(
-                &namespace_id,
-                path,
-                path.as_bytes(),
-                &loonfs_test_support::test_actor(),
-            )
-            .await
-            .expect("put file");
-        second
-            .maintenance
-            .fold_wal(&namespace_id)
-            .await
-            .expect("fold WAL");
-    }
-    let before = walk(
-        &open_runtime_async(store.clone(), "before").await,
-        &namespace_id,
-    )
-    .await;
-
-    // The first runtime's unit parks at its manifest put. The second
-    // runtime's unit plans the same window from the same manifest and
-    // publishes it, so the first unit's put loses, and the manifest that
-    // won no longer lists the first unit's inputs.
-    parked.block_next();
-    let cancellation = loonfs::MaintenanceCancellation::new();
-    let losing = first
-        .maintenance
-        .compact_metadata(&namespace_id, &cancellation);
-    tokio::pin!(losing);
-    tokio::select! {
-        _ = &mut losing => panic!("the first unit finished before its manifest put"),
-        () = parked.wait_until_blocked() => {}
-    }
-    assert_matches!(
-        second
-            .maintenance
-            .compact_metadata(&namespace_id, &cancellation)
-            .await
-            .expect("the second unit")
-            .compaction,
-        MetadataCompactionOutcome::Published { .. }
-    );
-    parked.release();
-    assert_eq!(
-        losing.await.expect("the first unit").compaction,
-        MetadataCompactionOutcome::Abandoned
-    );
-
-    let after = walk(
-        &open_runtime_async(store.clone(), "after").await,
-        &namespace_id,
-    )
-    .await;
-    assert_eq!(after, before);
-}
-
-/// Returns every path in the namespace with each file's bytes, read through
-/// `runtime`.
-async fn walk(runtime: &TestRuntime, namespace_id: &NamespaceId) -> Vec<(String, Option<Vec<u8>>)> {
-    let mut walked = Vec::new();
-    let mut directories = vec!["/".to_owned()];
-    while let Some(directory) = directories.pop() {
-        for entry in runtime
-            .list_path(namespace_id, &directory)
-            .await
-            .expect("list a directory")
-        {
-            let path = entry.path.to_string();
-            let bytes = match entry.kind {
-                loonfs::PathEntryKind::Directory {} => {
-                    directories.push(path.clone());
-                    None
-                }
-                _ => Some(
-                    runtime
-                        .reader
-                        .namespace(namespace_id)
-                        .read_file(&path)
-                        .await
-                        .expect("read a file")
-                        .bytes,
-                ),
-            };
-            walked.push((path, bytes));
-        }
-    }
-    walked.sort();
-    walked
 }
 
 #[test]
@@ -735,66 +602,6 @@ fn maintenance_step_counts_wal_objects_not_commits() {
             ..
         })
     );
-}
-
-#[tokio::test]
-async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let blocked = Arc::new(BlockingStore::new(
-        raw_store.clone(),
-        KeyPredicate::manifest(&namespace_id),
-        OperationSelector::Put,
-    ));
-    let fs = open_runtime_async(blocked.clone(), "step-race-test").await;
-    let winner = open_runtime_async(raw_store, "competing-fold").await;
-
-    fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    fs.put_file(
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello",
-        &loonfs_test_support::test_actor(),
-    )
-    .await
-    .expect("put file");
-
-    blocked.block_next();
-    let options = metadata_options(1);
-    let (step, ()) = futures::join!(
-        fs.maintenance
-            .maintain_metadata_with_options(&namespace_id, &options),
-        async {
-            blocked.wait_until_blocked().await;
-            winner
-                .maintenance
-                .fold_wal(&namespace_id)
-                .await
-                .expect("competing fold");
-            blocked.release();
-        }
-    );
-    let step = step.expect("maintenance pass should not fail on metadata root publish race");
-
-    assert_matches!(
-        step.wal_fold,
-        Some(FoldWalResponse {
-            outcome: FoldWalOutcome::AlreadyCurrent,
-            target_head_seq: CommitSeq(1),
-            manifest_no: ManifestNo(4),
-            ..
-        })
-    );
-    let status = fs
-        .maintenance
-        .diagnostics(&namespace_id)
-        .await
-        .expect("status after lost race");
-    assert_eq!(status.current_manifest_no, Some(ManifestNo(4)));
-    assert_eq!(status.wal_tail_objects, 0);
 }
 
 /// Checks that a second `Maintenance::gc_pool` call reads no completed upload

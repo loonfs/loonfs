@@ -447,9 +447,11 @@ impl Namespace<Writable> {
     /// and reads the fork through the snapshot, so the merge's range ends at
     /// the fork's folded head.
     ///
-    /// The fold is the namespace's one fold path, so when the fork's writer
-    /// session in this runtime is already folding, the fold waits for that
-    /// fold instead of folding the same tail. The read of the fork starts
+    /// The fold runs as a writer session of the fork in this runtime, which
+    /// claims the fork when the session has no writer epoch. It's the
+    /// namespace's one fold path, so when the fork's writer session is
+    /// already folding, the fold waits for that fold instead of folding the
+    /// same tail. The read of the fork starts
     /// from the snapshot record in memory, and the snapshot's verification
     /// after the record write is the check of the fork's position that the
     /// read's live head needs (see
@@ -459,10 +461,9 @@ impl Namespace<Writable> {
         fork_id: &NamespaceId,
         expires_at_ms: Option<u64>,
     ) -> Result<PinnedRead> {
-        let (created, verified) = self
-            .mode
-            .publisher
-            .snapshot_after_fold(fork_id, |manifest| {
+        let fork = self.mode.publisher.open_session(fork_id)?;
+        let (created, verified) = fork
+            .snapshot_after_fold(|manifest| {
                 let engine = self
                     .core
                     .writer_engine(&self.mode.writer.writer_id, fork_id);
@@ -476,17 +477,6 @@ impl Namespace<Writable> {
         self.core
             .pinned_read_at_created_snapshot(fork_id, &created, &verified)
             .await
-    }
-
-    /// Returns a maintenance value that folds as this runtime's writer.
-    #[cfg(test)]
-    pub(super) fn maintenance(&self) -> crate::Maintenance {
-        crate::Maintenance::new(
-            self.core.clone(),
-            self.mode.publisher.clone(),
-            std::sync::Arc::clone(&self.mode.writer),
-            self.mode.writer.writer_id.clone(),
-        )
     }
 }
 

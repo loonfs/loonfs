@@ -607,3 +607,63 @@ async fn a_fenced_merge_reports_the_request_that_its_first_plan_resolved() {
         assert_eq!(replayed.result.expect("receipt"), commit);
     }
 }
+
+/// Checks that a maintenance job whose held session another host fenced is
+/// retried once in a new session, which claims the namespace back and makes
+/// the job's publication as the namespace's writer.
+///
+/// The other host's clock is two grace windows behind, so its first commit
+/// is old enough for the floor to pass. This host's commit opens its held
+/// session, and the other host's next commit claims the namespace. The
+/// retention job's floor object then finds this host's session fenced, and
+/// the retry's session claims and advances the floor past the old commit.
+#[tokio::test]
+async fn a_fenced_maintenance_job_is_retried_once_in_a_new_session() {
+    let (directory, router, state, _) = host("job-host").await;
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::at_system_time());
+    clock.set_ms(clock.now_ms() - 2 * loonfs::GC_GRACE_WINDOW_MS);
+    let (past_router, _, _) = test_app_with_sessions(
+        test_options(directory.path(), "past-host"),
+        TestAppOptions {
+            wall_clock: Some(clock as Arc<dyn loonfs::WallClock>),
+            ..TestAppOptions::default()
+        },
+    )
+    .await
+    .expect("past host");
+    let namespace_id = namespace_id("fenced-job");
+    create_namespace(&state, &namespace_id).await;
+    create_directory(&past_router, &namespace_id, "/old").await;
+    let old_seq = head_seq(&state, &namespace_id).await;
+    create_directory(&router, &namespace_id, "/first").await;
+    create_directory(&past_router, &namespace_id, "/second").await;
+    let winning_epoch = writer_epoch(&state, &namespace_id).await;
+    let held = state.namespaces.open(&namespace_id).await.expect("open");
+    assert_eq!(held.session_status(), loonfs::NamespaceSessionStatus::Open);
+
+    let uri = format!("/v0/maintenance/namespaces/{namespace_id}/jobs");
+    let (status, bytes) = send(
+        &router,
+        Method::POST,
+        &uri,
+        serde_json::json!({"kind": "retention"}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{bytes:?}");
+    let advanced: serde_json::Value = serde_json::from_slice(&bytes).expect("response");
+    assert_eq!(advanced["retention_floor_seq"], old_seq, "{advanced}");
+    assert_eq!(
+        held.session_status(),
+        loonfs::NamespaceSessionStatus::Fenced,
+        "the first attempt ran in the held session and found it fenced"
+    );
+    assert_eq!(
+        writer_epoch(&state, &namespace_id).await,
+        winning_epoch + 1,
+        "the retry's session claims the namespace back"
+    );
+    assert_eq!(
+        head(&state, &namespace_id).await.retention_floor_seq.0,
+        old_seq
+    );
+}
