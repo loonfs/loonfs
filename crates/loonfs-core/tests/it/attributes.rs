@@ -856,7 +856,7 @@ async fn attributes_survive_a_fold_and_the_counter_keeps_going() {
     .expect("second write");
 
     namespace_engine(&store, &namespace_id, &context)
-        .fold_wal()
+        .fold_in_new_session()
         .await
         .expect("fold the WAL tail into metadata segments");
 
@@ -927,7 +927,7 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_fold() {
     .await
     .expect("write attributes in the source");
     namespace_engine(&store, &source, &context)
-        .fold_wal()
+        .fold_in_new_session()
         .await
         .expect("fold the source");
 
@@ -974,7 +974,7 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_fold() {
     .await
     .expect("the fork writes over the inherited map");
     namespace_engine(&store, &target, &context)
-        .fold_wal()
+        .fold_in_new_session()
         .await
         .expect("fold the fork");
 
@@ -1377,7 +1377,7 @@ async fn clearing_every_attribute_publishes_the_empty_map() {
 
     // A cleared map is a real state that survives a fold.
     namespace_engine(&store, &namespace_id, &context)
-        .fold_wal()
+        .fold_in_new_session()
         .await
         .expect("fold");
     update(

@@ -262,7 +262,7 @@ async fn revision_pages_list_each_revision_once_when_the_tail_has_more_rows_than
         .await
         .expect("write the files that the fold moves into the manifest");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     // The tail has two more revisions of each folded file, whose rows sort
@@ -764,7 +764,7 @@ async fn inode_pages_list_each_inode_once_when_the_tail_has_more_rows_than_a_pag
         .await
         .expect("write the files that the fold moves into the manifest");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let unfolded = [paths("first"), paths("second")].concat();
@@ -879,7 +879,7 @@ async fn directory_pages_list_each_child_once_when_the_tail_has_more_rows_than_a
         .await
         .expect("write the files that the fold moves into the manifest");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     for path in ["/dir/m-1", "/dir/m-3", "/dir/m-5"] {

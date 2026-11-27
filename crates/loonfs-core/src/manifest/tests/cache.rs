@@ -1588,7 +1588,7 @@ async fn compactions_read_input_without_the_cache_and_insert_only_their_output()
             .await
             .expect("write file");
         crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold the tail");
     }

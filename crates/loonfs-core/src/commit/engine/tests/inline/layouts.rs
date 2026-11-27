@@ -136,10 +136,7 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
             uploaded.checksum
         );
     }
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold upload layout");
+    engine.fold().await.expect("fold upload layout");
 }
 
 #[tokio::test]
@@ -171,7 +168,7 @@ async fn folds_write_spans_and_combine_small_tail_extents() {
         .await;
         store.reset();
         crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold");
         let operations = content_operations(&store);
@@ -230,7 +227,7 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
         )
         .await;
         crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold");
     }
@@ -295,10 +292,10 @@ async fn a_combined_span_must_match_its_objects_stored_checksum() {
         None,
     )
     .await;
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("span fold");
+    // The pieces are written below the session, so the session loads the
+    // namespace from the store before each fold.
+    engine.invalidate_projection();
+    engine.fold().await.expect("span fold");
     let pool_id = pool_id(&store).await;
     let key = span_key(&pool_id, &layout(&store, &reference).await, 100, 103);
     let incorrect = MetadataMapStore::new(
@@ -321,9 +318,16 @@ async fn a_combined_span_must_match_its_objects_stored_checksum() {
     )
     .await;
     store.reset();
-    let error = crate::test_support::namespace_store(&incorrect, &namespace_id)
-        .fold_wal()
+    engine.invalidate_projection();
+    let mut session = NamespaceCommitEngine {
+        namespace: crate::test_support::namespace_store(&incorrect, &namespace_id),
+        writer_id: engine.writer_id,
+        position: engine.position,
+    };
+    let error = session
+        .fold()
         .await
+        .map(|folded| folded.response)
         .expect_err("stored checksum mismatch");
     assert_matches!(error, CoreError::NamespaceCorrupt(message) if message.contains(&key));
     assert_no_writes(&store);
@@ -371,7 +375,7 @@ async fn an_early_write_and_the_later_fold_store_two_objects_with_the_same_bytes
     let early_key = span_key(&pool_id, &early, 100, 110);
     let before = store.head(&early_key).await.expect("head").expect("span");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let folded = layout(&store, &reference).await;
@@ -508,7 +512,7 @@ async fn a_retry_after_an_append_keeps_the_first_span_object_immutable() {
         assert_eq!(bytes, expected);
     }
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("retry after append");
     let row = layout(&store, &reference).await;
@@ -548,10 +552,7 @@ async fn an_empty_chain_folds_again_after_bytes_follow_it() {
         None,
     )
     .await;
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("second fold");
+    engine.fold().await.expect("second fold");
     assert_eq!(
         read_file(&store, &namespace_id, RevisionNo(2)).await,
         b"bytes"
@@ -577,10 +578,10 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
         )
         .await;
     }
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold base span");
+    // The pieces were written below the session, so the session loads the
+    // namespace from the store before it folds.
+    engine.invalidate_projection();
+    engine.fold().await.expect("fold base span");
     engine.invalidate_projection();
     for (commit_id, operation) in [
         (
@@ -637,10 +638,7 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
     bytes.truncate(105);
     bytes.push(b'!');
     store.reset();
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold shared base");
+    engine.fold().await.expect("fold shared base");
     let pool_id = pool_id(&store).await;
     let operations = content_operations(&store);
     let row = layout(&store, &fresh).await;
@@ -677,10 +675,10 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
             None,
         )
         .await;
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
-            .await
-            .expect("fold extent");
+        // The piece was written below the session, so the session loads the
+        // namespace from the store before it folds.
+        engine.invalidate_projection();
+        engine.fold().await.expect("fold extent");
     }
     let access = ReadAccess::live(Authorizer::Service);
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
@@ -775,10 +773,7 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
     )
     .await
     .expect("base file");
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold base");
+    engine.fold().await.expect("fold base");
     let inode_id = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_metadata_view()
         .await
@@ -804,7 +799,7 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
     )
     .await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let pool_id = pool_id(&store).await;
@@ -836,7 +831,7 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
         .expect("one outcome")
         .expect("other file");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold other file");
     prune_revisions(&store, &namespace_id).await;
@@ -914,7 +909,7 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
     )
     .await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold replacement");
     // The compaction after the advance drops the replaced revisions and the
@@ -1071,7 +1066,7 @@ async fn collection_keeps_shared_objects_that_a_restore_names_across_a_floor_adv
     )
     .await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold shared chain");
     let shared_layout = layout(&store, &shared).await;
@@ -1094,7 +1089,7 @@ async fn collection_keeps_shared_objects_that_a_restore_names_across_a_floor_adv
         .await
         .expect("delete the other file");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold replacements");
     let restored = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
@@ -1242,10 +1237,7 @@ async fn tail_revision_downloads_write_their_own_objects_in_either_order() {
         for key in &keys {
             before.push(store.head(key).await.expect("head").expect("span"));
         }
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
-            .await
-            .expect("fold after downloads");
+        engine.fold().await.expect("fold after downloads");
         for (key, before) in keys.iter().zip(before) {
             assert_eq!(store.head(key).await.expect("head").expect("span"), before);
         }
@@ -1371,7 +1363,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
     )
     .await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold append");
     let longer = layout(&store, &extended).await;
@@ -1401,7 +1393,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
             .expect("copy bytes");
         assert_eq!(read.bytes, b"hello");
         crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold copy");
     }
@@ -1556,10 +1548,7 @@ async fn a_pending_reference_keeps_its_chain_through_a_floor_advance() {
         )
         .await
         .expect("target");
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
-            .await
-            .expect("fold target");
+        engine.fold().await.expect("fold target");
         engine.invalidate_projection();
         let original = InlineContent::new(
             ContentId::parse("con_00000000000000000000000004").expect("content"),

@@ -1308,7 +1308,7 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
         .await;
     }
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold commits");
     for index in 6..=8u32 {

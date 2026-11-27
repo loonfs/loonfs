@@ -572,10 +572,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         "{:?}",
         store.snapshot()
     );
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold commits");
+    engine.fold().await.expect("fold commits");
     loop {
         let outcome = {
             let mut fixture = crate::test_support::NamespaceFixture::new(

@@ -50,10 +50,11 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     // Remove the physical evidence from WAL before the client retries. The
     // folded receipt and commit record must supply the original result.
     assert_eq!(
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
+        namespace
+            .fold_as_test_writer()
             .await
             .expect("fold the commit")
+            .response
             .outcome,
         FoldWalOutcome::Published
     );
@@ -69,9 +70,10 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .clock())
         .await
         .expect("collect folded WAL");
-    // The session's fence stays, and the commit object goes.
+    // The fences of the session's claim and of the fold's claim stay, and
+    // the commit object goes.
     assert_eq!(report.deleted.wal_objects, 1);
-    assert_eq!(report.retained.fences_and_floor_objects, 1);
+    assert_eq!(report.retained.fences_and_floor_objects, 2);
     assert!(crate::test_support::commit_wal_keys(&store, &namespace_id)
         .await
         .is_empty());

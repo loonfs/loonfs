@@ -47,14 +47,11 @@ async fn bootstrap_restricted_namespace<S: ObjectStore + ?Sized>(
         )
         .await
         .expect("set the administrator");
-    crate::test_support::namespace_store(store, namespace_id)
-        .acquire_writer_epoch(&context.writer_id)
+    fixture
+        .engine()
+        .fold_in_new_session()
         .await
-        .expect("acquire the writer");
-    crate::test_support::namespace_store(store, namespace_id)
-        .fold_wal()
-        .await
-        .expect("publish the first manifest");
+        .expect("acquire the writer and publish the first manifest");
 }
 
 /// Commits one operation as the administrator.
@@ -240,7 +237,7 @@ async fn expire_docs_beside_an_archive_in_the_trash<S: ObjectStore>(
     let deletion_seq = delete_recursively(store, namespace_id, "/docs", context).await;
     delete_recursively(store, namespace_id, "/archive", context).await;
     crate::test_support::namespace_store(store, namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold the deletions");
     // The floor stops at the deletion, so the views that the compaction has
@@ -609,7 +606,7 @@ async fn delete_nested<S: ObjectStore>(
     let inner_seq = delete_recursively(store, namespace_id, "/outer/inner/deep", context).await;
     let outer_seq = delete_recursively(store, namespace_id, "/outer", context).await;
     crate::test_support::namespace_store(store, namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold the deletions");
     NestedDeletions {
@@ -735,7 +732,7 @@ async fn nested_deletions_expire_in_order_and_lose_their_rows_in_order() {
     // compactions rewrite their bases.
     put(&store, &namespace_id, "/later.txt", b"later", &context).await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold the later write");
     compact_groups_without_false_positives(&store, &namespace_id, &MetadataFamilyGroup::ALL, &both)
@@ -992,7 +989,7 @@ async fn expire_old<S: ObjectStore>(
         .expect("bootstrap");
     write_test_file(store, namespace_id, "/old/a.txt", "c_old_a", context).await;
     crate::test_support::namespace_store(store, namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     write_test_file(store, namespace_id, "/old/b.txt", "c_old_b", context).await;
@@ -1004,7 +1001,7 @@ async fn expire_old<S: ObjectStore>(
         .await
         .expect("write visible files");
     crate::test_support::namespace_store(store, namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let old = inode_id_of(store, namespace_id, "/old").await;
@@ -1150,7 +1147,7 @@ async fn a_compaction_unit_reads_each_slot_index_segment_at_most_twice() {
     expire_old(&store, &namespace_id, &context).await;
     create_directory_chain(&store, &namespace_id, &context, 1_000).await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold the chain");
     let segment_cache = Arc::new(crate::test_support::segment_cache());
@@ -1428,7 +1425,7 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         .await
         .expect("write visible files");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold");
     let hidden_row = family_rows(&store, &namespace_id, ApiMetadataRowFamily::Inodes)
@@ -1612,7 +1609,7 @@ async fn a_base_compaction_walks_the_tree_once_the_floor_is_above_zero() {
     let expired_seq = delete_recursively(&store, &namespace_id, "/old", &context).await;
     let trash_seq = delete_recursively(&store, &namespace_id, "/trashed.txt", &context).await;
     crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .fold_as_test_writer()
         .await
         .expect("fold the deletions");
     assert_eq!(read_floor_seq(&store, &namespace_id).await, CommitSeq(0));
@@ -1800,7 +1797,7 @@ async fn base_compactions_of_two_groups_around_an_expiry_leave_the_reads_unchang
         let deletion_seq = delete_recursively(&store, &namespace_id, "/d", &context).await;
         put(&store, &namespace_id, "/d", b"recreated", &context).await;
         crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold the commits");
 

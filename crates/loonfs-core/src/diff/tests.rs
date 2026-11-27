@@ -109,7 +109,7 @@ impl History {
 
     async fn fold(&self) {
         namespace_store(&self.store, &self.namespace_id)
-            .fold_wal()
+            .fold_as_test_writer()
             .await
             .expect("fold the WAL tail");
     }

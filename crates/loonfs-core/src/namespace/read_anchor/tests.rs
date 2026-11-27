@@ -65,7 +65,11 @@ async fn fixture(name: &str, commits: usize) -> Fixture {
 async fn fixture_with_an_earlier_fold(name: &str) -> (Fixture, Rival) {
     let mut fixture = fixture(name, 2).await;
     let namespace = namespace_store(fixture.store(), &fixture.namespace_id);
-    let folded = namespace.fold_wal().await.expect("fold WAL 1 to 3");
+    let folded = namespace
+        .fold_wal_tail(None, &namespace.start_clock())
+        .await
+        .expect("fold WAL 1 to 3")
+        .response;
     assert_eq!(folded.manifest_head_seq, CommitSeq(2));
     let key = metadata_manifest_object(&fixture.namespace_id, &folded.manifest_no);
     let store = fixture.store();
@@ -193,8 +197,9 @@ impl RivalBeforeChecks {
                     .expect("the rival publishes its fold");
             }
             Rival::Folds => {
-                namespace_store(rival, namespace_id)
-                    .fold_wal()
+                let namespace = namespace_store(rival, namespace_id);
+                namespace
+                    .fold_wal_tail(None, &namespace.start_clock())
                     .await
                     .expect("the rival folds");
             }
@@ -203,8 +208,9 @@ impl RivalBeforeChecks {
                 for name in ["raced-0", "raced-1"] {
                     publish(&mut writer, name).await.expect("the rival commits");
                 }
-                namespace_store(rival, namespace_id)
-                    .fold_wal()
+                let namespace = namespace_store(rival, namespace_id);
+                namespace
+                    .fold_wal_tail(None, &namespace.start_clock())
                     .await
                     .expect("the rival folds");
             }
@@ -594,8 +600,9 @@ async fn a_collection_during_a_discovery_hides_no_acknowledged_commit() {
     let reader = namespace_store(&store, &namespace_id);
     let (anchor, ()) = futures::join!(reader.load_read_anchor(observed_now()), async {
         store.inner().wait_until_blocked().await;
-        namespace_store(&rival, &namespace_id)
-            .fold_wal()
+        let rival_namespace = namespace_store(&rival, &namespace_id);
+        rival_namespace
+            .fold_wal_tail(None, &rival_namespace.start_clock())
             .await
             .expect("fold the tail");
         // A manifest after the fold, so the fold's manifest isn't current.

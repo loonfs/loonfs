@@ -1421,3 +1421,141 @@ pub(super) async fn advance_in_session<S: ObjectStore>(
     engine.record_manifest_published(folded.clone());
     folded
 }
+
+/// Checks that a fold through a commit engine without a writer epoch claims
+/// the epoch and then folds the claim's fence, that a fold through an engine
+/// with a position folds from it with this request sequence and moves the
+/// position onto the fold's manifest, that a failed fold drops the position,
+/// and that a fenced session's fold sends no request.
+#[tokio::test]
+async fn a_commit_engine_fold_claims_first_and_then_folds_from_its_position() {
+    use loonfs_test_support::stores::{FailStore, InjectedError};
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let writer = context("writer");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &writer)
+        .create()
+        .await
+        .expect("create");
+    let created = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("the created manifest")
+        .payload()
+        .clone();
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(Arc::clone(&store), &namespace_id),
+        writer.writer_id.clone(),
+    );
+
+    // The claim publishes the next manifest with the next epoch and puts a
+    // fence, and the fold publishes the manifest after it, over the fence.
+    let claimed = engine.fold().await.expect("the first fold");
+    let epoch = created.writer_epoch.successor().expect("a next epoch");
+    let claimed_no = loonfs_types::ManifestNo(created.manifest_no.0 + 2);
+    assert_eq!(claimed.response.manifest_no, claimed_no);
+    assert_eq!(claimed.response.outcome, crate::FoldWalOutcome::Published);
+    assert_eq!(claimed.current.manifest().payload().writer_epoch, epoch);
+    assert_matches!(
+        &*engine.session_status().lock(),
+        WriterSessionStatus::Acquired(acquired) if acquired.writer_epoch == epoch
+    );
+
+    publish_one(&mut engine, &writer, "alpha").await;
+    store.reset();
+    let folded = engine.fold().await.expect("the second fold");
+    // The session's view checks the position's manifest and the fold reads
+    // it again, then the fold puts its segments, its manifest, and reads
+    // the boundary. It reads no WAL object.
+    let position_manifest =
+        loonfs_objectstore::keys::metadata_manifest_object(&namespace_id, &claimed_no);
+    let folded_manifest = loonfs_objectstore::keys::metadata_manifest_object(
+        &namespace_id,
+        &loonfs_types::ManifestNo(claimed_no.0 + 1),
+    );
+    let segments = loonfs_objectstore::keys::metadata_segment_prefix(&namespace_id);
+    let operations = store.take();
+    let [first, second, segment_puts @ .., manifest_put, boundary_read] = operations.as_slice()
+    else {
+        panic!("the fold sends at least four requests: {operations:?}");
+    };
+    for check in [first, second] {
+        assert_matches!(check, RecordedOperation::Get { key, .. } if *key == position_manifest);
+    }
+    assert!(!segment_puts.is_empty());
+    assert!(segment_puts.iter().all(|operation| matches!(
+        operation,
+        RecordedOperation::Put { key, .. } if key.starts_with(&segments)
+    )));
+    assert_matches!(manifest_put, RecordedOperation::Put { key, .. } if *key == folded_manifest);
+    assert_matches!(
+        boundary_read,
+        RecordedOperation::GetWithMetadata { key, .. }
+            if *key == loonfs_objectstore::keys::boundary(&namespace_id)
+    );
+    assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
+    assert_eq!(
+        folded.response.manifest_no,
+        loonfs_types::ManifestNo(claimed_no.0 + 1)
+    );
+    let position = engine
+        .writer_position()
+        .expect("the position after the fold");
+    assert_eq!(
+        position.read_basis().basis.manifest(),
+        &folded.current.manifest().manifest()
+    );
+    assert_eq!(position.wal_tail_objects(), 0);
+
+    // A fold whose manifest put fails drops the position and keeps the epoch.
+    publish_one(&mut engine, &writer, "beta").await;
+    let failing = FailStore::new(
+        Arc::clone(&store),
+        KeyPredicate::manifest(&namespace_id),
+        OperationSelector::PutCreateIfAbsent,
+        InjectedError::PermissionDenied("publication failed".to_owned()),
+    );
+    failing.fail_next(1);
+    let mut failing_engine = NamespaceCommitEngine {
+        namespace: crate::test_support::namespace_store(&failing, &namespace_id),
+        writer_id: engine.writer_id.clone(),
+        position: engine.position,
+    };
+    failing_engine
+        .fold()
+        .await
+        .map(|folded| folded.response)
+        .expect_err("the failed fold");
+    assert!(failing_engine.writer_position().is_none());
+    assert_matches!(
+        &*failing_engine.session_status().lock(),
+        WriterSessionStatus::Acquired(acquired) if acquired.writer_epoch == epoch
+    );
+
+    // Another writer's commit fences the session, and the session's next
+    // fold returns `writer_fenced` without a request.
+    let mut engine = NamespaceCommitEngine {
+        namespace: crate::test_support::namespace_store(Arc::clone(&store), &namespace_id),
+        writer_id: failing_engine.writer_id,
+        position: failing_engine.position,
+    };
+    let mut rival = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(Arc::clone(&store), &namespace_id),
+        context("rival").writer_id,
+    );
+    publish_one(&mut rival, &writer, "gamma").await;
+    let fenced = engine
+        .publish_batch(vec![create_dir("delta", "delta")], &writer.clock())
+        .await;
+    assert_matches!(fenced.results[0], Err(CoreError::WriterFenced(_)));
+    store.reset();
+    assert_matches!(
+        engine.fold().await.map(|folded| folded.response),
+        Err(CoreError::WriterFenced(_))
+    );
+    assert!(store.take().is_empty());
+}

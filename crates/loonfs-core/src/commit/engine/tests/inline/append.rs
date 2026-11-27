@@ -185,10 +185,7 @@ async fn an_append_continues_its_chain_and_preserves_earlier_revisions() {
             read_file(&store, &namespace_id, RevisionNo(1)).await,
             b"hello"
         );
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
-            .await
-            .expect("fold");
+        engine.fold().await.expect("fold");
     }
     assert_eq!(
         store
@@ -285,10 +282,7 @@ async fn an_append_to_a_restored_revision_starts_a_new_chain_from_it() {
             read_file(&store, &namespace_id, RevisionNo(2)).await,
             b"onetwo"
         );
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
-            .await
-            .expect("fold");
+        engine.fold().await.expect("fold");
     }
 }
 
@@ -551,10 +545,7 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
                     read_file(&store, &namespace_id, RevisionNo(3)).await,
                     b"direct+tail"
                 );
-                crate::test_support::namespace_store(&store, &namespace_id)
-                    .fold_wal()
-                    .await
-                    .expect("fold");
+                engine.fold().await.expect("fold");
             }
         } else {
             let error = appended.expect_err("wrong store algorithm");
@@ -591,10 +582,7 @@ async fn a_copy_appends_from_its_revision_checksums_under_a_fresh_chain_id() {
     )
     .await
     .expect("append original");
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold");
+    engine.fold().await.expect("fold");
     engine.invalidate_projection();
     store.reset();
     publish(
@@ -639,10 +627,7 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
                 )
                 .await
                 .expect("file");
-                crate::test_support::namespace_store(&store, &namespace_id)
-                    .fold_wal()
-                    .await
-                    .expect("fold prefix");
+                engine.fold().await.expect("fold prefix");
                 engine.invalidate_projection();
             }
             let mut operations = Vec::new();
@@ -713,10 +698,7 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
             let copied_bytes = [prefix.as_slice(), resident.as_slice(), b"!"].concat();
             for after_fold in [false, true] {
                 if after_fold {
-                    crate::test_support::namespace_store(&store, &namespace_id)
-                        .fold_wal()
-                        .await
-                        .expect("fold both chains");
+                    engine.fold().await.expect("fold both chains");
                 }
                 assert_eq!(
                     revision_bytes(&store, &namespace_id, "/file-0", 3).await,
