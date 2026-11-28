@@ -208,19 +208,8 @@ impl RivalBeforeChecks {
                     .expect("the rival claims");
             }
             Rival::Deletes => {
-                let namespace = namespace_store(rival, namespace_id);
-                let acquired = namespace
-                    .acquire_writer_epoch(&writer_at("rival", 1_000).writer_id)
-                    .await
-                    .expect("the rival claims");
-                namespace
-                    .delete_namespace(
-                        Default::default(),
-                        &acquired,
-                        None,
-                        &crate::publish::PublicationLane::new().lock().await,
-                        &namespace.start_clock(),
-                    )
+                namespace_store(rival, namespace_id)
+                    .delete_in_new_session(&writer_at("rival", 1_000).writer_id)
                     .await
                     .expect("the rival deletes the namespace");
             }

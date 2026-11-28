@@ -769,11 +769,7 @@ async fn writer_after_own_compaction<'a>(
         fixture
     }
     .engine()
-    .compact_metadata_unit_from(
-        &before,
-        &crate::publish::PublicationLane::new(),
-        &crate::compaction::MaintenanceCancellation::default(),
-    )
+    .compact_in_new_lane(&before)
     .await
     .expect("own compaction");
     let manifest = match compacted {
@@ -983,9 +979,9 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
 }
 
 /// Checks that a manifest that the session published two numbers above the
-/// position's manifest, over the session's own fold from an earlier position,
-/// moves the position with the commit after that fold as its tail, and that
-/// the start of the publication becomes the position's last successor check.
+/// position's manifest, over the session's own fold, moves the position with
+/// the commit after that fold as its tail, and that the start of the
+/// publication becomes the position's last successor check.
 #[tokio::test]
 async fn a_manifest_published_over_the_sessions_own_fold_moves_the_position() {
     let directory = tempdir().expect("tempdir");
@@ -993,16 +989,15 @@ async fn a_manifest_published_over_the_sessions_own_fold_moves_the_position() {
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     publish_one(&mut engine, &writer, "beta").await;
-    let input = engine.writer_position().expect("position");
-    let basis = input.read_basis().basis.clone();
-    // The session folds the tail through beta from that position, as a
-    // runtime's fold does beside the session's commits, and the writer then
-    // commits gamma on the manifest that the fold replaced.
-    let folded = engine
-        .namespace
-        .fold_wal_tail_in_new_lane(&input, &OperationClock::start(0, timer.clone()))
-        .await
-        .expect("fold");
+    let basis = engine
+        .writer_position()
+        .expect("position")
+        .read_basis()
+        .basis
+        .clone();
+    // The session folds the tail through beta from that position, and the
+    // writer then commits gamma on the fold's manifest.
+    let folded = engine.fold().await.expect("fold");
     assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
     publish_one(&mut engine, &writer, "gamma").await;
     timer.advance_ms(10);
@@ -1213,17 +1208,7 @@ pub(super) async fn advance_in_session<S: ObjectStore>(
         .await
         .expect("create the floor object");
     assert_eq!(report.retention_floor_seq, target, "the floor moves");
-    let folded = engine
-        .namespace
-        .fold_wal_tail_in_new_lane(
-            &engine.writer_position().expect("a writer position"),
-            &clock,
-        )
-        .await
-        .expect("fold")
-        .current;
-    engine.move_position_onto(folded.clone());
-    folded
+    engine.fold().await.expect("fold").current
 }
 
 /// Checks that a fold through a commit engine without a writer epoch claims

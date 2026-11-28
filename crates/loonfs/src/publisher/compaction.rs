@@ -8,13 +8,13 @@ use crate::trace::phase_span;
 use crate::Result;
 use crate::{MetadataMaintenanceOutcome, MetadataMaintenanceResponse, SharedObjectStore};
 use loonfs_core::control::{Held, LoadedManifest};
-use loonfs_core::{MaintenanceCancellation, Phase};
+use loonfs_core::{CompactionWriteOutcome, MaintenanceCancellation, Phase};
 use tracing::Instrument;
 
 /// Abandoned compaction units in a row after which
 /// [`NamespacePublisher::compact_namespace`] stops, so a loop whose units
-/// keep finding their inputs replaced, or keep losing every publication
-/// attempt, can't spin.
+/// keep finding their inputs replaced or their segments missing, or keep
+/// passing their time bound, can't spin.
 const MAX_LOST_COMPACTION_RACES: usize = 3;
 
 /// Compaction units that one call of [`NamespacePublisher::compact_namespace`]
@@ -143,17 +143,9 @@ impl NamespacePublisher {
     /// position, or on the current manifest when the session has no
     /// position. Checking that reads the store only without a position, and
     /// claims nothing, so a namespace with nothing due is left alone. The
-    /// caller has the namespace's compaction lock, but the position may have
-    /// been read before it: another unit may have published since, in this
-    /// runtime or in another process. A unit that planned from the older
-    /// manifest would compact runs that another compaction already replaced,
-    /// and end as abandoned after the whole rewrite. So before a due unit
-    /// plans from a position that it already had, one HEAD checks the
-    /// position's manifest for a successor, and a read of the manifest
-    /// boundary follows it, as a strong read's check does (see
-    /// [`RuntimeCore::checked_writer_position`](crate::runtime_core::RuntimeCore::checked_writer_position)),
-    /// which moves the position onto the manifests after it that have its
-    /// writer epoch, or drops it.
+    /// caller has the namespace's compaction lock, so no other unit of the
+    /// session publishes before this one plans, and the session's position
+    /// follows every manifest that the session publishes.
     async fn find_outcome_before_unit(
         &self,
         observed: Option<Held<LoadedManifest>>,
@@ -178,10 +170,6 @@ impl NamespacePublisher {
         {
             return Ok(Some(MetadataCompactionOutcome::NotNeeded));
         }
-        if position.is_some() {
-            core.checked_writer_position(&self.namespace_id, None)
-                .await?;
-        }
         Ok(None)
     }
 
@@ -190,17 +178,16 @@ impl NamespacePublisher {
     /// The unit waits for the lock before it plans, so two units of the
     /// namespace in this runtime never plan from the same manifest, and no
     /// commit waits for a unit, and a fold waits for one only while the
-    /// unit publishes: the unit's publication is an item of the session's
-    /// publication lane, so it takes its turn with the session's folds and
-    /// other publications. Under the lock,
-    /// [`Self::find_outcome_before_unit`] checks whether a unit is due, on
-    /// `observed`, a manifest loaded after anything this call published,
-    /// when it's given. The unit waits for a compaction permit from the
-    /// runtime's execution budget, and `cancellation` ends either wait or
-    /// stops the compaction at its next block. The unit then plans from the
-    /// session's position outside the lane, and publishes in it (see
-    /// [`Self::publish_from`] and [`Self::writer_position`]), so a session without its
-    /// writer epoch claims it first.
+    /// unit publishes. Under the lock, [`Self::find_outcome_before_unit`]
+    /// checks whether a unit is due, on `observed`, a manifest loaded after
+    /// anything this call published, when it's given. The unit waits for a
+    /// compaction permit from the runtime's execution budget, and
+    /// `cancellation` ends either wait or stops the compaction at its next
+    /// block. The unit then plans from the session's position and writes its
+    /// output outside the session's publication lane (see
+    /// [`Self::writer_position`]), so a session without its writer epoch
+    /// claims it first, and publishes in one turn of the lane (see
+    /// [`Self::lane_turn`]), with its fold and its other publications.
     pub(super) async fn compact_once(
         &self,
         observed: Option<Held<LoadedManifest>>,
@@ -234,20 +221,29 @@ impl NamespacePublisher {
         };
         let started_at_ms = core.timer().monotonic_now_ms();
         let engine = self.compaction_engine();
-        let outcome = self
-            .publish_from(
-                || self.writer_position(),
-                |position| {
+        let outcome: Result<loonfs_core::CompactionUnitOutcome> = async {
+            let writes = self
+                .run_from_position(|position| {
                     let engine = &engine;
                     async move {
                         engine
-                            .compact_metadata_unit_from(&position, &self.lane, cancellation)
+                            .write_metadata_compaction_unit(&position, cancellation)
                             .await
                     }
-                },
-                |_| false,
-            )
-            .await;
+                })
+                .await?;
+            let writes = match writes {
+                CompactionWriteOutcome::Ended(outcome) => return Ok(outcome),
+                CompactionWriteOutcome::Written(writes) => writes,
+            };
+            let lane = self.lane.lock().await;
+            let turn = self.lane_turn(&lane).await?;
+            Ok(core
+                .namespace_store(namespace_id)
+                .publish_compaction_in_turn(turn, writes, cancellation)
+                .await?)
+        }
+        .await;
         let elapsed_ms = core
             .timer()
             .monotonic_now_ms()

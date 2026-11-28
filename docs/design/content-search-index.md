@@ -72,8 +72,8 @@ A run of index steps changes a copy of the entry in memory (the "pending entry")
 
 1. The run loads the current manifest.
 2. Each step writes its segments and records its change in the pending entry.
-3. Once the change is one maintenance interval old, or when the run ends, the run creates the next manifest with put-if-absent.
-4. If the run loses the race to a manifest that copied grep's entry, such as a fold, the run publishes the change over that manifest. If another process changed the entry, the run publishes nothing, and its next step loads the winning manifest and plans again.
+3. Once the change is one maintenance interval old, or when the run ends, the run publishes the change as a publication of the writer session's [publication lane](../specs/glossary.md#publication-lane). The change builds on the session's newest published manifest. A fold, a compaction or a window change copies grep's entry unchanged, so LoonFS creates the next manifest over it with put-if-absent.
+4. If that manifest's entry isn't the one that the run started from, such as when the index was disabled through the same writer session, the run publishes nothing, and its next step loads the current manifest and plans again.
 
 A query reads grep's entry from the manifest of its read view, so the index is as current as the view, and the query sends no request to find the index. [Grep extension format](../specs/format.md#appendix-d-grep-extension-format) defines the entry and its publication.
 
@@ -102,7 +102,7 @@ A `next_event_index` of zero means the cursor is at a completed commit boundary.
 
 One request operation can produce several change events, so the event index is an offset within the commit's ordered events, not a count of request operations.
 
-Disabling the index publishes a `disabled` entry that lists no segments. The operation doesn't delete the previous objects synchronously. A worker whose run is in progress loses its publication to the disable, so it doesn't publish its earlier state again.
+Disabling the index publishes a `disabled` entry that lists no segments. The operation doesn't delete the previous objects synchronously. A worker whose run is in progress finds the disabled entry when its publication takes its turn in the lane, so it doesn't publish its earlier state again.
 
 ## Building the index
 

@@ -4,11 +4,10 @@
 //! size of what it compacts.
 
 use super::*;
-use crate::commit::session_epoch::SessionEpoch;
 use crate::compaction::group_compaction::{run_metadata_compaction, GroupCompactionReport};
 use crate::compaction::plan::MetadataCompactionSpec;
 use crate::compaction::plan::{group_run_descriptors, plan_group};
-use crate::compaction::publication::{input_segment_keys, CompactionPublication};
+use crate::compaction::publication::input_segment_keys;
 use crate::compaction::step::MaintenanceCancellation;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::segment::row::manifest_row_commit_seq;
@@ -19,8 +18,7 @@ use crate::time::{OperationClock, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
-    BlockingStore, ConcurrencyWatchStore, Intercept, InterceptStore, Interceptor, KeyPredicate,
-    OperationContext, OperationSelector, RecordedOperation, RecordingStore,
+    ConcurrencyWatchStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use std::assert_matches;
 use std::collections::BTreeMap;
@@ -391,17 +389,6 @@ async fn finalize_streaming_compaction<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Returns the namespace's current manifest, the basis that a finalization
-/// in these tests publishes from.
-async fn current_basis<S: ObjectStore>(
-    namespace: &crate::namespace::store::NamespaceStore<S>,
-) -> crate::namespace::held::Held<crate::namespace::control::LoadedManifest> {
-    namespace
-        .load_current_basis(crate::test_support::observed_now())
-        .await
-        .expect("load the current manifest")
-}
-
 /// The same, with the token the tests that cancel a finalization set.
 async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
     store: &S,
@@ -425,24 +412,18 @@ async fn try_finalize_streaming_compaction<S: ObjectStore + ?Sized>(
     result: &GroupCompactionReport,
     cancellation: &MaintenanceCancellation,
 ) -> crate::Result<CompactionUnitOutcome> {
-    let session = crate::publish::PublishedManifest::default();
-    let namespace = crate::test_support::namespace_store(store, namespace_id);
-    let timer = Arc::new(StdMonotonicTimer::default());
-    let publication = CompactionPublication {
-        compaction: OperationClock::start(0, timer.clone()),
-        publication: OperationClock::start(0, timer.clone()),
-        epoch: &SessionEpoch::new(&session, &namespace),
-    };
-    namespace
-        .finalize_metadata_compaction(
-            current_basis(&namespace).await,
-            spec,
-            input_keys,
-            result.clone(),
-            cancellation,
-            &publication,
-        )
-        .await
+    publish_compaction_over_current(
+        store,
+        namespace_id,
+        CompactionWrites {
+            spec: spec.clone(),
+            input_keys: input_keys.clone(),
+            report: result.clone(),
+            compaction: OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
+        },
+        cancellation,
+    )
+    .await
 }
 
 /// The same, for the tests where anything but a publication is a failure.
@@ -1950,570 +1931,6 @@ async fn referenced_segment_keys<S: ObjectStore + ?Sized>(
         .collect()
 }
 
-/// Publishes a competing manifest the first time the finalizer writes its
-/// replacement manifest object.
-///
-/// That is the window the retry is for: the finalizer has reloaded the manifest
-/// and decided its swap, and a fold is published before the finalizer's compare-and-swap.
-#[derive(Debug)]
-struct FoldDuringFinalization {
-    folder: LocalFsStore,
-    namespace_id: NamespaceId,
-    folded: AtomicUsize,
-}
-
-#[async_trait]
-impl Interceptor for FoldDuringFinalization {
-    type Guard = ();
-
-    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
-        if OperationSelector::Put.matches(context.kind())
-            && loonfs_objectstore::layout::manifest_no_of(context.key()).is_some()
-            && self.folded.fetch_add(1, Ordering::SeqCst) == 0
-        {
-            crate::test_support::namespace_store(&self.folder, &self.namespace_id)
-                .fold_as_test_writer()
-                .await
-                .expect("the competing fold must publish");
-        }
-        (Intercept::Continue, ())
-    }
-}
-
-#[tokio::test]
-async fn a_fold_published_during_finalization_is_retried_over() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    seed_bindings_workload(
-        &LocalFsStore::new(temp_dir.path()).expect("store"),
-        &namespace_id,
-    )
-    .await;
-    let group = MetadataFamilyGroup::Bindings;
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-    let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
-    let Ok(result) = run_compaction(
-        &store,
-        &namespace_id,
-        &spec,
-        small_segment_policy(),
-        &MaintenanceCancellation::default(),
-    )
-    .await
-    else {
-        panic!("nothing cancelled this job");
-    };
-
-    // A write with no snapshot behind it leaves a WAL tail, which is what
-    // the competing fold publishes.
-    let activity_before = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_statistics()
-        .await
-        .expect("activity")
-        .activity;
-    let visible_before = visible_namespace(&store, &namespace_id).await;
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .write_file_bytes("/raced-the-finalizer.txt", b"raced the finalizer\n", None)
-        .await
-        .expect("write a file the fold will publish");
-
-    let racing_store = InterceptStore::with_interceptor(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        FoldDuringFinalization {
-            folder: LocalFsStore::new(temp_dir.path()).expect("store"),
-            namespace_id: namespace_id.clone(),
-            folded: AtomicUsize::new(0),
-        },
-    );
-    let manifest_no = match finalize_streaming_compaction(
-        &racing_store,
-        &namespace_id,
-        &spec,
-        &input_keys,
-        &result,
-    )
-    .await
-    {
-        CompactionUnitOutcome::Published { manifest, .. } => {
-            manifest.manifest().manifest().manifest_no
-        }
-        other => panic!("the retry must publish, got {other:?}"),
-    };
-    assert!(
-        racing_store.interceptor().folded.load(Ordering::SeqCst) > 1,
-        "the finalizer must have written a replacement manifest more than once"
-    );
-
-    let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    assert_eq!(segments.manifest().payload().manifest_no, manifest_no);
-    assert_eq!(
-        segments.manifest().payload().activity,
-        loonfs_types::format::manifest::ManifestActivity {
-            content_bytes: activity_before
-                .content_bytes
-                .checked_add(b"raced the finalizer\n".len() as u64)
-                .expect("bytes"),
-            file_revisions: activity_before
-                .file_revisions
-                .checked_add(1)
-                .expect("revisions"),
-            mutations: activity_before.mutations.checked_add(1).expect("mutations"),
-        }
-    );
-    let runs = input_runs_for_group(segments.manifest(), group);
-    drop(segments);
-    // Two runs: the base run the job built, and the delta run the fold
-    // published above the job's input. The fold's run survives because
-    // the swap replaces only what the input held.
-    assert_eq!(
-        runs.iter().filter(|run| run.tier == RunTier::Base).count(),
-        1,
-        "the group must end in one base run"
-    );
-    assert_eq!(
-        runs.iter().filter(|run| run.tier == RunTier::Delta).count(),
-        1,
-        "the fold's run must survive the swap"
-    );
-    // Nothing the job rebuilt moved, and the file the fold published is
-    // there: the swap replaced its own input and preserved the rest.
-    let (raced, visible_after): (Vec<_>, Vec<_>) = visible_namespace(&store, &namespace_id)
-        .await
-        .into_iter()
-        .partition(|state| {
-            matches!(
-                &state.file,
-                CurrentFile::Visible { path, .. } if path.as_str() == "/raced-the-finalizer.txt"
-            )
-        });
-    assert_eq!(
-        raced.len(),
-        1,
-        "the file the fold published must be visible after the swap"
-    );
-    assert_eq!(
-        visible_after, visible_before,
-        "the swap must not move anything a read already answered"
-    );
-}
-
-/// A publication another process makes just before a unit's first manifest
-/// put.
-#[derive(Debug, Clone, Copy)]
-enum RivalPublication {
-    Fold,
-    RetentionAdvance,
-    OtherGroup(MetadataFamilyGroup),
-    SameGroup(MetadataFamilyGroup),
-}
-
-/// Runs a rival publication from another process before the first manifest
-/// write it sees.
-#[derive(Debug)]
-struct RivalDuringPublication {
-    rival: LocalFsStore,
-    namespace_id: NamespaceId,
-    publication: RivalPublication,
-    published: AtomicUsize,
-}
-
-#[async_trait]
-impl Interceptor for RivalDuringPublication {
-    type Guard = ();
-
-    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
-        let writes = OperationSelector::Put.matches(context.kind());
-        if !writes
-            || loonfs_objectstore::layout::manifest_no_of(context.key()).is_none()
-            || self.published.fetch_add(1, Ordering::SeqCst) != 0
-        {
-            return (Intercept::Continue, ());
-        }
-        let (rival, namespace_id) = (&self.rival, &self.namespace_id);
-        match self.publication {
-            RivalPublication::Fold => {
-                crate::test_support::NamespaceFixture::new(rival, namespace_id, &test_context())
-                    .write_file_bytes("/raced.txt", b"raced\n", None)
-                    .await
-                    .expect("the rival writes");
-                crate::test_support::namespace_store(rival, namespace_id)
-                    .fold_as_test_writer()
-                    .await
-                    .expect("the rival folds");
-            }
-            RivalPublication::RetentionAdvance => {
-                crate::test_support::NamespaceFixture::new(
-                    rival,
-                    namespace_id,
-                    &crate::test_support::writer_at(
-                        "test-writer",
-                        crate::test_support::grace_elapsed_after(test_context().now_ms),
-                    ),
-                )
-                .engine()
-                .advance_retention_floor(RetentionTarget::Head)
-                .await
-                .expect("the rival advances the floor");
-            }
-            RivalPublication::OtherGroup(group) | RivalPublication::SameGroup(group) => {
-                let spec = compaction_spec_for_group(rival, namespace_id, group).await;
-                publish_planned_compaction(rival, namespace_id, compact_everything_policy(), &spec)
-                    .await;
-            }
-        }
-        (Intercept::Continue, ())
-    }
-}
-
-/// Checks that a unit whose put loses to a fold, a retention advance, or a
-/// compaction of another family group publishes its output over the manifest
-/// that won and keeps the rival's change, and that a unit whose inputs a
-/// compaction of its own group replaced reports its position behind.
-#[tokio::test]
-async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_moved() {
-    let policy = MetadataRunPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        ..MetadataRunPolicy::default()
-    };
-    for case in 0..4 {
-        let temp_dir = tempdir().expect("tempdir");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        seed_bindings_workload(&store, &namespace_id).await;
-        // A commit above the floor, so a retention advance has somewhere to go.
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
-            .write_file_bytes("/above-the-floor.txt", b"above\n", None)
-            .await
-            .expect("write a file");
-        create_snapshot(&store, &namespace_id, &test_context())
-            .await
-            .expect("fold the file");
-        let before = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("current manifest");
-        let payload = before.payload().clone();
-        let runs = runs_newest_first(&payload);
-        let plan = crate::compaction::plan::plan_compaction(&payload, &runs, policy)
-            .expect("the unit has a window");
-        let group = plan.group();
-        let input_keys = input_segment_keys(&runs, &plan).expect("the plan's inputs");
-        let other = MetadataFamilyGroup::ALL
-            .into_iter()
-            .filter(|candidate| *candidate != group)
-            .find(|candidate| plan_group(&payload, &runs, *candidate, policy).is_some())
-            .expect("another group has a window");
-        let publication = [
-            RivalPublication::Fold,
-            RivalPublication::RetentionAdvance,
-            RivalPublication::OtherGroup(other),
-            RivalPublication::SameGroup(group),
-        ][case];
-        let intercepted = InterceptStore::with_interceptor(
-            LocalFsStore::new(temp_dir.path()).expect("store"),
-            RivalDuringPublication {
-                rival: LocalFsStore::new(temp_dir.path()).expect("store"),
-                namespace_id: namespace_id.clone(),
-                publication,
-                published: AtomicUsize::new(0),
-            },
-        );
-        let outcome = {
-            let mut fixture = crate::test_support::NamespaceFixture::new(
-                &intercepted,
-                &namespace_id,
-                &crate::test_support::writer_at("test-writer", 0),
-            );
-            fixture.namespace.run_policy = policy;
-            fixture
-        }
-        .engine()
-        .compact_from_current()
-        .await;
-        // The put that lost, and the retry unless the inputs moved.
-        let puts = if matches!(publication, RivalPublication::SameGroup(_)) {
-            1
-        } else {
-            2
-        };
-        assert_eq!(
-            intercepted.interceptor().published.load(Ordering::SeqCst),
-            puts,
-            "{publication:?}: {outcome:?}"
-        );
-        let after = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("current manifest");
-        let after_payload = after.payload();
-        let referenced = referenced_segment_keys(&store, &namespace_id).await;
-        if let RivalPublication::SameGroup(_) = publication {
-            // The winner ends the unit without a put, so the unit reports its
-            // position behind instead of abandoning its output on a manifest
-            // that it didn't publish.
-            assert_matches!(outcome, Err(CoreError::HeadMoved(_)), "{publication:?}");
-            continue;
-        }
-        let outcome = outcome.expect("run the unit");
-        let CompactionUnitOutcome::Published {
-            group: compacted,
-            manifest,
-            ..
-        } = outcome
-        else {
-            panic!("{publication:?}: the unit must publish over the winner, got {outcome:?}");
-        };
-        assert_eq!(compacted, group);
-        assert_eq!(
-            manifest.manifest().manifest(),
-            after.manifest(),
-            "{publication:?}"
-        );
-        assert!(
-            manifest.manifest().manifest().manifest_no.0 > before.manifest().manifest_no.0 + 1,
-            "{publication:?}: the unit's first put lost"
-        );
-        assert!(
-            input_keys.is_disjoint(&referenced),
-            "{publication:?}: the unit's output replaced its inputs"
-        );
-        match publication {
-            RivalPublication::Fold => assert!(after_payload.head_seq > payload.head_seq),
-            RivalPublication::RetentionAdvance => {
-                assert!(after_payload.retention_floor_seq > payload.retention_floor_seq)
-            }
-            RivalPublication::OtherGroup(other) => {
-                let other_runs = input_runs_for_group(after.envelope.as_ref(), other);
-                assert_eq!(
-                    other_runs.len(),
-                    1,
-                    "the rival's compaction of {other:?} survives"
-                );
-            }
-            RivalPublication::SameGroup(_) => {}
-        }
-    }
-}
-
-/// Changes the retention window from another process before each of the
-/// first `losses` manifest puts it sees.
-#[derive(Debug)]
-struct WindowChangesBeforeManifestPuts {
-    rival: LocalFsStore,
-    namespace_id: NamespaceId,
-    losses: usize,
-    manifest_puts: AtomicUsize,
-}
-
-#[async_trait]
-impl Interceptor for WindowChangesBeforeManifestPuts {
-    type Guard = ();
-
-    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
-        if !OperationSelector::Put.matches(context.kind())
-            || loonfs_objectstore::layout::manifest_no_of(context.key()).is_none()
-        {
-            return (Intercept::Continue, ());
-        }
-        let put = self.manifest_puts.fetch_add(1, Ordering::SeqCst);
-        if put < self.losses {
-            let window_ms = loonfs_types::RetentionWindow::new(
-                crate::limits::GC_GRACE_WINDOW_MS + put as u64 + 1,
-            )
-            .expect("a window longer than the grace window");
-            crate::test_support::NamespaceFixture::new(
-                &self.rival,
-                &self.namespace_id,
-                &test_context(),
-            )
-            .engine()
-            .namespace
-            .fixture_writer_session()
-            .await
-            .expect("the fixture's writer session")
-            .set_retention_window(Some(window_ms))
-            .await
-            .expect("the rival changes the window");
-        }
-        (Intercept::Continue, ())
-    }
-}
-
-/// Checks that a unit whose put loses to an unrelated publication on all but
-/// its last attempt publishes over the last winner, and writes its output
-/// segments once.
-#[tokio::test]
-async fn a_unit_whose_puts_lose_to_unrelated_publications_publishes_without_rewriting_its_output() {
-    let losses = crate::limits::MAX_CONTENTION_ATTEMPTS - 1;
-    let policy = MetadataRunPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        ..MetadataRunPolicy::default()
-    };
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_bindings_workload(
-        &LocalFsStore::new(temp_dir.path()).expect("store"),
-        &namespace_id,
-    )
-    .await;
-    let recorded = RecordingStore::metadata_segments(InterceptStore::with_interceptor(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        WindowChangesBeforeManifestPuts {
-            rival: LocalFsStore::new(temp_dir.path()).expect("store"),
-            namespace_id: namespace_id.clone(),
-            losses,
-            manifest_puts: AtomicUsize::new(0),
-        },
-    ));
-    let outcome = {
-        let mut fixture = crate::test_support::NamespaceFixture::new(
-            &recorded,
-            &namespace_id,
-            &crate::test_support::writer_at("test-writer", 0),
-        );
-        fixture.namespace.run_policy = policy;
-        fixture
-    }
-    .engine()
-    .compact_from_current()
-    .await
-    .expect("run the unit");
-
-    let CompactionUnitOutcome::Published {
-        manifest,
-        output_segments,
-        ..
-    } = outcome
-    else {
-        panic!("the unit must publish over the last winner, got {outcome:?}");
-    };
-    assert_eq!(
-        recorded
-            .inner()
-            .interceptor()
-            .manifest_puts
-            .load(Ordering::SeqCst),
-        losses + 1,
-        "every put but the last lost"
-    );
-    assert_eq!(
-        recorded.count(OperationSelector::Put),
-        output_segments,
-        "the unit wrote its output segments once"
-    );
-    let current = crate::test_support::namespace_store(
-        &LocalFsStore::new(temp_dir.path()).expect("store"),
-        &namespace_id,
-    )
-    .load_current_manifest()
-    .await
-    .expect("current manifest");
-    assert_eq!(manifest.manifest().manifest(), current.manifest());
-    assert_eq!(
-        current.payload().retention_window_ms,
-        std::num::NonZeroU64::new(crate::limits::GC_GRACE_WINDOW_MS + losses as u64),
-        "the last rival's window survives"
-    );
-}
-
-/// Checks that a fold whose manifest a unit publishes over doesn't make the
-/// unit's group due again. The unit leaves its group with a base and the
-/// fold's run, and two runs aren't a tier, so the fold's run waits for later
-/// folds while every other group compacts it into its own tier.
-#[tokio::test]
-async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    let policy = MetadataRunPolicy::default();
-    for index in 0..policy.min_compaction_runs.get() {
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .write_file_bytes(&format!("/f{index}.txt"), b"body\n", None)
-            .await
-            .expect("write a file");
-        create_snapshot(&store, &namespace_id, &context)
-            .await
-            .expect("fold the file");
-    }
-    let before = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current manifest");
-    let payload = before.payload();
-    let runs = runs_newest_first(payload);
-    let due_groups = MetadataFamilyGroup::ALL
-        .into_iter()
-        .filter(|group| plan_group(payload, &runs, *group, policy).is_some())
-        .count();
-    assert!(due_groups > 1, "the folds must make several groups due");
-
-    let intercepted = InterceptStore::with_interceptor(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        RivalDuringPublication {
-            rival: LocalFsStore::new(temp_dir.path()).expect("store"),
-            namespace_id: namespace_id.clone(),
-            publication: RivalPublication::Fold,
-            published: AtomicUsize::new(0),
-        },
-    );
-    let mut units = Vec::new();
-    while units.len() <= MetadataFamilyGroup::ALL.len() {
-        match {
-            let mut fixture = crate::test_support::NamespaceFixture::new(
-                &intercepted,
-                &namespace_id,
-                &crate::test_support::writer_at("test-writer", 0),
-            );
-            fixture.namespace.run_policy = policy;
-            fixture
-        }
-        .engine()
-        .compact_from_current()
-        .await
-        .expect("run a unit")
-        {
-            CompactionUnitOutcome::Published { group, .. } => units.push(group),
-            CompactionUnitOutcome::NotNeeded => break,
-            other => panic!("a unit publishes or finds nothing due, got {other:?}"),
-        }
-    }
-    assert_eq!(
-        intercepted.interceptor().published.load(Ordering::SeqCst),
-        units.len() + 1,
-        "the first unit's put lost to the fold, and the unit published over it"
-    );
-    assert_eq!(
-        units.len(),
-        due_groups,
-        "each due group is compacted once, and the fold's run doesn't make another unit due"
-    );
-    let after = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current manifest");
-    let fold_run = runs_newest_first(after.payload())
-        .into_iter()
-        .find(|run| run.run_no == payload.next_run_no)
-        .expect("the fold's run is still listed");
-    assert_eq!(fold_run.tier, RunTier::Delta);
-    assert_eq!(
-        fold_run
-            .segments
-            .iter()
-            .filter(|family_segments| !family_segments.segments.is_empty())
-            .map(|family_segments| family_segments.family)
-            .collect::<BTreeSet<_>>(),
-        units[0].families().iter().copied().collect::<BTreeSet<_>>(),
-        "the fold's run keeps only the first unit's group, which waits for a tier"
-    );
-}
-
 #[tokio::test]
 async fn a_cancellation_after_the_last_row_publishes_nothing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2573,82 +1990,6 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
     assert!(
         staged.is_disjoint(&referenced),
         "and nothing may reference them"
-    );
-}
-
-#[tokio::test]
-async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    seed_bindings_workload(&store, &namespace_id).await;
-    let spec =
-        compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
-    let cancellation = MaintenanceCancellation::default();
-    let Ok(result) = run_compaction(
-        &store,
-        &namespace_id,
-        &spec,
-        small_segment_policy(),
-        &cancellation,
-    )
-    .await
-    else {
-        panic!("nothing cancelled this job while it read");
-    };
-    let current = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current manifest");
-    let mut winner = current.payload().clone();
-    winner.manifest_no = winner.manifest_no.successor().expect("next manifest");
-    let recorded = Arc::new(RecordingStore::new(
-        store.clone(),
-        KeyPredicate::manifest(&namespace_id),
-    ));
-    let blocked = BlockingStore::new(
-        recorded.clone(),
-        KeyPredicate::manifest(&namespace_id),
-        OperationSelector::Put,
-    );
-    blocked.block_next();
-    let (finalization, ()) = futures::join!(
-        finalize_streaming_compaction_under(
-            &blocked,
-            &namespace_id,
-            &spec,
-            &input_keys,
-            &result,
-            &cancellation,
-        ),
-        async {
-            blocked.wait_until_blocked().await;
-            let published = publish_once(&store, winner.clone())
-                .await
-                .expect("competing publication");
-            assert_matches!(published, ManifestPublicationOutcome::Published(_));
-            cancellation.cancel();
-            blocked.release();
-        }
-    );
-
-    assert_matches!(
-        finalization,
-        CompactionUnitOutcome::Cancelled,
-        "the cancelled attempt must not be retried, got {finalization:?}"
-    );
-    assert_eq!(recorded.counts().create_if_absent_puts, 1);
-    let current = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current manifest");
-    assert_eq!(
-        current.payload(),
-        &loonfs_types::format::manifest::NamespaceManifestPayload {
-            publication_id: current.payload().publication_id.clone(),
-            ..winner
-        },
     );
 }
 
@@ -2724,25 +2065,17 @@ async fn an_expired_job_and_a_deletion_each_prevent_publication() {
     )
     .await
     .expect("compact");
-    let session = crate::publish::PublishedManifest::default();
     let store = RecordingStore::new(store, KeyPredicate::any());
-    let finalizing = crate::test_support::namespace_store(&store, &namespace);
     let timer = Arc::new(ManualClock::stepping(1_000));
-    let publication = CompactionPublication {
+    let writes = || CompactionWrites {
+        spec: spec.clone(),
+        input_keys: input.clone(),
+        report: result.clone(),
         compaction: OperationClock::start(0, timer.clone()),
-        publication: OperationClock::start(0, timer.clone()),
-        epoch: &SessionEpoch::new(&session, &finalizing),
     };
+    let expired = writes();
     timer.set_ms(METADATA_COMPACTION_BUDGET_MS + 1);
-    let outcome = finalizing
-        .finalize_metadata_compaction(
-            current_basis(&finalizing).await,
-            &spec,
-            &input,
-            result.clone(),
-            &cancellation,
-            &publication,
-        )
+    let outcome = publish_compaction_over_current(&store, &namespace, expired, &cancellation)
         .await
         .expect("elapsed bound");
     assert_eq!(outcome, CompactionUnitOutcome::Abandoned);
@@ -2765,15 +2098,7 @@ async fn an_expired_job_and_a_deletion_each_prevent_publication() {
     .await
     .expect("delete while the job runs");
     store.reset();
-    let outcome = finalizing
-        .finalize_metadata_compaction(
-            current_basis(&finalizing).await,
-            &spec,
-            &input,
-            result,
-            &cancellation,
-            &publication,
-        )
+    let outcome = publish_compaction_over_current(&store, &namespace, writes(), &cancellation)
         .await
         .expect("a deletion abandons the job");
     assert_eq!(outcome, CompactionUnitOutcome::Abandoned);
@@ -2788,223 +2113,6 @@ async fn an_expired_job_and_a_deletion_each_prevent_publication() {
         .await
         .expect_err("a tombstone ends the namespace");
     assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceDeleted);
-}
-
-#[tokio::test]
-async fn two_groups_publish_after_a_number_conflict() {
-    use loonfs_test_support::stores::RecordingStore;
-
-    let directory = tempdir().expect("tempdir");
-    let namespace = NamespaceId::parse("concurrent-groups").expect("namespace");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    seed_bindings_workload(&store, &namespace).await;
-    let before = current_manifest_number(&store, &namespace).await;
-    let first = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
-    let second =
-        compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Revisions).await;
-    let first_keys = input_keys_now(&store, &namespace, &first).await;
-    let second_keys = input_keys_now(&store, &namespace, &second).await;
-    let cancellation = MaintenanceCancellation::default();
-    let session = crate::publish::PublishedManifest::default();
-    let session_namespace = crate::test_support::namespace_store(
-        LocalFsStore::new(directory.path()).expect("store"),
-        &namespace,
-    );
-    let timer = Arc::new(StdMonotonicTimer::default());
-    let publication = CompactionPublication {
-        compaction: OperationClock::start(0, timer.clone()),
-        publication: OperationClock::start(0, timer.clone()),
-        epoch: &SessionEpoch::new(&session, &session_namespace),
-    };
-    let first_output = run_compaction(
-        &store,
-        &namespace,
-        &first,
-        small_segment_policy(),
-        &cancellation,
-    )
-    .await
-    .expect("first compaction");
-    let second_output = run_compaction(
-        &store,
-        &namespace,
-        &second,
-        small_segment_policy(),
-        &cancellation,
-    )
-    .await
-    .expect("second compaction");
-    let output_keys = first_output
-        .output_segments
-        .iter()
-        .chain(&second_output.output_segments)
-        .map(metadata_segment_object_key)
-        .collect::<BTreeSet<_>>();
-    let store = BlockingStore::new(
-        RecordingStore::new(
-            store,
-            KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
-                &namespace,
-            )),
-        ),
-        KeyPredicate::exact(metadata_manifest_object(
-            &namespace,
-            &before.successor().expect("next number"),
-        )),
-        OperationSelector::Put,
-    );
-    let first_store = crate::test_support::namespace_store(&store, &namespace);
-    let first_basis = current_basis(&first_store).await;
-    let second_basis = current_basis(&first_store).await;
-    store.block_next();
-    let (first_outcome, second_outcome) = tokio::join!(
-        first_store.finalize_metadata_compaction(
-            first_basis,
-            &first,
-            &first_keys,
-            first_output,
-            &cancellation,
-            &publication
-        ),
-        async {
-            store.wait_until_blocked().await;
-            let result = crate::test_support::namespace_store(&store, &namespace)
-                .finalize_metadata_compaction(
-                    second_basis,
-                    &second,
-                    &second_keys,
-                    second_output,
-                    &cancellation,
-                    &publication,
-                )
-                .await;
-            store.release();
-            result
-        }
-    );
-    assert_matches!(
-        second_outcome.expect("second publication"),
-        CompactionUnitOutcome::Published { manifest, .. }
-            if manifest.manifest().manifest().manifest_no.0 == before.0 + 1
-    );
-    assert_matches!(
-        first_outcome.expect("retried publication"),
-        CompactionUnitOutcome::Published { manifest, .. }
-            if manifest.manifest().manifest().manifest_no.0 == before.0 + 2
-    );
-    assert_eq!(store.inner().counts().create_if_absent_puts, 3);
-    assert!(output_keys.is_subset(&referenced_segment_keys(&store, &namespace).await));
-}
-
-/// Checks that a unit whose first put loses to another publication, and
-/// whose retry then finds the unit cancelled or past its budget, returns
-/// `Cancelled` or `Abandoned` as it is, without `head_moved`, so the session
-/// doesn't run the unit again from a new position. Neither outcome depends
-/// on the manifest that won the put.
-#[tokio::test]
-async fn a_stopped_retry_returns_its_outcome_whatever_manifest_won() {
-    use loonfs_test_support::stores::RecordingStore;
-
-    for expire in [false, true] {
-        let directory = tempdir().expect("tempdir");
-        let namespace = NamespaceId::parse("stopped-retry").expect("namespace");
-        let store = LocalFsStore::new(directory.path()).expect("store");
-        seed_bindings_workload(&store, &namespace).await;
-        let before = current_manifest_number(&store, &namespace).await;
-        let first =
-            compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
-        let second =
-            compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Revisions).await;
-        let first_keys = input_keys_now(&store, &namespace, &first).await;
-        let second_keys = input_keys_now(&store, &namespace, &second).await;
-        let unstopped = MaintenanceCancellation::default();
-        let first_output = run_compaction(
-            &store,
-            &namespace,
-            &first,
-            small_segment_policy(),
-            &unstopped,
-        )
-        .await
-        .expect("first compaction");
-        let second_output = run_compaction(
-            &store,
-            &namespace,
-            &second,
-            small_segment_policy(),
-            &unstopped,
-        )
-        .await
-        .expect("second compaction");
-        let store = BlockingStore::new(
-            RecordingStore::new(store, KeyPredicate::any()),
-            KeyPredicate::exact(metadata_manifest_object(
-                &namespace,
-                &before.successor().expect("next number"),
-            )),
-            OperationSelector::Put,
-        );
-        let finalizing = crate::test_support::namespace_store(&store, &namespace);
-        let first_basis = current_basis(&finalizing).await;
-        let second_basis = current_basis(&finalizing).await;
-        let session = crate::publish::PublishedManifest::default();
-        let clock = Arc::new(ManualClock::stepping(0));
-        let first_publication = CompactionPublication {
-            compaction: OperationClock::start(0, clock.clone()),
-            publication: OperationClock::start(0, clock.clone()),
-            epoch: &SessionEpoch::new(&session, &finalizing),
-        };
-        let second_publication = CompactionPublication {
-            compaction: OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
-            publication: OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
-            epoch: &SessionEpoch::new(&session, &finalizing),
-        };
-        let stop = MaintenanceCancellation::default();
-        store.block_next();
-        let (stopped, won) = tokio::join!(
-            finalizing.finalize_metadata_compaction(
-                first_basis,
-                &first,
-                &first_keys,
-                first_output,
-                &stop,
-                &first_publication,
-            ),
-            async {
-                store.wait_until_blocked().await;
-                let won = finalizing
-                    .finalize_metadata_compaction(
-                        second_basis,
-                        &second,
-                        &second_keys,
-                        second_output,
-                        &unstopped,
-                        &second_publication,
-                    )
-                    .await;
-                if expire {
-                    clock.set_ms(crate::limits::METADATA_COMPACTION_BUDGET_MS + 1);
-                } else {
-                    stop.cancel();
-                }
-                store.release();
-                won
-            }
-        );
-        assert_matches!(
-            won.expect("the other unit publishes"),
-            CompactionUnitOutcome::Published { .. }
-        );
-        let expected = if expire {
-            CompactionUnitOutcome::Abandoned
-        } else {
-            CompactionUnitOutcome::Cancelled
-        };
-        assert_eq!(
-            stopped.expect("a stopped retry returns its outcome"),
-            expected
-        );
-    }
 }
 
 /// Checks that a finalization from the current manifest, which a discovery
@@ -3065,9 +2173,9 @@ fn publication_requests(namespace: &NamespaceId, next: ManifestNo) -> Vec<(&'sta
     ]
 }
 
-/// Checks that a compaction unit loads nothing to plan, publishes on the
-/// manifest of its session's position with its put and no request before
-/// it, and reads the manifest boundary after the put.
+/// Checks that a compaction unit loads nothing to plan, publishes on its
+/// session's newest published manifest in its turn with its put and no
+/// request before it, and reads the manifest boundary after the put.
 ///
 /// The test installs a segment cache in the fixture's namespace, as a
 /// runtime has one, so the unit takes its position's manifest from the cache
@@ -3095,8 +2203,8 @@ async fn a_unit_loads_no_manifest_to_plan() {
     }
     .engine();
     // The session's claim and its load of the position come before the unit.
-    let position = engine
-        .commit_engine()
+    let mut session = engine.commit_engine();
+    let position = session
         .load_position_alone()
         .await
         .expect("the session's position");
@@ -3108,14 +2216,20 @@ async fn a_unit_loads_no_manifest_to_plan() {
         .successor()
         .expect("next manifest number");
     store.reset();
-    let outcome = engine
-        .compact_metadata_unit_from(
-            &position,
-            &crate::publish::PublicationLane::new(),
-            &MaintenanceCancellation::default(),
-        )
+    let cancellation = MaintenanceCancellation::default();
+    let crate::CompactionWriteOutcome::Written(writes) = engine
+        .write_metadata_compaction_unit(&position, &cancellation)
         .await
-        .expect("run a compaction unit");
+        .expect("write a compaction unit")
+    else {
+        panic!("a compaction unit is due");
+    };
+    let lane = session.publication_lane();
+    let outcome = engine
+        .namespace
+        .publish_compaction_in_turn(lane.lock().await.acquired_turn(), writes, &cancellation)
+        .await
+        .expect("publish a compaction unit");
     assert_matches!(
         outcome,
         CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest().manifest().manifest_no == next
@@ -3124,86 +2238,6 @@ async fn a_unit_loads_no_manifest_to_plan() {
         control_requests(&namespace, &store.take()),
         publication_requests(&namespace, next)
     );
-}
-
-/// Checks that a finalization whose put loses to a compaction of the same
-/// group publishes nothing at the next attempt, because its input runs are
-/// gone from the manifest that won, and returns `head_moved`, because that
-/// manifest isn't the one the unit planned from, so the session that ran
-/// the unit loads its position again (see
-/// `ManifestUpdate::published_or_unchanged`).
-#[tokio::test]
-async fn a_finalization_that_loses_to_its_own_group_returns_head_moved() {
-    use loonfs_test_support::stores::RecordingStore;
-
-    let directory = tempdir().expect("tempdir");
-    let namespace = NamespaceId::parse("same-group").expect("namespace");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    seed_bindings_workload(&store, &namespace).await;
-    let before = current_manifest_number(&store, &namespace).await;
-    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
-    let input = input_keys_now(&store, &namespace, &spec).await;
-    let cancellation = MaintenanceCancellation::default();
-    let losing = run_compaction(
-        &store,
-        &namespace,
-        &spec,
-        small_segment_policy(),
-        &cancellation,
-    )
-    .await
-    .expect("first compaction");
-    let winning = run_compaction(
-        &store,
-        &namespace,
-        &spec,
-        small_segment_policy(),
-        &cancellation,
-    )
-    .await
-    .expect("second compaction");
-    let store = BlockingStore::new(
-        RecordingStore::new(store, KeyPredicate::manifest(&namespace)),
-        KeyPredicate::exact(metadata_manifest_object(
-            &namespace,
-            &before.successor().expect("next number"),
-        )),
-        OperationSelector::Put,
-    );
-    store.block_next();
-    let (lost, won) = tokio::join!(
-        try_finalize_streaming_compaction(
-            &store,
-            &namespace,
-            &spec,
-            &input,
-            &losing,
-            &cancellation
-        ),
-        async {
-            store.wait_until_blocked().await;
-            let outcome =
-                finalize_streaming_compaction(&store, &namespace, &spec, &input, &winning).await;
-            store.release();
-            outcome
-        }
-    );
-    assert_matches!(
-        won,
-        CompactionUnitOutcome::Published { manifest, .. }
-            if manifest.manifest().manifest().manifest_no == before.successor().expect("next number")
-    );
-    assert_matches!(lost, Err(CoreError::HeadMoved(_)));
-    assert_eq!(store.inner().counts().create_if_absent_puts, 2);
-    let referenced = referenced_segment_keys(&store, &namespace).await;
-    assert!(winning
-        .output_segments
-        .iter()
-        .all(|segment| referenced.contains(&metadata_segment_object_key(segment))));
-    assert!(losing
-        .output_segments
-        .iter()
-        .all(|segment| !referenced.contains(&metadata_segment_object_key(segment))));
 }
 
 #[tokio::test]

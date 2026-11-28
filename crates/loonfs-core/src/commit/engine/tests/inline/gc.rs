@@ -109,15 +109,19 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
     assert_files_readable(&store, namespace_id, "handoff", &values).await;
 }
 
+/// Checks that a fold that another writer's claim fences at its turn, after
+/// it wrote its content objects, leaves the files readable: the new writer
+/// folds the same tail, a collection deletes the folded WAL objects, and
+/// the objects that the new writer's manifest lists stay.
 #[tokio::test]
-async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
+async fn a_fenced_fold_leaves_the_new_writers_fold_of_its_tail_readable() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = &engine.namespace.namespace_id.clone();
     let values = vec![inline(Bytes::from_static(b"shared"))];
     publish(
         &mut engine,
         &context,
-        candidate("competing-gc", values.clone()),
+        candidate("fenced-gc", values.clone()),
     )
     .await
     .expect("publish");
@@ -128,30 +132,24 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
         OperationSelector::Put,
     );
     blocked.block_next();
-    let timer = Arc::new(StdMonotonicTimer::default());
-    let deadline = crate::time::OperationClock::start(0, timer.clone());
+    let deadline = crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
     let namespace = crate::test_support::namespace_store(&blocked, namespace_id);
-    let loser = namespace.fold_wal_tail_in_new_lane(&input, &deadline);
-    let winner = async {
+    let fenced = namespace.fold_wal_tail_in_new_lane(&input, &deadline);
+    let new_writer = async {
         blocked.wait_until_blocked().await;
         let folded = crate::test_support::namespace_store(&store, namespace_id)
-            .fold_wal_tail_in_new_lane(
-                &input,
-                &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
-            )
+            .fold_as_test_writer()
             .await
-            .expect("winning fold");
+            .expect("the new writer's fold");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
         collect_aged_wal(&store, namespace_id, &context).await;
         assert!(crate::test_support::commit_wal_keys(&store, namespace_id)
             .await
             .is_empty());
-        assert_files_readable(&store, namespace_id, "competing-gc", &values).await;
+        assert_files_readable(&store, namespace_id, "fenced-gc", &values).await;
         blocked.release();
     };
-    let (lost, ()) = tokio::join!(loser, winner);
-    // The winner's manifest ends the losing fold without a put, so the losing
-    // fold reports its position behind.
-    assert!(matches!(lost, Err(CoreError::HeadMoved(_))));
-    assert_files_readable(&store, namespace_id, "competing-gc", &values).await;
+    let (fenced, ()) = tokio::join!(fenced, new_writer);
+    assert!(matches!(fenced, Err(CoreError::WriterFenced(_))));
+    assert_files_readable(&store, namespace_id, "fenced-gc", &values).await;
 }

@@ -307,7 +307,7 @@ Replaying a fork's unmerged commits onto a fresh fork of its parent namespace wh
 
 ### Writer position
 
-The in-memory head and manifest that an active writer session plans commits against. Reads in the writer's process start from the writer position instead of probing the WAL, advancing on every local commit (before acknowledgement) and every local manifest publication.
+The in-memory head and manifest that an active writer session plans commits against. Reads in the writer's process start from the writer position instead of probing the WAL. The position advances on every local commit (before acknowledgement) and onto every manifest that the session's [publication lane](#publication-lane) publishes, each of which builds on the session's newest published manifest.
 
 Manifest checks detect manifests published above the position: the position advances onto a newer manifest with the same writer epoch unless it folded past the position's WAL tip, and drops the position (falling back to full discovery) on a new writer's epoch claim or a fold past the tip. `strong` reads wait for a fresh manifest check, while `eventual` reads wait only past `max_staleness_ms`. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
 

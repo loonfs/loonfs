@@ -313,7 +313,7 @@ const _: () = assert!(
 /// run, and a collection deletes an unreferenced segment once it is older than
 /// the grace window. The assertion below keeps the budget plus the
 /// publication completion bound shorter than the grace window, so a unit
-/// that starts its last publication attempt at this budget finishes before
+/// that starts its publication at this budget finishes before
 /// its earliest unreferenced segment is old enough to delete.
 pub const METADATA_COMPACTION_BUDGET_MS: u64 = 12 * 60 * 60 * 1000;
 

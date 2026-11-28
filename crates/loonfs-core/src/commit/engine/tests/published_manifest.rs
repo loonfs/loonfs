@@ -307,9 +307,9 @@ async fn a_fold_published_while_a_unit_loads_moves_the_loaded_position() {
     assert_eq!(position.wal_tail_objects(), 1);
 }
 
-/// Brings the engine's position and the lane's copy of it up to the
-/// session's newest published manifest, as the runtime's release of the
-/// engine does, and drops the replaced positions after the unlock.
+/// Brings the engine's position up to the session's newest published
+/// manifest, as the runtime's release of the engine does, and drops the
+/// replaced position after the unlock.
 fn follow_as_the_release_does<S: ObjectStore>(engine: &mut NamespaceCommitEngine<S>) {
     let published = engine.published_manifest();
     let locked = published.lock();
@@ -318,8 +318,8 @@ fn follow_as_the_release_does<S: ObjectStore>(engine: &mut NamespaceCommitEngine
     drop(replaced);
 }
 
-/// Returns a new session of `writer` whose first commit is published, with
-/// the session's position copied into its publication lane.
+/// Returns a new session of `writer` whose first commit is published, and
+/// whose engine keeps the position that the commit left.
 async fn session_with_a_kept_position<'a>(
     store: &'a LocalFsStore,
     namespace_id: &NamespaceId,
@@ -337,18 +337,17 @@ async fn session_with_a_kept_position<'a>(
     follow_as_the_release_does(&mut engine);
     assert!(
         engine.publication_lane().lock().await.turn().is_some(),
-        "the lane keeps a copy of the position"
+        "the session has its writer epoch"
     );
     engine
 }
 
-/// Checks that a publication planned outside the lane, such as a compaction
-/// unit's or a snapshot's, builds on the newer of the manifest it planned
-/// from and the session's newest published manifest, whatever the lane
-/// keeps: a position that can't follow that manifest, no position, or a
-/// position above it.
+/// Checks that a snapshot planned outside the lane writes its record on the
+/// newer of the manifest it planned from and the session's newest published
+/// manifest, whatever the engine keeps: a position that can't follow that
+/// manifest, no position, or a position above it.
 #[tokio::test]
-async fn a_publication_planned_outside_the_lane_builds_on_the_newest_published_manifest() {
+async fn a_snapshot_planned_outside_the_lane_writes_on_the_newest_published_manifest() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
@@ -370,22 +369,19 @@ async fn a_publication_planned_outside_the_lane_builds_on_the_newest_published_m
     publish_one(&mut other, &writer, "beta").await;
     let folded = other.fold().await.expect("fold").current;
     let lane = engine.publication_lane();
-    lane.lock().await.record(&folded);
+    lane.published_manifest().record(&folded);
     assert!(folded.manifest_no() > planned.manifest_no());
 
     let basis_over = |lane: &LaneGuard<'_>| lane.basis_over(planned.clone()).manifest_no();
-    {
-        let guard = lane.lock().await;
-        assert!(
-            guard.turn().is_none(),
-            "the kept position can't follow a fold past its tip"
-        );
-        assert_eq!(
-            basis_over(&guard),
-            folded.manifest_no(),
-            "a dropped position"
-        );
-    }
+    assert!(
+        engine.writer_position().is_none(),
+        "the kept position can't follow a fold past its tip"
+    );
+    assert_eq!(
+        basis_over(&lane.lock().await),
+        folded.manifest_no(),
+        "a dropped position"
+    );
     engine.invalidate_projection();
     assert_eq!(
         basis_over(&lane.lock().await),
@@ -401,67 +397,24 @@ async fn a_publication_planned_outside_the_lane_builds_on_the_newest_published_m
         .await
         .expect("load the position");
     follow_as_the_release_does(&mut engine);
-    {
-        let guard = lane.lock().await;
-        assert_eq!(
-            guard.turn().map(|turn| turn.position().basis.manifest_no()),
-            Some(above.manifest_no()),
-            "the kept position is above the newest published manifest"
-        );
-        assert_eq!(
-            basis_over(&guard),
-            folded.manifest_no(),
-            "a position above the newest published manifest"
-        );
-    }
+    assert_eq!(
+        engine
+            .writer_position()
+            .map(|position| position.basis.manifest_no()),
+        Some(above.manifest_no()),
+        "the kept position is above the newest published manifest"
+    );
+    assert_eq!(
+        basis_over(&lane.lock().await),
+        folded.manifest_no(),
+        "a position above the newest published manifest"
+    );
 }
 
-/// Checks that a follow returns the copy of the position that it replaces
-/// in the session's publication lane, so the runtime drops that copy, and
-/// the folded tail that it can be the last owner of, after it unlocks the
-/// published manifest.
-#[tokio::test]
-async fn a_follow_returns_the_lanes_replaced_copy() {
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    let writer = context("writer-a");
-    let mut engine = session_with_a_kept_position(&store, &namespace_id, &writer).await;
-    let (tail, folded) = {
-        let position = engine.writer_position().expect("the position after alpha");
-        let folded = crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal_tail_in_new_lane(&position, &writer.clock())
-            .await
-            .expect("fold");
-        (Arc::downgrade(position.tail()), folded.current)
-    };
-    engine.publication_lane().lock().await.record(&folded);
-    // The engine's own position follows the fold first, as a unit's store
-    // does, so the lane's copy is the last owner of the folded tail.
-    let stored = engine.position.current.take().expect("a position");
-    engine.position.current.set(stored);
-    assert_eq!(
-        std::sync::Weak::strong_count(&tail),
-        1,
-        "only the lane's copy keeps the folded tail"
-    );
-    let published = engine.published_manifest();
-    let locked = published.lock();
-    let replaced = engine.follow_published(&locked);
-    assert_eq!(
-        std::sync::Weak::strong_count(&tail),
-        1,
-        "the lane's replaced copy isn't dropped with the published manifest locked"
-    );
-    drop(locked);
-    drop(replaced);
-    assert_eq!(std::sync::Weak::strong_count(&tail), 0);
-}
-
-/// Checks that a fenced session leaves no copy of its position in its
-/// publication lane, and that its engine keeps none either, so no
-/// publication of the lane builds on a head that the new writer has moved
-/// past, and no read starts from it.
+/// Checks that a fenced session takes no turn in its publication lane, and
+/// that its engine keeps no position, so no publication of the lane builds
+/// on a head that the new writer has moved past, and no read starts from
+/// it.
 #[tokio::test]
 async fn a_fenced_session_leaves_no_position_in_its_lane() {
     let directory = tempdir().expect("tempdir");
@@ -490,7 +443,7 @@ async fn a_fenced_session_leaves_no_position_in_its_lane() {
     follow_as_the_release_does(&mut engine);
     assert!(
         engine.publication_lane().lock().await.turn().is_none(),
-        "the lane keeps no copy of a fenced session's position"
+        "a fenced session takes no turn in its lane"
     );
     assert!(
         engine.stored_position().is_none(),
@@ -540,7 +493,7 @@ async fn a_load_beside_a_lane_publication_installs_a_position_on_its_manifest() 
             .await
             .expect("fold");
         assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
-        lane.lock().await.record(&folded.current);
+        lane.published_manifest().record(&folded.current);
         store.release.notify_one();
         folded.current
     };

@@ -14,7 +14,7 @@ use loonfs_core::control::{
 use loonfs_core::limits::{fold_at_inline_bytes, FOLD_AT_WAL_BYTES, MAX_CONTENTION_ATTEMPTS};
 use loonfs_core::publish::{LaneGuard, LaneTurn, WalTailReport, WriterPosition};
 use loonfs_core::time::OperationClock;
-use loonfs_core::{FoldedWalTail, MaintenanceCancellation, Phase};
+use loonfs_core::{FoldWriteOutcome, FoldedWalTail, MaintenanceCancellation, Phase};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Mutex as AsyncMutex;
@@ -249,7 +249,7 @@ impl NamespacePublisher {
     /// and claims nothing. A fold that is due is an item of the session's
     /// publication lane, which starts from the session's position, so a
     /// session without its writer epoch claims it first (see
-    /// [`Self::publish_from`] and [`Self::lane_turn`]). A check that loads the
+    /// [`Self::run_from_position`] and [`Self::lane_turn`]). A check that loads the
     /// tail takes a read permit, which it releases before the fold waits for
     /// its fold permit.
     ///
@@ -324,15 +324,21 @@ impl NamespacePublisher {
     }
 
     /// Folds the tail from the session's position, with the fold lock that
-    /// the caller has, as one item of the session's publication lane.
+    /// the caller has.
     ///
-    /// The fold keeps the lane from the moment it takes its turn until it
-    /// has recorded its manifest, so it builds on the newest manifest that
-    /// the session published and never puts at the number of another
-    /// publication. The lane comes after the fold lock and the fold permit,
-    /// and before the engine, which the fold locks only to load a position
-    /// that the session doesn't keep. A fold that has its permit runs to its
-    /// end, so the session's stop doesn't end its wait for the lane.
+    /// The fold writes its content objects and segments from the session's
+    /// position before it takes the session's publication lane (see
+    /// [`NamespaceStore::write_fold_segments`](loonfs_core::NamespaceStore::write_fold_segments)),
+    /// and then publishes them in one turn of the lane, over the session's
+    /// newest published manifest, which has the head that the fold started
+    /// from (see
+    /// [`NamespaceStore::publish_fold_in_turn`](loonfs_core::NamespaceStore::publish_fold_in_turn)).
+    /// So the fold keeps the lane only for its put and the boundary read
+    /// after it, and a claim waits for that turn alone. The lane comes after
+    /// the fold lock and the fold permit, and before the engine, which the
+    /// fold locks only to load a position that the session doesn't keep. A
+    /// fold that has its permit runs to its end, so the session's stop
+    /// doesn't end its wait for the lane.
     async fn fold_under_turn(&self, stop: &MaintenanceCancellation) -> Result<FoldedWalTail> {
         let core = &self.context.runtime_core;
         let namespace_id = &self.namespace_id;
@@ -358,17 +364,20 @@ impl NamespacePublisher {
         // permit are in the position now, so the fold folds them too.
         let namespace = core.namespace_store(namespace_id);
         let clock = OperationClock::start(core.now_ms(), Arc::clone(core.timer()));
-        let result = async {
-            let lane = self.lane.lock().await;
-            self.publish_from(
-                || self.lane_turn(&lane),
-                |turn| {
+        let result: Result<FoldedWalTail> = async {
+            let writes = self
+                .run_from_position(|position| {
                     let (namespace, clock) = (&namespace, &clock);
-                    async move { namespace.fold_wal_tail_from(turn, clock).await }
-                },
-                |_| false,
-            )
-            .await
+                    async move { namespace.write_fold_segments(&position, clock).await }
+                })
+                .await?;
+            let writes = match writes {
+                FoldWriteOutcome::AlreadyFolded(folded) => return Ok(folded),
+                FoldWriteOutcome::Written(writes) => writes,
+            };
+            let lane = self.lane.lock().await;
+            let turn = self.lane_turn(&lane).await?;
+            Ok(namespace.publish_fold_in_turn(turn, writes, &clock).await?)
         }
         .instrument(fold_span.clone())
         .await;
@@ -415,9 +424,11 @@ impl NamespacePublisher {
     /// The attempt then keeps the session's publication lane while `create`
     /// writes the snapshot's record and verifies it, and takes the newer of
     /// that manifest and the newest manifest that the session published,
-    /// which also covers the tail. So no publication of the session replaces
-    /// the snapshot's manifest before the snapshot is verified, and snapshots
-    /// take their turns in the lane. Another process can still replace the
+    /// which also covers the tail (see
+    /// [`LaneGuard::basis_over`](loonfs_core::publish::LaneGuard::basis_over)).
+    /// So no publication of the session replaces the snapshot's manifest
+    /// before the snapshot is verified, and snapshots take their turns in the
+    /// lane. Another process can still replace the
     /// manifest. Each attempt's result goes through
     /// [`PublisherRegistry::finish_namespace_mutation`], so an attempt that
     /// finds its manifest replaced drops the session's position and the
@@ -538,11 +549,11 @@ impl NamespacePublisher {
     }
 
     /// Returns the turn of a publication of the session's lane, which the
-    /// caller keeps as `lane`: the position that the session keeps, or, when
-    /// it keeps none, the position that the engine loads as a commit loads
-    /// its view, after a claim when the session has no writer epoch (see
-    /// `NamespaceCommitEngine::lane_turn`). A fenced session returns
-    /// `writer_fenced`.
+    /// caller keeps as `lane`, over the session's newest published manifest,
+    /// after a claim when the session has no writer epoch (see
+    /// `NamespaceCommitEngine::lane_turn`), which locks the engine. A fenced
+    /// session returns `writer_fenced`. Every publication of the lane starts its turn here,
+    /// so each checks the session's epoch in this one place.
     ///
     /// The caller keeps the lane and then locks the engine, which is the
     /// order of the session's locks, so a claim keeps both queues.
@@ -552,13 +563,13 @@ impl NamespacePublisher {
             return Ok(turn);
         }
         let mut engine = self.lock_engine().await;
-        let start = engine.unit_start(lane).await?;
-        engine.lane_turn(lane, start).await.map_err(Error::from)
+        engine.lane_turn(lane).await.map_err(Error::from)
     }
 
-    /// Returns the position that a publication of the session outside its
-    /// publication lane starts from, such as a compaction unit, which takes
-    /// the lane only for its put: the position that the session keeps, or,
+    /// Returns the position that the writes of a publication of the session
+    /// start from outside its publication lane, such as a fold's segments or
+    /// a compaction unit's output segments, before the publication takes the lane for
+    /// its put: the position that the session keeps, or,
     /// when it keeps none, the position that the engine loads as a commit
     /// loads its view. The load publishes nothing, so it takes the engine
     /// alone, after a claim when the session has no writer epoch, which

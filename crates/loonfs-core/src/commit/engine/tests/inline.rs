@@ -551,11 +551,11 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
                 );
             }
         } else {
-            // A fold of a held tail builds on the held manifest without a
-            // request, so it writes the tail's objects again and loses its
-            // put to the first fold, whose manifest ends it without a put,
-            // so the fold reports its position behind.
-            assert!(matches!(folded, Err(CoreError::HeadMoved(_))));
+            // A fold of a held tail in another lane of the session's epoch
+            // builds on the held manifest without a request, so it writes
+            // the tail's objects again and loses its put to the first fold,
+            // and no other process publishes under the session's epoch.
+            assert!(matches!(folded, Err(CoreError::NamespaceCorrupt(_))));
             assert_eq!(store.counts().compare_and_swaps, 0);
         }
         let manifest = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)

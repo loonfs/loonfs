@@ -427,7 +427,19 @@ impl NamespacePublisher {
     /// manifest that this runtime has replaced still reads correctly,
     /// because garbage collection keeps that manifest's objects for at least
     /// one grace.
+    ///
+    /// A fenced session keeps no position, because every copy of the
+    /// position follows the session's status and is dropped when the
+    /// session is fenced (see
+    /// [`PublishedManifest::follow`](loonfs_core::publish::PublishedManifest::follow)),
+    /// so its drop doesn't wait for a unit that has the engine. It records
+    /// the displacement instead (see [`Self::record_displacement`]), because
+    /// a publication of the lane finds a fence without the engine.
     pub(super) async fn drop_position(&self) {
+        if self.session_is_fenced() {
+            self.record_displacement();
+            return;
+        }
         self.lock_engine().await.invalidate_projection();
     }
 
@@ -481,26 +493,15 @@ impl NamespacePublisher {
 
     /// Stores the engine's position for reads, and releases the engine. The
     /// first release after the engine found the session fenced records the
-    /// displacement in the `loonfs.publisher.displacements` metric and
-    /// cancels the session's compaction.
-    ///
-    /// Every unit that can find a fence runs with the engine locked, so this
-    /// release is the one place that sees each fence. A fenced session
-    /// publishes nothing more, and its drain ends once its admitted work and
-    /// a running fold end instead of waiting for a compaction whose result
-    /// it can't publish.
+    /// displacement (see [`Self::record_displacement`]). A publication of the
+    /// lane that finds a fence without the engine records it
+    /// when the runtime drops the session's position after the item (see
+    /// [`Self::drop_position`]).
     pub(super) fn release_engine(
         &self,
         mut engine: tokio::sync::MutexGuard<'_, NamespaceCommitEngine<SharedObjectStore>>,
     ) {
-        if self.session_is_fenced() && !self.displacement_recorded.swap(true, Ordering::SeqCst) {
-            self.stop.cancel();
-            self.context
-                .runtime_core
-                .instruments()
-                .publisher
-                .displacement();
-        }
+        self.record_displacement();
         // A panic can stop any holder of the engine, in any task, partway
         // through its work, after a put whose outcome the engine hasn't
         // recorded (a commit's WAL put or a deletion's tombstone put).
@@ -535,6 +536,24 @@ impl NamespacePublisher {
         drop(recorded);
         drop(replaced);
         self.read_position.finish_follow(followed);
+    }
+
+    /// Records the session's displacement in the
+    /// `loonfs.publisher.displacements` metric and cancels the session's
+    /// compaction, the first time this finds the session fenced.
+    ///
+    /// A fenced session publishes nothing more, and its drain ends once its
+    /// admitted work and a running fold end instead of waiting for a
+    /// compaction whose result it can't publish.
+    fn record_displacement(&self) {
+        if self.session_is_fenced() && !self.displacement_recorded.swap(true, Ordering::SeqCst) {
+            self.stop.cancel();
+            self.context
+                .runtime_core
+                .instruments()
+                .publisher
+                .displacement();
+        }
     }
 
     /// Brings the engine's position and the position that reads start from

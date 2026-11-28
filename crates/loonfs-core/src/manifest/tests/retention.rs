@@ -810,11 +810,10 @@ async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine();
-    let mut session = engine.commit_engine();
 
-    // Each step sets the namespace's window, then advances at five grace
-    // windows. The cutoffs are five grace windows minus the window, and all
-    // three commits are at least a grace window old.
+    // Each step sets the namespace's window in a new session, then advances
+    // at five grace windows. The cutoffs are five grace windows minus the
+    // window, and all three commits are at least a grace window old.
     for (namespace_window_ms, expected_floor) in [
         (None, CommitSeq(0)),
         (Some(5 * grace_ms / 2), CommitSeq(1)),
@@ -823,6 +822,7 @@ async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_
         (None, CommitSeq(2)),
         (Some(grace_ms), CommitSeq(3)),
     ] {
+        let mut session = engine.commit_engine();
         let set = session
             .set_retention_window(namespace_window_ms.map(window))
             .await
@@ -901,20 +901,16 @@ async fn a_window_advance_under_a_recorded_window_shorter_than_the_grace_window_
     )
     .engine();
     let short_ms = std::num::NonZeroU64::new(grace_ms / 2);
+    let basis = engine
+        .namespace
+        .load_current_basis(crate::test_support::observed_now())
+        .await
+        .expect("the current manifest");
+    let mut payload = basis.manifest().payload().clone();
+    payload.retention_window_ms = short_ms;
     engine
         .namespace
-        .update_live_manifest(
-            None,
-            &engine.namespace.start_clock(),
-            crate::manifest::publish::ManifestSender::ClaimOrInitialization,
-            |mut payload: loonfs_types::format::manifest::NamespaceManifestPayload| async move {
-                payload.retention_window_ms = short_ms;
-                Ok(crate::manifest::publish::ManifestChange::Next(
-                    Box::new(payload),
-                    (),
-                ))
-            },
-        )
+        .publish_manifest_from(payload, &engine.namespace.start_clock(), Some(&basis))
         .await
         .expect("record a short window");
     let floor = engine
@@ -1693,18 +1689,8 @@ async fn snapshot_verification_rejects_a_deleted_namespace() {
         .expect("snapshot exists")
         .state;
 
-    let acquired = crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context.writer_id)
-        .await
-        .expect("writer");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .delete_namespace(
-            Default::default(),
-            &acquired,
-            None,
-            &crate::publish::PublicationLane::new().lock().await,
-            &context.clock(),
-        )
+        .delete_in_new_session(&context.writer_id)
         .await
         .expect("delete");
 
@@ -2028,16 +2014,17 @@ async fn snapshots_append_past_the_threshold_and_compaction_drains() {
     ));
 }
 
-/// Checks that a compaction unit is abandoned when it finds an input segment
-/// of its position's manifest missing and a newer manifest replaced that
-/// manifest, and that the same missing segment of the current manifest
-/// returns `namespace_corrupt`.
+/// Checks that a compaction unit returns `manifest_replaced` when it finds an
+/// input segment of its position's manifest missing and a newer manifest
+/// replaced that manifest, so the session loads its position again as after
+/// a fold's missing segment, and that the same missing segment of the
+/// current manifest returns `namespace_corrupt`.
 ///
 /// To replace the manifest, another writer claims the namespace and compacts
 /// the same runs, and a collection then deletes the segments that only the
 /// replaced manifest lists.
 #[tokio::test]
-async fn a_unit_whose_replaced_basis_lost_an_input_segment_is_abandoned() {
+async fn a_unit_whose_replaced_basis_lost_an_input_segment_returns_manifest_replaced() {
     for replaced in [true, false] {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2092,14 +2079,10 @@ async fn a_unit_whose_replaced_basis_lost_an_input_segment_is_abandoned() {
         )
         .with_run_policy(crate::test_support::one_delta_run_policy())
         .engine()
-        .compact_metadata_unit_from(
-            &position,
-            &crate::publish::PublicationLane::new(),
-            &crate::compaction::MaintenanceCancellation::default(),
-        )
+        .compact_in_new_lane(&position)
         .await;
         if replaced {
-            assert_matches!(unit, Ok(CompactionUnitOutcome::Abandoned));
+            assert_matches!(unit, Err(CoreError::ManifestReplaced { .. }));
         } else {
             let error = unit.expect_err("a missing segment of the current manifest");
             assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error:?}");

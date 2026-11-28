@@ -1,6 +1,6 @@
 //! An extension's entry across the core publications: every publication
 //! copies it, a namespace tombstone empties its runs, and an extension's
-//! publication is rebuilt over a manifest that copied the entry it built on.
+//! publication whose starting entry was replaced publishes nothing.
 
 use super::*;
 use crate::manifest::{ExtensionBasis, ExtensionPublication};
@@ -10,7 +10,6 @@ use crate::DeleteNamespaceOptions;
 use loonfs_types::format::manifest::{ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef};
 use loonfs_types::format::segment_blocks::BlockHandle;
 use loonfs_types::{ExtensionName, IndexSegmentId};
-use std::assert_matches;
 
 fn grep() -> ExtensionName {
     ExtensionName::parse("grep").expect("extension name")
@@ -224,62 +223,16 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
     assert_eq!(kept.state(), entry.state());
 }
 
-/// A publication that copies an extension's entry, which another session of
-/// the writer's epoch (the test support's same-epoch publisher) publishes
-/// after an extension's change took its position. A publication of the
-/// change's own session would wait for the change in the session's
-/// publication lane instead.
-#[derive(Debug, Clone, Copy)]
-enum RivalCopy {
-    Fold,
-    Compaction,
-    RetentionAdvance,
-    RetentionWindow,
-}
-
-impl RivalCopy {
-    async fn publish(self, store: &LocalFsStore, namespace_id: &NamespaceId) {
-        let fixture = NamespaceFixture::new(store, namespace_id, &test_context());
-        match self {
-            Self::Fold => {
-                let folded = crate::test_support::namespace_store(store, namespace_id)
-                    .fixture_writer_session()
-                    .await
-                    .expect("the writer's session")
-                    .fold()
-                    .await
-                    .expect("fold");
-                assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
-            }
-            Self::Compaction => {
-                let compacted = fixture
-                    .clone()
-                    .with_run_policy(crate::test_support::one_delta_run_policy())
-                    .engine()
-                    .compact_from_current()
-                    .await
-                    .expect("compact");
-                assert!(matches!(compacted, CompactionUnitOutcome::Published { .. }));
-            }
-            Self::RetentionAdvance => {
-                NamespaceFixture::new(
-                    store,
-                    namespace_id,
-                    &writer_at(
-                        "test-writer",
-                        crate::test_support::grace_elapsed_after(test_context().now_ms),
-                    ),
-                )
-                .engine()
-                .advance_retention_floor(RetentionTarget::Head)
-                .await
-                .expect("advance");
-            }
-            Self::RetentionWindow => {
-                crate::test_support::change_retention_window(&fixture.engine()).await;
-            }
-        }
-    }
+/// Folds the namespace's WAL tail through the fixture's writer session.
+async fn fold(store: &LocalFsStore, namespace_id: &NamespaceId) {
+    let folded = crate::test_support::namespace_store(store, namespace_id)
+        .fixture_writer_session()
+        .await
+        .expect("the writer's session")
+        .fold()
+        .await
+        .expect("fold");
+    assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
 }
 
 /// Returns the position of the namespace's writer session, which an
@@ -297,144 +250,6 @@ async fn session_position(
         .expect("the session's position")
 }
 
-/// Checks that an extension's publication whose put loses to a fold,
-/// compaction, retention advance, or retention window change of another
-/// session of the writer's epoch, published after the change took its
-/// position, is built again over the manifest that won, which copied the
-/// entry, and changes only the entry.
-#[tokio::test]
-async fn an_extension_publication_that_loses_to_a_rival_copy_of_its_entry_is_rebuilt() {
-    for copy in [
-        RivalCopy::Fold,
-        RivalCopy::Compaction,
-        RivalCopy::RetentionAdvance,
-        RivalCopy::RetentionWindow,
-    ] {
-        let directory = tempdir().expect("directory");
-        let store = LocalFsStore::new(directory.path()).expect("store");
-        let namespace_id = NamespaceId::parse("extension-rebuilt").expect("namespace");
-        let fixture = NamespaceFixture::new(&store, &namespace_id, &test_context());
-        fixture.create().await.expect("create");
-        for path in ["/a", "/b", "/c"] {
-            fixture
-                .write_file_bytes(path, path.as_bytes(), None)
-                .await
-                .expect("write");
-            RivalCopy::Fold.publish(&store, &namespace_id).await;
-        }
-        publish_entry(&fixture, "active").await;
-        fixture
-            .write_file_bytes("/d", b"d", None)
-            .await
-            .expect("write a tail for the fold");
-        let stale = fixture
-            .engine()
-            .load_extension_basis()
-            .await
-            .expect("basis");
-        let position = session_position(&store, &namespace_id).await;
-        copy.publish(&store, &namespace_id).await;
-        let winner = current_manifest(&store, &namespace_id).await;
-        assert!(
-            winner.payload().manifest_no > stale.manifest().manifest_no,
-            "{copy:?}"
-        );
-
-        let rebuilt = crate::test_support::namespace_store(&store, &namespace_id)
-            .publish_extension_in_new_lane(
-                &position,
-                &stale,
-                &grep(),
-                entry_after(&stale, "rebuilt"),
-            )
-            .await
-            .expect("publish");
-        assert!(
-            matches!(
-                rebuilt.response,
-                ExtensionPublication::Published { rebuilt: true, .. }
-            ),
-            "{copy:?}"
-        );
-        let current = current_manifest(&store, &namespace_id).await;
-        let entry = &current.payload().extensions[&grep()];
-        assert_eq!(
-            entry.runs[..entry.runs.len() - 1],
-            winner.payload().extensions[&grep()].runs
-        );
-        assert_eq!(
-            NamespaceManifestPayload {
-                manifest_no: winner.payload().manifest_no,
-                publication_id: winner.payload().publication_id.clone(),
-                extensions: winner.payload().extensions.clone(),
-                ..current.payload().clone()
-            },
-            *winner.payload(),
-            "{copy:?}: the rebuilt manifest changes only the entry"
-        );
-        assert_eq!(
-            current.payload().manifest_no,
-            winner.payload().manifest_no.successor().expect("next")
-        );
-    }
-}
-
-/// Checks that an extension's publication whose position's manifest a
-/// collection deleted returns `head_moved` and publishes nothing, instead of
-/// building on the newest manifest, which could be another writer's claim.
-#[tokio::test]
-async fn an_extension_publication_over_a_collected_position_manifest_reports_the_position_behind() {
-    let directory = tempdir().expect("directory");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    let namespace_id = NamespaceId::parse("extension-collected").expect("namespace");
-    let fixture = NamespaceFixture::new(&store, &namespace_id, &test_context());
-    fixture.create().await.expect("create");
-    fixture
-        .write_file_bytes("/a", b"a", None)
-        .await
-        .expect("write");
-    RivalCopy::Fold.publish(&store, &namespace_id).await;
-    publish_entry(&fixture, "active").await;
-    let basis = fixture
-        .engine()
-        .load_extension_basis()
-        .await
-        .expect("basis");
-    let position = session_position(&store, &namespace_id).await;
-    let collected = position.read_basis().basis.manifest_no();
-    // A window change publishes the manifest after the position's, and a
-    // collection deletes the position's manifest, the only one old enough.
-    RivalCopy::RetentionWindow
-        .publish(&store, &namespace_id)
-        .await;
-    let newest = current_manifest(&store, &namespace_id).await;
-    let report = crate::test_support::namespace_store(
-        &loonfs_test_support::stores::MetadataMapStore::aged(
-            LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::exact(metadata_manifest_object(&namespace_id, &collected)),
-        ),
-        &namespace_id,
-    )
-    .gc(&WriterAt {
-        now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
-        ..test_context()
-    }
-    .clock())
-    .await
-    .expect("collect");
-    assert_eq!(report.deleted.manifests, 1);
-
-    let published = crate::test_support::namespace_store(&store, &namespace_id)
-        .publish_extension_in_new_lane(&position, &basis, &grep(), entry_after(&basis, "next"))
-        .await;
-    assert_matches!(published, Err(CoreError::HeadMoved(_)));
-    assert_eq!(
-        current_manifest(&store, &namespace_id).await.manifest(),
-        newest.manifest(),
-        "the publication puts nothing"
-    );
-}
-
 /// Checks that an extension's publication whose entry the session's own
 /// later change replaced, such as a disable, publishes nothing and returns
 /// `Superseded`, that the next one builds on the winner, and that a
@@ -450,7 +265,7 @@ async fn an_extension_publication_whose_entry_the_session_replaced_publishes_not
         .write_file_bytes("/a", b"a", None)
         .await
         .expect("write");
-    RivalCopy::Fold.publish(&store, &namespace_id).await;
+    fold(&store, &namespace_id).await;
     let engine = fixture.engine();
     let stale = engine.load_extension_basis().await.expect("basis");
     let won = publish_entry(&fixture, "won").await;
@@ -474,7 +289,6 @@ async fn an_extension_publication_whose_entry_the_session_replaced_publishes_not
     assert_eq!(next.runs[..1], won.runs);
 
     let basis = engine.load_extension_basis().await.expect("basis");
-    let position = session_position(&store, &namespace_id).await;
     engine
         .delete_namespace(
             &crate::test_support::administrator(&engine),
@@ -482,8 +296,18 @@ async fn an_extension_publication_whose_entry_the_session_replaced_publishes_not
         )
         .await
         .expect("delete");
+    let tombstone = namespace
+        .load_current_basis(crate::test_support::observed_now())
+        .await
+        .expect("the tombstone");
+    let lane = crate::test_support::lane_at_manifest(tombstone);
     let deleted = namespace
-        .publish_extension_in_new_lane(&position, &basis, &grep(), entry_after(&basis, "deleted"))
+        .publish_extension_from(
+            lane.lock().await.acquired_turn(),
+            &basis,
+            &grep(),
+            entry_after(&basis, "deleted"),
+        )
         .await
         .expect_err("a tombstone has no successor");
     assert!(

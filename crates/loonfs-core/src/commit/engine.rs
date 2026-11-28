@@ -11,9 +11,9 @@ use super::published_manifest::{
 use super::session_epoch::SessionEpoch;
 use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
+use crate::manifest::publish::ManifestPublicationOutcome;
 use crate::manifest::FloorObjectReport;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
-use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::held::Held;
 use crate::namespace::read_anchor::WriterAnchor;
 use crate::namespace::store::NamespaceStore;
@@ -109,6 +109,17 @@ pub enum WriterSessionStatus {
     /// publish: each one reads the store again, and acquires a writer epoch
     /// if the namespace exists.
     NamespaceGone,
+}
+
+impl WriterSessionStatus {
+    /// Returns the session's writer epoch and its newest published manifest,
+    /// or `None` when the session doesn't have its epoch.
+    pub(crate) fn acquired(&self) -> Option<(&AcquiredWriter, &Held<LoadedManifest>)> {
+        match self {
+            Self::Acquired { writer, published } => Some((writer, published)),
+            _ => None,
+        }
+    }
 }
 
 /// A read-only view of one engine's [`WriterSessionStatus`], from
@@ -235,13 +246,12 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     }
 
     /// Brings the position up to the manifest that `published`, this
-    /// engine's locked [`Self::published_manifest`], records, and stores it
-    /// with its copy in the session's publication lane, so neither keeps the
-    /// part of the tail that a publication folded. A session without its
-    /// writer epoch keeps neither. The session's runtime calls this after
-    /// each publication, and when it releases the engine. Returns the
-    /// positions that the call replaced, which the caller drops once it has
-    /// unlocked `published`.
+    /// engine's locked [`Self::published_manifest`], records, and stores it,
+    /// so it doesn't keep the part of the tail that a publication folded. A
+    /// session without its writer epoch keeps no position. The session's
+    /// runtime calls this after each publication, and when it releases the
+    /// engine. Returns the position that the call replaced, which the caller
+    /// drops once it has unlocked `published`.
     pub fn follow_published(&mut self, published: &PublishedLock<'_>) -> ReplacedPositions {
         self.position.current.follow_stored(published)
     }
@@ -325,13 +335,12 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     ///
     /// Deletion publishes a new manifest with the same writer-session checks as
     /// [`Self::publish_batch`]. Fenced sessions fail before accessing the store,
-    /// and a takeover detected during manifest publication permanently fences the
-    /// session. A session without its writer epoch claims it first, and the
-    /// deletion then starts from the claim's discovery. A deletion first folds
-    /// the WAL tail under the namespace's run policy. Both publications build
-    /// on the position's manifest, and both puts are sent under the session's
-    /// epoch, as every put of the session is, so after an unknown outcome the
-    /// session's next publication claims a new epoch and writes a fence.
+    /// and a put that another writer's claim won fences the session. A
+    /// session without its writer epoch claims it first, and the deletion
+    /// then starts from the claim's discovery. A deletion first folds the WAL
+    /// tail under the namespace's run policy, and then publishes the
+    /// tombstone over the fold's manifest (see
+    /// [`NamespaceStore::delete_namespace`]).
     ///
     /// An initializing namespace has no writer session, so its deletion is a
     /// plain manifest publication of its tombstone (see
@@ -354,8 +363,8 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     ) -> Result<DeleteNamespaceResponse> {
         administrator.assert_for(&self.namespace.namespace_id);
         let clock = self.namespace.start_clock();
-        let (acquired_writer, position) = match self.deletion_writer(lane).await {
-            Ok(acquired) => acquired,
+        let position = match self.load_position_in_lane(lane).await {
+            Ok(position) => position,
             Err(error @ CoreError::NamespaceNotFound { .. }) => {
                 let NewestManifest::Manifest(current) =
                     self.namespace.find_newest_manifest(clock.origin()).await?
@@ -374,48 +383,57 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
                         });
                     }
                 }
-                let update = self
+                let winner = match self
                     .namespace
                     .tombstone_initializing_namespace(current, &clock)
-                    .await?;
-                match update.response {
-                    TombstoneOutcome::Published(response) => return Ok(response),
-                    TombstoneOutcome::Deleted => {
+                    .await?
+                {
+                    ManifestPublicationOutcome::Published(tombstone) => {
+                        return Ok(DeleteNamespaceResponse {
+                            namespace_id: self.namespace.namespace_id.clone(),
+                            head_seq: tombstone.manifest().payload().head_seq,
+                        });
+                    }
+                    ManifestPublicationOutcome::Lost(winner) => winner,
+                };
+                match winner.manifest().payload().status {
+                    NamespaceStatus::Active {} => self.load_position_in_lane(lane).await?,
+                    NamespaceStatus::Deleted { .. } => {
                         return Err(CoreError::NamespaceDeleted {
                             namespace_id: self.namespace.namespace_id.clone(),
                         })
                     }
-                    TombstoneOutcome::Active => self.deletion_writer(lane).await?,
+                    NamespaceStatus::Initializing {} => {
+                        return Err(CoreError::NamespaceCorrupt(format!(
+                            "manifest {} of namespace `{}` is initializing after a fork's \
+                             manifest 2",
+                            winner.manifest_no(),
+                            self.namespace.namespace_id
+                        )))
+                    }
                 }
             }
             Err(error) => return Err(error),
         };
         let deleted = self
             .namespace
-            .delete_namespace(options, &acquired_writer, position, lane, &clock)
+            .delete_namespace(options, position, lane, &clock)
             .await;
         self.position.invalidate_projection();
-        deleted
-            .map(|report| report.response)
-            .inspect_err(|error| self.position.record_session_error(error))
+        deleted.inspect_err(|error| self.position.record_session_error(error))
     }
 
-    /// Returns the writer epoch and the position that a deletion starts
-    /// from: the session's, or, for a session without its epoch, the claim's
-    /// and the position of the claim's discovery.
-    async fn deletion_writer(
-        &mut self,
-        lane: &LaneGuard<'_>,
-    ) -> Result<(AcquiredWriter, Option<WriterPosition>)> {
-        let writer = match self.unit_start(lane).await? {
-            UnitStart::Kept(writer) => writer,
-            UnitStart::Claimed(claim) => {
-                let writer = claim.writer.clone();
-                self.load_position(UnitStart::Claimed(claim)).await?;
-                writer
-            }
-        };
-        Ok((writer, self.writer_position()))
+    /// Returns the session's position, loaded while the caller keeps `lane`,
+    /// the session's publication lane, and the engine: the position that the
+    /// session keeps, or the position from the load of the namespace from
+    /// the store under the session's writer epoch, or, for a session without
+    /// its epoch, the position of the discovery of a claim in `lane` (see
+    /// [`Self::load_position`]). A deletion starts from it, and so does a
+    /// publication of the lane that loads its position again after a check
+    /// found it behind.
+    pub async fn load_position_in_lane(&mut self, lane: &LaneGuard<'_>) -> Result<WriterPosition> {
+        let start = self.unit_start(lane).await?;
+        self.load_position(start).await
     }
 
     /// Returns where the session's next unit of the commit queue or of the
@@ -514,23 +532,19 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     }
 
     /// Returns the turn of a publication of the session's lane, which `lane`
-    /// keeps, from the position that the session kept or, when it kept none,
-    /// from the position that the engine loads from `start` (see
-    /// [`Self::load_position`]).
-    pub async fn lane_turn<'g>(
-        &mut self,
-        lane: &'g LaneGuard<'_>,
-        start: UnitStart,
-    ) -> Result<LaneTurn<'g>> {
+    /// keeps (see [`LaneGuard::turn`]), after a claim when the session has
+    /// no writer epoch. The engine keeps the position of the claim's
+    /// discovery. A fenced session returns `writer_fenced`.
+    pub async fn lane_turn<'g>(&mut self, lane: &'g LaneGuard<'_>) -> Result<LaneTurn<'g>> {
         assert!(
             lane.is_guard_of(&self.lane),
             "a publication takes its turn in its own session's lane"
         );
-        if let Some(turn) = lane.turn() {
-            return Ok(turn);
+        if self.kept_start()?.is_none() {
+            let claim = self.claim(lane).await?;
+            self.load_position(UnitStart::Claimed(claim)).await?;
         }
-        let position = self.load_position(start).await?;
-        Ok(lane.turn_from(position))
+        Ok(lane.acquired_turn())
     }
 
     /// Advances the retention floor to `target` with a floor object, as one
@@ -703,50 +717,52 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// Brings the stored position up to the manifest that a publication of
     /// the session's lane recorded, as the runtime's release of the engine
     /// does, so the engine keeps no part of the tail that the publication
-    /// folded. The lane keeps no copy of the position, because no release
-    /// of the engine would bring the copy up to the commits after it, so the
-    /// next turn loads the engine's position.
+    /// folded.
     fn follow_alone(&mut self) {
         let published = self.published_manifest();
         let recorded = published.lock();
         let replaced = self.follow_published(&recorded);
         drop(recorded);
         drop(replaced);
-        drop(self.lane.keep(None));
     }
 
-    /// Takes a turn in the session's own publication lane, after a claim
-    /// when the session needs one (see [`Self::lane_turn`]).
-    async fn lane_turn_alone<'g>(&mut self, lane: &'g LaneGuard<'_>) -> Result<LaneTurn<'g>> {
-        let start = self.unit_start(lane).await?;
-        self.lane_turn(lane, start).await
-    }
-
-    /// Folds the WAL tail from this session's position as one publication of
-    /// its lane, and publishes the next manifest (format spec, "Publishing a
-    /// manifest").
+    /// Folds the WAL tail from this session's position, and publishes the
+    /// next manifest as one publication of its lane (format spec,
+    /// "Publishing a manifest").
     ///
-    /// A session without its writer epoch claims it first. The fold records
-    /// the manifest that covers the tail as the session's newest published
-    /// manifest, as every publication of the lane does (see
-    /// [`Self::published_manifest`]), so the position moves onto it and later
-    /// commits plan against it, and a failed fold drops the position. A fold
-    /// whose manifest put loses to another process's claim still builds again
-    /// on that claim through the publication loop of
-    /// [`NamespaceStore::fold_wal_tail_from`]. The stored position follows
-    /// the manifest at once, so the engine keeps no part of the tail that the
-    /// fold covered.
+    /// A session without its writer epoch claims it first. The fold writes
+    /// its segments from the session's position (see
+    /// [`NamespaceStore::write_fold_segments`]), and then publishes in its
+    /// turn (see [`NamespaceStore::publish_fold_in_turn`]), which records the
+    /// manifest as the session's newest published manifest, so the position
+    /// moves onto it and later commits plan against it. A failed fold drops
+    /// the position. The stored position follows the manifest at once, so
+    /// the engine keeps no part of the tail that the fold covered.
     pub async fn fold(&mut self) -> Result<crate::manifest::FoldedWalTail> {
-        let lane = self.publication_lane();
-        let guard = lane.lock().await;
-        let turn = self.lane_turn_alone(&guard).await?;
         let clock = self.namespace.start_clock();
-        let folded = self.namespace.fold_wal_tail_from(turn, &clock).await;
+        let lane = self.publication_lane();
+        let folded = async {
+            let position = self.load_position_alone().await?;
+            match self
+                .namespace
+                .write_fold_segments(&position, &clock)
+                .await?
+            {
+                crate::manifest::FoldWriteOutcome::AlreadyFolded(folded) => Ok(folded),
+                crate::manifest::FoldWriteOutcome::Written(writes) => {
+                    let guard = lane.lock().await;
+                    let turn = self.lane_turn(&guard).await?;
+                    self.namespace
+                        .publish_fold_in_turn(turn, writes, &clock)
+                        .await
+                }
+            }
+        }
+        .await;
         let folded = folded.inspect_err(|error| {
             self.position.record_session_error(error);
             self.position.invalidate_projection();
         })?;
-        drop(guard);
         self.follow_alone();
         Ok(folded)
     }
@@ -761,7 +777,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     > {
         let lane = self.publication_lane();
         let guard = lane.lock().await;
-        let turn = self.lane_turn_alone(&guard).await?;
+        let turn = self.lane_turn(&guard).await?;
         let report = self
             .namespace
             .set_retention_window_from(turn, retention_window_ms)
@@ -788,7 +804,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         basis.ensure_for(&self.namespace.namespace_id)?;
         let lane = self.publication_lane();
         let guard = lane.lock().await;
-        let turn = self.lane_turn_alone(&guard).await?;
+        let turn = self.lane_turn(&guard).await?;
         let report = self
             .namespace
             .publish_extension_from(turn, basis, name, entry)
@@ -808,24 +824,10 @@ impl PositionState {
         self.current.clear();
     }
 
-    /// Records that the session was fenced, or found its namespace deleted
-    /// or missing, when `error` says so. Every caller passes an error from a
-    /// read of the session's own namespace, so an error about another
-    /// namespace, such as a merge's fork, is never recorded. A fence stays
-    /// recorded.
+    /// Records what `error` says about the session (see
+    /// [`PublishedManifest::record_session_error`]).
     fn record_session_error(&self, error: &CoreError) {
-        let mut session = self.lock_session();
-        match error {
-            CoreError::WriterFenced(fence) => {
-                session.set(WriterSessionStatus::Fenced(fence.clone()));
-            }
-            CoreError::NamespaceDeleted { .. } | CoreError::NamespaceNotFound { .. }
-                if !matches!(*session, WriterSessionStatus::Fenced(_)) =>
-            {
-                session.set(WriterSessionStatus::NamespaceGone);
-            }
-            _ => {}
-        }
+        self.session.record_session_error(error);
     }
 
     /// Loads the view that one publication unit plans against, from

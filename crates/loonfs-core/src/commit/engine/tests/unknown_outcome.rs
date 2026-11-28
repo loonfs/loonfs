@@ -64,7 +64,9 @@ fn holding_store(
 /// `gamma` from a fresh discovery would plan it at 3, and its put there
 /// would succeed and acknowledge a commit that no reader replays. A session
 /// without its epoch puts the fence first, and the check after that put
-/// finds the number emptied.
+/// finds the number emptied and folded, which only a fold of another
+/// process under the claim's epoch can do, so `gamma` returns
+/// `namespace_corrupt` and no commit is acknowledged at that number.
 #[tokio::test]
 async fn a_stalled_put_after_an_unknown_outcome_is_never_written_at_an_emptied_number() {
     let directory = tempdir().expect("tempdir");
@@ -107,8 +109,8 @@ async fn a_stalled_put_after_an_unknown_outcome_is_never_written_at_an_emptied_n
         "gamma",
     )
     .await;
-    gamma.expect("gamma commits");
-    assert_readable(&local, &namespace_id, &["alpha", "beta", "gamma"]).await;
+    assert_matches!(gamma, Err(CoreError::NamespaceCorrupt(_)));
+    assert_readable(&local, &namespace_id, &["alpha", "beta"]).await;
 }
 
 /// Publishes `name` while the session's first WAL put is held. Meanwhile
@@ -194,7 +196,8 @@ async fn assert_readable(local: &LocalFsStore, namespace_id: &NamespaceId, names
 /// the future. The session's next publication, of `gamma`, claims and then
 /// stalls before its fence put while the put of `beta` is written at 3,
 /// folded and collected. A session that kept its epoch would plan `gamma`
-/// at 3 and acknowledge a commit that no reader replays.
+/// at 3 and acknowledge a commit that no reader replays. The claim's fence
+/// finds its number folded instead, and `gamma` returns `namespace_corrupt`.
 #[tokio::test]
 async fn a_dropped_publish_future_leaves_the_session_without_its_epoch() {
     let directory = tempdir().expect("tempdir");
@@ -237,8 +240,8 @@ async fn a_dropped_publish_future_leaves_the_session_without_its_epoch() {
         "gamma",
     )
     .await;
-    gamma.expect("gamma commits");
-    assert_readable(&local, &namespace_id, &["alpha", "beta", "gamma"]).await;
+    assert_matches!(gamma, Err(CoreError::NamespaceCorrupt(_)));
+    assert_readable(&local, &namespace_id, &["alpha", "beta"]).await;
 }
 
 /// Checks that a caller that drops the session's publish future while the
@@ -736,4 +739,105 @@ async fn a_dropped_manifest_put_future_leaves_the_session_without_its_epoch() {
     }
     store.release();
     assert_the_next_publication_claims(&mut engine, &local, &namespace_id, &writer).await;
+}
+
+/// Who folds the tail in
+/// [`a_fold_whose_session_claims_before_its_turn_builds_on_the_claim`]
+/// between the fold's writes and its turn.
+#[derive(Debug, Clone, Copy)]
+enum FoldBeforeTurn {
+    /// Nobody: the session's own claim is the only manifest in between.
+    Nobody,
+    /// Another writer claims the namespace and folds the tail first.
+    AnotherWriter,
+}
+
+/// Checks a fold whose session loses its writer epoch between the fold's
+/// writes and its turn, so the turn claims first. With no other writer, the
+/// claim keeps the folded WAL number that the fold started from, the fold
+/// publishes over its own claim manifest, and a reader sees every commit
+/// that was written.
+/// When another writer claimed and folded the tail first, the session's
+/// claim builds on that fold, and the fold publishes nothing and returns the
+/// claim manifest, which covers its tail.
+#[tokio::test]
+async fn a_fold_whose_session_claims_before_its_turn_builds_on_the_claim() {
+    for before in [FoldBeforeTurn::Nobody, FoldBeforeTurn::AnotherWriter] {
+        let directory = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let local = LocalFsStore::new(directory.path()).expect("store");
+        let (store, _) = holding_store(&directory, &namespace_id);
+        let writer = context("writer-a");
+        crate::test_support::NamespaceFixture::new(&local, &namespace_id, &writer)
+            .create()
+            .await
+            .expect("bootstrap");
+        let mut engine = NamespaceCommitEngine::new(
+            crate::test_support::namespace_store(&store, &namespace_id),
+            writer.writer_id.clone(),
+        );
+        publish_one(&mut engine, &writer, "alpha").await;
+        let position = engine.writer_position().expect("the position after alpha");
+        let clock = writer.clock();
+        let crate::manifest::FoldWriteOutcome::Written(writes) = engine
+            .namespace
+            .write_fold_segments(&position, &clock)
+            .await
+            .expect("the fold's writes")
+        else {
+            panic!("the tail has a commit to fold");
+        };
+        store.fail_next(1);
+        let lost = engine
+            .publish_batch_alone(vec![create_dir("beta", "beta")], &writer.clock())
+            .await;
+        assert_matches!(
+            lost.results.as_slice(),
+            [Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(
+                _
+            )))]
+        );
+        if let FoldBeforeTurn::AnotherWriter = before {
+            crate::test_support::namespace_store(&local, &namespace_id)
+                .fold_as_test_writer()
+                .await
+                .expect("another writer folds");
+        }
+        let lane = engine.publication_lane();
+        let guard = lane.lock().await;
+        let turn = engine.lane_turn(&guard).await.expect("the turn claims");
+        let claim = turn.basis().manifest_no();
+        let folded = engine
+            .namespace
+            .publish_fold_in_turn(turn, writes, &clock)
+            .await
+            .expect("the fold's turn");
+        drop(guard);
+        match before {
+            FoldBeforeTurn::Nobody => {
+                assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
+                assert_eq!(
+                    Some(folded.response.manifest_no),
+                    claim.successor().ok(),
+                    "the fold publishes over its session's claim"
+                );
+                // The put of `beta` failed before it reached the store.
+                assert_readable(&local, &namespace_id, &["alpha"]).await;
+            }
+            FoldBeforeTurn::AnotherWriter => {
+                assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
+                assert_eq!(folded.response.manifest_no, claim);
+                assert_eq!(
+                    crate::test_support::namespace_store(&local, &namespace_id)
+                        .load_current_manifest()
+                        .await
+                        .expect("current manifest")
+                        .payload()
+                        .manifest_no,
+                    claim,
+                    "the fold publishes nothing"
+                );
+            }
+        }
+    }
 }

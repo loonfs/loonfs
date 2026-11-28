@@ -22,7 +22,9 @@ pub(crate) mod validate;
 
 pub use self::error::ManifestLoadError;
 pub use self::extension::{ExtensionBasis, ExtensionPublication};
-pub use self::fold::{FoldWalOutcome, FoldWalResponse, FoldedWalTail};
+pub use self::fold::{
+    FoldWalOutcome, FoldWalResponse, FoldWriteOutcome, FoldWrites, FoldedWalTail,
+};
 pub(crate) use self::fork_tail::ForkPointTail;
 pub(crate) use self::published::move_read_basis;
 pub use self::published::PublicationReport;

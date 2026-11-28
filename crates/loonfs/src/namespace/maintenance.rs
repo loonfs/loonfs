@@ -102,9 +102,10 @@ impl Namespace<Writable> {
     /// Stops when nothing is due, when `cancellation` is set, when this
     /// session is closed or its namespace deleted, after three abandoned
     /// units in a row, or after it publishes 16 compaction units. Work still
-    /// due after the 16th unit waits for the next call. A unit that loses its
-    /// manifest put to another publication tries again over the manifest
-    /// that won, so only an abandoned unit counts as a lost race. Setting
+    /// due after the 16th unit waits for the next call. Each unit puts its
+    /// manifest once, in its turn in the session's publication lane, and a
+    /// unit whose put loses to another writer's claim returns
+    /// `writer_fenced`. Setting
     /// `cancellation` ends a wait for a lock or a permit and drops a fold in
     /// progress at once, and a running compaction unit stops at its next
     /// block. A close, a fence or the runtime's shutdown sets the session's
@@ -112,10 +113,10 @@ impl Namespace<Writable> {
     /// block, but lets a fold that has its fold permit run to its end, and
     /// the call then returns the session's refusal: `writer_fenced`,
     /// `writer_session_closed` or `shutting_down`. The close and the
-    /// runtime's drain wait for the call to end. A unit whose put loses to a
-    /// manifest that ends it without a put drops the session's position and
-    /// loads it again, so a session that another writer displaced returns
-    /// `writer_fenced`. A dropped call leaves what a crash would: unreferenced
+    /// runtime's drain wait for the call to end. A unit whose position's
+    /// manifest or segments a collection deleted drops the session's
+    /// position and loads it again, so a session that another writer
+    /// displaced returns `writer_fenced`. A dropped call leaves what a crash would: unreferenced
     /// segments, or a manifest the runtime learns of the way it learns of
     /// another process's. Fails with the first error. Keeps no state between
     /// calls.
@@ -131,7 +132,7 @@ impl Namespace<Writable> {
     /// window change, an index change or a retention advance), or its close,
     /// and the server closes an idle session after
     /// `idle_session_close_after_ms`. It is
-    /// [`MetadataMaintenanceOutcome::Due`] at a work limit, after lost races,
+    /// [`MetadataMaintenanceOutcome::Due`] at a work limit, after abandoned units,
     /// on cancellation, when a compaction unit does not finish,
     /// or while a tail waits for the fold age. When the wait for the fold
     /// age is the only work left, the report says when the fold comes due.
@@ -422,11 +423,9 @@ impl Namespace<Writable> {
     /// when it has none.
     ///
     /// The publication lists `entry` as the extension's entry and changes
-    /// nothing else. It is one item of the session's publication lane, so it
-    /// builds on the newest manifest that the session published, such as the
-    /// session's own fold, and a put that loses to a manifest with the same
-    /// entry of `name` is published over that manifest. When the position's
-    /// manifest has another entry, the call checks that the manifest is
+    /// nothing else. It is a publication of the session's lane, so it builds
+    /// on the session's newest published manifest, such as the session's own
+    /// fold, with one put. When that manifest has another entry, the call checks that the manifest is
     /// still the newest, publishes nothing and returns
     /// [`ExtensionPublication::Superseded`]. When a manifest that another
     /// writer published is in the way, the call returns `writer_fenced`. A

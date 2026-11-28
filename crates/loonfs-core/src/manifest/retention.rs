@@ -2,16 +2,14 @@
 //! object records in the WAL, and the namespace's retention window through a
 //! verified successor manifest.
 
-use super::publish::{ManifestChange, ManifestSender};
 use super::published::PublicationReport;
 use crate::commit::publication_lane::LaneTurn;
 use crate::error::Result;
 use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::metadata::manifest_index::commits_after_page;
-use crate::namespace::control::LoadedManifest;
+use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{CommitSeq, RetentionWindow, SetRetentionWindowResponse};
 use std::num::NonZeroU64;
 
@@ -124,24 +122,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
-    /// Publishes the manifest after the manifest of the position of `turn`,
-    /// an item's turn in a writer session's publication lane, with the
-    /// retention window set to
-    /// `retention_window_ms`, or cleared when it's `None`, and nothing else
-    /// changed (format spec, "Advancing the retention floor").
+    /// Publishes the manifest after the turn's basis, the newest manifest
+    /// that a writer session published, as a publication of the session's
+    /// publication lane, whose turn is `turn`, with the retention window set
+    /// to `retention_window_ms`, or cleared when it's `None`, and nothing
+    /// else changed (format spec, "Advancing the retention floor").
     ///
-    /// The publication builds on the position's manifest, and returns
-    /// `head_moved` when that manifest is missing from the store and at or
-    /// below the manifest boundary (see [`Self::load_publication_basis`]). If
-    /// the position's manifest already has the requested window, the call
-    /// publishes nothing, and when a manifest that won its put has the
-    /// window, the call returns `head_moved` instead of reporting the change
-    /// done (see `ManifestUpdate::published_or_unchanged`). The report
-    /// includes the manifest that records the change, which the call records
-    /// as the session's newest published manifest, as a fold does (see
-    /// [`NamespaceCommitEngine::published_manifest`](crate::publish::NamespaceCommitEngine::published_manifest)).
-    ///
-    /// Only an item of the session's publication lane can call this, so the
+    /// The manifest is put once (see [`Self::publish_manifest_in_turn`]).
+    /// If the basis already has the requested window, the call publishes
+    /// nothing. The report includes the manifest that the call published.
+    /// Only a publication of the session's lane can call this, so the
     /// change is published only while the session has its epoch, it takes
     /// its turn with the session's other manifest publications, and the put
     /// doesn't wait for the session's commits.
@@ -152,31 +142,24 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<PublicationReport<SetRetentionWindowResponse>> {
         let retention_window_ms = retention_window_ms.map(NonZeroU64::from);
         let clock = self.start_clock();
-        let basis = self.load_publication_basis(turn.position()).await?;
-        let built_on = basis.manifest_no();
-        let epoch = turn.epoch(self);
-        let update = self
-            .update_live_manifest(
-                Some(basis),
-                &clock,
-                ManifestSender::Session(&epoch),
-                |mut payload: NamespaceManifestPayload| async move {
-                    if payload.retention_window_ms == retention_window_ms {
-                        return Ok(ManifestChange::Finished(()));
-                    }
-                    payload.retention_window_ms = retention_window_ms;
-                    Ok(ManifestChange::Next(Box::new(payload), ()))
-                },
-            )
-            .await?
-            .published_or_unchanged(built_on)?;
-        if update.published {
-            turn.record(&update.current);
-        }
-        Ok(update.into_report().map(|()| SetRetentionWindowResponse {
+        let mut payload = turn.basis().manifest().payload().clone();
+        ensure_namespace_live(&payload.namespace_id, payload.status)?;
+        let response = SetRetentionWindowResponse {
             namespace_id: self.namespace_id.clone(),
             retention_window_ms: retention_window_ms.map(NonZeroU64::get),
-        }))
+        };
+        if payload.retention_window_ms == retention_window_ms {
+            return Ok(PublicationReport {
+                response,
+                published: None,
+            });
+        }
+        payload.retention_window_ms = retention_window_ms;
+        let published = self.publish_manifest_in_turn(turn, payload, &clock).await?;
+        Ok(PublicationReport {
+            response,
+            published: Some(published),
+        })
     }
 }
 

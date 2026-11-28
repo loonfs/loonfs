@@ -4,7 +4,7 @@
 
 use super::fold::ManifestProjection;
 use super::load::{load_referenced_manifest, manifest_base_state, DecodedManifest};
-use super::publish::{ManifestChange, ManifestSender};
+use super::publish::ManifestPublicationOutcome;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::fork::ForkDeadline;
@@ -16,9 +16,9 @@ use crate::segment::{KeptBy, SegmentKeeper};
 use crate::time::OperationClock;
 use crate::wal::{load_replayed_wal_tail_through_seq, ProjectedWalTail, WalTailLoadError};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ForkBasis, NamespaceStatus};
+use loonfs_types::format::control::ForkBasis;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{CommitSeq, ManifestNo, WriterEpoch};
+use loonfs_types::{CommitSeq, WriterEpoch};
 use std::sync::Arc;
 
 /// The source's WAL tail above the source manifest that a fork is built
@@ -99,9 +99,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// activity counters stay because the source's commits are the source's
     /// activity. The tail has at least one commit above manifest 1's head.
     ///
-    /// If another call's manifest 2 won the put, or another call already made
-    /// the fork active, this function returns that newest manifest. If the
-    /// newest manifest is a tombstone, it returns `namespace_deleted`. The
+    /// The manifest is put once. If another call's manifest 2 won the put, or
+    /// another call already made the fork active, this function returns the
+    /// manifest that won. If that manifest is a tombstone, it returns
+    /// `namespace_deleted`. The
     /// call checks `deadline` with the publication budget, after the
     /// materialization and before the manifest, and writes no manifest past
     /// either.
@@ -154,27 +155,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .build_namespace_manifest_for_projection(&projection, &layouts)
                 .await?
         };
-        let update = self
-            .update_manifest(
-                Some(manifest_1),
-                clock,
-                ManifestSender::ClaimOrInitialization,
-                |current: LoadedManifest| {
-                    let changed = match current.payload().status {
-                        NamespaceStatus::Initializing {}
-                            if current.payload().manifest_no == ManifestNo(1) =>
-                        {
-                            Ok(ManifestChange::Next(Box::new(manifest_2.clone()), ()))
-                        }
-                        NamespaceStatus::Initializing {} | NamespaceStatus::Active {} => {
-                            Ok(ManifestChange::Finished(()))
-                        }
-                        NamespaceStatus::Deleted { .. } => Err(self.namespace_deleted()),
-                    };
-                    async move { changed }
-                },
-            )
-            .await?;
-        Ok(update.current)
+        match self
+            .publish_manifest_from(manifest_2, clock, Some(&manifest_1))
+            .await?
+        {
+            ManifestPublicationOutcome::Published(published) => Ok(published),
+            ManifestPublicationOutcome::Lost(winner)
+                if winner.manifest().payload().status.is_deleted() =>
+            {
+                Err(self.namespace_deleted())
+            }
+            ManifestPublicationOutcome::Lost(winner) => Ok(winner),
+        }
     }
 }
