@@ -1,14 +1,16 @@
-//! The plan of a retention floor advance, which a writer session's floor
-//! object records in the WAL, and the namespace's retention window through a
-//! verified successor manifest.
+//! The plan of a retention floor advance and the manifest that raises the
+//! floor, and the namespace's retention window through a verified successor
+//! manifest.
 
 use super::published::PublicationReport;
-use crate::commit::publication_lane::LaneTurn;
+use crate::commit::publication_lane::{LaneGuard, LaneTurn};
+use crate::commit::publish_view::WriterPosition;
 use crate::error::Result;
 use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
+use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{CommitSeq, RetentionWindow, SetRetentionWindowResponse};
 use std::num::NonZeroU64;
@@ -57,22 +59,6 @@ pub enum RetentionPlan {
     Moves(CommitSeq),
 }
 
-/// What one floor object publication did: the retention floor of the view
-/// after the call, and the floor of the manifest below that view.
-///
-/// While `manifest_retention_floor_seq` is below `retention_floor_seq`, no
-/// manifest records the view's floor yet, and the next fold of the namespace
-/// publishes it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FloorObjectReport {
-    /// The view's retention floor: the floor that this call created a floor
-    /// object for, or a higher floor that the call found.
-    pub retention_floor_seq: CommitSeq,
-    /// The retention floor of the manifest that the view replays its WAL tail
-    /// above.
-    pub manifest_retention_floor_seq: CommitSeq,
-}
-
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Plans where a retention advance toward `target` moves the floor of a
     /// view whose manifest is `current` and whose floor is
@@ -119,6 +105,58 @@ impl<S: ObjectStore> NamespaceStore<S> {
             RetentionPlan::Stays(retention_floor_seq)
         } else {
             RetentionPlan::Moves(floor)
+        })
+    }
+
+    /// Checks that every segment of `planned`, the manifest that a retention
+    /// advance planned its floor from, exists, before the advance ends the
+    /// replay guarantee for the history below the new floor (format spec,
+    /// "Advancing the retention floor"). The check sends one HEAD for each
+    /// segment. A missing segment returns `manifest_replaced` when a newer
+    /// manifest replaced `planned`, so the caller plans again from the
+    /// newest manifest, and `namespace_corrupt` otherwise.
+    pub async fn verify_planned_segments(&self, planned: &LoadedManifest) -> Result<()> {
+        self.current_segments(planned)
+            .segments
+            .verify_segments_exist()
+            .await
+    }
+
+    /// Folds the WAL tail of `position`, a writer session's position, and
+    /// publishes one manifest that includes that fold and whose floor is the
+    /// higher of the old floor and `target`, as one publication of the
+    /// session's publication lane (format spec, "Advancing the retention
+    /// floor"). It is a retention advance's last step, the fold of what
+    /// arrived during the advance's ordinary fold.
+    ///
+    /// The caller keeps `lane`, the session's publication lane, and the
+    /// session's commit queue for this whole step, after the WAL put in
+    /// flight was settled, so every commit written before the manifest is in
+    /// it, and every commit after it is validated against the new floor. The
+    /// manifest is published even when nothing arrived, because the floor is
+    /// in it, and nothing is published only when nothing arrived and the old
+    /// floor is already at or above `target`. The report includes the floor
+    /// of the session's newest published manifest after the call, and the
+    /// manifest that the call published.
+    pub(crate) async fn raise_retention_floor(
+        &self,
+        position: &WriterPosition,
+        lane: &LaneGuard<'_>,
+        target: CommitSeq,
+        clock: &OperationClock,
+    ) -> Result<PublicationReport<CommitSeq>> {
+        let published = self
+            .fold_while_paused(position, lane, clock, |payload| {
+                payload.retention_floor_seq = payload.retention_floor_seq.max(target);
+            })
+            .await?;
+        Ok(PublicationReport {
+            response: lane
+                .acquired_turn()
+                .basis()
+                .manifest()
+                .retention_floor_seq(),
+            published,
         })
     }
 

@@ -440,8 +440,9 @@ Maintenance
     pass a commit that's less than 24 hours old, and the output shows the
     floor that the advance reached. An embedded advance runs as the
     namespace's writer, so it claims the namespace first and fences a
-    server's session for it. The new floor is written to the WAL as a
-    floor object.
+    server's session for it. The new floor is recorded in a manifest
+    after a fold, and commits pause only for the fold of the commits that
+    arrived during that fold.
 
   loonfs maintenance retention window (--retention-window-ms <ms> | --clear)
     Set or clear the namespace's retention window. The server's

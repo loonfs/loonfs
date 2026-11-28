@@ -242,7 +242,7 @@ The sequence boundary below which full history is no longer guaranteed. Above th
 - Visible files and recoverable deleted files keep at least their newest revision, while compaction can drop older revisions, superseded bindings, old attribute/access rows, and commit receipts.
 - Deletions with `deletion_seq <= retention_floor_seq` expire (cannot be restored, leave trash, and have their hidden rows removed by base compaction).
 
-The floor only moves forward via a [floor object](#floor-object) in the WAL (ordering advances against restores), and the next fold copies it into a manifest. A [read view's](#read-view) effective floor is the maximum of its manifest's floor and any floor objects in its WAL tail. Snapshots below the floor still protect their manifests. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+The floor only moves forward, in a manifest that the namespace's writer publishes for a retention advance while it pauses its commit queue for the fold of what arrived (ordering advances against restores), or in a fork's active manifest. A [read view's](#read-view) effective floor is the maximum of its manifest's floor and any floor objects in its WAL tail. Snapshots below the floor still protect their manifests. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Retention window
 
@@ -343,7 +343,7 @@ The second serial queue of a [writer session](#writer-session), beside the queue
 
 ### Writer epoch
 
-A monotonic counter in the manifest incremented each time a new writer session claims a namespace. Once the new session writes its fence, older epochs cannot commit. A [floor object](#floor-object) has the writer session's own epoch.
+A monotonic counter in the manifest incremented each time a new writer session claims a namespace. Once the new session writes its fence, older epochs cannot commit.
 
 ### Epoch claim
 
@@ -351,11 +351,11 @@ A manifest publication incrementing the writer epoch by 1. The claim must be fol
 
 ### Fence
 
-A commitless WAL object written by a new writer session at the next WAL number to block commits from older writer epochs. Fences are never deleted (even after retirement), ensuring stale WAL writes always collide. (A [floor object](#floor-object) is also commitless, but the writer puts it with its own epoch, so it fences no writer.)
+A commitless WAL object written by a new writer session at the next WAL number to block commits from older writer epochs. Fences are never deleted (even after retirement), ensuring stale WAL writes always collide.
 
 ### Floor object
 
-A commitless WAL object recording a new `retention_floor_seq` at the next WAL number so retention advances are ordered against restores in the WAL. The namespace's writer puts one at its tip, as one item of its queue, with its own writer epoch. Floor objects are never deleted, and the next fold copies the floor into a manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+A commitless WAL object recording a `retention_floor_seq`. A view that replays one raises its floor to it, and a fold that covers one copies the floor into its manifest. No writer creates one, because the writer raises the floor in a manifest. Floor objects are never deleted. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Job
 

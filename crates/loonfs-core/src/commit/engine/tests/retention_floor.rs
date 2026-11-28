@@ -1,5 +1,6 @@
-//! Validation of restores of deleted items against the retention floor of a writer session's
-//! position, around a floor object that the session creates itself.
+//! Validation of restores of deleted items against the retention floor of a
+//! writer session's position, around a retention advance that the session
+//! makes itself.
 
 use super::*;
 use loonfs_types::FilesystemEvent;
@@ -83,15 +84,15 @@ async fn delete<S: ObjectStore>(
     (inode_id, deleted.committed_seq)
 }
 
-/// Checks that a session's own floor object orders the session's restores
-/// around the new floor. The floor object follows the session's tip, the
-/// position's floor rises at once, so a restore of a deletion at the new
-/// floor returns `not_deleted` before any manifest records the floor, and
-/// one above it succeeds. The fold that covers the floor object records the
-/// floor, and it contains the restore made before the advance. The session
-/// claims no epoch for the advance.
+/// Checks that a session's own advance orders the session's restores around
+/// the new floor. The advance folds the tail and then publishes a manifest
+/// with the new floor, which the position follows, so a restore of a
+/// deletion at the new floor returns `not_deleted`, and one above it
+/// succeeds. The manifest with the floor contains the restore made before
+/// the advance, the advance writes no WAL object, and the session claims no
+/// epoch for it.
 #[tokio::test]
-async fn a_sessions_floor_object_orders_its_restores_around_the_floor() {
+async fn a_sessions_advance_orders_its_restores_around_the_floor() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("restore-floor").expect("valid namespace id");
@@ -119,15 +120,18 @@ async fn a_sessions_floor_object_orders_its_restores_around_the_floor() {
         .expect("the planned manifest");
 
     let report = engine
-        .publish_floor_object_alone(&planned, expired_seq, &context("writer").clock())
+        .advance_retention_floor_alone(&planned, expired_seq)
         .await
-        .expect("create the floor object");
+        .expect("advance the floor");
     let after = engine.writer_position().expect("the position moves");
-    assert_eq!(report.retention_floor_seq, expired_seq);
-    assert_eq!(report.manifest_retention_floor_seq, CommitSeq(0));
+    assert_eq!(report.response, expired_seq);
+    let floor = report.published.expect("the manifest with the floor");
+    assert_eq!(floor.manifest().payload().retention_floor_seq, expired_seq);
+    assert!(floor.manifest().manifest().head_seq >= restored_commit.committed_seq);
     assert_eq!(
-        after.read_basis().head.wal_no.0,
-        before.read_basis().head.wal_no.0 + 1
+        after.read_basis().head.wal_no,
+        before.read_basis().head.wal_no,
+        "the advance writes no WAL object"
     );
     assert_eq!(after.read_basis().head.seq, before.read_basis().head.seq);
     assert_eq!(after.retention_floor_seq(), expired_seq);
@@ -144,18 +148,6 @@ async fn a_sessions_floor_object_orders_its_restores_around_the_floor() {
     .await
     .expect_err("a restore at the new floor");
     assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
-    let folded = engine
-        .namespace
-        .fold_wal_tail_in_new_lane(
-            &engine.writer_position().expect("a writer position"),
-            &context("writer").clock(),
-        )
-        .await
-        .expect("fold")
-        .current;
-    assert_eq!(folded.manifest().payload().retention_floor_seq, expired_seq);
-    assert!(folded.manifest().manifest().head_seq >= restored_commit.committed_seq);
-    engine.move_position_onto(folded);
     let (above, above_seq) = delete(&mut engine, "above").await;
     publish(
         &mut engine,
@@ -165,10 +157,12 @@ async fn a_sessions_floor_object_orders_its_restores_around_the_floor() {
     .expect("a restore above the new floor");
 }
 
-/// Checks that a session's own floor object has no check after its put: the
-/// put is the call's last request, and the call sends no manifest HEAD.
+/// Checks that an advance publishes its floor in its own manifest, after the
+/// fold of what arrived, and puts no WAL object: its ordinary fold publishes the tail with
+/// the old floor, and the manifest after it, with nothing more to fold, has
+/// the fold's head and the new floor.
 #[tokio::test]
-async fn a_sessions_floor_object_has_no_check_after_its_put() {
+async fn an_advance_publishes_its_floor_in_a_manifest_and_puts_no_wal_object() {
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -190,28 +184,42 @@ async fn a_sessions_floor_object_has_no_check_after_its_put() {
         .await
         .expect("the planned manifest");
     store.reset();
-    engine
-        .publish_floor_object_alone(&planned, deletion_seq, &context("writer").clock())
+    let report = engine
+        .advance_retention_floor_alone(&planned, deletion_seq)
         .await
-        .expect("create the floor object");
+        .expect("advance the floor");
     let operations = store.take();
-    let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id);
     assert!(
-        matches!(operations.last(), Some(put) if is_wal_put(put, &namespace_id))
-            && !operations.iter().any(|operation| {
-                matches!(operation, RecordedOperation::Head { key } if key.starts_with(&manifests))
-            }),
+        !operations
+            .iter()
+            .any(|operation| is_wal_put(operation, &namespace_id)),
         "{operations:?}"
     );
+    let floor = report.published.expect("the manifest with the floor");
+    let floor = floor.manifest().payload();
+    let fold = engine
+        .namespace
+        .load_manifest_if_present(loonfs_types::ManifestNo(floor.manifest_no.0 - 1))
+        .await
+        .expect("load the ordinary fold's manifest")
+        .expect("the ordinary fold's manifest");
+    let fold = fold.payload();
+    assert_eq!(fold.manifest_no.0, planned.payload().manifest_no.0 + 1);
+    assert_eq!(fold.retention_floor_seq, CommitSeq(0));
+    assert_eq!(fold.head_seq, deletion_seq);
+    assert_eq!(floor.retention_floor_seq, deletion_seq);
+    assert_eq!(floor.head_seq, fold.head_seq);
+    assert_eq!(floor.folded_wal_no, fold.folded_wal_no);
+    assert_eq!(floor.runs, fold.runs, "nothing arrived to fold");
 }
 
-/// Checks that an advance puts its floor object at the session's tip, that
-/// a session without its writer epoch claims it first, and that a session
-/// that another claim displaced writes no floor object: its put collides
-/// with the claim's fence, the writer's load that follows finds the claim,
-/// and the advance returns `writer_fenced`.
+/// Checks that an advance of a session without its writer epoch claims it
+/// first and publishes the floor in a manifest of the new epoch, and that a
+/// session that the claim displaced publishes nothing: its ordinary fold's
+/// put collides with the claim's manifests, and the advance returns
+/// `writer_fenced`.
 #[tokio::test]
-async fn an_advance_puts_its_floor_object_at_the_sessions_tip_or_returns_writer_fenced() {
+async fn an_advance_claims_first_or_returns_writer_fenced() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("fenced-floor").expect("valid namespace id");
@@ -239,66 +247,46 @@ async fn an_advance_puts_its_floor_object_at_the_sessions_tip_or_returns_writer_
         .expect("head")
         .writer_epoch;
     let report = claiming
-        .publish_floor_object_alone(&planned, first_seq, &context("writer").clock())
+        .advance_retention_floor_alone(&planned, first_seq)
         .await
-        .expect("the claiming session's floor object");
-    assert_eq!(report.retention_floor_seq, first_seq);
-    let head = namespace.load_read_state().await.expect("head");
+        .expect("the claiming session's advance");
+    assert_eq!(report.response, first_seq);
+    let current = namespace.load_current_manifest().await.expect("current");
     assert_eq!(
-        head.writer_epoch.0,
+        current.payload().writer_epoch.0,
         epoch_before.0 + 1,
         "the session claims"
     );
     assert_eq!(
-        head.wal_no,
-        claiming
-            .writer_position()
-            .expect("a position")
-            .read_basis()
-            .head
-            .wal_no,
-        "the floor object is at the session's tip"
+        current.payload().retention_floor_seq,
+        first_seq,
+        "the newest manifest records the floor"
     );
     assert_eq!(
-        head.retention_floor_seq, first_seq,
+        namespace
+            .load_read_state()
+            .await
+            .expect("head")
+            .retention_floor_seq,
+        first_seq,
         "the head's floor is the target"
     );
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test reads the WAL object at the tip to check its body"
-    )]
-    let tip = {
-        store
-            .get(
-                &loonfs_objectstore::keys::wal_object(&namespace_id, &head.wal_no),
-                None,
-            )
-            .await
-            .expect("get the object at the tip")
-            .expect("the object at the tip exists")
-    };
-    assert_eq!(
-        loonfs_types::format::wal::decode_wal_object_envelope_zstd(&tip)
-            .expect("decode the object at the tip")
-            .payload()
-            .body,
-        loonfs_types::format::wal::WalObjectBody::Floor {
-            retention_floor_seq: first_seq
-        },
-        "the object at the tip is the floor object"
-    );
 
-    // The first session was displaced by that claim. Its put at its tip
-    // collides with the claim's fence, and the writer's load after the
-    // collision finds the higher epoch.
+    // The first session was displaced by that claim. Its ordinary fold's put
+    // collides with a manifest of the claim's epoch.
     let fenced = engine
-        .publish_floor_object_alone(&planned, second_seq, &context("writer").clock())
+        .advance_retention_floor_alone(&planned, second_seq)
         .await
         .expect_err("a displaced session's advance");
     assert_matches!(fenced, CoreError::WriterFenced(_));
     assert_eq!(
-        namespace.load_read_state().await.expect("head").wal_no,
-        head.wal_no,
-        "the displaced session writes no floor object"
+        namespace
+            .load_current_manifest()
+            .await
+            .expect("current")
+            .payload()
+            .manifest_no,
+        current.payload().manifest_no,
+        "the displaced session publishes nothing"
     );
 }

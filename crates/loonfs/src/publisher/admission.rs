@@ -153,6 +153,9 @@ impl PublicationAdmission {
         Ok(())
     }
 
+    /// Charges a request of `estimated_request_bytes` to its namespace's
+    /// limits and to the budget's totals, for a test of the budget.
+    #[cfg(test)]
     pub(super) fn acquire(
         self: &Arc<Self>,
         namespace_id: &NamespaceId,

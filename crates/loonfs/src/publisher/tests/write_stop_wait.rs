@@ -708,14 +708,13 @@ async fn engine_wal_tail_bytes(publisher: &NamespacePublisher) -> usize {
 /// Returns whether a commit in `publisher`'s queue waits after the engine
 /// refused it at a write stop whose reason contains `stop`.
 fn waits_at_the_write_stop(publisher: &NamespacePublisher, stop: &str) -> bool {
-    publisher_state(publisher).queue.iter().any(|item| {
-        matches!(item, crate::publisher::queue::WorkItem::Batch(batch)
-        if batch.candidates.iter().any(|candidate| {
+    publisher_state(publisher).queue.iter().any(|batch| {
+        batch.candidates.iter().any(|candidate| {
             candidate
                 .write_stop_reason
                 .as_deref()
                 .is_some_and(|reason| reason.contains(stop))
-        }))
+        })
     })
 }
 

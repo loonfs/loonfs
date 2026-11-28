@@ -6,7 +6,7 @@ use loonfs::{
     RetentionWindow, SharedObjectStore, Writable, GC_GRACE_WINDOW_MS,
 };
 use loonfs_core::limits::MAX_TAIL_COMMIT_AGE_MS;
-use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
+use loonfs_objectstore::keys::metadata_manifest_prefix;
 use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -420,14 +420,15 @@ async fn a_deletion_whose_fold_loses_to_another_writers_fold_is_fenced() {
     gated.a.shutdown().await.expect("shutdown a");
 }
 
-/// Checks that a retention advance whose floor object's put waits while
-/// another runtime deletes the namespace returns `writer_fenced`, as a
-/// commit does, and leaves the namespace deleted: the advance checked its
-/// position and planned a move before the deletion, and the deletion's
-/// claim then takes the number that the floor object's put needs.
+/// Checks that a retention advance whose put of the manifest that records
+/// the floor waits while another runtime deletes the namespace returns
+/// `writer_fenced`, as a commit does, and leaves the namespace deleted: the
+/// advance checked its position and planned a move before the deletion, and
+/// the deletion's claim then takes the number that the advance's manifest
+/// put needs.
 #[tokio::test]
-async fn an_advance_whose_floor_object_put_follows_a_deletion_is_fenced() {
-    let gated = gated("advance-then-deletion", wal_prefix).await;
+async fn an_advance_whose_floor_manifest_put_follows_a_deletion_is_fenced() {
+    let gated = gated("advance-then-deletion", metadata_manifest_prefix).await;
     gated.handle.fold_wal().await.expect("fold the commit");
     gated.clock.advance_ms(2 * GC_GRACE_WINDOW_MS);
     let b = clocked_runtime(&gated.store, &gated.clock, "advance-then-deletion-b").await;
@@ -435,7 +436,7 @@ async fn an_advance_whose_floor_object_put_follows_a_deletion_is_fenced() {
     let advance = gated.handle.advance_retention_floor();
     tokio::pin!(advance);
     tokio::select! {
-        ended = &mut advance => panic!("the advance ended before its floor object's put: {ended:?}"),
+        ended = &mut advance => panic!("the advance ended before its manifest put: {ended:?}"),
         () = gated.gate.wait_until_blocked() => {}
     }
     b.open_namespace(&gated.namespace_id)
@@ -570,4 +571,145 @@ async fn a_window_change_that_changes_nothing_claims_nothing_without_a_position(
     drop((b_session, handle));
     b.shutdown().await.expect("shutdown b");
     a.shutdown().await.expect("shutdown a");
+}
+
+/// Builds a [`Gated`] whose gate parks manifest puts, after a fold of the
+/// first commit and a second commit, with the clock two grace windows
+/// ahead, so an advance plans a floor that moves and its ordinary fold
+/// puts a manifest.
+async fn gated_advance(name: &str) -> Gated {
+    let gated = gated(name, metadata_manifest_prefix).await;
+    gated.handle.fold_wal().await.expect("fold the commit");
+    gated
+        .handle
+        .put_file("/b", b"b", &loonfs_test_support::test_actor())
+        .await
+        .expect("a commit for the advance's ordinary fold");
+    gated.clock.advance_ms(2 * GC_GRACE_WINDOW_MS);
+    gated
+}
+
+/// Checks that the session's close and the runtime's drain wait for a
+/// retention advance whose ordinary fold is in its manifest put, and that
+/// the advance then publishes its floor.
+#[tokio::test]
+async fn a_close_and_a_drain_wait_for_a_running_advance() {
+    for drains in [false, true] {
+        let gated = gated_advance(if drains {
+            "drain-during-advance"
+        } else {
+            "close-during-advance"
+        })
+        .await;
+        gated.gate.block_next();
+        let advance = gated.handle.advance_retention_floor();
+        tokio::pin!(advance);
+        tokio::select! {
+            ended = &mut advance => panic!("the advance ended before its fold's put: {ended:?}"),
+            () = gated.gate.wait_until_blocked() => {}
+        }
+        let ending = async {
+            if drains {
+                gated.a.drain().await.map(drop)
+            } else {
+                gated.handle.clone().close().await.map(drop)
+            }
+        };
+        tokio::pin!(ending);
+        assert_waits(&mut ending, "the close or the drain").await;
+        gated.gate.release();
+        let (ended, advanced) = tokio::join!(ending, advance);
+        ended.expect("the close or the drain");
+        let advanced = advanced.expect("the advance publishes its floor");
+        assert!(advanced.retention_floor_seq > loonfs_types::CommitSeq(0));
+        assert_eq!(
+            current_manifest(&gated.store, &gated.namespace_id)
+                .await
+                .payload()
+                .retention_floor_seq,
+            advanced.retention_floor_seq
+        );
+        gated.a.shutdown().await.expect("shutdown");
+    }
+}
+
+/// Checks that the session's stop ends an advance's wait for the fold lock
+/// with the session's refusal: a host's fold has the fold lock and is in its
+/// manifest put, the advance waits for the lock, and the session's close
+/// sets the stop, so the advance returns `writer_session_closed` and moves
+/// no floor, while the close waits for the fold.
+#[tokio::test]
+async fn the_sessions_stop_ends_an_advances_wait_for_the_fold_lock() {
+    let gated = gated_advance("stop-before-advance").await;
+    gated.gate.block_next();
+    let fold = gated.handle.fold_wal();
+    tokio::pin!(fold);
+    tokio::select! {
+        ended = &mut fold => panic!("the fold ended before its put: {ended:?}"),
+        () = gated.gate.wait_until_blocked() => {}
+    }
+    let advance = gated.handle.advance_retention_floor();
+    tokio::pin!(advance);
+    assert_waits(&mut advance, "the advance").await;
+    let close = gated.handle.clone().close();
+    tokio::pin!(close);
+    assert_waits(&mut close, "the close").await;
+    let refused = bounded(Duration::from_secs(10), advance)
+        .await
+        .expect("the stop ends the advance's wait")
+        .expect_err("a closed session's advance");
+    assert_eq!(
+        refused.code(),
+        ErrorCode::WriterSessionClosed,
+        "{refused:?}"
+    );
+    gated.gate.release();
+    let (closed, folded) = tokio::join!(close, fold);
+    closed.expect("close");
+    folded.expect("the fold that had its permit runs to its end");
+    assert_eq!(
+        current_manifest(&gated.store, &gated.namespace_id)
+            .await
+            .payload()
+            .retention_floor_seq,
+        loonfs_types::CommitSeq(0),
+        "the floor didn't move"
+    );
+    gated.a.shutdown().await.expect("shutdown");
+}
+
+/// Checks that an advance whose ordinary fold's put waits while another
+/// runtime claims the namespace returns `writer_fenced`, and that the floor
+/// in the store is the other writer's.
+#[tokio::test]
+async fn an_advance_whose_fold_loses_to_another_writers_claim_is_fenced() {
+    let gated = gated_advance("claim-during-advance").await;
+    let before = current_manifest(&gated.store, &gated.namespace_id).await;
+    gated.gate.block_next();
+    let advance = gated.handle.advance_retention_floor();
+    tokio::pin!(advance);
+    tokio::select! {
+        ended = &mut advance => panic!("the advance ended before its fold's put: {ended:?}"),
+        () = gated.gate.wait_until_blocked() => {}
+    }
+    let b = clocked_runtime(&gated.store, &gated.clock, "claim-during-advance-b").await;
+    b.open_namespace(&gated.namespace_id)
+        .expect("open on b")
+        .put_file("/c", b"c", &loonfs_test_support::test_actor())
+        .await
+        .expect("b claims with a commit");
+    gated.gate.release();
+    let error = advance
+        .await
+        .expect_err("the other writer's claim fences the advance");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+    let after = current_manifest(&gated.store, &gated.namespace_id).await;
+    assert!(after.payload().writer_epoch > before.payload().writer_epoch);
+    assert_eq!(
+        after.payload().retention_floor_seq,
+        before.payload().retention_floor_seq,
+        "the floor is the other writer's"
+    );
+    b.shutdown().await.expect("shutdown b");
+    gated.a.shutdown().await.expect("shutdown a");
 }

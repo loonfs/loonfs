@@ -9,8 +9,8 @@ use loonfs_types::NamespaceId;
 use std::future::Future;
 
 /// A writer session's epoch, through which the session sends each of its
-/// puts as the writer: a commit's WAL put, a floor object's put, and every
-/// manifest put of an item of its publication lane (format spec, "Failed
+/// puts as the writer: a commit's WAL put, and every manifest put of an
+/// item of its publication lane (format spec, "Failed
 /// and unknown outcomes"). A claim's puts and the publications that
 /// initialize a namespace aren't sent under an epoch.
 ///

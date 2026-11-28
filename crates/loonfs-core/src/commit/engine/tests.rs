@@ -365,7 +365,7 @@ async fn a_stored_manifest_below_the_sessions_writer_epoch_is_corrupt() {
         engine.invalidate_projection();
         let error = match entry {
             "retention advance" => engine
-                .publish_floor_object_alone(&current, CommitSeq(1), &writer.clock())
+                .advance_retention_floor_alone(&current, CommitSeq(1))
                 .await
                 .expect_err("the advance finds the lower epoch"),
             "deletion" => engine
@@ -1190,25 +1190,24 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
 }
 
 /// Advances the retention floor to `target` the way a writer session does:
-/// creates a floor object at the position's tip as one unit of the session,
-/// folds the tail from the position, and moves the position onto the fold's
-/// manifest, which records the floor. Returns that manifest.
+/// folds the tail from the position as an ordinary fold, and then publishes
+/// the manifest of the fold of what arrived with the raised floor, which the
+/// position moves onto. Returns that manifest.
 pub(super) async fn advance_in_session<S: ObjectStore>(
     engine: &mut NamespaceCommitEngine<S>,
     target: CommitSeq,
 ) -> crate::namespace::Held<LoadedManifest> {
-    let clock = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
     let planned = engine
         .namespace
         .load_current_manifest()
         .await
         .expect("load the planned manifest");
     let report = engine
-        .publish_floor_object_alone(&planned, target, &clock)
+        .advance_retention_floor_alone(&planned, target)
         .await
-        .expect("create the floor object");
-    assert_eq!(report.retention_floor_seq, target, "the floor moves");
-    engine.fold().await.expect("fold").current
+        .expect("advance the floor");
+    assert_eq!(report.response, target, "the floor moves");
+    report.published.expect("the advance publishes its floor")
 }
 
 /// Checks that a fold through a commit engine without a writer epoch claims

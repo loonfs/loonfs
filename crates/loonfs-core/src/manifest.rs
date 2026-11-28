@@ -28,7 +28,7 @@ pub use self::fold::{
 pub(crate) use self::fork_tail::ForkPointTail;
 pub(crate) use self::published::move_read_basis;
 pub use self::published::PublicationReport;
-pub use self::retention::{FloorObjectReport, RetentionPlan, RetentionTarget};
+pub use self::retention::{RetentionPlan, RetentionTarget};
 pub use self::statistics::NamespaceStatistics;
 
 #[cfg(any(test, feature = "test-support"))]

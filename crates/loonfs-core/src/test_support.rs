@@ -780,6 +780,50 @@ pub async fn folded_manifest<S: ObjectStore + Clone>(
         .current)
 }
 
+#[cfg(test)]
+/// Puts a floor object with `retention_floor_seq` at the WAL number after
+/// the namespace's tip, with the tip's writer epoch and head, for a test of
+/// how readers and folds treat a floor object in a tail.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test writes a floor object, which no writer creates"
+)]
+pub(crate) async fn put_floor_object<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    retention_floor_seq: loonfs_types::CommitSeq,
+) {
+    use loonfs_types::format::wal::{
+        encode_wal_object_envelope_zstd, WalObjectBody, WalObjectPayload,
+    };
+
+    let head = crate::test_support::namespace_store(store, namespace_id)
+        .load_read_state()
+        .await
+        .expect("read the head");
+    let floor_object = WalObjectPayload {
+        namespace_id: namespace_id.clone(),
+        wal_no: head.wal_no.successor().expect("next WAL number"),
+        writer_epoch: head.writer_epoch,
+        head_seq: head.seq,
+        body: WalObjectBody::Floor {
+            retention_floor_seq,
+        },
+    };
+    let key = loonfs_objectstore::keys::wal_object(namespace_id, &floor_object.wal_no);
+    store
+        .put(
+            &key,
+            encode_wal_object_envelope_zstd(floor_object)
+                .expect("encode a floor object")
+                .into_bytes()
+                .into(),
+            loonfs_objectstore::PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("put a floor object");
+}
+
 /// Returns the inode ID of the item visible at `absolute_path` in the
 /// namespace's current view, for a test that needs the ID a commit generated.
 #[cfg(test)]

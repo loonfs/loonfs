@@ -12,7 +12,6 @@ use loonfs_core::ExtensionPublication;
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_test_support::stores::RecordedOperation;
 use loonfs_types::format::manifest::ExtensionEntry;
-use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::{ExtensionName, ManifestNo};
 use std::num::NonZeroU64;
 
@@ -171,30 +170,6 @@ impl Fixture {
             .collect()
     }
 
-    /// Returns whether the namespace's WAL has a floor object.
-    async fn has_floor_object(&self) -> bool {
-        for key in self
-            .store
-            .list_prefix(&wal_prefix(&self.namespace_id))
-            .await
-            .expect("list the WAL")
-        {
-            let bytes = self
-                .store
-                .get(&key, None)
-                .await
-                .expect("read a WAL object")
-                .expect("the WAL object exists");
-            let payload = decode_wal_object_envelope_zstd(&bytes)
-                .expect("decode a WAL object")
-                .into_payload();
-            if matches!(payload.body, WalObjectBody::Floor { .. }) {
-                return true;
-            }
-        }
-        false
-    }
-
     async fn current_manifest_no(&self) -> ManifestNo {
         current_manifest_no(self.store.as_ref(), &self.namespace_id).await
     }
@@ -238,11 +213,12 @@ async fn an_explicit_fold_from_a_live_session_puts_on_its_basis_with_no_request_
 }
 
 /// Checks that a retention advance in a runtime with the namespace's live
-/// session checks the session's position as a strong read does, creates its
-/// floor object at the session's tip, and then folds the floor object on the
-/// session's position. The check is a HEAD of the manifest after the
-/// position's manifest and a read of the manifest boundary, and the fold's
-/// put is the advance's one manifest put.
+/// session checks the session's position as a strong read does, and then
+/// publishes its floor on the session's position. The check is a HEAD of the
+/// manifest after the position's manifest and a read of the manifest
+/// boundary. The tail is folded, so the advance's ordinary fold sends
+/// nothing, and the advance's manifest is the advance's one
+/// put.
 #[tokio::test]
 async fn a_retention_advance_from_a_live_session_checks_the_position_and_folds_on_its_basis() {
     let clock = Arc::new(ManualClock::at_system_time());
@@ -284,12 +260,8 @@ async fn a_retention_advance_from_a_live_session_checks_the_position_and_folds_o
         vec![format!("head {manifest}"), "get basis Boundary".to_owned()],
         // The check that the planned manifest's segments exist.
         vec!["head basis MetadataSegment".to_owned(); 5],
-        // The floor object, and the fold that records its floor.
-        vec![
-            "put basis WalObject 00000000000000000003".to_owned(),
-            format!("put {manifest}"),
-            "get basis Boundary".to_owned(),
-        ],
+        // The advance's manifest.
+        vec![format!("put {manifest}"), "get basis Boundary".to_owned()],
     ]
     .concat();
     assert_eq!(
@@ -795,10 +767,9 @@ async fn a_commit_is_acknowledged_while_a_lane_items_put_is_in_flight() {
 
 /// Checks the order of the session's locks under contention (the fold lock,
 /// the fold permit, the publication lane, then the engine): a retention
-/// advance that arrives during a fold puts its floor object and then waits
-/// for the fold, a deletion that arrives during a fold waits for it, the
-/// commits that arrive meanwhile are acknowledged, and each operation
-/// finishes once the fold's put returns.
+/// advance or a deletion that arrives during a fold waits for it at the fold
+/// lock, the commits that arrive meanwhile are acknowledged, and each
+/// operation finishes once the fold's put returns.
 #[tokio::test]
 async fn an_advance_a_deletion_and_commits_finish_beside_a_fold() {
     let clock = Arc::new(ManualClock::at_system_time());
@@ -841,19 +812,10 @@ async fn an_advance_a_deletion_and_commits_finish_beside_a_fold() {
                 other.advance_retention_floor().await.map(drop)
             }
         });
-        if !deletes {
-            bounded(Duration::from_secs(10), commit(&format!("during-{round}")))
-                .await
-                .expect("a commit is acknowledged while the fold's put is in flight")
-                .expect("commit");
-            bounded(Duration::from_secs(10), async {
-                while !fixture.has_floor_object().await {
-                    tokio::task::yield_now().await;
-                }
-            })
+        bounded(Duration::from_secs(10), commit(&format!("during-{round}")))
             .await
-            .expect("the advance puts its floor object while the fold's put is in flight");
-        }
+            .expect("a commit is acknowledged while the fold's put is in flight")
+            .expect("commit");
         assert_matches!(
             bounded(Duration::from_millis(200), &mut operation).await,
             Err(_),

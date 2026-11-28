@@ -1,37 +1,21 @@
-//! Submission and admission: the candidates and retention advances that
-//! enter a namespace's queue, and the work items the worker takes from it.
+//! Submission and admission: the candidates that enter a namespace's queue,
+//! and the batches the worker takes from it.
 
 use super::admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use super::registry::MergeReservation;
 use super::{NamespacePublisher, NamespacePublisherState};
 use crate::publish::CommitCandidate;
 use crate::trace::phase_event;
-use crate::{CommitSeq, CoreError, Result};
+use crate::{CoreError, Result};
 use loonfs_core::commit::CommitFingerprint;
-use loonfs_core::control::LoadedManifest;
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::publish::WalPublishError;
-use loonfs_core::FloorObjectReport;
 use loonfs_core::Phase;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::Commit;
 use loonfs_types::{u64_from_usize, CommitId};
 use std::sync::Arc;
 use tokio::sync::oneshot;
-
-/// A retention advance that waits in the queue: the floor it moves to, the
-/// manifest that the floor was planned from, and the callers that wait for
-/// it.
-pub(super) struct PendingRetentionAdvance {
-    pub(super) target: CommitSeq,
-    pub(super) planned: LoadedManifest,
-    pub(super) waiters: Vec<AdmittedWaiter<Result<FloorObjectReport>>>,
-}
-
-pub(super) enum WorkItem {
-    Batch(OpenBatch),
-    RetentionAdvance(PendingRetentionAdvance),
-}
 
 pub(super) struct OpenBatch {
     pub(super) candidates: Vec<BatchCandidate>,
@@ -277,10 +261,9 @@ impl NamespacePublisher {
         };
         match state.queue.back_mut() {
             // Coalesce with the tail batch while its bound stays under the
-            // WAL object limit. A retention advance at the tail, or a full
-            // batch, opens a batch behind it. A merge opens a batch of its
-            // own, and nothing joins a merge's batch.
-            Some(WorkItem::Batch(batch))
+            // WAL object limit. A full batch opens a batch behind it. A merge
+            // opens a batch of its own, and nothing joins a merge's batch.
+            Some(batch)
                 if !is_merge
                     && !batch.is_merge()
                     && batch
@@ -302,11 +285,11 @@ impl NamespacePublisher {
                 batch.inline_content_bytes += inline_content_bytes;
                 batch.candidates.push(candidate);
             }
-            _ => state.queue.push_back(WorkItem::Batch(OpenBatch {
+            _ => state.queue.push_back(OpenBatch {
                 candidates: vec![candidate],
                 wal_record_bytes_upper_bound,
                 inline_content_bytes,
-            })),
+            }),
         }
         state.in_flight.insert(
             commit_id,
@@ -329,52 +312,6 @@ impl NamespacePublisher {
         })
     }
 
-    /// Enqueues an advance of the retention floor to `target`, planned from
-    /// `planned`, which creates its floor object after the work admitted
-    /// before it and before the work admitted after it (format spec,
-    /// "Advancing the retention floor"). Returns the session's error, and
-    /// enqueues nothing, when the session admits no more work or is fenced.
-    ///
-    /// An advance queued behind another advance that's still waiting joins
-    /// it, and the joined advance moves the floor to the higher of the two
-    /// targets. Both callers share its outcome.
-    pub(super) async fn submit_retention_advance(
-        &self,
-        planned: LoadedManifest,
-        target: CommitSeq,
-    ) -> Result<FloorObjectReport> {
-        let (sender, receiver) = oneshot::channel();
-        {
-            let mut state = self.lock_state();
-            let _session = self.admitted_session(&state)?;
-            let permit = self.context.admission.acquire(&self.namespace_id, 0)?;
-            let sender = AdmittedWaiter::new(sender, &permit);
-            match state.queue.back_mut() {
-                Some(WorkItem::RetentionAdvance(pending)) => {
-                    if target > pending.target {
-                        pending.target = target;
-                        pending.planned = planned;
-                    }
-                    pending.waiters.push(sender);
-                }
-                _ => state
-                    .queue
-                    .push_back(WorkItem::RetentionAdvance(PendingRetentionAdvance {
-                        target,
-                        planned,
-                        waiters: vec![sender],
-                    })),
-            }
-            self.spawn_worker_if_idle(&mut state);
-        }
-        receiver.await.unwrap_or_else(|_| {
-            Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(
-                "publisher task stopped mid-advance".to_owned(),
-            ))
-            .into())
-        })
-    }
-
     fn trace_enqueue(&self, queue_depth: usize, reason: &'static str) {
         phase_event!(
             self.context.runtime_core,
@@ -390,12 +327,5 @@ impl NamespacePublisher {
 /// Candidates queued but not yet taken by the worker: the depth admission
 /// bounds and traces.
 pub(super) fn queued_candidates(state: &NamespacePublisherState) -> usize {
-    state
-        .queue
-        .iter()
-        .map(|item| match item {
-            WorkItem::Batch(batch) => batch.candidates.len(),
-            WorkItem::RetentionAdvance(_) => 0,
-        })
-        .sum()
+    state.queue.iter().map(|batch| batch.candidates.len()).sum()
 }

@@ -3,15 +3,16 @@
 //! Each namespace writer session has two serial queues: the commit queue,
 //! which sends its WAL puts, and the publication lane, which sends its
 //! manifest puts. Concurrent commits may share a WAL object and head update.
-//! Duplicate commit IDs join in flight, conflicting reuse is rejected, and
-//! retention advances are ordered with other mutations. A namespace
-//! deletion runs in its caller's task, and pauses the commit queue only for
-//! its fold of what arrived and its tombstone. Every manifest publication of
-//! the session other than a claim (a fold, a compaction unit, an extension
-//! entry, a window change, a deletion's manifests, and a snapshot's record
-//! put with its verification) takes its turn in the lane, and a claim keeps
-//! the lane and the commit queue while it runs. A commit of a session that
-//! has its writer epoch never waits for a manifest put.
+//! Duplicate commit IDs join in flight, and conflicting reuse is rejected. A
+//! namespace deletion and a retention advance run in their caller's task,
+//! and pause the commit queue only for the fold of what arrived and their
+//! last manifest: the tombstone, or the advance's manifest.
+//! Every manifest publication of the session other than a claim (a fold, a
+//! compaction unit, an extension entry, a window change, a retention
+//! advance's manifest, a deletion's manifests, and a snapshot's record put
+//! with its verification) takes its turn in the lane, and a claim keeps the
+//! lane and the commit queue while it runs. A commit of a session that has
+//! its writer epoch never waits for a manifest put.
 //!
 //! A new commit that reaches the write stop waits at the front of the queue
 //! for the session's fold, for at most the publication policy's write-stop
@@ -58,7 +59,7 @@ use loonfs_core::time::Observation;
 use loonfs_core::MaintenanceCancellation;
 use loonfs_types::{CommitId, CommitSeq, NamespaceId, WriterId};
 pub(crate) use maintenance::AdmittedMaintenance;
-use queue::{InFlightRequest, WorkItem};
+use queue::{InFlightRequest, OpenBatch};
 use registry::RegistryShared;
 pub use registry::{CloseNamespaceReport, NamespaceSessionStatus};
 pub(crate) use registry::{MergeReservation, NamespaceSession, PublisherRegistry};
@@ -232,9 +233,9 @@ enum PublisherAdmissionStatus {
 }
 
 struct NamespacePublisherState {
-    /// Admitted work in admission order. Commits coalesce into the tail
-    /// batch, so a retention advance queued between them keeps its place.
-    queue: VecDeque<WorkItem>,
+    /// Admitted commits in admission order, which coalesce into the tail
+    /// batch.
+    queue: VecDeque<OpenBatch>,
     in_flight: HashMap<CommitId, InFlightRequest>,
     admission: PublisherAdmissionStatus,
     /// The worker draining `queue`, while one is running. A live entry is
@@ -450,8 +451,8 @@ impl NamespacePublisher {
         matches!(*self.session.lock(), WriterSessionStatus::Fenced(_))
     }
 
-    /// Locks the engine for one unit of the commit queue, a commit batch or a
-    /// retention advance, or for a load of the session's position outside
+    /// Locks the engine for one unit of the commit queue, a commit batch, or
+    /// for a load of the session's position outside
     /// the publication lane (see [`Self::writer_position`]), and returns
     /// where the unit or the load starts.
     ///

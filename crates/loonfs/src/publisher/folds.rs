@@ -175,8 +175,8 @@ pub(crate) enum FoldDue {
 /// `FOLD_AT_WAL_BYTES`, or the inline fold trigger of the runtime's inline
 /// tail limit (see `fold_at_inline_bytes`), once its oldest commit is the
 /// runtime's fold age old, or at once when a floor object in it raised the
-/// view's floor above the manifest's, such as after a retention advance
-/// whose fold failed, because no manifest records that floor yet.
+/// view's floor above the manifest's, because no manifest records that floor
+/// yet.
 ///
 /// The writer session's check after each publication and every maintenance
 /// check use this one rule, with their own object threshold.
