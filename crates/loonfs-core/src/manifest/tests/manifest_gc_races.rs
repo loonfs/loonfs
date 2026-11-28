@@ -283,6 +283,7 @@ async fn a_put_at_a_number_that_a_collection_emptied_is_lost() {
             .update_manifest(
                 Some(basis),
                 &OperationClock::start(0, crate::test_support::std_timer()),
+                crate::manifest::publish::ManifestSender::ClaimOrInitialization,
                 |current: crate::namespace::control::LoadedManifest| async move {
                     Ok(super::super::publish::ManifestChange::Next(
                         Box::new(current.payload().clone()),

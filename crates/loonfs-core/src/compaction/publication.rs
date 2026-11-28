@@ -4,11 +4,12 @@
 use super::group_compaction::GroupCompactionReport;
 use super::plan::{group_run_descriptors, CompactionPlacement, MetadataCompactionSpec};
 use super::step::{CompactionUnitOutcome, MaintenanceCancellation};
+use crate::commit::session_epoch::SessionEpoch;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::{MAX_CONTENTION_ATTEMPTS, METADATA_COMPACTION_BUDGET_MS};
 use crate::manifest::fold::{next_run_no_after, no_manifest_after};
-use crate::manifest::publish::{ManifestChange, ManifestUpdate};
+use crate::manifest::publish::{ManifestChange, ManifestSender, ManifestUpdate};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
@@ -22,12 +23,15 @@ use loonfs_types::format::manifest::{
 use loonfs_types::NamespaceId;
 use std::collections::BTreeSet;
 
-pub(crate) struct CompactionPublication {
+pub(crate) struct CompactionPublication<'a> {
     pub(crate) compaction: OperationClock,
     pub(crate) publication: OperationClock,
+    /// The epoch of the writer session whose publication lane the unit
+    /// publishes in, which the unit's manifest put is sent under.
+    pub(crate) epoch: &'a SessionEpoch<'a>,
 }
 
-impl CompactionPublication {
+impl CompactionPublication<'_> {
     fn expired(&self) -> bool {
         self.compaction.elapsed_ms() > METADATA_COMPACTION_BUDGET_MS
     }
@@ -55,7 +59,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         input_keys: &BTreeSet<String>,
         result: GroupCompactionReport,
         cancellation: &MaintenanceCancellation,
-        publication: &CompactionPublication,
+        publication: &CompactionPublication<'_>,
     ) -> Result<CompactionUnitOutcome> {
         let output_segments = &result.output_segments;
         let built_on = basis.manifest_no();
@@ -64,6 +68,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .update_manifest(
                 Some(basis),
                 &publication.publication,
+                ManifestSender::Session(publication.epoch),
                 |current: LoadedManifest| async move {
                     let stopped = |outcome| {
                         Ok(ManifestChange::Finished(Some(Unpublished::Stopped(

@@ -378,20 +378,22 @@ async fn a_session_fold_sends_these_requests_in_order() {
         };
         writer.engine = NamespaceCommitEngine::new(namespace(), writer.context.writer_id.clone());
         writer.commit("first", Vec::new(), &["/a"]).await;
-        let writer_epoch =
-            crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
-                .load_current_manifest()
-                .await
-                .expect("the current manifest")
-                .payload()
-                .writer_epoch;
+        let current = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
+            .load_current_manifest()
+            .await
+            .expect("the current manifest");
         let mut session = NamespaceCommitEngine::with_acquired_session(
             namespace(),
             writer.context.writer_id.clone(),
             crate::namespace::writer_epoch::AcquiredWriter {
                 writer_id: writer.context.writer_id.clone(),
-                writer_epoch,
+                writer_epoch: current.payload().writer_epoch,
             },
+            crate::namespace::Held::new(
+                current,
+                crate::test_support::observed_now(),
+                Default::default(),
+            ),
         );
         writer.store.reset();
         let folded = if new_session {
@@ -642,7 +644,7 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
     );
 
     writer.engine.move_position_onto(folded.current);
-    assert!(writer.engine.read_position().is_none());
+    assert!(writer.engine.writer_position().is_none());
     let results = writer
         .engine
         .publish_batch_alone(
@@ -717,7 +719,7 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
         if let Some(recorded) = recorded {
             writer.engine.move_position_onto(recorded.current);
         }
-        let position = writer.engine.read_position();
+        let position = writer.engine.writer_position();
         let folded_manifest = folded.current.manifest().manifest();
         let expected = match expected {
             Position::Moves => Some(&folded_manifest),

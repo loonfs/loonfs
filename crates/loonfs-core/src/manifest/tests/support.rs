@@ -377,6 +377,10 @@ pub(super) async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
             &CompactionPublication {
                 compaction: OperationClock::start(0, Arc::clone(&timer)),
                 publication: OperationClock::start(0, timer),
+                epoch: &crate::commit::session_epoch::SessionEpoch::new(
+                    &crate::publish::PublishedManifest::default(),
+                    &namespace,
+                ),
             },
         )
         .await
@@ -909,7 +913,7 @@ pub(super) async fn publish_once_within<S: ObjectStore + ?Sized>(
             payload,
             deadline,
             Some(&basis),
-            crate::manifest::publish::ManifestSender::Process,
+            crate::manifest::publish::ManifestSender::ClaimOrInitialization,
         )
         .await
 }

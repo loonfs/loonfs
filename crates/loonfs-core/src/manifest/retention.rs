@@ -2,7 +2,7 @@
 //! object records in the WAL, and the namespace's retention window through a
 //! verified successor manifest.
 
-use super::publish::ManifestChange;
+use super::publish::{ManifestChange, ManifestSender};
 use super::published::PublicationReport;
 use crate::commit::publication_lane::LaneTurn;
 use crate::error::Result;
@@ -154,10 +154,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let clock = self.start_clock();
         let basis = self.load_publication_basis(turn.position()).await?;
         let built_on = basis.manifest_no();
+        let epoch = turn.epoch(self);
         let update = self
             .update_live_manifest(
                 Some(basis),
                 &clock,
+                ManifestSender::Session(&epoch),
                 |mut payload: NamespaceManifestPayload| async move {
                     if payload.retention_window_ms == retention_window_ms {
                         return Ok(ManifestChange::Finished(()));

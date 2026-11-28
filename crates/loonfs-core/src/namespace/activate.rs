@@ -3,7 +3,7 @@
 
 use crate::cache::CachedHead;
 use crate::error::Result;
-use crate::manifest::publish::ManifestChange;
+use crate::manifest::publish::{ManifestChange, ManifestSender};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::state::NamespaceReadState;
@@ -35,17 +35,22 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock: &OperationClock,
     ) -> Result<Held<LoadedManifest>> {
         let update = self
-            .update_manifest(Some(manifest_1), clock, |current: LoadedManifest| {
-                let changed = match current.payload().status {
-                    NamespaceStatus::Initializing {} => Ok(ManifestChange::Next(
-                        Box::new(current.payload().activated()),
-                        (),
-                    )),
-                    NamespaceStatus::Active {} => Ok(ManifestChange::Finished(())),
-                    NamespaceStatus::Deleted { .. } => Err(self.namespace_deleted()),
-                };
-                async move { changed }
-            })
+            .update_manifest(
+                Some(manifest_1),
+                clock,
+                ManifestSender::ClaimOrInitialization,
+                |current: LoadedManifest| {
+                    let changed = match current.payload().status {
+                        NamespaceStatus::Initializing {} => Ok(ManifestChange::Next(
+                            Box::new(current.payload().activated()),
+                            (),
+                        )),
+                        NamespaceStatus::Active {} => Ok(ManifestChange::Finished(())),
+                        NamespaceStatus::Deleted { .. } => Err(self.namespace_deleted()),
+                    };
+                    async move { changed }
+                },
+            )
             .await?;
         if update.published {
             let active = &update.current;

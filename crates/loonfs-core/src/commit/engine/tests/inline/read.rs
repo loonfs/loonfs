@@ -187,7 +187,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         .publish_batch_alone([candidate("owned", vec![value.clone()])], &writer.clock())
         .await;
     assert!(result.results[0].is_ok());
-    let state = publisher.read_position().expect("published state");
+    let state = publisher.writer_position().expect("published state");
     let basis = state.basis().clone();
     let tail = state.tail;
     let context =
@@ -251,7 +251,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         .publish_batch_alone([candidate("later", vec![later])], &writer.clock())
         .await;
     assert!(published.results[0].is_ok());
-    let later = publisher.read_position().expect("later state");
+    let later = publisher.writer_position().expect("later state");
     assert_eq!(
         Arc::as_ptr(&later.tail) as usize,
         old_tail,
@@ -269,7 +269,7 @@ async fn a_publish_shares_every_earlier_chunk_with_a_tail_a_reader_holds() {
             .publish_batch_alone([candidate(name, vec![value])], &writer.clock())
             .await;
         assert!(published.results[0].is_ok());
-        tails.push(publisher.read_position().expect("published state").tail);
+        tails.push(publisher.writer_position().expect("published state").tail);
     }
     let (held, extended) = (&tails[0], &tails[1]);
     assert!(

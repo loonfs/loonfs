@@ -259,7 +259,10 @@ async fn an_unknown_change_drops_the_read_position_until_the_next_commit() {
 /// Checks that a fold that this runtime publishes while a commit's WAL put is
 /// in flight moves the position that reads start from onto its manifest at
 /// once, without waiting for the publish to release the engine, and that the
-/// commit is then in the tail above the fold's manifest.
+/// commit is then in the tail above the fold's manifest. The session keeps
+/// its writer epoch while the commit's put is in flight, so the fold
+/// publishes without a claim (`writer_lane`
+/// `MC_TwoQueuesFoldDuringCommitWitness`).
 #[tokio::test]
 async fn a_fold_moves_the_read_position_while_a_commits_put_is_in_flight() {
     let temp_dir = tempdir().expect("tempdir");
@@ -288,6 +291,11 @@ async fn a_fold_moves_the_read_position_while_a_commits_put_is_in_flight() {
             .await
             .expect("the snapshot's fold doesn't wait for the commit's put")
             .expect("snapshot");
+            assert_matches!(
+                *namespace.session().publisher.session.lock(),
+                WriterSessionStatus::Acquired { .. },
+                "the session keeps its epoch while the commit's put is in flight"
+            );
             let moved = writer
                 .core
                 .writer_position(&namespace_id)
@@ -779,5 +787,172 @@ async fn a_fold_that_finds_the_manifest_current_keeps_an_unused_sessions_cached_
     recording.reset();
     namespace.stat("/").await.expect("stat the root");
     assert_eq!(recording.take(), [], "the read starts from the cached head");
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Returns a writer over `store` whose reads take the cached head for a
+/// minute, on a timer that doesn't move, so an eventual read never checks
+/// the head that an earlier read cached.
+async fn writer_with_a_long_staleness(store: SharedStore) -> crate::LoonFs<crate::Writable> {
+    crate::LoonFs::builder_with_store(store, crate::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            max_staleness_ms: 60_000,
+            ..crate::RuntimeConfig::default()
+        })
+        .monotonic_timer(Arc::new(ManualClock::new(1_000_000)))
+        .build()
+        .await
+        .expect("build writer")
+}
+
+/// Waits until the session of `namespace` has no writer epoch.
+async fn wait_for_the_epoch_to_end(namespace: &crate::Namespace<crate::Writable>) {
+    bounded(Duration::from_secs(10), async {
+        while matches!(
+            *namespace.session().publisher.session.lock(),
+            WriterSessionStatus::Acquired { .. }
+        ) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the session loses its epoch");
+}
+
+/// Checks that a read after a commit's acknowledgement sees the commit when
+/// the session lost its epoch while the commit's WAL put was in flight: a
+/// fold's manifest put has an unknown outcome, and a read meanwhile caches a
+/// head below the commit. The commit's put ends while the session has no
+/// epoch, so it drops the cached head before the commit is acknowledged.
+#[tokio::test]
+async fn a_read_after_a_commit_acknowledged_without_the_epoch_sees_the_commit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(FailStore::new(
+        blocking_publication_store(temp_dir.path(), &namespace_id),
+        KeyPredicate::manifest(&namespace_id),
+        OperationSelector::PutCreateIfAbsent,
+        InjectedError::Transport("lost manifest acknowledgment".to_owned()),
+    ));
+    let writer = writer_with_a_long_staleness(store.clone() as SharedStore).await;
+    let namespace = publish_once_into_each(&writer, std::slice::from_ref(&namespace_id))
+        .await
+        .pop()
+        .expect("one namespace");
+
+    store.inner().block_next();
+    let committing = namespace.clone();
+    let commit = tokio::spawn(async move {
+        committing
+            .commit_candidate(CommitCandidate::new(create_directory_request(
+                "during", "during",
+            )))
+            .await
+    });
+    bounded(Duration::from_secs(10), store.inner().wait_until_blocked())
+        .await
+        .expect("the commit reaches its WAL put");
+    store.fail_next(1);
+    assert_eq!(
+        namespace
+            .fold_wal()
+            .await
+            .expect_err("the fold's outcome is unknown")
+            .code(),
+        ErrorCode::OutcomeUnknown
+    );
+    wait_for_the_epoch_to_end(&namespace).await;
+    namespace
+        .stat("/during")
+        .await
+        .expect_err("the commit isn't written yet");
+    store.inner().release();
+    bounded(Duration::from_secs(10), commit)
+        .await
+        .expect("the commit settles")
+        .expect("join the commit")
+        .expect("the commit is acknowledged");
+    namespace
+        .stat("/during")
+        .await
+        .expect("the read after the acknowledgement sees the commit");
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a window change whose manifest put succeeds after the session
+/// lost its epoch to a commit's WAL put with an unknown outcome leaves no
+/// cached head below its manifest when its caller hears the outcome, so a
+/// read meanwhile that cached a head below the manifest doesn't hide the
+/// change. The test keeps the engine, so the commit's retry can't claim
+/// before the window change returns.
+#[tokio::test]
+async fn a_read_after_a_publication_acknowledged_without_the_epoch_sees_the_publication() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(FailStore::new(
+        BlockingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::manifest(&namespace_id),
+            OperationSelector::PutCreateIfAbsent,
+        ),
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+        InjectedError::Transport("lost WAL acknowledgment".to_owned()),
+    ));
+    let writer = writer_with_a_long_staleness(store.clone() as SharedStore).await;
+    let namespace = publish_once_into_each(&writer, std::slice::from_ref(&namespace_id))
+        .await
+        .pop()
+        .expect("one namespace");
+    let before = current_manifest_no(store.as_ref(), &namespace_id).await;
+
+    store.inner().block_next();
+    let changing = namespace.clone();
+    let change = tokio::spawn(async move {
+        changing
+            .set_retention_window(Some(
+                crate::RetentionWindow::new(2 * crate::GC_GRACE_WINDOW_MS)
+                    .expect("a window longer than the grace window"),
+            ))
+            .await
+    });
+    bounded(Duration::from_secs(10), store.inner().wait_until_blocked())
+        .await
+        .expect("the window change reaches its manifest put");
+    store.fail_next(1);
+    let committing = namespace.clone();
+    let commit = tokio::spawn(async move {
+        committing
+            .commit_candidate(CommitCandidate::new(create_directory_request(
+                "lost", "lost",
+            )))
+            .await
+    });
+    wait_for_the_epoch_to_end(&namespace).await;
+    let engine = namespace.session().publisher.lock_engine().await;
+    namespace.stat("/").await.expect("stat the root");
+    store.inner().release();
+    bounded(Duration::from_secs(10), change)
+        .await
+        .expect("the window change settles")
+        .expect("join the window change")
+        .expect("the window change is acknowledged");
+    let cached = writer
+        .core
+        .head_and_wal_tail_cache()
+        .get_head(&namespace_id);
+    assert!(
+        cached
+            .as_ref()
+            .is_none_or(|head| head.basis().manifest_no() > before),
+        "the cached head is on the window change's manifest or later: {:?}",
+        cached.map(|head| head.basis().manifest_no())
+    );
+    drop(engine);
+    let _ = bounded(Duration::from_secs(10), commit)
+        .await
+        .expect("the commit settles");
     writer.shutdown().await.expect("shutdown");
 }

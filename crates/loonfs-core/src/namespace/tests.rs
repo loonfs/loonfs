@@ -1471,12 +1471,17 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
             panic!("manifest 1 is the newest manifest");
         };
         namespace
-            .update_manifest(Some(current), &context().clock(), |current| async move {
-                Ok(crate::manifest::publish::ManifestChange::Next(
-                    Box::new(current.payload().activated()),
-                    (),
-                ))
-            })
+            .update_manifest(
+                Some(current),
+                &context().clock(),
+                crate::manifest::publish::ManifestSender::ClaimOrInitialization,
+                |current| async move {
+                    Ok(crate::manifest::publish::ManifestChange::Next(
+                        Box::new(current.payload().activated()),
+                        (),
+                    ))
+                },
+            )
             .await
             .expect("publish manifest 2");
         store.release();

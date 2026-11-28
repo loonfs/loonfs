@@ -102,12 +102,12 @@ async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replace
     let acquired = crate::test_support::namespace_store(&store, &namespace_id)
         .acquire_writer(&context.writer_id)
         .await
-        .expect("claim")
-        .writer;
+        .expect("claim");
     let mut session = crate::publish::NamespaceCommitEngine::with_acquired_session(
         crate::test_support::namespace_store(&store, &namespace_id),
         context.writer_id.clone(),
-        acquired,
+        acquired.writer,
+        acquired.claim,
     );
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let clock = context.clock();
@@ -284,10 +284,7 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
             crate::test_support::namespace_store(store.inner(), &namespace_id)
                 .delete_namespace(
                     Default::default(),
-                    crate::commit::session_epoch::SessionEpoch::new(
-                        &std::sync::Mutex::default(),
-                        writer,
-                    ),
+                    &writer,
                     None,
                     &crate::publish::PublicationLane::new().lock().await,
                     &context.clock(),

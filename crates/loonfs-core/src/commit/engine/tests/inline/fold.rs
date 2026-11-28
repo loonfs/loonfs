@@ -715,7 +715,7 @@ async fn a_published_fold_moves_the_position_with_its_tail() {
         .expect("commit after the fold");
 
     engine.move_position_onto(published.clone());
-    let moved = engine.read_position().expect("the position moved");
+    let moved = engine.writer_position().expect("the position moved");
     assert_eq!(
         moved.read_basis().basis.manifest(),
         &published.manifest().manifest()

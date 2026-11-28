@@ -307,60 +307,6 @@ async fn a_fold_published_while_a_unit_loads_moves_the_loaded_position() {
     assert_eq!(position.wal_tail_objects(), 1);
 }
 
-/// Checks that a fold that publishes while a session claims the namespace
-/// moves the position that the claim installs.
-///
-/// Another writer's commit is in the tail. The claim's discovery checks for
-/// a successor of the claim's manifest and finds none, and the fold folds the
-/// tail over the claim's manifest before the claim returns.
-#[tokio::test]
-async fn a_fold_published_during_a_claim_moves_the_claimed_position() {
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let local = LocalFsStore::new(directory.path()).expect("store");
-    let first = context("writer-a");
-    crate::test_support::NamespaceFixture::new(&local, &namespace_id, &first)
-        .create()
-        .await
-        .expect("bootstrap");
-    let mut previous = NamespaceCommitEngine::new(
-        crate::test_support::namespace_store(&local, &namespace_id),
-        first.writer_id.clone(),
-    );
-    publish_one(&mut previous, &first, "alpha").await;
-    let current = previous
-        .writer_position()
-        .expect("the position after alpha")
-        .read_basis()
-        .basis()
-        .manifest_no();
-
-    let store = HeldManifestHead::new(&directory);
-    let claim = current.successor().expect("a next manifest number");
-    store.hold_next(
-        &namespace_id,
-        claim.successor().expect("a next manifest number"),
-    );
-    let writer = context("writer-b");
-    let mut engine = NamespaceCommitEngine::new(
-        crate::test_support::namespace_store(&store, &namespace_id),
-        writer.writer_id.clone(),
-    );
-    let folded = publish_while_a_fold_publishes(&mut engine, &store, &local, &writer).await;
-
-    // The position that the next unit plans from.
-    let position = engine
-        .position
-        .current
-        .take()
-        .expect("a position after beta");
-    assert_eq!(
-        position.read_basis().basis().manifest_no(),
-        folded.manifest_no(),
-        "the claimed position moves onto the fold's manifest"
-    );
-}
-
 /// Brings the engine's position and the lane's copy of it up to the
 /// session's newest published manifest, as the runtime's release of the
 /// engine does, and drops the replaced positions after the unlock.
@@ -513,8 +459,9 @@ async fn a_follow_returns_the_lanes_replaced_copy() {
 }
 
 /// Checks that a fenced session leaves no copy of its position in its
-/// publication lane, so no publication of the lane builds on a head that
-/// the new writer has moved past.
+/// publication lane, and that its engine keeps none either, so no
+/// publication of the lane builds on a head that the new writer has moved
+/// past, and no read starts from it.
 #[tokio::test]
 async fn a_fenced_session_leaves_no_position_in_its_lane() {
     let directory = tempdir().expect("tempdir");
@@ -533,13 +480,21 @@ async fn a_fenced_session_leaves_no_position_in_its_lane() {
             },
         }));
     assert!(
-        engine.writer_position().is_some(),
-        "the engine keeps its position"
+        engine.stored_position().is_some(),
+        "the engine stores its position until the follow"
+    );
+    assert!(
+        engine.writer_position().is_none(),
+        "a fenced session has no position"
     );
     follow_as_the_release_does(&mut engine);
     assert!(
         engine.publication_lane().lock().await.turn().is_none(),
         "the lane keeps no copy of a fenced session's position"
+    );
+    assert!(
+        engine.stored_position().is_none(),
+        "the follow drops the engine's position"
     );
 }
 
