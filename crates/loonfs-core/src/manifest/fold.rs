@@ -185,13 +185,23 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// the fold's tail, and the call publishes nothing. A basis that covers
     /// only part of the fold's tail is bad stored state, and the call returns
     /// `namespace_corrupt`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `writes` are another namespace's, which is a bug in the
+    /// calling process.
     pub async fn publish_fold_in_turn(
         &self,
         turn: LaneTurn<'_>,
         writes: Box<FoldWrites>,
         clock: &OperationClock,
     ) -> Result<FoldedWalTail> {
-        let Some(payload) = fold_payload_over(turn.basis().manifest().payload(), &writes)? else {
+        let Some(payload) = fold_payload_over(
+            &self.namespace_id,
+            turn.basis().manifest().payload(),
+            &writes,
+        )?
+        else {
             return Ok(FoldedWalTail::new(
                 &self.namespace_id,
                 writes.head.seq,
@@ -240,7 +250,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let turn = lane.acquired_turn();
         let basis = turn.basis().manifest().payload();
         let folded = match folded {
-            Some(writes) => fold_payload_over(basis, &writes)?,
+            Some(writes) => fold_payload_over(&self.namespace_id, basis, &writes)?,
             None => None,
         };
         let mut payload = folded.unwrap_or_else(|| basis.clone());
@@ -404,13 +414,28 @@ struct FoldRun {
 /// `basis` already covers the fold's tail (see
 /// [`NamespaceStore::publish_fold_in_turn`]). A basis that covers only part
 /// of the fold's tail is bad stored state, and returns `namespace_corrupt`.
+///
+/// # Panics
+///
+/// Panics if `writes` aren't `namespace_id`'s, which is a bug in the calling
+/// process.
 fn fold_payload_over(
+    namespace_id: &NamespaceId,
     basis: &NamespaceManifestPayload,
     writes: &FoldWrites,
 ) -> Result<Option<NamespaceManifestPayload>> {
+    assert_eq!(
+        &writes.head.namespace_id, namespace_id,
+        "a fold publishes the segments that it wrote for its own namespace"
+    );
     if basis.folded_wal_no >= writes.head.wal_no && basis.head_seq >= writes.head.seq {
         return Ok(None);
     }
+    // No state that this process writes reaches this branch. The session's
+    // folds run one at a time under the namespace's fold lock, so no fold of
+    // the session publishes between this fold's writes and its turn, and a
+    // fold of another writer that the session's claim builds on covers the
+    // whole tail below that writer's fence.
     if basis.folded_wal_no != writes.started_folded_wal_no {
         return Err(CoreError::NamespaceCorrupt(format!(
             "manifest {} folds WAL number {}, but the fold that builds on it in a writer \

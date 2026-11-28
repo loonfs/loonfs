@@ -94,6 +94,8 @@ pub enum CompactionWriteOutcome {
 /// turn (see [`NamespaceStore::publish_compaction_in_turn`](crate::NamespaceStore::publish_compaction_in_turn)).
 #[derive(Debug)]
 pub struct CompactionWrites {
+    /// The namespace whose runs the unit compacted.
+    pub(crate) namespace_id: NamespaceId,
     pub(crate) spec: MetadataCompactionSpec,
     /// The segments of the input runs, which the manifest that the unit
     /// publishes over must still list.
@@ -178,6 +180,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let stopped = match ran {
             Ok(Ok(report)) => {
                 return Ok(CompactionWriteOutcome::Written(CompactionWrites {
+                    namespace_id: self.namespace.namespace_id.clone(),
                     spec,
                     input_keys,
                     report,

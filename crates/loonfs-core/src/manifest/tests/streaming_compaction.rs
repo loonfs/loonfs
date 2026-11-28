@@ -416,6 +416,7 @@ async fn try_finalize_streaming_compaction<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         CompactionWrites {
+            namespace_id: namespace_id.clone(),
             spec: spec.clone(),
             input_keys: input_keys.clone(),
             report: result.clone(),
@@ -2141,6 +2142,7 @@ async fn an_expired_job_prevents_publication() {
     let store = RecordingStore::new(store, KeyPredicate::any());
     let timer = Arc::new(ManualClock::stepping(1_000));
     let writes = || CompactionWrites {
+        namespace_id: namespace.clone(),
         spec: spec.clone(),
         input_keys: input.clone(),
         report: result.clone(),

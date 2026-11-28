@@ -16,7 +16,7 @@ use super::NamespacePublisher;
 use crate::runtime_core::CheckedPosition;
 use crate::{CoreError, Error, Result};
 use loonfs_core::publish::{UnitBasis, UnitReport, UnitStart, WriterPosition};
-use loonfs_types::{ManifestNo, WriterEpoch};
+use loonfs_types::ManifestNo;
 use std::future::Future;
 
 impl NamespacePublisher {
@@ -25,17 +25,20 @@ impl NamespacePublisher {
     /// a fold's, a compaction unit's or a snapshot's use of the position.
     ///
     /// A newer manifest is the session's own publication between its put
-    /// and its record, or another writer's claim. So the call first waits
-    /// for the session's publication lane, and a publication in flight has
-    /// recorded its manifest once the call has the lane. When the session's
-    /// position then follows a manifest above `replaced`, the newer manifest
-    /// was the session's own (a put that succeeds at the number after
-    /// `replaced` shows that no other writer's manifest is there), and the
-    /// call returns without the engine, so no commit waits for it. Otherwise,
-    /// with the engine, and only while the session keeps its writer epoch and
-    /// a position, the call drops the position and runs the writer's load,
-    /// which returns `writer_fenced`, and marks the session fenced, when
-    /// another writer claimed the namespace.
+    /// and its record, or another writer's claim. When the session's
+    /// position follows a manifest above `replaced`, the newer manifest was
+    /// the session's own (a put that succeeds at the number after `replaced`
+    /// shows that no other writer's manifest is there), and the call returns
+    /// at once. Otherwise the call waits for the session's publication lane,
+    /// and a publication in flight has recorded its manifest once the call
+    /// has the lane, so the call tests the position again. A call that
+    /// returns at either test doesn't lock the engine, so no commit waits for
+    /// it. Otherwise, with the engine, and only while the session keeps its
+    /// writer epoch and the engine's position is on `replaced` or an earlier
+    /// manifest (each release of the engine moves the engine's position onto
+    /// the session's newest published manifest), the call drops the position
+    /// and runs the writer's load, which returns `writer_fenced`, and marks
+    /// the session fenced, when another writer claimed the namespace.
     ///
     /// The call never claims: a session without its epoch has no position to
     /// settle, and a read must never cause a claim. When it returns, the
@@ -45,16 +48,20 @@ impl NamespacePublisher {
         &self,
         replaced: ManifestNo,
     ) -> std::result::Result<(), CoreError> {
+        let follows_newer = |position: Option<WriterPosition>| {
+            position.is_some_and(|position| position.basis().manifest_no() > replaced)
+        };
+        if follows_newer(self.current_position()) {
+            return Ok(());
+        }
         let _lane = self.lock_lane().await;
-        let follows_newer = self
-            .current_position()
-            .is_some_and(|position| position.basis().manifest_no() > replaced);
-        if follows_newer {
+        if follows_newer(self.current_position()) {
             return Ok(());
         }
         let mut engine = self.lock_engine().await;
-        if engine.writer_position().is_none() {
-            return Ok(());
+        match engine.writer_position() {
+            Some(position) if position.basis().manifest_no() <= replaced => {}
+            _ => return Ok(()),
         }
         let Some(start @ UnitStart::Kept(_)) = engine.kept_start()? else {
             return Ok(());
@@ -86,9 +93,13 @@ impl NamespacePublisher {
     /// the writer epoch that the unit computed its value under, which the
     /// unit reports with its basis. A session can lose its epoch to an
     /// unknown outcome on its other queue while `run` computes, and claim
-    /// and load again before the check. Otherwise `run` runs once more, and
-    /// its own start loads a position, claims, or returns `writer_fenced`,
-    /// as every unit's start does, so its value needs no check.
+    /// and load again before the check. Otherwise `run` runs once more. The
+    /// second run's value rests on the store when its start claims or loads
+    /// a position, and a session that the check found fenced returns
+    /// `writer_fenced`. A second value that the unit computed from the
+    /// session's own state again is confirmed by the same check, under the
+    /// epoch in its own basis, and when the check doesn't confirm it either,
+    /// the call returns `store_contention`, so the caller tries again.
     ///
     /// A unit that returns an error isn't confirmed. Every such error comes
     /// from the store or from the session's own status, not from the kept
@@ -110,19 +121,30 @@ impl NamespacePublisher {
         Fut: Future<Output = std::result::Result<UnitReport<T>, E>>,
     {
         let first = run().await?;
-        let confirmed = match first.basis {
-            UnitBasis::Store => true,
-            UnitBasis::Session { writer_epoch } => self.confirms(writer_epoch).await?,
-        };
-        if confirmed {
+        if self.confirms(first.basis).await? {
             return Ok(first.value);
         }
-        Ok(run().await?.value)
+        let second = run().await?;
+        if self.confirms(second.basis).await? {
+            return Ok(second.value);
+        }
+        Err(CoreError::StoreContention {
+            object_key: format!("{} writer position", self.namespace_id),
+        }
+        .into())
     }
 
-    /// Returns whether the session's check confirms a position with
-    /// `epoch`, the writer epoch that a unit computed its value under.
-    async fn confirms(&self, epoch: WriterEpoch) -> std::result::Result<bool, CoreError> {
+    /// Returns whether a unit's value with `basis` can be returned: a value
+    /// from the store can, and a value from the session's own state can when
+    /// the session's check confirms a position with the writer epoch that
+    /// the unit computed its value under.
+    async fn confirms(&self, basis: UnitBasis) -> std::result::Result<bool, CoreError> {
+        let UnitBasis::Session {
+            writer_epoch: epoch,
+        } = basis
+        else {
+            return Ok(true);
+        };
         let checked = self
             .context
             .runtime_core

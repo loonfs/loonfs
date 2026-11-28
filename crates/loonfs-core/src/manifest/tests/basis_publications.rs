@@ -166,6 +166,67 @@ async fn a_lost_manifest_put_returns_writer_fenced_with_the_newer_writer() {
     }
 }
 
+/// Checks that a publication of the lane whose put loses, and whose read of
+/// the manifest that won fails, returns that read's error and leaves the
+/// session its epoch, and that the lane's next publication puts at the same
+/// number, loses, reads the winner, and returns `writer_fenced` (see
+/// `publish_manifest_in_turn`).
+#[tokio::test]
+async fn a_lost_put_whose_read_of_the_winner_fails_leaves_the_next_publication_to_read_it() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("basis-publication").expect("namespace");
+    let winner = metadata_manifest_object(&namespace_id, &ManifestNo(4));
+    let store = RecordingStore::new(
+        FailStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::exact(winner.clone()),
+            OperationSelector::Read,
+            InjectedError::Transport("manifest read failed".to_owned()),
+        ),
+        KeyPredicate::any(),
+    );
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
+        .create()
+        .await
+        .expect("create");
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        test_context().writer_id,
+    );
+    // The session claims manifest 3, and another writer's claim wins 4.
+    engine
+        .load_position_alone()
+        .await
+        .expect("the session claims");
+    crate::test_support::namespace_store(store.inner().inner(), &namespace_id)
+        .acquire_writer_epoch(&crate::test_support::writer_at("b", 0).writer_id)
+        .await
+        .expect("another writer claims");
+    store.inner().fail_next(1);
+    store.reset();
+    let failed = engine.set_retention_window(retention_window(0)).await;
+    assert_matches!(failed, Err(CoreError::ControlObjectLoad(_)));
+    assert_eq!(store.inner().remaining(), 0);
+    assert_matches!(
+        *engine.session_status().lock(),
+        crate::publish::WriterSessionStatus::Acquired { .. }
+    );
+    let first = control_requests(&namespace_id, &store.take());
+    assert_eq!(first.first(), Some(&("put", winner.clone())), "{first:?}");
+    let Err(CoreError::WriterFenced(fence)) =
+        engine.set_retention_window(retention_window(1)).await
+    else {
+        panic!("the next publication should find the claim");
+    };
+    assert_eq!(fence.active_writer.writer_id.as_str(), "b");
+    assert_matches!(
+        *engine.session_status().lock(),
+        crate::publish::WriterSessionStatus::Fenced(_)
+    );
+    let second = control_requests(&namespace_id, &store.take());
+    assert_eq!(second.first(), Some(&("put", winner)), "{second:?}");
+}
+
 /// Checks that a window change and an extension's entry of a session with
 /// its writer epoch send no request before their put, one put, and one read
 /// of the manifest boundary after it: each builds on the session's newest

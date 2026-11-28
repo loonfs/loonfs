@@ -786,6 +786,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// can't move there (see `WriterPosition::move_to` for the rule). Only
     /// the session's queues move the position in a runtime: a commit, a
     /// publication of the lane, and the writer's load.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn move_position_onto(&mut self, manifest: Held<LoadedManifest>) {
         let state = &mut self.position;
         let Some(mut position) = state.current.take() else {

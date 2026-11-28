@@ -226,6 +226,7 @@ pub(crate) async fn publish_rewritten<S: ObjectStore + ?Sized>(
         .publish_compaction_in_turn(
             guard.acquired_turn(),
             CompactionWrites {
+                namespace_id: namespace_id.clone(),
                 spec: spec.clone(),
                 input_keys: rewritten.input_keys,
                 report: rewritten.compacted,

@@ -33,6 +33,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// nothing and return `Abandoned`, and a cancelled unit returns
     /// `Cancelled`. Nothing references the output of a unit that publishes
     /// nothing, so a collection deletes it by age.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `writes` are another namespace's, which is a bug in the
+    /// calling process.
     pub async fn publish_compaction_in_turn(
         &self,
         turn: LaneTurn<'_>,
@@ -41,11 +46,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<CompactionUnitOutcome> {
         let publication = self.start_clock();
         let CompactionWrites {
+            namespace_id,
             spec,
             input_keys,
             report,
             compaction,
         } = writes;
+        assert_eq!(
+            namespace_id, self.namespace_id,
+            "a compaction unit publishes the output that it wrote for its own namespace"
+        );
         let previous = turn.basis().manifest().payload();
         let outcome = if compaction.elapsed_ms() > METADATA_COMPACTION_BUDGET_MS {
             CompactionUnitOutcome::Abandoned
