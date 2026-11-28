@@ -365,6 +365,7 @@ pub(super) async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         CompactionWrites {
+            namespace_id: namespace_id.clone(),
             spec: spec.clone(),
             input_keys,
             report: compacted,
