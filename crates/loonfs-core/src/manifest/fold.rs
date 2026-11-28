@@ -185,12 +185,21 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// the fold's tail, and the call publishes nothing. A basis that covers
     /// only part of the fold's tail is bad stored state, and the call returns
     /// `namespace_corrupt`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `writes` are another namespace's, which is a bug in the
+    /// calling process.
     pub async fn publish_fold_in_turn(
         &self,
         turn: LaneTurn<'_>,
         writes: Box<FoldWrites>,
         clock: &OperationClock,
     ) -> Result<FoldedWalTail> {
+        assert_eq!(
+            writes.head.namespace_id, self.namespace_id,
+            "a fold publishes the segments that it wrote for its own namespace"
+        );
         let previous = turn.basis().manifest().payload();
         if previous.folded_wal_no >= writes.head.wal_no && previous.head_seq >= writes.head.seq {
             return Ok(FoldedWalTail::new(
@@ -200,6 +209,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 FoldWalOutcome::AlreadyCurrent,
             ));
         }
+        // No state that this process writes reaches this branch. The session's
+        // folds run one at a time under the namespace's fold lock, so no fold of
+        // the session publishes between this fold's writes and its turn, and a
+        // fold of another writer that the session's claim builds on covers the
+        // whole tail below that writer's fence.
         if previous.folded_wal_no != writes.started_folded_wal_no {
             return Err(CoreError::NamespaceCorrupt(format!(
                 "manifest {} folds WAL number {}, but the fold that builds on it in a writer \

@@ -304,8 +304,9 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
 
     /// Ends a step: publishes the pending change when `publish_interval_ms`
     /// has passed since the change loaded its basis, and returns
-    /// `superseded` instead of `outcome` when another process changed the
-    /// entry first.
+    /// `superseded` instead of `outcome` when a newer change of the writer
+    /// session replaced the entry first, such as a disable through the same
+    /// session.
     pub(super) async fn finish_step<T>(&mut self, outcome: T, superseded: T) -> Result<T> {
         let due = self
             .pending
@@ -352,8 +353,8 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
                 counts.superseded.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(
                     namespace_id = %self.namespace_id,
-                    "another process changed the grep entry; the next step plans from the current \
-                     manifest"
+                    "a newer change of the writer session replaced the grep entry; the next step \
+                     plans from the session's position"
                 );
                 Ok(GrepPublishOutcome::Superseded)
             }
