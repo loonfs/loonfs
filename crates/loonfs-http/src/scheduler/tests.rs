@@ -2,17 +2,17 @@
 
 use super::retries::MaintenanceCall;
 use super::{GrepIndexing, Scheduler, SchedulerConfig, SchedulerState, StepRetry, SweepReport};
-use crate::{HeldNamespace, JobMode, Namespaces, WriterSessions};
+use crate::{HeldNamespace, Namespaces, WriterSessions};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
-use loonfs::{LoonFs, Maintenance, Namespace, NamespaceId, SharedObjectStore, Writable};
+use loonfs::{LoonFs, Namespace, NamespaceId, SharedObjectStore, Writable};
 use loonfs_grep::entry::{grep_extension_name, GrepIndexStatus};
 use loonfs_grep::{GrepWorker, GrepWorkerConfig};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_test_support::clock::ManualClock;
-use loonfs_test_support::ids::{namespace_id, page_limit, writer_id};
+use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationKind, OperationSelector,
     RecordedOperation, RecordingStore,
@@ -71,7 +71,7 @@ struct SchedulerServer {
     clock: Arc<ManualClock>,
     recorder: Arc<DefaultMetricsRecorder>,
     runtime: LoonFs<Writable>,
-    maintenance: Maintenance,
+    maintenance: LoonFs<Writable>,
     grep_worker: Option<GrepWorker<SharedObjectStore>>,
     scheduler: Scheduler,
 }
@@ -92,13 +92,11 @@ impl SchedulerServer {
             .build()
             .await
             .expect("build the server runtime");
-        let maintenance_writer_id = writer_id("sweep-server-maintenance");
-        let maintenance = runtime.maintenance(maintenance_writer_id.clone());
+        let maintenance = runtime.clone();
         let grep_worker = config.grep.map(|_| {
             GrepWorker::new(
                 runtime.object_store(),
                 runtime.read_only(),
-                maintenance.clone(),
                 loonfs_grep::GrepStepBudget::default(),
             )
         });
@@ -108,10 +106,6 @@ impl SchedulerServer {
         let scheduler = Scheduler::new(
             config.scheduler,
             Arc::new(Namespaces::new(runtime.clone())),
-            config
-                .maintenance
-                .maintains()
-                .then_some(maintenance_writer_id),
             grep,
             recorder.as_ref(),
         );
@@ -125,13 +119,20 @@ impl SchedulerServer {
         }
     }
 
+    /// Opens `namespace_id`'s writer session in the server's runtime.
+    fn session(&self, namespace_id: &NamespaceId) -> Namespace<Writable> {
+        self.runtime
+            .open_namespace(namespace_id)
+            .expect("open the namespace")
+    }
+
     async fn run_steps_after(&self, elapsed_ms: u64) {
         self.clock.advance_ms(elapsed_ms);
         self.scheduler.run_due_steps().await;
     }
 
     async fn enable_index(&self, namespace_id: &NamespaceId) {
-        let _handle = self
+        let handle = self
             .scheduler
             .inner
             .namespaces
@@ -141,7 +142,7 @@ impl SchedulerServer {
         self.grep_worker
             .as_ref()
             .expect("grep worker")
-            .enable(namespace_id)
+            .enable(&handle)
             .await
             .expect("enable grep");
         self.scheduler
@@ -151,7 +152,7 @@ impl SchedulerServer {
     }
 
     async fn disable_index(&self, namespace_id: &NamespaceId) {
-        let _handle = self
+        let handle = self
             .scheduler
             .inner
             .namespaces
@@ -161,7 +162,7 @@ impl SchedulerServer {
         self.grep_worker
             .as_ref()
             .expect("grep worker")
-            .disable(namespace_id)
+            .disable(&handle)
             .await
             .expect("disable grep");
         self.scheduler
@@ -177,6 +178,7 @@ impl SchedulerServer {
 
     async fn wal_tail_objects(&self, namespace_id: &NamespaceId) -> u64 {
         self.maintenance
+            .maintenance()
             .diagnostics(namespace_id)
             .await
             .expect("namespace diagnostics")
@@ -233,12 +235,10 @@ impl SchedulerServer {
 }
 
 /// The settings of a test host: those of its runtime and its scheduler,
-/// whether it maintains the store, and those of its grep worker when it
-/// maintains the grep index.
+/// and those of its grep worker when it builds the grep index.
 struct TestConfig {
     runtime: loonfs::RuntimeConfig,
     scheduler: SchedulerConfig,
-    maintenance: JobMode,
     grep: Option<GrepWorkerConfig>,
 }
 
@@ -257,8 +257,8 @@ fn scheduler_config(grep: Option<GrepWorkerConfig>) -> TestConfig {
             gc_interval_ms: crate::DEFAULT_GC_INTERVAL_MS,
             sweep_interval_ms: crate::DEFAULT_SWEEP_INTERVAL_MS,
             idle_session_close_after_ms: crate::DEFAULT_IDLE_SESSION_CLOSE_AFTER_MS,
+            sweep_store: true,
         },
-        maintenance: JobMode::ServeAndMaintain,
         grep,
     }
 }
@@ -313,8 +313,9 @@ async fn a_restart_then_one_sweep_folds_a_tail_past_the_fold_age_and_collects_ga
     let (writer, now_ms) = seed_writer(&store).await;
     seed_unfolded_tail(&writer, &namespace_id).await;
     writer
-        .maintenance(writer_id("before-the-server"))
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the first commit");
     writer
@@ -358,6 +359,135 @@ async fn a_restart_then_one_sweep_folds_a_tail_past_the_fold_age_and_collects_ga
             .bytes,
         b"left unfolded"
     );
+}
+
+/// Checks that a sweep claims only the namespaces with work due: a namespace
+/// whose tail reached the fold age gets a session, which claims it and folds
+/// the tail, and a folded namespace with nothing due gets no session, so the
+/// sweep puts no manifest and no WAL object of it. The idle namespace's
+/// requests are the due check's discovery and the collection's reads,
+/// listings and raise of the manifest boundary, and none puts a manifest or
+/// a WAL object.
+#[tokio::test]
+async fn a_sweep_claims_only_namespaces_with_work_due() {
+    let directory = tempdir().expect("tempdir");
+    let base: SharedObjectStore = local_store(directory.path());
+    let store = Arc::new(RecordingStore::new(base, KeyPredicate::any()));
+    let shared: SharedObjectStore = store.clone();
+    let [idle, due] = ["idle", "due"].map(namespace_id);
+    let (writer, now_ms) = seed_writer(&shared).await;
+    for namespace_id in [&idle, &due] {
+        seed_unfolded_tail(&writer, namespace_id).await;
+    }
+    writer
+        .open_namespace(&idle)
+        .expect("open the idle namespace")
+        .fold_wal()
+        .await
+        .expect("fold the idle namespace");
+    writer.shutdown().await.expect("stop the writer");
+    drop(writer);
+    let epoch = |namespace_id: &NamespaceId| {
+        let namespace = loonfs_core::test_support::namespace_store(&*store, namespace_id);
+        async move {
+            namespace
+                .load_read_state()
+                .await
+                .expect("the head")
+                .writer_epoch
+        }
+    };
+    let (idle_epoch, due_epoch) = (epoch(&idle).await, epoch(&due).await);
+
+    let server = SchedulerServer::start(shared, &scheduler_config(None), now_ms).await;
+    store.reset();
+    let report = server.sweep_after(2 * DAY_MS).await;
+    assert!(report.complete);
+    let operations = store.take();
+    let idle_prefix = format!("namespaces/{idle}/");
+    let idle_puts: Vec<_> = operations
+        .iter()
+        .filter(|operation| {
+            operation.key().starts_with(&idle_prefix)
+                && (operation.key().contains("/manifests/") || operation.key().contains("/wal/"))
+                && matches!(
+                    operation,
+                    loonfs_test_support::stores::RecordedOperation::Put { .. }
+                )
+        })
+        .collect();
+    assert!(idle_puts.is_empty(), "{idle_puts:?}");
+    assert_eq!(
+        epoch(&idle).await,
+        idle_epoch,
+        "the idle namespace isn't claimed"
+    );
+    assert_eq!(
+        epoch(&due).await.0,
+        due_epoch.0 + 1,
+        "the due namespace is claimed"
+    );
+    assert_eq!(
+        server.wal_tail_objects(&due).await,
+        0,
+        "and its tail is folded"
+    );
+}
+
+/// Checks a sweep over a namespace that a live writer in another runtime
+/// writes: while nothing is due, the sweep sends no claim and the writer
+/// keeps committing, and once the writer's tail reaches the fold age on the
+/// sweeping server's clock, the sweep claims the namespace and folds the
+/// tail, and the writer's next commit returns `writer_fenced`.
+#[tokio::test]
+async fn a_sweep_claims_a_live_writers_namespace_only_when_work_is_due() {
+    let directory = tempdir().expect("tempdir");
+    let store: SharedObjectStore = local_store(directory.path());
+    let namespace_id = namespace_id("live");
+    let (writer, now_ms) = seed_writer(&store).await;
+    seed_unfolded_tail(&writer, &namespace_id).await;
+    let session = writer
+        .open_namespace(&namespace_id)
+        .expect("the writer's session");
+    session.fold_wal().await.expect("the writer folds its tail");
+    let epoch = |store: SharedObjectStore| {
+        let namespace_id = namespace_id.clone();
+        async move {
+            loonfs_core::test_support::namespace_store(store, &namespace_id)
+                .load_read_state()
+                .await
+                .expect("the head")
+                .writer_epoch
+                .0
+        }
+    };
+    let writer_epoch = epoch(store.clone()).await;
+
+    let server = SchedulerServer::start(store.clone(), &scheduler_config(None), now_ms).await;
+    assert!(server.sweep_after(0).await.complete);
+    assert_eq!(
+        epoch(store.clone()).await,
+        writer_epoch,
+        "nothing is due, so the sweep claims nothing"
+    );
+    session
+        .put_file("/next.txt", b"next", &test_actor())
+        .await
+        .expect("the writer keeps committing");
+
+    assert!(server.sweep_after(2 * DAY_MS).await.complete);
+    assert_eq!(
+        epoch(store.clone()).await,
+        writer_epoch + 1,
+        "the tail is past the fold age, so the sweep claims"
+    );
+    assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
+    let fenced = session
+        .put_file("/after.txt", b"after", &test_actor())
+        .await
+        .expect_err("the sweep's claim fences the writer");
+    assert_eq!(fenced.code(), loonfs::ErrorCode::WriterFenced);
+    writer.shutdown().await.expect("stop the writer");
 }
 
 #[tokio::test]
@@ -442,13 +572,19 @@ async fn grep_gc_runs_in_a_sweep() {
     )
     .await;
     let worker = server.grep_worker.as_ref().expect("grep worker");
-    worker.enable(&namespace_id).await.expect("enable grep");
+    worker
+        .enable(&server.session(&namespace_id))
+        .await
+        .expect("enable grep");
     assert!(server.scheduler.run_sweep().await.complete);
     assert_matches!(
         server.grep_status(&namespace_id).await,
         GrepIndexStatus::Active { .. }
     );
-    worker.disable(&namespace_id).await.expect("disable grep");
+    worker
+        .disable(&server.session(&namespace_id))
+        .await
+        .expect("disable grep");
     let segments_prefix =
         loonfs_objectstore::keys::extension_segment_prefix(&namespace_id, &grep_extension_name());
     assert!(!keys_under(store.as_ref(), &segments_prefix)
@@ -508,7 +644,7 @@ async fn a_sweep_drives_a_grep_backfill_to_active() {
         .grep_worker
         .as_ref()
         .expect("grep worker")
-        .enable(&namespace_id)
+        .enable(&server.session(&namespace_id))
         .await
         .expect("enable grep");
 
@@ -617,10 +753,20 @@ async fn a_sweep_reports_what_its_collections_listed_and_whether_it_covered_the_
     let mut namespace_results = Vec::new();
     let mut pool_results = Vec::new();
     for namespace_id in &names {
-        let response = server.maintenance.gc(namespace_id).await.expect("collect");
+        let response = server
+            .maintenance
+            .maintenance()
+            .gc(namespace_id)
+            .await
+            .expect("collect");
         namespace_results.push((response.listed_bytes, response.next_reclamation_at_ms));
         let pool_id = loonfs_core::test_support::load_pool_id(base.as_ref(), namespace_id).await;
-        let response = server.maintenance.gc_pool(&pool_id).await.expect("collect");
+        let response = server
+            .maintenance
+            .maintenance()
+            .gc_pool(&pool_id)
+            .await
+            .expect("collect");
         pool_results.push((response.listed_bytes, response.next_reclamation_at_ms));
     }
     let report = |namespaces: usize, pools: usize, results: Vec<(u64, Option<u64>)>| SweepReport {
@@ -844,7 +990,9 @@ impl SchedulerServer {
     /// returns whether it finds the namespace's metadata caught up.
     async fn metadata_caught_up(&self, namespace_id: &NamespaceId) -> bool {
         self.maintenance
-            .maintain_metadata_while_due(namespace_id, &loonfs::MaintenanceCancellation::new())
+            .open_namespace(namespace_id)
+            .expect("open namespace")
+            .maintain_metadata_while_due(&loonfs::MaintenanceCancellation::new())
             .await
             .expect("the metadata call")
             .response
@@ -1234,22 +1382,34 @@ enum Grep {
 /// call finds the namespace's newest manifest with a read of the manifest
 /// boundary, a listing of the manifests, and a second read of the boundary.
 /// An earlier sweep loaded the newest manifest into the segment cache, so no
-/// call sends a GET for it. The retention advance uses those 3 requests alone.
-/// The metadata call and the pool's collection then check the manifest with a GET of the WAL number
-/// after it, a HEAD of the manifest number after it, and a read of the
-/// boundary, so each of them sends 6 requests before its own listings. The
+/// call sends a GET for it. The check of whether the namespace has metadata
+/// work or a retention advance due, and the pool's collection, then check
+/// the manifest with a GET of the WAL number after it, a HEAD of the
+/// manifest number after it, and a read of the boundary, so each of them
+/// sends 6 requests before its own listings. Nothing is due, so the sweep
+/// opens no session and makes no metadata call and no advance. The
 /// namespace's collection takes its roots from the manifest that its find
 /// returns, so it sends the 3 requests of the find and then 5 listings. The
 /// pool's collection lists the upload sessions and the member entries before
 /// it reads the member, and then lists the member's snapshots and the
-/// content, so the four calls cost 6, 3, 8, and 10. A
-/// maintained grep index adds a call that finds the newest manifest (3), and
-/// an enabled one also reads the WAL number after it (4). The docs quote
-/// these numbers.
+/// content, so the three calls cost 6, 8, and 10. A grep index host adds a
+/// check of whether an index build is due, which finds the newest manifest
+/// (3). An enabled index was published by a session that claimed the
+/// namespace, and the claim's fence stays in the WAL tail with no commit, so
+/// no fold is due for it. That changes three calls. The enable's session
+/// recorded the enable's manifest as its own publication, so the head that
+/// the runtime cached is the newest manifest, and the due check and the
+/// grep check's two reads (of grep's entry and of the change feed) each
+/// check that cached head with a HEAD of the next manifest number and a read
+/// of the boundary (2 each), where an idle namespace's due check finds the
+/// newest manifest instead. The pool's collection reads the member's roots
+/// from a discovery of the head, which reads every WAL object above the
+/// manifest, the fence among them, to find the tip (12). The total is 26
+/// requests, with two listings fewer. The docs quote these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize); 3] = [
-    (Grep::NotMaintained, 27, 13),
-    (Grep::Maintained, 30, 14),
-    (Grep::Enabled, 31, 14),
+    (Grep::NotMaintained, 24, 12),
+    (Grep::Maintained, 27, 13),
+    (Grep::Enabled, 26, 11),
 ];
 
 #[tokio::test(start_paused = true)]
@@ -1259,11 +1419,13 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
         let base: SharedObjectStore = local_store(directory.path());
         let names = ["first", "second", "third"].map(namespace_id);
         let (writer, now_ms) = seed_writer(&base).await;
-        let seed_maintenance = writer.maintenance(writer_id("before-the-server"));
+        let seed_maintenance = writer.clone();
         for namespace_id in &names {
             seed_unfolded_tail(&writer, namespace_id).await;
             seed_maintenance
-                .fold_wal(namespace_id)
+                .open_namespace(namespace_id)
+                .expect("open namespace")
+                .fold_wal()
                 .await
                 .expect("fold the tail");
         }
@@ -1281,9 +1443,27 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
                     .grep_worker
                     .as_ref()
                     .expect("grep worker")
-                    .enable(namespace_id)
+                    .enable(&server.session(namespace_id))
                     .await
                     .expect("enable grep");
+                // The enable's session claimed the namespace, which leaves
+                // the claim's fence in the WAL tail and no commit, so no fold
+                // is due.
+                let maintenance = server.maintenance.maintenance();
+                let diagnostics = maintenance
+                    .diagnostics(namespace_id)
+                    .await
+                    .expect("diagnostics");
+                assert_eq!(diagnostics.wal_tail_objects, 1, "the claim's fence");
+                assert_eq!(diagnostics.wal_tail_oldest_commit_at_ms, None, "no commit");
+                assert!(
+                    !maintenance
+                        .due_maintenance(namespace_id)
+                        .await
+                        .expect("the due check")
+                        .any(),
+                    "nothing is due"
+                );
             }
         }
         let scheduler = server.scheduler.page_limit(page_limit(2));

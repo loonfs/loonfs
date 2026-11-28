@@ -253,17 +253,13 @@ impl ResolvedTarget {
             .build()
             .await
             .map_err(CliError::from)?;
-        let maintenance = runtime.maintenance(
-            WriterId::parse(format!("{writer_id}-maintenance"))
-                .map_err(|error| CliError::invalid_config(error.to_string()))?,
-        );
+        let maintenance = runtime.maintenance();
         let grep_block_cache = Arc::new(GrepBlockCache::new(DecodedBlockCacheConfig::new(
             DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
         )));
         let grep_worker = GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
-            maintenance.clone(),
             GrepStepBudget::default(),
         );
         let host = MaintenanceHost {

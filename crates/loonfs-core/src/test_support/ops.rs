@@ -379,17 +379,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 }
 
-impl<S: ObjectStore> crate::engine::NamespaceEngine<S, crate::engine::Writable> {
-    /// Advances the retention floor toward `target` as a runtime without a
-    /// writer session for the namespace does, for a test of core without a
-    /// runtime (format spec, "Advancing the retention floor").
+impl<S: ObjectStore + Clone> crate::engine::NamespaceEngine<S, crate::engine::Writable> {
+    /// Advances the retention floor toward `target` through the fixture's
+    /// writer session (see
+    /// [`NamespaceStore::fixture_writer_session`](crate::NamespaceStore::fixture_writer_session)),
+    /// for a test of core without a runtime (format spec, "Advancing the
+    /// retention floor").
     ///
     /// The advance plans the floor from the current manifest's floor, and
-    /// returns that floor when the floor would not move. Otherwise, it
-    /// creates a floor object at the WAL tip and claims no epoch, unless the
-    /// view that the publication discovers already has the floor. Then, when no manifest records the view's floor, it folds
-    /// the WAL tail, and the report includes the fold's manifest, which
-    /// records the floor.
+    /// returns that floor when the floor would not move. Otherwise, the
+    /// session puts a floor object at its tip,
+    /// unless the view that it loads already has the floor. Then, when no
+    /// manifest records the view's floor, the session folds the WAL tail, and
+    /// the report includes the fold's manifest, which records the floor.
     pub async fn advance_retention_floor(
         &self,
         target: crate::manifest::RetentionTarget,
@@ -399,6 +401,7 @@ impl<S: ObjectStore> crate::engine::NamespaceEngine<S, crate::engine::Writable> 
             .load_live_basis(crate::test_support::observed_now())
             .await?
             .into_manifest();
+        let mut session = self.namespace.fixture_writer_session().await?;
         let report = match self
             .namespace
             .plan_retention_floor(planned, planned.retention_floor_seq(), target)
@@ -411,14 +414,13 @@ impl<S: ObjectStore> crate::engine::NamespaceEngine<S, crate::engine::Writable> 
                 }
             }
             crate::manifest::RetentionPlan::Moves(floor) => {
-                self.namespace.publish_floor_object(planned, floor).await?
+                session
+                    .publish_floor_object(planned, floor, &self.namespace.start_clock())
+                    .await?
             }
         };
         let published = if report.retention_floor_seq > report.manifest_retention_floor_seq {
-            self.namespace
-                .fold_wal_tail(None, &self.namespace.start_clock())
-                .await?
-                .published()
+            session.fold().await?.published()
         } else {
             None
         };

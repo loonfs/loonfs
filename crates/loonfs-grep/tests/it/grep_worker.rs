@@ -2,7 +2,7 @@
 
 use crate::common::{
     control, default_block_cache, drive_worker_to_current, fold_wal_and_advance_retention,
-    grep_with, page_request, request, worker, writable_namespace, GrepHost,
+    grep_with, page_request, request, writable_namespace, GrepHost,
 };
 use loonfs::{
     ErrorCode, LoonFs, NamespaceId, PutFileOptions, RestoreDeletedDestination,
@@ -73,6 +73,50 @@ fn normalize_namespace(mut response: GrepResponse) -> GrepResponse {
     response
 }
 
+/// Checks that the due check of a backfilling entry finds the backfill due
+/// from grep's entry alone, without a listing of the namespace's files,
+/// because a backfilling entry always has work for the next step.
+#[tokio::test]
+async fn the_due_check_of_a_backfilling_entry_lists_no_files() {
+    let directory = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = recording.clone();
+    let namespace_id = NamespaceId::parse("due-backfill").expect("namespace id");
+    let (_writer, namespace) = writable_namespace(&store, &namespace_id).await;
+    namespace
+        .put_file("/a.txt", b"needle\n", &loonfs_test_support::test_actor())
+        .await
+        .expect("write a file");
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable");
+    assert_matches!(
+        host.worker
+            .lifecycle(&namespace_id)
+            .await
+            .expect("lifecycle"),
+        GrepIndexStatus::Backfilling { .. }
+    );
+    recording.reset();
+    assert!(host
+        .worker
+        .index_due(&namespace_id, GramIndexBuildPolicy::default())
+        .await
+        .expect("check whether the index is due"));
+    // The load of the current manifest, which the reader's cache already
+    // has, and nothing more.
+    assert_eq!(
+        loonfs_test_support::stores::request_lines(&recording.take()),
+        [
+            "get due-backfill Boundary",
+            "list namespaces/due-backfill/manifests/",
+            "get due-backfill Boundary",
+        ]
+    );
+}
+
 #[tokio::test]
 async fn grep_worker_lifecycle_backfills_queries_and_disables() {
     let temp_dir = tempdir().expect("tempdir");
@@ -91,11 +135,11 @@ async fn grep_worker_lifecycle_backfills_queries_and_disables() {
             .expect("write preexisting file");
     }
 
-    let worker = worker(&store).await;
-    let enabled = worker.enable(&namespace_id).await.expect("enable");
+    let host = GrepHost::new(&store).await;
+    let enabled = host.enable_of(&namespace_id).await.expect("enable");
     assert_matches!(enabled, loonfs_grep::GrepEnableOutcome::Enabled { .. });
-    let again = worker
-        .enable(&namespace_id)
+    let again = host
+        .enable_of(&namespace_id)
         .await
         .expect("idempotent enable");
     assert_matches!(again, loonfs_grep::GrepEnableOutcome::AlreadyEnabled { .. });
@@ -108,8 +152,8 @@ async fn grep_worker_lifecycle_backfills_queries_and_disables() {
         max_files_per_step: NonZeroUsize::MIN,
         ..GramIndexBuildPolicy::default()
     };
-    let first = worker
-        .steps(&namespace_id, 0)
+    let first = host
+        .steps_of(&namespace_id, 0)
         .build_step(policy)
         .await
         .expect("first backfill page");
@@ -119,7 +163,7 @@ async fn grep_worker_lifecycle_backfills_queries_and_disables() {
         .expect_err("backfill is not materialized");
     assert_eq!(error.code(), ErrorCode::NotSupported);
 
-    drive_worker_to_current(&worker, &namespace_id, policy).await;
+    drive_worker_to_current(&host, &namespace_id, policy).await;
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect("materialized query");
@@ -131,7 +175,7 @@ async fn grep_worker_lifecycle_backfills_queries_and_disables() {
         .is_empty());
 
     assert_eq!(
-        worker.disable(&namespace_id).await.expect("disable"),
+        host.disable_of(&namespace_id).await.expect("disable"),
         loonfs_grep::GrepDisableOutcome::Disabled
     );
     let disabled_manifest = crate::common::control::grep_entry(&store, &namespace_id)
@@ -143,13 +187,12 @@ async fn grep_worker_lifecycle_backfills_queries_and_disables() {
         "disabling empties the entry's runs, which leaves the segments to the core collector"
     );
     assert_eq!(
-        worker
-            .disable(&namespace_id)
+        host.disable_of(&namespace_id)
             .await
             .expect("idempotent disable"),
         loonfs_grep::GrepDisableOutcome::NotEnabled
     );
-    let reenabled = worker.enable(&namespace_id).await.expect("re-enable");
+    let reenabled = host.enable_of(&namespace_id).await.expect("re-enable");
     assert_matches!(reenabled, loonfs_grep::GrepEnableOutcome::Enabled { .. });
     let manifest = crate::common::control::grep_entry(&store, &namespace_id)
         .await
@@ -175,10 +218,9 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
         .await
         .expect("write initial file");
 
-    let host = GrepHost::new(&store, "run-number-limit").await;
-    let worker = &host.worker;
-    worker.enable(&namespace_id).await.expect("enable grep");
-    drive_worker_to_current(worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable grep");
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     let current = control::grep_entry(&store, &namespace_id)
         .await
@@ -206,13 +248,11 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
         .expect("list segments before failure");
 
     for error in [
-        worker
-            .steps(&namespace_id, 0)
+        host.steps_of(&namespace_id, 0)
             .build_step(GramIndexBuildPolicy::default())
             .await
             .expect_err("a build cannot allocate a run above the public maximum"),
-        worker
-            .steps(&namespace_id, 0)
+        host.steps_of(&namespace_id, 0)
             .reorganize_step(GramIndexBuildPolicy {
                 max_delta_runs: NonZeroUsize::MIN,
                 ..GramIndexBuildPolicy::default()
@@ -252,10 +292,9 @@ async fn a_retention_gap_restarts_a_fresh_backfill() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-gap").expect("namespace id");
     let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
-    let maintenance = GrepHost::new(&store, "gap-maintenance").await.maintenance;
-    let worker = worker(&store).await;
-    worker.enable(&namespace_id).await.expect("enable");
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     namespace
         .put_file(
@@ -265,8 +304,7 @@ async fn a_retention_gap_restarts_a_fresh_backfill() {
         )
         .await
         .expect("write after watermark");
-    let retention_floor_seq =
-        fold_wal_and_advance_retention(&store, &maintenance, &namespace_id).await;
+    let retention_floor_seq = fold_wal_and_advance_retention(&store, &namespace_id).await;
     assert!(retention_floor_seq > CommitSeq(0));
     let indexed = crate::common::control::grep_entry(&store, &namespace_id)
         .await
@@ -276,8 +314,8 @@ async fn a_retention_gap_restarts_a_fresh_backfill() {
 
     // The feed can no longer reach the watermark, which the worker must
     // read as "my basis is gone" and answer with a whole new attempt.
-    let restart = worker
-        .steps(&namespace_id, 0)
+    let restart = host
+        .steps_of(&namespace_id, 0)
         .build_step(GramIndexBuildPolicy::default())
         .await
         .expect("gap restart");
@@ -292,7 +330,7 @@ async fn a_retention_gap_restarts_a_fresh_backfill() {
         "a rebootstrap keeps the index's segments, whose postings stay valid"
     );
 
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect("query after rebootstrap");
@@ -307,9 +345,7 @@ async fn retention_passing_a_backfill_sequence_restarts_the_backfill() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-handoff-gap").expect("namespace id");
     let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
-    let maintenance = GrepHost::new(&store, "handoff-gap-maintenance")
-        .await
-        .maintenance;
+
     for index in 0..2u32 {
         namespace
             .put_file(
@@ -321,9 +357,10 @@ async fn retention_passing_a_backfill_sequence_restarts_the_backfill() {
             .expect("write a file at the backfill sequence");
     }
 
-    let worker = worker(&store).await;
-    worker.enable(&namespace_id).await.expect("enable");
-    let captured_seq = match worker
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable");
+    let captured_seq = match host
+        .worker
         .lifecycle(&namespace_id)
         .await
         .expect("backfill lifecycle")
@@ -335,8 +372,8 @@ async fn retention_passing_a_backfill_sequence_restarts_the_backfill() {
         max_files_per_step: NonZeroUsize::MIN,
         ..GramIndexBuildPolicy::default()
     };
-    let first = worker
-        .steps(&namespace_id, 0)
+    let first = host
+        .steps_of(&namespace_id, 0)
         .build_step(policy)
         .await
         .expect("first backfill page");
@@ -356,15 +393,14 @@ async fn retention_passing_a_backfill_sequence_restarts_the_backfill() {
         )
         .await
         .expect("write during backfill");
-    let retention_floor_seq =
-        fold_wal_and_advance_retention(&store, &maintenance, &namespace_id).await;
+    let retention_floor_seq = fold_wal_and_advance_retention(&store, &namespace_id).await;
     assert!(retention_floor_seq > captured_seq);
 
     // The files at the backfill's sequence can no longer be read, so the
     // next step starts a new backfill at a later sequence instead of
     // finishing the walk.
-    let restarted = worker
-        .steps(&namespace_id, 0)
+    let restarted = host
+        .steps_of(&namespace_id, 0)
         .build_step(policy)
         .await
         .expect("restart the backfill");
@@ -377,7 +413,7 @@ async fn retention_passing_a_backfill_sequence_restarts_the_backfill() {
         .await
         .expect_err("a backfill cannot answer a query");
     assert_eq!(error.code(), ErrorCode::NotSupported);
-    drive_worker_to_current(&worker, &namespace_id, policy).await;
+    drive_worker_to_current(&host, &namespace_id, policy).await;
 
     let response = new_query(&store, &namespace_id, &request("handoff needle"))
         .await
@@ -471,16 +507,16 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
             .expect("write preexisting file");
     }
 
-    let worker = worker(&store).await;
-    worker.enable(&namespace_id).await.expect("enable");
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable");
     // One file per step, so the backfill is genuinely partway through the
     // snapshot's file set when the commits below are made.
     let policy = GramIndexBuildPolicy {
         max_files_per_step: NonZeroUsize::MIN,
         ..GramIndexBuildPolicy::default()
     };
-    let first = worker
-        .steps(&namespace_id, 0)
+    let first = host
+        .steps_of(&namespace_id, 0)
         .build_step(policy)
         .await
         .expect("first backfill page");
@@ -517,7 +553,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         .await
         .expect("replace a file the snapshot captured during backfill");
 
-    drive_worker_to_current(&worker, &namespace_id, policy).await;
+    drive_worker_to_current(&host, &namespace_id, policy).await;
 
     let response = new_query(&store, &namespace_id, &request("overlap needle"))
         .await
@@ -564,9 +600,9 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
         )
         .await
         .expect("write file");
-    let worker = worker(&store).await;
-    worker.enable(&namespace_id).await.expect("enable");
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
     let segments_before = grep_segment_ids(&store, &namespace_id).await;
     let built_before = grep_built_through_seq(&store, &namespace_id).await;
 
@@ -578,7 +614,7 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
         )
         .await
         .expect("move the indexed file");
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     assert_eq!(
         grep_segment_ids(&store, &namespace_id).await,
@@ -616,9 +652,9 @@ async fn a_recursive_delete_hides_matches_and_a_restore_brings_them_back() {
             .await
             .expect("write file");
     }
-    let worker = worker(&store).await;
-    worker.enable(&namespace_id).await.expect("enable");
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
     let segments_before = grep_segment_ids(&store, &namespace_id).await;
     let docs_inode_id = namespace
         .stat("/docs")
@@ -645,7 +681,7 @@ async fn a_recursive_delete_hides_matches_and_a_restore_brings_them_back() {
         )
         .await
         .expect("delete the subtree");
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     let hidden = new_query(&store, &namespace_id, &request("subtree needle"))
         .await
@@ -675,7 +711,7 @@ async fn a_recursive_delete_hides_matches_and_a_restore_brings_them_back() {
         )
         .await
         .expect("restore the subtree");
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     let restored = new_query(&store, &namespace_id, &request("subtree needle"))
         .await
@@ -725,9 +761,9 @@ async fn restoring_a_subtree_deleted_before_backfill_needs_no_rebuild() {
         .await
         .expect("delete subtree before backfill");
 
-    let worker = worker(&store).await;
-    worker.enable(&namespace_id).await.expect("enable");
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
     assert!(
         new_query(&store, &namespace_id, &request("restored needle"))
             .await
@@ -758,8 +794,8 @@ async fn restoring_a_subtree_deleted_before_backfill_needs_no_rebuild() {
     assert!(restored.tail_scanned);
     assert_eq!(matched_paths(&restored), vec!["/docs/a.txt", "/docs/b.txt"]);
 
-    let step = worker
-        .steps(&namespace_id, 0)
+    let step = host
+        .steps_of(&namespace_id, 0)
         .build_step(GramIndexBuildPolicy::default())
         .await
         .expect("build step after restore");
@@ -791,17 +827,15 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
     let (writer, namespace_writer) = writable_namespace(&store, &namespace_id).await;
     let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
-    let host = GrepHost::new(&store, "worker-isolation").await;
-    let worker = &host.worker;
-    worker.enable(&namespace_id).await.expect("enable");
-    drive_worker_to_current(worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
     publish_entry_of_another_version(&host, &namespace_id).await;
 
     let actor = loonfs_test_support::test_actor();
     let (build, commit) = tokio::join!(
         async {
-            worker
-                .steps(&namespace_id, 0)
+            host.steps_of(&namespace_id, 0)
                 .build_step(GramIndexBuildPolicy::default())
                 .await
         },
@@ -829,23 +863,23 @@ async fn grep_entry_lifecycle_pins_not_materialized_error_surface() {
         .build()
         .await
         .expect("writer");
+    crate::common::share_writer(&store, &writer);
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
-    let host = GrepHost::new(&store, "error-surface").await;
-    let worker = &host.worker;
+    let host = GrepHost::new(&store).await;
 
     assert_not_enabled_error(
         "never enabled",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
-    worker.enable(&namespace_id).await.expect("enable");
+    host.enable_of(&namespace_id).await.expect("enable");
     assert_backfilling_error(
         "backfilling",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
-    worker.disable(&namespace_id).await.expect("disable");
+    host.disable_of(&namespace_id).await.expect("disable");
     assert_not_enabled_error(
         "disabled",
         new_query(&store, &namespace_id, &request("needle")).await,
@@ -881,6 +915,7 @@ async fn disable_resets_an_invalid_entry_and_enable_starts_a_new_backfill() {
         .build()
         .await
         .expect("writer");
+    crate::common::share_writer(&store, &writer);
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -895,9 +930,8 @@ async fn disable_resets_an_invalid_entry_and_enable_starts_a_new_backfill() {
         )
         .await
         .expect("write a file");
-    let host = GrepHost::new(&store, "invalid-entry").await;
-    let worker = &host.worker;
-    worker.enable(&namespace_id).await.expect("enable");
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable");
 
     type EntryEdit = fn(&mut serde_json::Value);
     let cases: [(&str, EntryEdit); 2] = [
@@ -913,7 +947,7 @@ async fn disable_resets_an_invalid_entry_and_enable_starts_a_new_backfill() {
     ];
     for (case, edit) in cases {
         publish_edited_entry(&host, &namespace_id, edit).await;
-        let refused = worker.enable(&namespace_id).await.expect_err(case);
+        let refused = host.enable_of(&namespace_id).await.expect_err(case);
         assert_matches!(refused, GrepError::IndexCorrupt { .. }, "{case}");
         assert!(
             refused.to_string().contains("disable and re-enable grep"),
@@ -921,7 +955,7 @@ async fn disable_resets_an_invalid_entry_and_enable_starts_a_new_backfill() {
         );
 
         assert_eq!(
-            worker.disable(&namespace_id).await.expect(case),
+            host.disable_of(&namespace_id).await.expect(case),
             loonfs_grep::GrepDisableOutcome::Disabled,
             "{case}"
         );
@@ -935,13 +969,13 @@ async fn disable_resets_an_invalid_entry_and_enable_starts_a_new_backfill() {
             new_query(&store, &namespace_id, &request("needle")).await,
         );
 
-        let enabled = worker.enable(&namespace_id).await.expect(case);
+        let enabled = host.enable_of(&namespace_id).await.expect(case);
         assert_matches!(enabled, loonfs_grep::GrepEnableOutcome::Enabled { .. });
         let backfill = control::grep_entry(&store, &namespace_id)
             .await
             .expect("grep's entry");
         assert_matches!(backfill.status(), GrepIndexStatus::Backfilling { .. });
-        drive_worker_to_current(worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+        drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
     writer.shutdown().await.expect("shutdown");
 }
@@ -962,6 +996,7 @@ async fn enable_and_disable_refuse_an_entry_of_another_version_and_leave_it() {
         .build()
         .await
         .expect("writer");
+    crate::common::share_writer(&store, &writer);
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -976,10 +1011,9 @@ async fn enable_and_disable_refuse_an_entry_of_another_version_and_leave_it() {
         )
         .await
         .expect("write a file");
-    let host = GrepHost::new(&store, "another-version").await;
-    let worker = &host.worker;
-    worker.enable(&namespace_id).await.expect("enable");
-    drive_worker_to_current(worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
     publish_entry_of_another_version(&host, &namespace_id).await;
     let before = control::metadata_manifest(&store, &namespace_id).await;
     assert!(
@@ -989,8 +1023,8 @@ async fn enable_and_disable_refuse_an_entry_of_another_version_and_leave_it() {
         "the other version's entry lists the index's runs"
     );
 
-    assert_unsupported_version_error("enable", worker.enable(&namespace_id).await);
-    assert_unsupported_version_error("disable", worker.disable(&namespace_id).await);
+    assert_unsupported_version_error("enable", host.enable_of(&namespace_id).await);
+    assert_unsupported_version_error("disable", host.disable_of(&namespace_id).await);
     assert_eq!(
         control::metadata_manifest(&store, &namespace_id)
             .await
@@ -1036,9 +1070,9 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
     let namespace_id = NamespaceId::parse("scan-gap").expect("namespace id");
     let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
 
-    let worker = worker(&store).await;
-    worker.enable(&namespace_id).await.expect("enable");
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     namespace
         .put_file(
@@ -1048,7 +1082,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         )
         .await
         .expect("write WAL-only file");
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     let head = control::head(&store, &namespace_id).await;
     let metadata_manifest = control::metadata_manifest(&store, &namespace_id).await;
@@ -1136,7 +1170,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
         )
         .await
         .expect("create a file by inode");
-    let host = GrepHost::new(&store, "deep-scan").await;
+    let host = GrepHost::new(&store).await;
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
     // "ee" has no trigram, so it scans the directory tree; "tree" uses the index.
@@ -1241,14 +1275,14 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-results").expect("namespace id");
     let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
-    let worker = worker(&store).await;
+    let host = GrepHost::new(&store).await;
     let policy = GramIndexBuildPolicy {
         max_delta_runs: nonzero_usize(2),
         max_mid_runs: nonzero_usize(2),
         ..GramIndexBuildPolicy::default()
     };
-    worker.enable(&namespace_id).await.expect("enable");
-    drive_worker_to_current(&worker, &namespace_id, policy).await;
+    host.enable_of(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&host, &namespace_id, policy).await;
 
     for round in 0..6u32 {
         namespace
@@ -1259,18 +1293,16 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
             )
             .await
             .expect("write indexed file");
-        worker
-            .steps(&namespace_id, 0)
+        host.steps_of(&namespace_id, 0)
             .build_step(policy)
             .await
             .expect("new build");
-        worker
-            .steps(&namespace_id, 0)
+        host.steps_of(&namespace_id, 0)
             .reorganize_step(policy)
             .await
             .expect("new reorganization");
     }
-    drive_worker_to_current(&worker, &namespace_id, policy).await;
+    drive_worker_to_current(&host, &namespace_id, policy).await;
 
     namespace
         .put_file(
@@ -1402,19 +1434,19 @@ async fn snapshot_backfill_matches_incremental_worker_results() {
         .build()
         .await
         .expect("writer");
+    crate::common::share_writer(&store, &writer);
     for namespace_id in [&backfill_namespace, &incremental_namespace] {
         writer
             .create_namespace(namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
     }
-    let worker = worker(&store).await;
-    worker
-        .enable(&incremental_namespace)
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&incremental_namespace)
         .await
         .expect("enable incremental");
     drive_worker_to_current(
-        &worker,
+        &host,
         &incremental_namespace,
         GramIndexBuildPolicy::default(),
     )
@@ -1433,18 +1465,17 @@ async fn snapshot_backfill_matches_incremental_worker_results() {
                 .expect("write file");
         }
         drive_worker_to_current(
-            &worker,
+            &host,
             &incremental_namespace,
             GramIndexBuildPolicy::default(),
         )
         .await;
     }
-    worker
-        .enable(&backfill_namespace)
+    host.enable_of(&backfill_namespace)
         .await
         .expect("enable backfill");
     drive_worker_to_current(
-        &worker,
+        &host,
         &backfill_namespace,
         GramIndexBuildPolicy {
             max_files_per_step: nonzero_usize(2),
@@ -1481,10 +1512,10 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
         )
         .await
         .expect("write file");
-    let worker = worker(&store).await;
+    let host = GrepHost::new(&store).await;
 
     let loonfs_grep::GrepEnableOutcome::Enabled { state } =
-        worker.enable(&namespace_id).await.expect("enable")
+        host.enable_of(&namespace_id).await.expect("enable")
     else {
         panic!("a fresh enable publishes a backfill");
     };
@@ -1502,7 +1533,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
         "a backfill must not report a watermark anywhere: {rendered}"
     );
     assert_eq!(
-        worker
+        host.worker
             .lifecycle(&namespace_id)
             .await
             .expect("read lifecycle"),
@@ -1512,8 +1543,8 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
 
     // Re-enabling an active manifest reports the same phase, still without a
     // watermark.
-    let loonfs_grep::GrepEnableOutcome::AlreadyEnabled { state: again } = worker
-        .enable(&namespace_id)
+    let loonfs_grep::GrepEnableOutcome::AlreadyEnabled { state: again } = host
+        .enable_of(&namespace_id)
         .await
         .expect("idempotent enable")
     else {
@@ -1523,9 +1554,10 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
 
     // Once the walk finishes, the API reports the manifest as active with the
     // target it reached as its own watermark, and no target field survives.
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    drive_worker_to_current(&host, &namespace_id, GramIndexBuildPolicy::default()).await;
     let active = loonfs_types::GrepIndexStatus::from(
-        &worker
+        &host
+            .worker
             .lifecycle(&namespace_id)
             .await
             .expect("read completed lifecycle"),
@@ -1563,14 +1595,14 @@ async fn enable_disable_and_warm_queries_read_and_write_no_grep_object() {
         .build()
         .await
         .expect("writer");
+    crate::common::share_writer(&store, &writer);
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
-    let host = GrepHost::new(&store, "entry-query").await;
-    host.worker.enable(&namespace_id).await.expect("enable");
-    host.worker
-        .steps(&namespace_id, 0)
+    let host = GrepHost::new(&store).await;
+    host.enable_of(&namespace_id).await.expect("enable");
+    host.steps_of(&namespace_id, 0)
         .build_step(GramIndexBuildPolicy::default())
         .await
         .expect("empty backfill");
@@ -1587,7 +1619,7 @@ async fn enable_disable_and_warm_queries_read_and_write_no_grep_object() {
         .await
         .expect(query);
     }
-    host.worker.disable(&namespace_id).await.expect("disable");
+    host.disable_of(&namespace_id).await.expect("disable");
     assert_eq!(recording.take(), Vec::new());
     assert_matches!(
         grep_with(
@@ -1635,6 +1667,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
         .build()
         .await
         .expect("writer");
+    crate::common::share_writer(&store, &writer);
     let namespace_id = NamespaceId::parse("grep-access").expect("namespace");
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -1649,7 +1682,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let host = GrepHost::new(&store, "grep-access").await;
+    let host = GrepHost::new(&store).await;
     for operation in [
         FilesystemOperation::CreateDirectory {
             path: AbsolutePath::parse("/team").expect("path"),
@@ -1783,6 +1816,7 @@ async fn a_subject_without_history_follows_a_cursor_over_unchanged_files() {
         .build()
         .await
         .expect("writer");
+    crate::common::share_writer(&store, &writer);
     let namespace_id = NamespaceId::parse("grep-pages-access").expect("namespace");
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -1848,7 +1882,7 @@ async fn a_subject_without_history_follows_a_cursor_over_unchanged_files() {
     };
     put("/team/one", b"page needle one\n").await;
     put("/team/two", b"page needle two\n").await;
-    let host = GrepHost::new(&store, "grep-pages-access").await;
+    let host = GrepHost::new(&store).await;
     host.enable_grep_index(&namespace_id).await.expect("index");
     let page = |principal: &'static str, cursor: Option<String>| {
         let reads = NamespaceReads::new(host.reader.clone(), &namespace_id)
@@ -1905,19 +1939,15 @@ async fn a_direct_build_policy_rejects_oversized_pages_without_panicking() {
     let directory = tempdir().expect("directory");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = NamespaceId::parse("policy-limit").expect("namespace");
-    let host = GrepHost::new(&store, "policy-limit").await;
+    let host = GrepHost::new(&store).await;
     host.writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
-    host.worker
-        .enable(&namespace_id)
-        .await
-        .expect("enable grep");
+    host.enable_of(&namespace_id).await.expect("enable grep");
     for limit in [loonfs_types::MAX_PAGE_LIMIT as usize + 1, usize::MAX] {
         let error = host
-            .worker
-            .steps(&namespace_id, 0)
+            .steps_of(&namespace_id, 0)
             .build_step(GramIndexBuildPolicy {
                 max_files_per_step: nonzero_usize(limit),
                 ..GramIndexBuildPolicy::default()
@@ -1930,8 +1960,7 @@ async fn a_direct_build_policy_rejects_oversized_pages_without_panicking() {
             Some("max_files_per_step")
         );
     }
-    host.worker
-        .steps(&namespace_id, 0)
+    host.steps_of(&namespace_id, 0)
         .build_step(GramIndexBuildPolicy {
             max_files_per_step: nonzero_usize(loonfs_types::MAX_PAGE_LIMIT as usize),
             ..GramIndexBuildPolicy::default()

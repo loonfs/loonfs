@@ -69,8 +69,7 @@ async fn a_scheduler_runs_steps_only_when_its_host_calls_them() {
         .build()
         .await
         .expect("build the host runtime");
-    let maintenance_writer_id = writer_id("host-maintenance");
-    let maintenance = runtime.maintenance(maintenance_writer_id.clone());
+    let maintenance = runtime.maintenance();
     let namespaces = Arc::new(Namespaces::<SchedulerState>::new(runtime.clone()));
     let scheduler = Scheduler::new(
         SchedulerConfig {
@@ -80,9 +79,9 @@ async fn a_scheduler_runs_steps_only_when_its_host_calls_them() {
             gc_interval_ms: DEFAULT_GC_INTERVAL_MS,
             sweep_interval_ms: DEFAULT_SWEEP_INTERVAL_MS,
             idle_session_close_after_ms: DEFAULT_IDLE_SESSION_CLOSE_AFTER_MS,
+            sweep_store: true,
         },
         Arc::clone(&namespaces),
-        Some(maintenance_writer_id),
         None,
         &DefaultMetricsRecorder::new(),
     );

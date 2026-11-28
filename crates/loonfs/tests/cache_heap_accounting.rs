@@ -287,12 +287,7 @@ fn full_attributes() -> BTreeMap<AttributeKey, AttributeValue> {
 
 async fn seed(store: &SharedObjectStore, shape: &Shape) {
     let writer = writer(store.clone(), "seed-writer").await;
-    let maintenance = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("seed-maintenance"))
-        .build()
-        .await
-        .expect("maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id("seed-maintenance"));
+    let maintenance = writer.clone();
     let fold = MaintainMetadataOptions {
         max_wal_tail_objects: std::num::NonZeroU64::MIN,
     };
@@ -318,7 +313,9 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
             .await
             .expect("seed commit");
         maintenance
-            .maintain_metadata_with_options(&namespace_id, &fold)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .maintain_metadata_with_options(&fold)
             .await
             .expect("fold");
         let mut next = shape.folded_entries;

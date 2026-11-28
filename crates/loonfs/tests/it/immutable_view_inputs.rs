@@ -20,8 +20,7 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
         .writer_id(loonfs_test_support::ids::writer_id("seed-maintenance"))
         .build()
         .await
-        .expect("build maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id("seed-maintenance"));
+        .expect("build maintenance");
     writer
         .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -38,12 +37,11 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
             .expect("seed file");
     }
     maintenance
-        .maintain_metadata_with_options(
-            namespace_id,
-            &MaintainMetadataOptions {
-                max_wal_tail_objects: std::num::NonZeroU64::MIN,
-            },
-        )
+        .open_namespace(namespace_id)
+        .expect("open namespace")
+        .maintain_metadata_with_options(&MaintainMetadataOptions {
+            max_wal_tail_objects: std::num::NonZeroU64::MIN,
+        })
         .await
         .expect("step");
 }

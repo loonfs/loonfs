@@ -1,5 +1,4 @@
-//! Writer acquisition through a manifest epoch and a numbered fence WAL object,
-//! and the retry loop that fences and floor objects share.
+//! Writer acquisition through a manifest epoch and a numbered fence WAL object.
 
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
@@ -8,15 +7,15 @@ use crate::manifest::PublicationReport;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Checked;
 use crate::namespace::held::Held;
-use crate::namespace::read_anchor::{NamespaceReadAnchor, WriterAnchor};
+use crate::namespace::read_anchor::WriterAnchor;
 use crate::namespace::store::NamespaceStore;
-use crate::time::{Observation, OperationClock};
+use crate::time::OperationClock;
 use crate::wal::{prepare_wal_object, publish_wal_object, wal_no_is_unfolded};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::WriterBlock;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::format::wal::WalObjectBody;
-use loonfs_types::{CommitSeq, WriterEpoch, WriterId};
+use loonfs_types::{WriterEpoch, WriterId};
 
 /// Captures the writer identity and fencing epoch a session must retain while publishing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,28 +26,13 @@ pub struct AcquiredWriter {
     pub writer_epoch: WriterEpoch,
 }
 
-/// A writer epoch that a session or a maintainer acquired: the epoch, its
+/// A writer epoch that a session acquired: the epoch, its
 /// claim manifest, and the read anchor whose tip is the fence.
 #[derive(Debug)]
 pub(crate) struct WriterAcquisition {
     pub(crate) writer: AcquiredWriter,
     pub(crate) claim: Held<LoadedManifest>,
     pub(crate) anchor: WriterAnchor,
-}
-
-/// A fence or floor object that [`NamespaceStore::put_fence_or_floor_object`]
-/// puts at the WAL tip. The two kinds differ in where each attempt's writer
-/// epoch comes from.
-#[derive(Debug, Clone, Copy)]
-enum FenceOrFloorObject<'a> {
-    /// A fence with the epoch of this acquired writer. Loading a writer
-    /// anchor whose manifest has a higher epoch returns `writer_fenced`.
-    Fence(&'a AcquiredWriter),
-    /// A floor object for this floor, put by a process without the writer
-    /// epoch. Each attempt copies the epoch of the manifest that the
-    /// attempt's anchor loaded (format spec, "Advancing the retention
-    /// floor").
-    Floor(CommitSeq),
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
@@ -127,52 +111,27 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
-    /// Puts a fence with `acquired`'s epoch at the tip of `anchor`, as
-    /// [`Self::put_fence_or_floor_object`] describes. Every anchor that the
-    /// put starts from or loads is a writer anchor, so the anchor it returns
-    /// is one too.
+    /// Puts a fence with `acquired`'s epoch at the tip of `anchor`, checks
+    /// after the put whether it's live, and puts it again at the new tip while
+    /// it's dead or its number is taken (format spec, "Writer ownership").
+    /// Returns the writer anchor whose view includes the live fence.
+    ///
+    /// The fence is live when the anchor's manifest is still the newest, and
+    /// otherwise when its number is above the `folded_wal_no` of the newest
+    /// manifest (see [`wal_no_is_unfolded`]). The newest manifest is the one
+    /// that the next writer anchor's load finds (see
+    /// [`Self::load_writer_read_anchor`]), so a dead fence's next attempt
+    /// starts from that anchor without another load, and that load returns
+    /// `writer_fenced` for another writer's epoch. Every put after the first
+    /// checks the publication budget first, and the call returns
+    /// `store_contention` when the budget or the attempts run out.
     async fn put_fence(
         &self,
         acquired: &AcquiredWriter,
         anchor: WriterAnchor,
         clock: &OperationClock,
     ) -> Result<WriterAnchor> {
-        self.put_fence_or_floor_object(FenceOrFloorObject::Fence(acquired), anchor.0, clock)
-            .await
-            .map(WriterAnchor)
-    }
-
-    /// Creates a floor object for `target` at the WAL tip of the live read
-    /// anchor, as [`Self::put_fence_or_floor_object`] describes, and returns
-    /// the anchor whose view includes the floor object, or the first anchor
-    /// whose floor is already at or above `target`.
-    pub(crate) async fn put_floor_object(&self, target: CommitSeq) -> Result<NamespaceReadAnchor> {
-        let clock = self.start_clock();
-        let anchor = self.load_live_read_anchor(clock.observe()).await?;
-        self.put_fence_or_floor_object(FenceOrFloorObject::Floor(target), anchor, &clock)
-            .await
-    }
-
-    /// Puts `object` at the tip of `anchor`, checks after the put whether it's
-    /// live, and puts it again at the new tip while it's dead or its number is
-    /// taken (format spec, "Writer ownership" and "Advancing the retention
-    /// floor"). Returns the read anchor whose view includes the live object.
-    /// For a floor object, the call returns without a put at the first anchor
-    /// whose floor is already at or above the target.
-    ///
-    /// The object is live when the anchor's manifest is still the newest, and
-    /// otherwise when its number is above the `folded_wal_no` of the newest
-    /// manifest (see [`wal_no_is_unfolded`]). The newest manifest is the one
-    /// that the next anchor's load finds, so a dead object's next attempt
-    /// starts from that anchor without another load. Every put after the
-    /// first checks the publication budget first, and the call returns
-    /// `store_contention` when the budget or the attempts run out.
-    async fn put_fence_or_floor_object(
-        &self,
-        object: FenceOrFloorObject<'_>,
-        mut anchor: NamespaceReadAnchor,
-        clock: &OperationClock,
-    ) -> Result<NamespaceReadAnchor> {
+        let mut anchor = anchor.0;
         // Bounded by both the publication time budget and
         // `MAX_UNFOLDED_WAL_OBJECTS`: a writer that commits ahead of the put
         // stops at `MAX_UNFOLDED_WAL_OBJECTS` unfolded WAL objects until a
@@ -180,21 +139,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // frozen clock or broken store.
         for attempt in 0..crate::limits::MAX_UNFOLDED_WAL_OBJECTS {
             let head = &anchor.read_state;
-            let (writer_epoch, body) = match object {
-                FenceOrFloorObject::Fence(acquired) => {
-                    (acquired.writer_epoch, WalObjectBody::Fence)
-                }
-                FenceOrFloorObject::Floor(target) if head.retention_floor_seq >= target => {
-                    return Ok(anchor)
-                }
-                FenceOrFloorObject::Floor(target) => (
-                    head.writer_epoch,
-                    WalObjectBody::Floor {
-                        retention_floor_seq: target,
-                    },
-                ),
-            };
-            let prepared = prepare_wal_object(head, writer_epoch, body)?;
+            let prepared = prepare_wal_object(head, acquired.writer_epoch, WalObjectBody::Fence)?;
             if attempt > 0 {
                 clock.ensure_metadata_publication_budget(&self.namespace_id)?;
             }
@@ -207,7 +152,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         anchor
                             .tail
                             .push_published(prepared.envelope().clone(), prepared.as_bytes().len());
-                        return Ok(anchor);
+                        return Ok(WriterAnchor(anchor));
                     }
                     Some(put_head.wal_no)
                 }
@@ -217,34 +162,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
             // The old anchor's decoded WAL tail is dropped before the next
             // anchor's load, so the retry keeps one decoded tail in memory.
             drop(anchor);
-            anchor = self.load_next_anchor(object, clock.observe()).await?;
+            anchor = self
+                .load_writer_read_anchor(acquired, clock.observe())
+                .await?
+                .0;
             if put_wal_no.is_some_and(|wal_no| {
                 wal_no_is_unfolded(wal_no, anchor.current_manifest().folded_wal_no())
             }) {
-                return Ok(anchor);
+                return Ok(WriterAnchor(anchor));
             }
         }
         Err(CoreError::contention_exhausted(
             &anchor.current_manifest().object_key,
         ))
-    }
-
-    /// Loads the anchor that the next put of `object` starts from: the writer
-    /// anchor for a fence (see [`Self::load_writer_read_anchor`]), or the
-    /// live read anchor for a floor object, whose manifest's epoch the floor
-    /// object copies. Either load returns `namespace_deleted` for a
-    /// tombstone.
-    async fn load_next_anchor(
-        &self,
-        object: FenceOrFloorObject<'_>,
-        observed: Observation,
-    ) -> Result<NamespaceReadAnchor> {
-        match object {
-            FenceOrFloorObject::Fence(acquired) => {
-                Ok(self.load_writer_read_anchor(acquired, observed).await?.0)
-            }
-            FenceOrFloorObject::Floor(_) => self.load_live_read_anchor(observed).await,
-        }
     }
 
     /// Returns the manifest of the namespace's cached head, with the manifest

@@ -3,9 +3,7 @@
 use crate::common::GrepHost;
 use loonfs::engine::PermitCounts;
 use loonfs::{InlineContentPolicy, LoonFs, NamespaceId, SharedObjectStore, Writable};
-use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepReorganizeOutcome, GrepStepBudget, GrepWorker,
-};
+use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepReorganizeOutcome, GrepStepBudget};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, KeyPrefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::bounded;
@@ -86,15 +84,6 @@ async fn namespace_with_files(writer: &LoonFs<Writable>, name: &str) -> Namespac
     namespace_id
 }
 
-fn worker_with(host: &GrepHost, budget: &GrepStepBudget) -> GrepWorker<SharedObjectStore> {
-    GrepWorker::new(
-        host.store.clone(),
-        host.reader.clone(),
-        host.maintenance.clone(),
-        budget.clone(),
-    )
-}
-
 async fn blocking_setup(
     directory: &tempfile::TempDir,
 ) -> (Arc<BlockingStore<LocalFsStore>>, LoonFs<Writable>, GrepHost) {
@@ -105,7 +94,7 @@ async fn blocking_setup(
     ));
     let store: SharedObjectStore = blocking.clone();
     let writer = content_object_writer(&store).await;
-    let host = GrepHost::new(&store, "grep-step-permits").await;
+    let host = GrepHost::new(&store).await;
     (blocking, writer, host)
 }
 
@@ -113,13 +102,13 @@ async fn blocking_setup(
 /// holding a step permit.
 async fn parked_build_step<'a>(
     blocking: &BlockingStore<LocalFsStore>,
-    worker: &'a GrepWorker<SharedObjectStore>,
+    budgeted: &'a GrepHost,
     namespace_id: &'a NamespaceId,
 ) -> Pin<Box<impl Future<Output = loonfs_grep::Result<GrepBuildOutcome>> + 'a>> {
     blocking.block_next();
     let mut step = Box::pin(async move {
-        worker
-            .steps(namespace_id, 0)
+        budgeted
+            .steps_of(namespace_id, 0)
             .build_step(GramIndexBuildPolicy::default())
             .await
     });
@@ -160,12 +149,15 @@ async fn no_more_grep_steps_hold_content_than_the_limit() {
     ));
     let store: SharedObjectStore = watch.clone();
     let writer = content_object_writer(&store).await;
-    let host = GrepHost::new(&store, "grep-step-permits").await;
-    let worker = &worker_with(&host, &GrepStepBudget::new(NonZeroUsize::MIN));
+    let host = GrepHost::new(&store).await;
+    let budgeted = &host.with_budget(&GrepStepBudget::new(NonZeroUsize::MIN));
     let mut namespaces = Vec::new();
     for index in 0..3 {
         let namespace_id = namespace_with_files(&writer, &format!("permits-{index}")).await;
-        worker.enable(&namespace_id).await.expect("enable grep");
+        budgeted
+            .enable_of(&namespace_id)
+            .await
+            .expect("enable grep");
         namespaces.push(namespace_id);
     }
     // The backfill run and the incremental run make a reorganize step due.
@@ -177,7 +169,7 @@ async fn no_more_grep_steps_hold_content_than_the_limit() {
 
     let backfills =
         futures::future::try_join_all(namespaces.iter().map(|namespace_id| async move {
-            worker.steps(namespace_id, 0).build_step(policy).await
+            budgeted.steps_of(namespace_id, 0).build_step(policy).await
         }))
         .await
         .expect("backfill steps");
@@ -186,13 +178,16 @@ async fn no_more_grep_steps_hold_content_than_the_limit() {
     }
     let increments =
         futures::future::try_join_all(namespaces.iter().map(|namespace_id| async move {
-            worker.steps(namespace_id, 0).build_step(policy).await
+            budgeted.steps_of(namespace_id, 0).build_step(policy).await
         }))
         .await
         .expect("incremental steps");
     let reorganizations =
         futures::future::try_join_all(namespaces.iter().map(|namespace_id| async move {
-            worker.steps(namespace_id, 0).reorganize_step(policy).await
+            budgeted
+                .steps_of(namespace_id, 0)
+                .reorganize_step(policy)
+                .await
         }))
         .await
         .expect("reorganize steps");
@@ -217,14 +212,17 @@ async fn workers_over_two_stores_share_one_step_permit() {
     let (blocking, first_writer, first_host) = blocking_setup(&first_directory).await;
     let (_, second_writer, second_host) = blocking_setup(&second_directory).await;
     let budget = GrepStepBudget::new(NonZeroUsize::MIN);
-    let first_worker = worker_with(&first_host, &budget);
-    let second_worker = worker_with(&second_host, &budget);
+    let first_budgeted = first_host.with_budget(&budget);
+    let second_budgeted = second_host.with_budget(&budget);
     let first = namespace_with_files(&first_writer, "first").await;
     let second = namespace_with_files(&second_writer, "second").await;
-    first_worker.enable(&first).await.expect("enable grep");
-    second_worker.enable(&second).await.expect("enable grep");
+    first_budgeted.enable_of(&first).await.expect("enable grep");
+    second_budgeted
+        .enable_of(&second)
+        .await
+        .expect("enable grep");
 
-    let holding_step = parked_build_step(&blocking, &first_worker, &first).await;
+    let holding_step = parked_build_step(&blocking, &first_budgeted, &first).await;
     assert_eq!(
         budget.stats(),
         PermitCounts {
@@ -233,8 +231,8 @@ async fn workers_over_two_stores_share_one_step_permit() {
         }
     );
     let mut waiting_step = Box::pin(async {
-        second_worker
-            .steps(&second, 0)
+        second_budgeted
+            .steps_of(&second, 0)
             .build_step(GramIndexBuildPolicy::default())
             .await
     });
@@ -266,28 +264,28 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
     let (blocking, first_writer, first_host) = blocking_setup(&first_directory).await;
     let (_, second_writer, second_host) = blocking_setup(&second_directory).await;
     let budget = GrepStepBudget::new(NonZeroUsize::MIN);
-    let first_worker = worker_with(&first_host, &budget);
-    let second_worker = worker_with(&second_host, &budget);
+    let first_budgeted = first_host.with_budget(&budget);
+    let second_budgeted = second_host.with_budget(&budget);
     let mut current = Vec::new();
-    for (writer, host, worker) in [
-        (&first_writer, &first_host, &first_worker),
-        (&second_writer, &second_host, &second_worker),
+    for (writer, host, budgeted) in [
+        (&first_writer, &first_host, &first_budgeted),
+        (&second_writer, &second_host, &second_budgeted),
     ] {
         let namespace_id = namespace_with_files(writer, "current").await;
         host.enable_grep_index(&namespace_id)
             .await
             .expect("index the current namespace");
-        current.push((worker, namespace_id));
+        current.push((budgeted, namespace_id));
     }
     let busy = namespace_with_files(&first_writer, "busy").await;
-    first_worker.enable(&busy).await.expect("enable grep");
+    first_budgeted.enable_of(&busy).await.expect("enable grep");
 
-    let busy_step = parked_build_step(&blocking, &first_worker, &busy).await;
-    for (worker, namespace_id) in &current {
+    let busy_step = parked_build_step(&blocking, &first_budgeted, &busy).await;
+    for (budgeted, namespace_id) in &current {
         let outcome = bounded(
             Duration::from_secs(10),
-            worker
-                .steps(namespace_id, 0)
+            budgeted
+                .steps_of(namespace_id, 0)
                 .build_step(GramIndexBuildPolicy::default()),
         )
         .await
@@ -312,24 +310,25 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
 async fn a_dropped_step_returns_its_permit() {
     let directory = tempdir().expect("directory");
     let (blocking, writer, host) = blocking_setup(&directory).await;
-    let worker = worker_with(&host, &GrepStepBudget::new(NonZeroUsize::MIN));
+    let budgeted = host.with_budget(&GrepStepBudget::new(NonZeroUsize::MIN));
     let holding = namespace_with_files(&writer, "holding").await;
     let waiting = namespace_with_files(&writer, "waiting").await;
     for namespace_id in [&holding, &waiting] {
-        worker.enable(namespace_id).await.expect("enable grep");
+        budgeted.enable_of(namespace_id).await.expect("enable grep");
     }
     let policy = GramIndexBuildPolicy::default();
 
     // One step takes the only permit and parks at its first content read.
     blocking.block_next();
-    let mut holding_step = Box::pin(async { worker.steps(&holding, 0).build_step(policy).await });
+    let mut holding_step =
+        Box::pin(async { budgeted.steps_of(&holding, 0).build_step(policy).await });
     tokio::select! {
         outcome = &mut holding_step => panic!("the holding step finished while its read was held: {outcome:?}"),
         () = blocking.wait_until_blocked() => {}
     }
     // Another step with work waits for that permit, and is dropped waiting.
     bounded(Duration::from_millis(200), async {
-        worker.steps(&waiting, 0).build_step(policy).await
+        budgeted.steps_of(&waiting, 0).build_step(policy).await
     })
     .await
     .expect_err("a step with work waits while the only permit is held");
@@ -338,7 +337,7 @@ async fn a_dropped_step_returns_its_permit() {
 
     let outcome = bounded(
         Duration::from_secs(10),
-        worker.steps(&waiting, 0).build_step(policy),
+        budgeted.steps_of(&waiting, 0).build_step(policy),
     )
     .await
     .expect("both dropped steps returned the permit")
@@ -351,17 +350,17 @@ async fn a_step_dropped_while_waiting_leaves_the_counts_at_zero() {
     let directory = tempdir().expect("directory");
     let (blocking, writer, host) = blocking_setup(&directory).await;
     let budget = GrepStepBudget::new(NonZeroUsize::MIN);
-    let worker = worker_with(&host, &budget);
+    let budgeted = host.with_budget(&budget);
     let holding = namespace_with_files(&writer, "holding").await;
     let waiting = namespace_with_files(&writer, "waiting").await;
     for namespace_id in [&holding, &waiting] {
-        worker.enable(namespace_id).await.expect("enable grep");
+        budgeted.enable_of(namespace_id).await.expect("enable grep");
     }
 
-    let holding_step = parked_build_step(&blocking, &worker, &holding).await;
+    let holding_step = parked_build_step(&blocking, &budgeted, &holding).await;
     let mut waiting_step = Box::pin(async {
-        worker
-            .steps(&waiting, 0)
+        budgeted
+            .steps_of(&waiting, 0)
             .build_step(GramIndexBuildPolicy::default())
             .await
     });

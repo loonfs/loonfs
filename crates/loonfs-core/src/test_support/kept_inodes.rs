@@ -5,7 +5,7 @@ use crate::compaction::group_compaction::{run_metadata_compaction, GroupCompacti
 use crate::compaction::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
 use crate::compaction::plan::{group_run_descriptors, CompactionPlacement, MetadataCompactionSpec};
 use crate::compaction::publication::{input_segment_keys, CompactionPublication};
-use crate::compaction::{CompactionUnitOutcome, MetadataCompactionCancellation};
+use crate::compaction::{CompactionUnitOutcome, MaintenanceCancellation};
 use crate::manifest::metadata_basis_from_manifest;
 use crate::manifest::publish::encode_manifest;
 use crate::metadata::InodeRecord;
@@ -189,7 +189,7 @@ pub(crate) async fn rewrite_with_seed<S: ObjectStore + ?Sized>(
     let mut basis = metadata_basis_from_manifest(store, None, &current).segments;
     basis.manifest = seeded_manifest(&current, seed);
     let input_keys = input_segment_keys(&basis.scan_runs, spec).expect("the spec's runs");
-    let cancellation = MetadataCompactionCancellation::default();
+    let cancellation = MaintenanceCancellation::default();
     let compacted = run_metadata_compaction(
         &basis,
         &crate::cache::MetadataSegmentCache::unshared(0),
@@ -216,13 +216,18 @@ pub(crate) async fn publish_rewritten<S: ObjectStore + ?Sized>(
     rewritten: RewrittenUnit,
 ) -> CompactionUnitOutcome {
     let timer = super::std_timer();
-    super::namespace_store(store, namespace_id)
+    let namespace = super::namespace_store(store, namespace_id);
+    let basis = namespace
+        .load_current_basis(super::observed_now())
+        .await
+        .expect("load the current manifest");
+    namespace
         .finalize_metadata_compaction(
-            None,
+            basis,
             spec,
             &rewritten.input_keys,
             rewritten.compacted,
-            &MetadataCompactionCancellation::default(),
+            &MaintenanceCancellation::default(),
             &CompactionPublication {
                 compaction: OperationClock::start(0, Arc::clone(&timer)),
                 publication: OperationClock::start(0, timer),
@@ -257,7 +262,7 @@ pub(crate) async fn seeded_kept_inode_filter<S: ObjectStore + ?Sized>(
             },
             CommitSeq(0),
         ),
-        &MetadataCompactionCancellation::default(),
+        &MaintenanceCancellation::default(),
     )
     .await
     .expect("build the filter")

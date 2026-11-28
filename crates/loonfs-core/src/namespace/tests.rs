@@ -37,12 +37,12 @@ use tempfile::tempdir;
 const CREATE_STORE_OPERATIONS: usize = 8;
 
 /// The store operations of the fork in
-/// `a_new_namespace_is_looked_up_before_its_first_write`, with the fold of
-/// the source's WAL tail before it: 16 for the fold, and 23 for the fork, of
-/// which 7 are the discovery of the folded source, 2 are the check of the
-/// snapshot that the fork is built from, 1 is the fork point snapshot, and 1
-/// is the member entry.
-const FORK_STORE_OPERATIONS: usize = 39;
+/// `a_new_namespace_is_looked_up_before_its_first_write`, after the fold of
+/// the source's WAL tail: 7 for the discovery of the folded source, 2 for the
+/// check of the snapshot that the fork is built from, 1 for the fork point
+/// snapshot, 1 for the member entry, and the target's lookup and its two
+/// manifests.
+const FORK_STORE_OPERATIONS: usize = 23;
 
 /// The store operations of the deletion in
 /// `a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a_writer_session`.
@@ -335,8 +335,13 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
     )
     .await
     .expect("source data");
-    store.reset();
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
+    let folded = crate::test_support::fold_before_fork(&fixture.namespace)
+        .await
+        .expect("fold the WAL tail");
+    // The fold's requests are pinned in
+    // `a_session_fold_sends_these_requests_in_order`.
+    store.reset();
     let forked = fixture
         .engine()
         .fork_namespace(
@@ -347,9 +352,7 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::fold_before_fork(&fixture.namespace)
-                .await
-                .expect("fold the WAL tail"),
+            folded,
         )
         .await
         .expect("fork")

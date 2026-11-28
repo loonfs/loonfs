@@ -52,6 +52,10 @@ pub struct WalTailReport {
     /// records, or `None` when the tail has no commit, such as a tail of
     /// fences alone.
     pub oldest_commit_at_ms: Option<u64>,
+    /// Whether a floor object in the tail raised the view's floor above the
+    /// manifest's (see
+    /// [`NamespaceReadState::raises_retention_floor`](crate::control::NamespaceReadState::raises_retention_floor)).
+    pub raises_retention_floor: bool,
     /// Where the attempt found the tail.
     pub source: TailSource,
 }
@@ -181,7 +185,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// Returns a commit engine whose session already holds `acquired`, for a
     /// test that acquires the writer epoch through the store before the
     /// engine's first publish.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_acquired_session(
         namespace: NamespaceStore<S>,
         writer_id: WriterId,
@@ -385,20 +389,16 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             .inspect_err(|error| self.position.record_session_error(error))
     }
 
-    /// Folds the WAL tail from this session's position and publishes the
-    /// next manifest (format spec, "Publishing a manifest").
+    /// Returns this session's position, loaded as a commit loads its view: a
+    /// session without its writer epoch claims it first, and the position is
+    /// the claim's discovery, the engine's position once the store shows that
+    /// it's still current, or the writer's load. The engine keeps the
+    /// position, and a failed load drops it.
     ///
-    /// The fold loads its view as a commit does: a session without its
-    /// writer epoch claims it first, and the fold starts from the claim's
-    /// discovery, from the position once the store shows that it's still
-    /// current, or from the writer's load. The fold records the manifest that
-    /// covers the tail as the session's newest published manifest, as every
-    /// publication does (see [`Self::published_manifest`]), so the position
-    /// moves onto it and later commits plan against it, and a failed fold
-    /// drops the position. A fold whose manifest put loses to another
-    /// process's claim still builds again on that claim through the
-    /// publication loop of [`NamespaceStore::fold_wal_tail`].
-    pub async fn fold(&mut self) -> Result<FoldedWalTail> {
+    /// Every publication of the session that runs beside its commits, such
+    /// as a fold or a compaction unit, starts from a position that this
+    /// returns, so it publishes only while the session has its epoch.
+    pub async fn load_position(&mut self) -> Result<WriterPosition> {
         let clock = self.namespace.start_clock();
         let Self {
             namespace,
@@ -410,12 +410,32 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             .await?
             .view
             .into_position();
-        let folded = namespace
-            .fold_wal_tail(Some(held.clone()), &clock)
-            .await
-            .inspect_err(|error| position.record_session_error(error))?;
-        position.current.published().record(&folded.current);
-        position.current.set(held);
+        position.current.set(held.clone());
+        Ok(held)
+    }
+
+    /// Folds the WAL tail from this session's position and publishes the
+    /// next manifest (format spec, "Publishing a manifest").
+    ///
+    /// The fold starts from [`Self::load_position`], so a session without its
+    /// writer epoch claims it first. The fold records the manifest that
+    /// covers the tail as the session's newest published manifest, as every
+    /// publication does (see [`Self::published_manifest`]), so the position
+    /// moves onto it and later commits plan against it, and a failed fold
+    /// drops the position. The stored position follows the manifest at once,
+    /// so the engine keeps no part of the tail that the fold covered. A fold
+    /// whose manifest put loses to another process's claim still builds
+    /// again on that claim through the publication loop of
+    /// [`NamespaceStore::fold_wal_tail_from`].
+    pub async fn fold(&mut self) -> Result<FoldedWalTail> {
+        let held = self.load_position().await?;
+        let clock = self.namespace.start_clock();
+        let folded = self.namespace.fold_wal_tail_from(&held, &clock).await;
+        let folded = folded.inspect_err(|error| {
+            self.position.record_session_error(error);
+            self.position.invalidate_projection();
+        })?;
+        drop(self.position.current.record_published(&folded.current));
         Ok(folded)
     }
 
@@ -425,20 +445,21 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// retention floor").
     ///
     /// The call first checks that the segments of `planned`, the manifest
-    /// that the advance was planned from, exist. A session with its writer
-    /// epoch puts the floor object at the number after its position's tip,
-    /// as it puts a commit, with no check after the put. The position then
-    /// replays the floor object, so its tip is the floor object's number and
-    /// its floor is raised. A session without its writer epoch has no
-    /// position, so it creates the floor object as a process without a
-    /// session does (see [`NamespaceStore::publish_floor_object`]), and the
-    /// advance claims no epoch. A session that discovery finds fenced does
-    /// the same, and so does a session whose put finds the number taken,
-    /// after the put drops the position. The floor object's put doesn't
-    /// change the session's status, because collection never deletes a fence
-    /// or a floor object (format spec, "Advancing the retention floor"), and
-    /// a put whose outcome is unknown drops the position. The call
-    /// writes nothing when the view's floor is already at or above `target`.
+    /// that the advance was planned from, exist. The session loads its view
+    /// as a commit does, so a session without its writer epoch claims it
+    /// first, and it puts the floor object at the number after its position's
+    /// tip, as it puts a commit, with no check after the put. The position
+    /// then replays the floor object, so its tip is the floor object's number
+    /// and its floor is raised. A session that discovery finds fenced returns
+    /// `writer_fenced`. A put that finds the number taken drops the position
+    /// and runs the writer's load, which returns `writer_fenced` when another
+    /// writer's fence took the number, and otherwise the put's error, so the
+    /// caller plans again. The
+    /// floor object's put doesn't change the session's status, because
+    /// collection never deletes a fence or a floor object (format spec,
+    /// "Advancing the retention floor"), and a put whose outcome is unknown
+    /// drops the position. The call writes nothing when the view's floor is
+    /// already at or above `target`.
     pub async fn publish_floor_object(
         &mut self,
         planned: &LoadedManifest,
@@ -450,36 +471,17 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             .segments
             .verify_segments_exist()
             .await?;
-        let acquired = matches!(
-            *self.position.lock_session(),
-            WriterSessionStatus::Acquired(_)
-        );
         let Self {
             namespace,
             writer_id,
             position,
         } = self;
-        if acquired {
-            let published = match position
-                .load_publish_view(namespace, writer_id, clock)
-                .await
-            {
-                Ok(loaded) => {
-                    position
-                        .publish_floor_object_against(namespace, loaded, target)
-                        .await
-                }
-                Err(error) => Err(error),
-            };
-            match published {
-                Err(
-                    CoreError::WriterFenced(_)
-                    | CoreError::WalPublish(WalPublishError::NumberTaken),
-                ) => {}
-                result => return result,
-            }
-        }
-        namespace.publish_floor_object_at_tip(target).await
+        let loaded = position
+            .load_publish_view(namespace, writer_id, clock)
+            .await?;
+        position
+            .publish_floor_object_against(namespace, loaded, target)
+            .await
     }
 
     /// Publishes `candidates` as one batch. Retries share `clock`, so the
@@ -512,6 +514,67 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             }
             Err(error) => failed_publication(candidates.len(), error),
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<S: ObjectStore> NamespaceCommitEngine<S> {
+    /// Records the manifest that `report` says a publication from this
+    /// session's position published as the session's newest published
+    /// manifest, the last step of the one path by which a test publishes as a
+    /// session, the way the session's runtime publishes a window change or an
+    /// extension's entry: load the position (claiming first when the session
+    /// has no epoch, see [`Self::load_position`]), publish from it without the
+    /// engine, and record the manifest.
+    fn record_publication<T>(
+        &mut self,
+        report: crate::manifest::published::PublicationReport<T>,
+    ) -> crate::manifest::published::PublicationReport<T> {
+        if let Some(manifest) = &report.published {
+            drop(self.position.current.record_published(manifest));
+        }
+        report
+    }
+
+    /// Sets the retention window as this session (see
+    /// [`Self::record_publication`] and
+    /// [`NamespaceStore::set_retention_window_from`]).
+    pub async fn set_retention_window(
+        &mut self,
+        retention_window_ms: Option<loonfs_types::RetentionWindow>,
+    ) -> crate::Result<
+        crate::manifest::published::PublicationReport<loonfs_types::SetRetentionWindowResponse>,
+    > {
+        let position = self.load_position().await?;
+        let report = self
+            .namespace
+            .set_retention_window_from(&position, retention_window_ms)
+            .await?;
+        Ok(self.record_publication(report))
+    }
+
+    /// Publishes an extension's change as this session (see
+    /// [`Self::record_publication`] and
+    /// [`NamespaceStore::publish_extension_from`]). A basis of another
+    /// namespace returns `invalid_request` before the session claims
+    /// anything (see [`ExtensionBasis::ensure_for`](crate::manifest::extension::ExtensionBasis::ensure_for)).
+    pub async fn publish_extension(
+        &mut self,
+        basis: &crate::manifest::extension::ExtensionBasis,
+        name: &loonfs_types::ExtensionName,
+        entry: loonfs_types::format::manifest::ExtensionEntry,
+    ) -> crate::Result<
+        crate::manifest::published::PublicationReport<
+            crate::manifest::extension::ExtensionPublication,
+        >,
+    > {
+        basis.ensure_for(&self.namespace.namespace_id)?;
+        let position = self.load_position().await?;
+        let report = self
+            .namespace
+            .publish_extension_from(&position, basis, name, entry)
+            .await?;
+        Ok(self.record_publication(report))
     }
 }
 
@@ -657,6 +720,7 @@ impl PositionState {
                 wal_bytes: update.wal_tail_bytes,
                 inline_bytes: update.wal_tail_inline_bytes,
                 oldest_commit_at_ms: update.wal_tail_oldest_commit_at_ms,
+                raises_retention_floor: update.raises_retention_floor,
                 source: if wal_tail_discovered {
                     TailSource::Store
                 } else {
@@ -697,11 +761,24 @@ impl PositionState {
         // (collection recognizes them by their size and keeps them, see
         // `gc/families.rs`). The format spec, "Advancing the retention
         // floor", explains why that is enough.
+        let acquired_writer = view.acquired_writer.clone();
         let published = publish_wal_object(view.store(), &floor_object).await;
         let position = view.into_position();
         if let Err(error) = published {
             // The session's next unit loads the namespace from the store.
             self.invalidate_projection();
+            if matches!(error, CoreError::WalPublish(WalPublishError::NumberTaken)) {
+                // While the session has its epoch, only another writer's
+                // fence takes the session's next number, so the writer's load
+                // finds that writer's claim and returns `writer_fenced`.
+                let loaded = namespace
+                    .load_writer_read_anchor(&acquired_writer, namespace.start_clock().observe())
+                    .await;
+                if let Err(fenced) = loaded {
+                    self.record_session_error(&fenced);
+                    return Err(fenced);
+                }
+            }
             return Err(error);
         }
         let head = head.after_wal_object(floor_object.envelope().payload());
@@ -784,6 +861,7 @@ struct TailProjectionUpdate {
     wal_tail_bytes: usize,
     wal_tail_inline_bytes: usize,
     wal_tail_oldest_commit_at_ms: Option<u64>,
+    raises_retention_floor: bool,
 }
 
 impl TailProjectionUpdate {
@@ -793,6 +871,7 @@ impl TailProjectionUpdate {
             wal_tail_bytes: position.wal_tail_bytes(),
             wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
             wal_tail_oldest_commit_at_ms: position.wal_tail_oldest_commit_at_ms(),
+            raises_retention_floor: position.read_basis().head().raises_retention_floor(),
         }
     }
 }

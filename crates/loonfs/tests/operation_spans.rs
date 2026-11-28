@@ -62,15 +62,15 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
                 .build()
                 .await
                 .expect("build maintenance")
-                .maintenance(loonfs_test_support::ids::writer_id(
-                    "operation-span-maintenance",
-                ));
+                .maintenance();
         maintenance
             .diagnostics(&namespace_id)
             .await
             .expect("read namespace diagnostics");
-        maintenance
-            .maintain_metadata(&namespace_id)
+        writer
+            .open_namespace(&namespace_id)
+            .expect("open the namespace")
+            .maintain_metadata()
             .await
             .expect("maintain metadata");
     });

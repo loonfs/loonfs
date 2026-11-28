@@ -38,8 +38,9 @@ async fn a_cold_diff_reads_a_revisions_segment_in_a_few_data_gets() {
     let namespace_id = namespace_id("cold-diff-page");
     let actor = loonfs_test_support::test_actor();
     let writer = writer(store.clone(), "cold-diff-writer").await;
-    let maintenance =
-        writer.maintenance(loonfs_test_support::ids::writer_id("cold-diff-maintenance"));
+    let maintenance = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     writer
         .create_namespace(&namespace_id, &actor)
         .await
@@ -88,16 +89,13 @@ async fn a_cold_diff_reads_a_revisions_segment_in_a_few_data_gets() {
             if round == 0 {
                 from_seq = Some(commit.committed_seq);
             }
-            maintenance
-                .fold_wal(&namespace_id)
-                .await
-                .expect("fold batch");
+            maintenance.fold_wal().await.expect("fold batch");
         }
     }
     for pass in 0.. {
         assert!(pass < 16, "compaction catches up");
         let report = maintenance
-            .maintain_metadata_while_due(&namespace_id, &MaintenanceCancellation::new())
+            .maintain_metadata_while_due(&MaintenanceCancellation::new())
             .await
             .expect("compact");
         if report.response.outcome == MetadataMaintenanceOutcome::CaughtUp {

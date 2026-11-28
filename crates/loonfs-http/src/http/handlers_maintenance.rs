@@ -10,7 +10,7 @@ use loonfs::{AdvanceRetentionFloorOptions, MaintainMetadataOptions};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    GcRequest, PoolId, RunMaintenanceJobRequest, RunMaintenanceJobResponse,
+    Context, GcRequest, PoolId, RunMaintenanceJobRequest, RunMaintenanceJobResponse,
     RunPoolMaintenanceJobRequest, RunPoolMaintenanceJobResponse,
 };
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use std::sync::Arc;
         path = "/v0/maintenance/namespaces/{namespace_id}/jobs",
         tag = "maintenance",
         summary = "Run one maintenance job",
-        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, or `retention_window`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the snapshots, and then sweeps every object family under the namespace's prefix to the end, including the segments of extensions such as the grep index. The collection of the namespace's pool, which deletes content objects and upload records, is a job of the pool. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
+        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, or `retention_window`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. The `metadata`, `retention`, and `retention_window` jobs publish as the namespace's writer, so a server that isn't the namespace's writer claims the namespace first, and a writer in another process is fenced and its next request is retried. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the snapshots, and then sweeps every object family under the namespace's prefix to the end, including the segments of extensions such as the grep index. The collection of the namespace's pool, which deletes content objects and upload records, is a job of the pool. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
         params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")),
         request_body(content = RunMaintenanceJobRequest, description = "The maintenance job to run"),
         responses(
@@ -49,22 +49,27 @@ pub(super) async fn run_maintenance_job(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<RunMaintenanceJobRequest>,
 ) -> Result<Json<RunMaintenanceJobResponse>, ApiResponseError> {
-    let maintenance = &state.maintenance;
     let response = match request {
         RunMaintenanceJobRequest::Metadata(request) => {
             let options = MaintainMetadataOptions::from_request(request).map_err(|error| {
                 ApiResponseError::runtime(error).with_body_field_params(&["/max_wal_tail_objects"])
             })?;
-            maintenance
-                .maintain_metadata_while_due_with_options(
-                    &namespace_id,
-                    &loonfs::MaintenanceCancellation::new(),
-                    &options,
-                )
-                .await
-                .map(|report| RunMaintenanceJobResponse::Metadata(report.response))
+            let options = &options;
+            return state
+                .run_as_writer(&namespace_id, Context::Service, |namespace| async move {
+                    namespace
+                        .maintain_metadata_while_due_with_options(
+                            &loonfs::MaintenanceCancellation::new(),
+                            options,
+                        )
+                        .await
+                        .map(|report| Json(RunMaintenanceJobResponse::Metadata(report.response)))
+                        .map_err(ApiResponseError::runtime)
+                })
+                .await;
         }
-        RunMaintenanceJobRequest::Gc(GcRequest {}) => maintenance
+        RunMaintenanceJobRequest::Gc(GcRequest {}) => state
+            .maintenance
             .gc(&namespace_id)
             .await
             .map(RunMaintenanceJobResponse::Gc),
@@ -72,15 +77,29 @@ pub(super) async fn run_maintenance_job(
             let options = AdvanceRetentionFloorOptions::from_request(request).map_err(|error| {
                 ApiResponseError::runtime(error).with_body_field_params(&["/cutoff_at_ms"])
             })?;
-            maintenance
-                .advance_retention_floor_with_options(&namespace_id, &options)
-                .await
-                .map(RunMaintenanceJobResponse::Retention)
+            let options = &options;
+            return state
+                .run_as_writer(&namespace_id, Context::Service, |namespace| async move {
+                    namespace
+                        .advance_retention_floor_with_options(options)
+                        .await
+                        .map(|response| Json(RunMaintenanceJobResponse::Retention(response)))
+                        .map_err(ApiResponseError::runtime)
+                })
+                .await;
         }
-        RunMaintenanceJobRequest::RetentionWindow(request) => maintenance
-            .set_retention_window(&namespace_id, request.retention_window_ms)
-            .await
-            .map(RunMaintenanceJobResponse::RetentionWindow),
+        RunMaintenanceJobRequest::RetentionWindow(request) => {
+            let retention_window_ms = request.retention_window_ms;
+            return state
+                .run_as_writer(&namespace_id, Context::Service, |namespace| async move {
+                    namespace
+                        .set_retention_window(retention_window_ms)
+                        .await
+                        .map(|response| Json(RunMaintenanceJobResponse::RetentionWindow(response)))
+                        .map_err(ApiResponseError::runtime)
+                })
+                .await;
+        }
     };
     response.map(Json).map_err(ApiResponseError::runtime)
 }

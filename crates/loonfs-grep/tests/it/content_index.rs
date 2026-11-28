@@ -5,8 +5,8 @@
 use crate::common::{request, GrepHost};
 use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation, PreparedContent};
 use loonfs::{
-    Commit, CommitId, ContentRef, LoonFs, MaintainMetadataOptions, Maintenance, MetadataCache,
-    Namespace, NamespaceId, PutFileOptions, SharedObjectStore, Writable,
+    Commit, CommitId, ContentRef, LoonFs, MaintainMetadataOptions, MetadataCache, Namespace,
+    NamespaceId, PutFileOptions, SharedObjectStore, Writable,
 };
 use loonfs_grep::codec::{ContentRevisionRow, ContentValue, IndexRow};
 use loonfs_grep::entry::{grep_extension_name, GrepEntry};
@@ -35,7 +35,7 @@ pub(crate) struct ContentFixture {
     pub(crate) namespace_id: NamespaceId,
     pub(crate) namespace: Namespace<Writable>,
     /// Maintenance in the runtime that has `namespace`'s writer session.
-    maintenance: Maintenance,
+    maintenance: LoonFs<Writable>,
     /// The wall clock of that runtime, which stamps the fixture's commits.
     clock: Arc<ManualClock>,
 }
@@ -64,7 +64,8 @@ impl ContentFixture {
             .build()
             .await
             .expect("build writer");
-        let host = GrepHost::with_reader(&store, name, |builder| {
+        crate::common::share_writer(&store, &writer);
+        let host = GrepHost::with_reader(&store, |builder| {
             builder.metadata_cache(MetadataCache::builder().max_content_object_bytes(0).build())
         })
         .await;
@@ -76,7 +77,7 @@ impl ContentFixture {
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(name));
+        let maintenance = writer.clone();
         Self {
             _directory: directory,
             store,
@@ -198,8 +199,7 @@ impl ContentFixture {
     /// Runs one build step and returns its outcome.
     pub(crate) async fn build_step(&self) -> GrepBuildOutcome {
         self.host
-            .worker
-            .steps(&self.namespace_id, 0)
+            .steps_of(&self.namespace_id, 0)
             .build_step(GramIndexBuildPolicy::default())
             .await
             .expect("grep build step")
@@ -211,8 +211,7 @@ impl ContentFixture {
         policy: GramIndexBuildPolicy,
     ) -> GrepReorganizeOutcome {
         self.host
-            .worker
-            .steps(&self.namespace_id, 0)
+            .steps_of(&self.namespace_id, 0)
             .reorganize_step(policy)
             .await
             .expect("grep reorganize step")
@@ -343,17 +342,18 @@ impl ContentFixture {
     /// clock stamps every commit the fixture makes.
     pub(crate) async fn advance_retention_floor(&self) -> CommitSeq {
         self.maintenance
-            .maintain_metadata_with_options(
-                &self.namespace_id,
-                &MaintainMetadataOptions {
-                    max_wal_tail_objects: std::num::NonZeroU64::MIN,
-                },
-            )
+            .open_namespace(&self.namespace_id)
+            .expect("open namespace")
+            .maintain_metadata_with_options(&MaintainMetadataOptions {
+                max_wal_tail_objects: std::num::NonZeroU64::MIN,
+            })
             .await
             .expect("fold wal");
         self.clock.advance_ms(loonfs::GC_GRACE_WINDOW_MS);
         self.maintenance
-            .advance_retention_floor(&self.namespace_id)
+            .open_namespace(&self.namespace_id)
+            .expect("open namespace")
+            .advance_retention_floor()
             .await
             .expect("advance retention")
             .retention_floor_seq

@@ -1,7 +1,7 @@
 //! The server config file's top-level settings, its `[auth]` and
 //! `[transport]` tables, and their defaults.
 
-use super::{GrepConfig, JobMode, MemorySizing, MetadataCacheConfig, StoreConfig};
+use super::{GrepConfig, MemorySizing, MetadataCacheConfig, StoreConfig};
 use crate::{Result, ServerError};
 use loonfs::metrics::MetricsRecorder;
 use loonfs::ExecutionBudget;
@@ -103,15 +103,28 @@ pub struct ServerConfig {
     /// Limits of the one metadata cache the server's runtime reads through.
     #[serde(default)]
     pub metadata_cache: MetadataCacheConfig,
-    /// What this server does about grep, plus the bounded-step budgets its
-    /// index maintenance runs under. A config with no `[grep]` table
-    /// composes no grep at all; a present table must name its `mode`.
+    /// Whether this server builds grep indexes and serves grep queries, plus
+    /// the bounded-step budgets its index builds run under. A config with no
+    /// `[grep]` table composes no grep at all.
     #[serde(default)]
-    pub grep: GrepConfig,
-    /// Whether this server serves maintenance requests, runs the maintenance
-    /// scheduler, both, or neither.
-    #[serde(default = "default_maintenance")]
-    pub maintenance: JobMode,
+    pub grep: Option<GrepConfig>,
+    /// Whether this server serves the maintenance API group. The jobs that
+    /// publish run as the namespace's writer, so a job claims a namespace
+    /// that this server doesn't write.
+    #[serde(default = "default_serve_maintenance_api")]
+    pub serve_maintenance_api: bool,
+    /// Whether this server's scheduler runs the store's sweeps, the scheduled
+    /// retention floor advances, and the collection steps. A server that
+    /// doesn't sweep still folds, compacts, and indexes the namespaces that it
+    /// writes. A sweep claims any namespace that has work due, including one
+    /// that another server writes, so keep it `true` only on a store with one
+    /// server. With more than one server on a store, set it to `false` on
+    /// every server and run maintenance jobs against each namespace's writer.
+    /// With this and [`Self::serve_maintenance_api`] both `false`, nothing
+    /// collects and no floor advances unless another process calls the
+    /// maintenance jobs.
+    #[serde(default = "default_sweep_store")]
+    pub sweep_store: bool,
     /// Minimum time between publication starts in one namespace, in
     /// milliseconds.
     ///
@@ -286,8 +299,12 @@ pub struct TlsServerConfig {
     pub key_path: String,
 }
 
-fn default_maintenance() -> JobMode {
-    JobMode::ServeAndMaintain
+fn default_serve_maintenance_api() -> bool {
+    true
+}
+
+fn default_sweep_store() -> bool {
+    true
 }
 
 fn default_min_publish_interval_ms() -> u64 {
@@ -414,6 +431,7 @@ impl ServerConfig {
             gc_interval_ms: self.gc_interval_ms,
             sweep_interval_ms: self.sweep_interval_ms,
             idle_session_close_after_ms: self.idle_session_close_after_ms,
+            sweep_store: self.sweep_store,
         }
     }
 

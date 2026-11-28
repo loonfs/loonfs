@@ -4,9 +4,10 @@
 //! unknown outcome keeps what the put may list.
 
 use crate::common::{
-    control, fold_wal_and_advance_retention, page_request, writable_namespace, GrepHost,
+    control, fold_wal_and_advance_retention, page_request, writable_namespace, writer_session,
+    GrepHost,
 };
-use loonfs::{LoonFs, SharedObjectStore, Writable};
+use loonfs::{LoonFs, NamespaceSessionStatus, SharedObjectStore, Writable};
 use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome, GrepError,
@@ -20,7 +21,7 @@ use loonfs_test_support::stores::{
 };
 use loonfs_types::{ErrorCode, GrepRequest, GrepScope, ManifestNo, NamespaceId};
 use std::assert_matches;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 fn needle() -> GrepRequest {
@@ -65,24 +66,6 @@ async fn manifest_no(store: &SharedObjectStore, namespace_id: &NamespaceId) -> M
         .manifest_no
 }
 
-/// Sets the namespace's retention window through another runtime, which
-/// publishes the next manifest.
-async fn publish_rival(store: &SharedObjectStore, namespace_id: &NamespaceId, window_ms: u64) {
-    let rival = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("rival"))
-        .build()
-        .await
-        .expect("rival");
-    rival
-        .maintenance(loonfs_test_support::ids::writer_id("rival"))
-        .set_retention_window(
-            namespace_id,
-            Some(loonfs::RetentionWindow::new(window_ms).expect("a long enough window")),
-        )
-        .await
-        .expect("the rival publishes");
-}
-
 /// Checks that the steps of a run publish once, when the run publishes, and
 /// that a query reads the index that its view's manifest lists, so the run's
 /// pending steps aren't searchable until then.
@@ -92,14 +75,20 @@ async fn the_steps_of_a_run_publish_once_and_a_query_reads_the_published_entry()
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("one-publication");
     let _writer = seed(&store, &namespace_id, &["/a", "/b", "/c"]).await;
-    let host = GrepHost::new(&store, "one-publication").await;
+    let host = GrepHost::new(&store).await;
+    // The held session is the namespace's writer for the whole run, so only
+    // the enable claims the namespace.
+    let _session = host
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("hold the writer session");
     assert_matches!(
-        host.worker.enable(&namespace_id).await,
+        host.enable_of(&namespace_id).await,
         Ok(GrepEnableOutcome::Enabled { .. })
     );
     let enabled = manifest_no(&store, &namespace_id).await;
 
-    let mut steps = host.worker.steps(&namespace_id, u64::MAX);
+    let mut steps = host.steps_of(&namespace_id, u64::MAX);
     let mut indexed = 0;
     loop {
         match steps.build_step(one_file_steps()).await.expect("step") {
@@ -137,7 +126,8 @@ async fn the_steps_of_a_run_publish_once_and_a_query_reads_the_published_entry()
         host.worker.publication_stats(),
         GrepPublicationStats {
             published: 2,
-            ..GrepPublicationStats::default()
+            rebuilt: 0,
+            superseded: 0,
         },
         "the enable and the run published, and an empty publication isn't one"
     );
@@ -157,7 +147,7 @@ async fn a_restart_and_its_finished_backfill_publish_together() {
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("restart-in-one-change");
     let writer = seed(&store, &namespace_id, &["/a"]).await;
-    let host = GrepHost::new(&store, "restart-in-one-change").await;
+    let host = GrepHost::new(&store).await;
     host.enable_grep_index(&namespace_id).await.expect("enable");
     let GrepIndexStatus::Active {
         captured_seq: first_build,
@@ -172,9 +162,9 @@ async fn a_restart_and_its_finished_backfill_publish_together() {
         .put_file("/b", b"needle\n", &loonfs_test_support::test_actor())
         .await
         .expect("file");
-    fold_wal_and_advance_retention(&store, &host.maintenance, &namespace_id).await;
+    fold_wal_and_advance_retention(&store, &namespace_id).await;
 
-    let mut steps = host.worker.steps(&namespace_id, u64::MAX);
+    let mut steps = host.steps_of(&namespace_id, u64::MAX);
     assert_matches!(
         steps.build_step(one_file_steps()).await,
         Ok(GrepBuildOutcome::BackfillRestarted { .. }),
@@ -207,151 +197,13 @@ async fn a_restart_and_its_finished_backfill_publish_together() {
     assert_eq!(found.built_through_seq, found.head_seq);
 }
 
-/// Checks that a step whose publication loses its put to a manifest that
-/// copied grep's entry, such as a retention window change, is published over
-/// that manifest with the winner's other fields.
-#[tokio::test]
-async fn a_step_that_loses_its_put_to_a_copy_of_its_entry_is_published_over_it() {
-    let directory = tempfile::tempdir().expect("directory");
-    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let namespace_id = namespace_id("rebuilt-step");
-    let _writer = seed(&base, &namespace_id, &["/a", "/b"]).await;
-    let gate = Arc::new(BlockingStore::new(
-        base.clone(),
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-        OperationSelector::PutCreateIfAbsent,
-    ));
-    let gated: SharedObjectStore = gate.clone();
-    let host = GrepHost::new(&gated, "rebuilt-step").await;
-    host.worker.enable(&namespace_id).await.expect("enable");
-
-    gate.block_next();
-    let (rebuilt, winner) = tokio::join!(
-        async {
-            host.worker
-                .steps(&namespace_id, 0)
-                .build_step(one_file_steps())
-                .await
-        },
-        async {
-            gate.wait_until_blocked().await;
-            publish_rival(&base, &namespace_id, loonfs::GC_GRACE_WINDOW_MS).await;
-            let winner = manifest_no(&base, &namespace_id).await;
-            gate.release();
-            winner
-        }
-    );
-    assert_matches!(rebuilt, Ok(GrepBuildOutcome::Indexed { .. }));
-    assert_matches!(
-        host.worker.lifecycle(&namespace_id).await,
-        Ok(GrepIndexStatus::Backfilling {
-            cursor_inode_id: Some(_),
-            ..
-        })
-    );
-    let current = control::metadata_manifest(&base, &namespace_id).await;
-    assert_eq!(
-        current.payload().manifest_no,
-        winner.successor().expect("next")
-    );
-    assert_eq!(
-        current.payload().retention_window_ms,
-        NonZeroU64::new(loonfs::GC_GRACE_WINDOW_MS),
-        "grep's publications copy the winner's other fields"
-    );
-    assert_eq!(
-        host.worker.publication_stats(),
-        GrepPublicationStats {
-            published: 1,
-            rebuilt: 1,
-            superseded: 0,
-        },
-        "the enable published at its first put, and the step's change was rebuilt"
-    );
-
-    host.enable_grep_index(&namespace_id)
-        .await
-        .expect("finish the build");
-    let found = host
-        .grep(&namespace_id, &needle(), page_request(None, 10))
-        .await
-        .expect("query");
-    assert_eq!(found.matches.len(), 2);
-}
-
-/// Checks that a step whose publication loses its put to another process's
-/// change of grep's entry publishes nothing, and that the next step plans
-/// from the manifest that won.
-#[tokio::test]
-async fn a_step_that_loses_its_put_to_another_change_of_its_entry_publishes_nothing() {
-    let directory = tempfile::tempdir().expect("directory");
-    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let namespace_id = namespace_id("lost-step");
-    let _writer = seed(&base, &namespace_id, &["/a", "/b"]).await;
-    let gate = Arc::new(BlockingStore::new(
-        base.clone(),
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-        OperationSelector::PutCreateIfAbsent,
-    ));
-    let gated: SharedObjectStore = gate.clone();
-    let host = GrepHost::new(&gated, "lost-step").await;
-    let rival = GrepHost::new(&base, "lost-step-rival").await;
-    host.worker.enable(&namespace_id).await.expect("enable");
-
-    gate.block_next();
-    let (lost, ()) = tokio::join!(
-        async {
-            host.worker
-                .steps(&namespace_id, 0)
-                .build_step(one_file_steps())
-                .await
-        },
-        async {
-            gate.wait_until_blocked().await;
-            assert_matches!(
-                rival
-                    .worker
-                    .steps(&namespace_id, 0)
-                    .build_step(one_file_steps())
-                    .await,
-                Ok(GrepBuildOutcome::Indexed { .. })
-            );
-            gate.release();
-        }
-    );
-    assert_matches!(lost, Ok(GrepBuildOutcome::Superseded));
-    assert_eq!(
-        host.worker.publication_stats(),
-        GrepPublicationStats {
-            published: 1,
-            rebuilt: 0,
-            superseded: 1,
-        }
-    );
-    let winner = control::metadata_manifest(&base, &namespace_id).await;
-    assert_eq!(
-        host.worker.entry(&namespace_id).await.expect("entry"),
-        control::grep_entry(&base, &namespace_id).await,
-        "the step published nothing over the rival's change"
-    );
-
-    let built = host
-        .enable_grep_index(&namespace_id)
-        .await
-        .expect("build from the winner");
-    assert!(built.status.is_built_through(winner.payload().head_seq));
-    let found = host
-        .grep(&namespace_id, &needle(), page_request(None, 10))
-        .await
-        .expect("query");
-    assert_eq!(found.matches.len(), 2);
-}
-
 /// Checks that an enable whose publication loses its put to another
-/// process's enable returns `Superseded`, and that the other enable is
-/// published.
+/// writer's enable returns `writer_fenced`, which the server sends once
+/// more in a new session, instead of `Superseded`, and that the other enable
+/// is published. The session has its writer epoch before the enable, so the
+/// put that loses is the enable's own.
 #[tokio::test]
-async fn an_enable_that_loses_to_another_enable_is_superseded() {
+async fn an_enable_that_loses_to_another_writers_enable_is_fenced() {
     let directory = tempfile::tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("lost-enable");
@@ -362,24 +214,113 @@ async fn an_enable_that_loses_to_another_enable_is_superseded() {
         OperationSelector::PutCreateIfAbsent,
     ));
     let gated: SharedObjectStore = gate.clone();
-    let host = GrepHost::new(&gated, "lost-enable").await;
-    let rival = GrepHost::new(&base, "lost-enable-rival").await;
+    let host = GrepHost::new(&gated).await;
+    let rival = GrepHost::new(&base).await;
+    let held = writer_session(&gated, &namespace_id);
+    held.put_file("/claim", b"claim", &loonfs_test_support::test_actor())
+        .await
+        .expect("the session claims the namespace with a commit");
 
     gate.block_next();
-    let (lost, ()) = tokio::join!(host.worker.enable(&namespace_id), async {
+    let (lost, ()) = tokio::join!(host.enable_of(&namespace_id), async {
         gate.wait_until_blocked().await;
         assert_matches!(
-            rival.worker.enable(&namespace_id).await,
+            rival.enable_of(&namespace_id).await,
             Ok(GrepEnableOutcome::Enabled { .. })
         );
         gate.release();
     });
-    assert_matches!(lost, Ok(GrepEnableOutcome::Superseded));
+    let error = lost.expect_err("the rival's claim fences the host's session");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+    drop(held);
     assert_matches!(
         host.worker.lifecycle(&namespace_id).await,
         Ok(GrepIndexStatus::Backfilling { .. }),
         "the rival's enable is published"
     );
+}
+
+/// Checks that a run of steps on server A, after another server claimed the
+/// namespace and published another grep entry with a backfill to build, ends
+/// fenced before it builds
+/// anything: A's first step loads its basis from A's position, the check of
+/// that position finds the other server's manifests, and the writer's load
+/// returns `writer_fenced`. The step writes no segment, A's session is
+/// fenced, and an enable on it returns `writer_fenced`, which the server
+/// sends once more in a new session, instead of `grep_publication_conflict`.
+#[tokio::test]
+async fn a_run_of_steps_that_another_writer_displaced_ends_fenced() {
+    let directory = tempfile::tempdir().expect("directory");
+    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = namespace_id("displaced-steps");
+    let _writer = seed(&base, &namespace_id, &["/a", "/b"]).await;
+    let host = GrepHost::new(&base).await;
+    let held = writer_session(&base, &namespace_id);
+    assert_matches!(
+        host.worker.enable(&held).await,
+        Ok(GrepEnableOutcome::Enabled { .. })
+    );
+
+    let rival_store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let rival = GrepHost::new(&rival_store).await;
+    assert_matches!(
+        rival.disable_of(&namespace_id).await,
+        Ok(GrepDisableOutcome::Disabled),
+        "server B claims the namespace"
+    );
+    assert_matches!(
+        rival.enable_of(&namespace_id).await,
+        Ok(GrepEnableOutcome::Enabled { .. }),
+        "server B publishes another entry, whose backfill has work to build"
+    );
+    let segments = directory
+        .path()
+        .join(loonfs_objectstore::keys::extension_segment_prefix(
+            &namespace_id,
+            &loonfs_grep::entry::grep_extension_name(),
+        ));
+    let before = file_count(&segments);
+    let manifest = control::metadata_manifest(&base, &namespace_id).await;
+
+    let mut steps = host.worker.steps(&held, u64::MAX);
+    let error = steps
+        .step(one_file_steps())
+        .await
+        .expect_err("A's step finds B's manifests above its position");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+    assert_eq!(held.session_status(), NamespaceSessionStatus::Fenced);
+    assert_eq!(file_count(&segments), before, "the step writes no segment");
+    assert_eq!(
+        control::metadata_manifest(&base, &namespace_id)
+            .await
+            .payload(),
+        manifest.payload()
+    );
+    let error = host
+        .worker
+        .enable(&held)
+        .await
+        .expect_err("an enable on the fenced session");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+}
+
+/// Returns the number of files under `directory`, or 0 when it doesn't
+/// exist.
+fn file_count(directory: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return 0;
+    };
+    entries
+        .map(|entry| {
+            let entry = entry.expect("a directory entry");
+            if entry.file_type().expect("a file type").is_dir() {
+                file_count(&entry.path())
+            } else {
+                1
+            }
+        })
+        .sum()
 }
 
 /// Checks that an enable whose put has an unknown outcome returns
@@ -397,19 +338,181 @@ async fn an_enable_whose_put_has_an_unknown_outcome_fails() {
         OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("lost enable request".to_owned()),
     );
+    let failing = Arc::new(failing);
+    let shared: SharedObjectStore = failing.clone();
+    let host = GrepHost::new(&shared).await;
+    // The session claims the namespace first, so the put that fails is the
+    // enable's own.
+    let held = writer_session(&shared, &namespace_id);
+    held.put_file("/claim", b"claim", &loonfs_test_support::test_actor())
+        .await
+        .expect("the session claims the namespace with a commit");
     failing.fail_next(1);
-    let failing: SharedObjectStore = Arc::new(failing);
-    let host = GrepHost::new(&failing, "unknown-enable").await;
 
-    let outcome = host.worker.enable(&namespace_id).await;
+    let outcome = host.enable_of(&namespace_id).await;
+    drop(held);
 
     assert_matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown);
     assert_matches!(host.worker.entry(&namespace_id).await, Ok(None));
 }
 
-/// Checks that an enable and a disable whose put loses its response return
-/// `Enabled` and `Disabled` when the put was written, and `Superseded` when
-/// another process published the same entry at that number first.
+/// Checks that a step whose publication loses its put to the session's own
+/// retention window change, a manifest that copied grep's entry, is
+/// published over that manifest with the winner's other fields.
+#[tokio::test]
+async fn a_step_that_loses_its_put_to_the_sessions_copy_of_its_entry_is_published_over_it() {
+    let directory = tempfile::tempdir().expect("directory");
+    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = namespace_id("rebuilt-step");
+    let _writer = seed(&base, &namespace_id, &["/a", "/b"]).await;
+    let gate = Arc::new(BlockingStore::new(
+        base.clone(),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    let gated: SharedObjectStore = gate.clone();
+    let host = GrepHost::new(&gated).await;
+    // The test keeps the session open, so the enable's claim and the step's
+    // publication share it.
+    let session = host
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open the session");
+    host.worker.enable(&session).await.expect("enable");
+    let window_ms = 2 * loonfs::GC_GRACE_WINDOW_MS;
+
+    gate.block_next();
+    let (rebuilt, winner) = tokio::join!(
+        async {
+            host.worker
+                .steps(&session, 0)
+                .build_step(one_file_steps())
+                .await
+        },
+        async {
+            gate.wait_until_blocked().await;
+            session
+                .set_retention_window(Some(
+                    loonfs::RetentionWindow::new(window_ms).expect("a long enough window"),
+                ))
+                .await
+                .expect("the session changes the window");
+            let winner = manifest_no(&base, &namespace_id).await;
+            gate.release();
+            winner
+        }
+    );
+    assert_matches!(rebuilt, Ok(GrepBuildOutcome::Indexed { .. }));
+    assert_matches!(
+        host.worker.lifecycle(&namespace_id).await,
+        Ok(GrepIndexStatus::Backfilling {
+            cursor_inode_id: Some(_),
+            ..
+        }),
+        "the rebuilt manifest has the step's progress"
+    );
+    let current = control::metadata_manifest(&base, &namespace_id).await;
+    assert_eq!(
+        current.payload().manifest_no,
+        winner.successor().expect("next")
+    );
+    assert_eq!(
+        current.payload().retention_window_ms,
+        std::num::NonZeroU64::new(window_ms),
+        "grep's publications copy the winner's other fields"
+    );
+    assert_eq!(
+        host.worker.publication_stats(),
+        GrepPublicationStats {
+            published: 1,
+            rebuilt: 1,
+            superseded: 0,
+        },
+        "the enable published at its first put, and the step's change was rebuilt"
+    );
+    host.enable_grep_index(&namespace_id)
+        .await
+        .expect("finish the build");
+    let found = host
+        .grep(&namespace_id, &needle(), page_request(None, 10))
+        .await
+        .expect("query");
+    assert_eq!(found.matches.len(), 2);
+}
+
+/// Checks that a step whose publication loses its put to the session's own
+/// disable publishes nothing and returns `Superseded`, and that the next
+/// enable builds from the manifest that won.
+#[tokio::test]
+async fn a_step_that_loses_its_put_to_the_sessions_disable_publishes_nothing() {
+    let directory = tempfile::tempdir().expect("directory");
+    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = namespace_id("lost-step");
+    let _writer = seed(&base, &namespace_id, &["/a", "/b"]).await;
+    let gate = Arc::new(BlockingStore::new(
+        base.clone(),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    let gated: SharedObjectStore = gate.clone();
+    let host = GrepHost::new(&gated).await;
+    // The test keeps the session open, so the enable's claim, the step and the
+    // disable share it.
+    let _session = host
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open the session");
+    host.enable_of(&namespace_id).await.expect("enable");
+
+    gate.block_next();
+    let (lost, ()) = tokio::join!(
+        async {
+            host.steps_of(&namespace_id, 0)
+                .build_step(one_file_steps())
+                .await
+        },
+        async {
+            gate.wait_until_blocked().await;
+            assert_matches!(
+                host.disable_of(&namespace_id).await,
+                Ok(loonfs_grep::GrepDisableOutcome::Disabled)
+            );
+            gate.release();
+        }
+    );
+    assert_matches!(lost, Ok(GrepBuildOutcome::Superseded));
+    assert_eq!(
+        host.worker.publication_stats(),
+        GrepPublicationStats {
+            published: 2,
+            rebuilt: 0,
+            superseded: 1,
+        },
+        "the enable and the disable published, and the step's change was superseded"
+    );
+    assert_matches!(
+        host.worker.lifecycle(&namespace_id).await,
+        Ok(GrepIndexStatus::Disabled {})
+    );
+
+    let built = host
+        .enable_grep_index(&namespace_id)
+        .await
+        .expect("build from the winner");
+    let winner = control::metadata_manifest(&base, &namespace_id).await;
+    assert!(built.status.is_built_through(winner.payload().head_seq));
+    let found = host
+        .grep(&namespace_id, &needle(), page_request(None, 10))
+        .await
+        .expect("query");
+    assert_eq!(found.matches.len(), 2);
+}
+
+/// Checks that an enable and a disable whose put loses its response read
+/// the number back: they return `Enabled` and `Disabled` when the put was
+/// written, and `writer_fenced` when another writer claimed the namespace
+/// and published at that number first, which the server sends once more in
+/// a new session.
 #[tokio::test]
 async fn an_enable_or_disable_whose_put_loses_its_response_reads_back_whose_manifest_it_is() {
     for rival in [false, true] {
@@ -439,8 +542,16 @@ async fn an_enable_or_disable_whose_put_loses_its_response_reads_back_whose_mani
             OperationSelector::PutCreateIfAbsent,
         ));
         let gated: SharedObjectStore = gate.clone();
-        let host = GrepHost::new(&gated, "lost-response").await;
-        let other = GrepHost::new(&base, "lost-response-rival").await;
+        let host = GrepHost::new(&gated).await;
+        let rival_store: SharedObjectStore =
+            Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+        let other = GrepHost::new(&rival_store).await;
+        // The host's session claims the namespace first, so the injected
+        // failures hit the grep publications' puts.
+        let held = writer_session(&gated, &namespace_id);
+        held.put_file("/claim", b"claim", &loonfs_test_support::test_actor())
+            .await
+            .expect("the session claims the namespace with a commit");
         let arm = || {
             gate.inner().fail_next(1);
             if rival {
@@ -449,38 +560,29 @@ async fn an_enable_or_disable_whose_put_loses_its_response_reads_back_whose_mani
         };
 
         arm();
-        let (enabled, ()) = tokio::join!(host.worker.enable(&namespace_id), async {
+        let (enabled, ()) = tokio::join!(host.enable_of(&namespace_id), async {
             if rival {
                 gate.wait_until_blocked().await;
                 assert_matches!(
-                    other.worker.enable(&namespace_id).await,
+                    other.enable_of(&namespace_id).await,
                     Ok(GrepEnableOutcome::Enabled { .. })
                 );
                 gate.release();
             }
         });
         if rival {
-            assert_matches!(enabled, Ok(GrepEnableOutcome::Superseded));
-        } else {
-            assert_matches!(enabled, Ok(GrepEnableOutcome::Enabled { .. }));
+            let error = enabled.expect_err("the rival's claim fences the session");
+            assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+            assert_eq!(gate.inner().remaining(), 0);
+            continue;
         }
-
+        assert_matches!(enabled, Ok(GrepEnableOutcome::Enabled { .. }));
         arm();
-        let (disabled, ()) = tokio::join!(host.worker.disable(&namespace_id), async {
-            if rival {
-                gate.wait_until_blocked().await;
-                assert_matches!(
-                    other.worker.disable(&namespace_id).await,
-                    Ok(GrepDisableOutcome::Disabled)
-                );
-                gate.release();
-            }
-        });
+        assert_matches!(
+            host.disable_of(&namespace_id).await,
+            Ok(GrepDisableOutcome::Disabled)
+        );
         assert_eq!(gate.inner().remaining(), 0);
-        if rival {
-            assert_matches!(disabled, Ok(GrepDisableOutcome::Superseded));
-        } else {
-            assert_matches!(disabled, Ok(GrepDisableOutcome::Disabled));
-        }
+        drop(held);
     }
 }

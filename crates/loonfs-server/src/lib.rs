@@ -15,7 +15,7 @@ mod http;
 mod trace;
 
 pub use config::{
-    load_server_config, parse_server_config, AuthConfig, GrepConfig, JobMode, MetadataCacheConfig,
+    load_server_config, parse_server_config, AuthConfig, GrepConfig, MetadataCacheConfig,
     MetadataCacheSsdConfig, ServerConfig, StoreConfig, TlsServerConfig, TransportConfig,
     ValidatedServerConfig,
 };

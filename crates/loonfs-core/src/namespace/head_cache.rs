@@ -496,6 +496,7 @@ mod tests {
                 wal_no: WalNo(seq),
                 folded_wal_no: WalNo(0),
                 retention_floor_seq: CommitSeq(0),
+                manifest_retention_floor_seq: CommitSeq(0),
             },
             basis: MetadataBasis::new(ManifestRef {
                 owner_namespace_id: namespace_id,

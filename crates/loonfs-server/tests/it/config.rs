@@ -4,8 +4,8 @@
 use loonfs::GC_GRACE_WINDOW_MS;
 use loonfs::READ_REVALIDATION_BOUND_MS;
 use loonfs_server::{
-    load_server_config, JobMode, MetadataCacheConfig, MetadataCacheSsdConfig, ServerConfig,
-    ServerError, TlsServerConfig, TransportConfig,
+    load_server_config, MetadataCacheConfig, MetadataCacheSsdConfig, ServerConfig, ServerError,
+    TlsServerConfig, TransportConfig,
 };
 use loonfs_test_support::EnvGuard;
 use loonfs_types::config::ConfigFieldError;
@@ -15,7 +15,7 @@ use std::num::NonZeroUsize;
 use tempfile::tempdir;
 
 #[test]
-fn every_maintenance_mode_names_its_serving_and_scheduling_behavior() {
+fn the_maintenance_and_grep_settings_decode_with_their_defaults() {
     let path = write_config(
         r#"
 bind = "127.0.0.1:9400"
@@ -30,24 +30,24 @@ root = "/tmp/loonfs-server"
         .expect("valid config")
         .config()
         .clone();
-    assert_eq!(config.maintenance, JobMode::ServeAndMaintain);
-    assert!(config.maintenance.serves());
-    assert!(config.maintenance.maintains());
+    assert!(config.serve_maintenance_api);
+    assert!(config.sweep_store);
+    assert_eq!(config.grep, None);
 
-    for (spelling, mode, serves, maintains) in [
-        ("disabled", JobMode::Disabled, false, false),
-        ("serve_only", JobMode::ServeOnly, true, false),
-        ("maintain_only", JobMode::MaintainOnly, false, true),
-        ("serve_and_maintain", JobMode::ServeAndMaintain, true, true),
+    for (serve_maintenance_api, sweep_store, serve_queries) in [
+        (false, false, false),
+        (false, true, true),
+        (true, false, true),
     ] {
         let path = write_config(&format!(
             r#"
 bind = "127.0.0.1:9400"
 writer_id = "loonfs-server"
-maintenance = "{spelling}"
+serve_maintenance_api = {serve_maintenance_api}
+sweep_store = {sweep_store}
 
 [grep]
-mode = "{spelling}"
+serve_queries = {serve_queries}
 
 [store]
 kind = "local_fs"
@@ -58,20 +58,22 @@ root = "/tmp/loonfs-server"
             .expect("valid config")
             .config()
             .clone();
-        assert_eq!(config.maintenance, mode);
-        assert_eq!(config.grep.mode, mode);
-        assert_eq!(config.maintenance.serves(), serves);
-        assert_eq!(config.maintenance.maintains(), maintains);
+        assert_eq!(config.serve_maintenance_api, serve_maintenance_api);
+        assert_eq!(config.sweep_store, sweep_store);
+        assert_eq!(
+            config.grep.map(|grep| grep.serve_queries),
+            Some(serve_queries)
+        );
     }
 }
 
 #[test]
-fn an_unknown_maintenance_word_is_rejected() {
+fn a_maintenance_mode_is_rejected_as_an_unknown_setting() {
     let path = write_config(
         r#"
 bind = "127.0.0.1:9400"
 writer_id = "loonfs-server"
-maintenance = "sometimes"
+maintenance = "serve_only"
 
 [store]
 kind = "local_fs"
@@ -79,15 +81,12 @@ root = "/tmp/loonfs-server"
 "#,
     );
 
-    let error = load_server_config(&path).expect_err("unknown mode must not load");
+    let error = load_server_config(&path).expect_err("an unknown setting must not load");
     match error {
         ServerError::ConfigDecode(message) => {
-            assert!(message.contains("serve_and_maintain"), "{message}");
-            assert!(message.contains("serve_only"), "{message}");
-            assert!(message.contains("maintain_only"), "{message}");
-            assert!(message.contains("disabled"), "{message}");
+            assert!(message.contains("maintenance"), "{message}");
         }
-        other => panic!("expected decode error naming the modes, got {other:?}"),
+        other => panic!("expected a decode error naming the setting, got {other:?}"),
     }
 }
 
@@ -627,7 +626,7 @@ bind = "127.0.0.1:9400"
 writer_id = "loonfs-server"
 
 [grep]
-mode = "serve_and_maintain"
+serve_queries = true
 max_content_bytes_per_step = 0
 
 [store]
@@ -770,7 +769,7 @@ bind = "127.0.0.1:9400"
 writer_id = "loonfs-server"
 
 [grep]
-mode = "serve_and_maintain"
+serve_queries = true
 max_files_per_stepp = 3
 
 [store]
@@ -1038,11 +1037,11 @@ root = "/tmp/loonfs-server"
         .expect("load config")
         .config()
         .clone();
-    assert_eq!(config.grep.mode, JobMode::Disabled);
+    assert_eq!(config.grep, None);
 }
 
 #[test]
-fn a_grep_table_without_a_mode_is_rejected() {
+fn a_grep_table_without_serve_queries_serves_queries() {
     let path = write_config(
         r#"
 bind = "127.0.0.1:9400"
@@ -1056,8 +1055,11 @@ root = "/tmp/loonfs-server"
 "#,
     );
 
-    let error = load_server_config(&path).expect_err("mode is required");
-    assert!(error.to_string().contains("mode"), "{error}");
+    let config = load_server_config(&path)
+        .expect("serve_queries defaults to true")
+        .config()
+        .clone();
+    assert!(config.grep.expect("the grep table").serve_queries);
 }
 
 #[test]
@@ -1069,7 +1071,7 @@ bind = "127.0.0.1:9400"
 writer_id = "loonfs-server"
 
 [grep]
-mode = "serve_and_maintain"
+serve_queries = true
 {setting}
 
 [store]
@@ -1080,9 +1082,15 @@ root = "/tmp/loonfs-server"
     };
 
     let default = load("").expect("load the default step limit");
-    assert_eq!(default.config().grep.worker.max_concurrent_steps, 2);
+    let steps = |config: &loonfs_server::ValidatedServerConfig| {
+        config
+            .config()
+            .grep
+            .map(|grep| grep.worker.max_concurrent_steps)
+    };
+    assert_eq!(steps(&default), Some(2));
     let configured = load("max_concurrent_steps = 5").expect("load a step limit");
-    assert_eq!(configured.config().grep.worker.max_concurrent_steps, 5);
+    assert_eq!(steps(&configured), Some(5));
     match load("max_concurrent_steps = 0") {
         Err(ServerError::Config(ConfigFieldError::Invalid {
             field: "grep",
@@ -1093,14 +1101,14 @@ root = "/tmp/loonfs-server"
 }
 
 #[test]
-fn load_applies_grep_mode_and_policy() {
+fn load_applies_grep_serving_and_policy() {
     let path = write_config(
         r#"
 bind = "127.0.0.1:9400"
 writer_id = "loonfs-server"
 
 [grep]
-mode = "serve_only"
+serve_queries = false
 max_files_per_step = 1000
 max_content_bytes_per_step = 536870912
 
@@ -1113,8 +1121,9 @@ root = "/tmp/loonfs-server"
     let grep = load_server_config(&path)
         .expect("load config")
         .config()
-        .grep;
-    assert_eq!(grep.mode, JobMode::ServeOnly);
+        .grep
+        .expect("the config has a grep table");
+    assert!(!grep.serve_queries);
     let policy = grep
         .worker
         .build_policy()

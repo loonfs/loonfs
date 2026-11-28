@@ -13,7 +13,7 @@ use loonfs::SharedObjectStore;
 use loonfs_client::{Client, ClientConfig, ClientError, ListOptions, NamespacePath};
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_server::{
-    serve_with_shutdown, AppConfig, AuthConfig, JobMode, ServerConfig, ServerError, StoreConfig,
+    serve_with_shutdown, AppConfig, AuthConfig, ServerConfig, ServerError, StoreConfig,
     TlsServerConfig, TransportConfig,
 };
 use loonfs_test_support::http::raw_agent;
@@ -132,13 +132,10 @@ pub(crate) struct TestServer {
 // with `flavor = "multi_thread"` to give the server a second worker.
 //
 // The server never shuts down gracefully; a test stops it by aborting its
-// task. It runs no maintenance scheduler: a config that serves and
-// maintains serves only, so maintenance traffic never reaches a test's
-// request counts.
+// task. It starts no maintenance scheduler, and its config sweeps nothing,
+// so maintenance traffic never reaches a test's request counts.
 pub(crate) async fn start_server(mut config: ServerConfig) -> TestServer {
-    if config.maintenance == JobMode::ServeAndMaintain {
-        config.maintenance = JobMode::ServeOnly;
-    }
+    config.sweep_store = false;
     let (store_root, store_key_prefix) = match &config.store {
         StoreConfig::LocalFs(LocalFsStoreConfig { root, key_prefix }) => {
             (Some(PathBuf::from(root)), key_prefix.clone())
@@ -359,7 +356,11 @@ root = "unused"
     });
     config.content_token_secret = content_token_secret.into();
     config.writer_id = loonfs_test_support::ids::writer_id(writer_id);
-    config.grep.mode = JobMode::ServeAndMaintain;
+    config.grep = Some(loonfs_server::GrepConfig {
+        serve_queries: true,
+        max_cache_bytes: None,
+        worker: Default::default(),
+    });
     config.min_publish_interval_ms = 0;
     config.store = store;
     config

@@ -405,7 +405,7 @@ async fn a_floor_advance_between_two_pages_fails_the_later_page() {
         &history.store,
         &history.namespace_id,
         &writer_at(
-            "maintainer",
+            "other-writer",
             crate::test_support::grace_elapsed_after(COMMITTED_AT_MS),
         ),
     )

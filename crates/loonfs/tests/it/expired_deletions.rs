@@ -24,19 +24,19 @@ async fn advance_floor_through(
     // engine's clock is that far ahead of the writer's.
     let clock = Arc::new(ManualClock::at_system_time());
     clock.advance_ms(loonfs::GC_GRACE_WINDOW_MS);
-    let maintenance = loonfs_core::NamespaceWriterEngine::writer(
+    let other_writer = loonfs_core::NamespaceWriterEngine::writer(
         loonfs_core::test_support::namespace_store_with_wall_clock(
             store.clone(),
             namespace_id,
             clock,
         ),
-        writer_id("maintainer"),
+        writer_id("other-writer"),
     );
-    maintenance
+    other_writer
         .fold_in_new_session()
         .await
         .expect("fold the deletion");
-    let advanced = maintenance
+    let advanced = other_writer
         .advance_retention_floor(loonfs_core::RetentionTarget::Seq(deletion_seq))
         .await
         .expect("advance the floor to the deletion");

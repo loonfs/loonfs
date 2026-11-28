@@ -2,12 +2,11 @@
 //!
 //! The shipped segment target is 8 MiB of decoded rows, so a compacted run
 //! only splits into many segments at a scale no test can write in seconds.
-//! These tests narrow the rows per compacted segment through
-//! [`Maintenance::narrow_segment_row_budget`]. Everything else (folds,
+//! These tests narrow the rows per compacted segment of the writer's
+//! compaction units. Everything else (folds,
 //! compaction planning, and the page read) uses the shipped path.
 
 use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, InlineContent};
-use crate::test_support::writer;
 use crate::{
     DestinationBehavior, LoonFs, MetadataCompactionOutcome, NamespaceId, SharedObjectStore,
 };
@@ -83,19 +82,17 @@ async fn create_compacted_directory(
             .collect(),
     )
     .expect("grants");
-    let writer = writer(store.clone(), "compacted-page-writer").await;
-    let maintenance = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "compacted-page-maintenance",
-        ))
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("compacted-page-writer"))
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..crate::RuntimeConfig::default()
+        })
         .run_policy(loonfs_core::test_support::one_delta_run_policy())
         .build()
         .await
-        .expect("maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id(
-            "compacted-page-maintenance",
-        ))
-        .narrow_segment_row_budget(NonZeroUsize::new(ROWS_PER_SEGMENT).expect("nonzero"));
+        .expect("writer");
+    writer.narrow_segment_row_budget(NonZeroUsize::new(ROWS_PER_SEGMENT).expect("nonzero"));
     writer
         .create_namespace(namespace_id, &actor)
         .await
@@ -174,14 +171,11 @@ async fn create_compacted_directory(
             ))
             .await
             .expect("file batch");
-        maintenance
-            .fold_wal(namespace_id)
-            .await
-            .expect("fold file batch");
+        namespace.fold_wal().await.expect("fold file batch");
     }
     loop {
-        let response = maintenance
-            .compact_metadata(namespace_id, &crate::MaintenanceCancellation::new())
+        let response = namespace
+            .compact_metadata(&crate::MaintenanceCancellation::new())
             .await
             .expect("compact metadata");
         if response.compaction == MetadataCompactionOutcome::NotNeeded {

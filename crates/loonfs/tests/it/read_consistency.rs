@@ -207,13 +207,14 @@ async fn a_fold_that_finds_its_manifest_current_confirms_the_cached_head() {
     let fixture = fixture("found-current").await;
     fixture
         .writer
-        .maintenance(loonfs_test_support::ids::writer_id("found-current"))
-        .fold_wal(&fixture.namespace_id)
+        .open_namespace(&fixture.namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("the writer folds the tail");
     let store: SharedObjectStore = fixture.recording.clone();
-    let maintainer = LoonFs::builder_with_store(store, loonfs::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("maintainer"))
+    let other_runtime = LoonFs::builder_with_store(store, loonfs::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("other-writer"))
         .monotonic_timer(fixture.clock.clone())
         .config(loonfs::RuntimeConfig {
             manifest_revalidation_interval_ms: INTERVAL_MS,
@@ -221,8 +222,8 @@ async fn a_fold_that_finds_its_manifest_current_confirms_the_cached_head() {
         })
         .build()
         .await
-        .expect("maintainer");
-    let reader = maintainer.read_only().namespace(&fixture.namespace_id);
+        .expect("other runtime");
+    let reader = other_runtime.read_only().namespace(&fixture.namespace_id);
     reader
         .strong()
         .stat("/file.txt")
@@ -230,11 +231,12 @@ async fn a_fold_that_finds_its_manifest_current_confirms_the_cached_head() {
         .expect("a strong stat loads the cached head");
 
     fixture.clock.advance_ms(INTERVAL_MS);
-    let folded = maintainer
-        .maintenance(loonfs_test_support::ids::writer_id("maintainer"))
-        .fold_wal(&fixture.namespace_id)
+    let folded = other_runtime
+        .open_namespace(&fixture.namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
-        .expect("the maintainer's fold");
+        .expect("the other runtime's fold");
     assert_eq!(folded.outcome, loonfs::FoldWalOutcome::AlreadyCurrent);
     fixture.recording.reset();
     reader
@@ -248,7 +250,10 @@ async fn a_fold_that_finds_its_manifest_current_confirms_the_cached_head() {
             if key.starts_with(&wal_prefix(&fixture.namespace_id)),
         "the fold's check confirmed the manifest, so the read probes the WAL only"
     );
-    maintainer.shutdown().await.expect("maintainer shutdown");
+    other_runtime
+        .shutdown()
+        .await
+        .expect("other runtime shutdown");
     fixture.shutdown().await;
 }
 

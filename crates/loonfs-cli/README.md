@@ -420,11 +420,14 @@ Maintenance
     due. A compaction unit can take minutes, so the command can too.
     It stops after 16 compaction units. A `due` outcome means that work
     remains, and a later job continues it. --max-wal-tail-objects
-    overrides the default fold threshold.
+    overrides the default fold threshold. On an embedded profile, the
+    command runs as the namespace's writer, so it fences a server that
+    writes the namespace.
 
   loonfs maintenance fold
     Fold the WAL tail whatever its length, and compact metadata until
-    nothing is due.
+    nothing is due. On an embedded profile, the command runs as the
+    namespace's writer, so it fences a server that writes the namespace.
 
   loonfs maintenance retention advance [--to-seq <seq> | --before <unix-ms>]
     Advance the retention floor and discard the change-feed replay history
@@ -435,10 +438,10 @@ Maintenance
     lower. --before moves it to the last commit made at or before that
     Unix time in milliseconds. Whatever the target, the floor doesn't
     pass a commit that's less than 24 hours old, and the output shows the
-    floor that the advance reached. An embedded advance against a bucket
-    writes the new floor to the namespace's WAL as a floor object and
-    claims no writer epoch, so a server's session for that namespace isn't
-    fenced.
+    floor that the advance reached. An embedded advance runs as the
+    namespace's writer, so it claims the namespace first and fences a
+    server's session for it. The new floor is written to the WAL as a
+    floor object.
 
   loonfs maintenance retention window (--retention-window-ms <ms> | --clear)
     Set or clear the namespace's retention window. The server's
@@ -446,7 +449,9 @@ Maintenance
     milliseconds, at least 86400000 (24 hours). --clear removes the
     namespace's window, so the sweep doesn't advance the namespace's floor.
     The new window takes effect at the sweep's next full pass, and the
-    command doesn't move the floor itself.
+    command doesn't move the floor itself. On an embedded profile, the
+    command runs as the namespace's writer, so it fences a server that
+    writes the namespace.
 
   loonfs maintenance gc
     Run one collection of the namespace and print its report. Each
@@ -496,7 +501,8 @@ Maintenance
     returns as soon as the index is enabled. --max-steps and --deadline-ms
     limit the wait, so neither can be combined with --no-wait. When either
     limit stops the command, it exits nonzero and reports how far the index
-    got.
+    got. On an embedded profile, the command runs as the namespace's
+    writer, so it fences a server that writes the namespace.
 
   loonfs maintenance index status
     Show whether the gram content index is disabled, backfilling, or active.
@@ -504,7 +510,9 @@ Maintenance
   loonfs maintenance index disable
     Disable the gram content index. This also resets a corrupt index so
     that you can enable it again. For an index in another version of the
-    index format, the command fails and leaves the index unchanged.
+    index format, the command fails and leaves the index unchanged. On an
+    embedded profile, the command runs as the namespace's writer, so it
+    fences a server that writes the namespace.
 
 Profile create options
   Used by:

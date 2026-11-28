@@ -16,7 +16,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_CONTENTION_ATTEMPTS, MAX_UNFOLDED_WAL_OBJECTS};
 use loonfs_core::test_support::WriterAt;
-use loonfs_core::time::OperationClock;
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
@@ -24,8 +23,7 @@ use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode}
 use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate,
-    NamespaceOverlapStore, OperationContext, OperationKind, OperationSelector, RecordedOperation,
-    RecordingStore,
+    NamespaceOverlapStore, OperationContext, OperationKind, OperationSelector, RecordingStore,
 };
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
@@ -575,7 +573,7 @@ fn standalone_publisher(namespace_id: &NamespaceId, runtime: &TestRuntime) -> Na
         &runtime.writer,
         tokio::runtime::Handle::current(),
     );
-    let turns = registry.namespace_turns(namespace_id);
+    let turns = registry.shared.lock_state().turns(namespace_id);
     NamespacePublisher::new(namespace_id.clone(), &registry.shared, turns)
 }
 
@@ -2793,7 +2791,7 @@ async fn a_fold_with_no_read_cache_moves_the_position_to_its_manifest() {
         .expect("fold the session's tail");
 
     let status = writer
-        .maintenance(loonfs_test_support::ids::writer_id("fold-inspection"))
+        .maintenance()
         .diagnostics(&namespace_id)
         .await
         .expect("inspect the folded namespace");
@@ -2928,8 +2926,8 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
 }
 
 /// Checks that a session's fold that fails leaves the session's position
-/// where it was, and that the session's next fold, after another process
-/// folded the tail, reloads the tail and folds the rest of it.
+/// where it was, and that the session's next fold folds the whole tail from
+/// that position.
 #[tokio::test]
 async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2989,13 +2987,6 @@ async fn a_failed_fold_keeps_the_position_until_the_next_fold() {
             .is_some_and(|objects| objects >= FOLD_AT_WAL_OBJECTS.get()),
         "the failed fold kept the position"
     );
-    loonfs_core::test_support::namespace_store(failing.inner(), &namespace_id)
-        .fold_wal_tail(
-            None,
-            &OperationClock::start(0, Arc::new(loonfs_types::StdMonotonicTimer::default())),
-        )
-        .await
-        .expect("another process folds the tail");
     namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "after-fold",
@@ -3262,10 +3253,15 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
     // permit, so the fold that the next publication starts waits for the
     // lock, and finds the tail folded.
     let explicit_fold = tokio::spawn({
-        let maintenance =
-            writer.maintenance(loonfs_test_support::ids::writer_id("late-fold-maintenance"));
+        let maintenance = writer.clone();
         let namespace_b = namespace_b.clone();
-        async move { maintenance.fold_wal(&namespace_b).await }
+        async move {
+            maintenance
+                .open_namespace(&namespace_b)
+                .expect("open namespace")
+                .fold_wal()
+                .await
+        }
     });
     wait_for_fold_waiters(&writer, 1).await;
     namespace_writer_b
@@ -3323,11 +3319,13 @@ async fn a_metadata_call_with_nothing_to_fold_takes_no_fold_permit() {
         .await
         .expect("put a file");
     let permits = hold_every_fold_permit(&writer).await;
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
+    let maintenance = writer.clone();
     let maintained = bounded(
         Duration::from_secs(10),
         maintenance
-            .maintain_metadata_while_due(&namespace_id, &crate::MaintenanceCancellation::new()),
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .maintain_metadata_while_due(&crate::MaintenanceCancellation::new()),
     )
     .await
     .expect("the call doesn't wait for a fold permit")
@@ -3726,8 +3724,12 @@ async fn garbage_collection_leaves_the_writer_tail() {
     let namespaces = publish_once_into_each(&writer, std::slice::from_ref(&namespace_id)).await;
     let replays = counter(&recorder, "loonfs.publisher.tail_replays");
 
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-    maintenance.gc(&namespace_id).await.expect("gc");
+    let maintenance = writer.clone();
+    maintenance
+        .maintenance()
+        .gc(&namespace_id)
+        .await
+        .expect("gc");
     assert!(writer.core.writer_position(&namespace_id).is_some());
     namespaces[0]
         .commit_candidate(CommitCandidate::new(create_directory_request(
@@ -3847,8 +3849,9 @@ async fn a_writer_keeps_its_tail_out_of_the_read_cache() {
 
     commit("before-fold").await.expect("commit before the fold");
     writer
-        .maintenance(loonfs_test_support::ids::writer_id("maintenance"))
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the tail");
     store.reset();

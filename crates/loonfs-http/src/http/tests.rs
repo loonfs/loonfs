@@ -19,7 +19,8 @@ mod usage;
 
 use super::error::{status_for, ServedErrorCode};
 use super::middleware::{request_log_severity, RequestLogSeverity};
-use crate::{HttpState, JobMode};
+use crate::HttpState;
+use fixtures::GrepHandles;
 use loonfs::SharedObjectStore;
 use loonfs_types::ROOT_INODE_ID;
 mod fixtures;
@@ -144,7 +145,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "inode_kind",
     "load_snapshot_statistics",
     "load_namespace_statistics",
-    "maintain_only",
     "manifest_no",
     "manifest_revalidation_interval_ms",
     "max_connections",
@@ -199,8 +199,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "revision_committed_at_ms",
     "revision_committed_by",
     "revision_no",
-    "serve_and_maintain",
-    "serve_only",
+    "serve_maintenance_api",
     "service_proxied",
     "size_bytes",
     "snapshot_id",
@@ -209,6 +208,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "source_namespace_id",
     "source_parent_inode_id",
     "split_commits",
+    "sweep_store",
     "target_namespace_id",
     "captured_seq",
     "touched_inodes",
@@ -1018,10 +1018,16 @@ async fn grep_error_unreadable_entries_and_segments_are_index_corrupt_and_core_r
     harness.server.abort();
 }
 
-/// Checks that an enable whose publication another process's enable beat
-/// returns `store_contention`, and that core reads still work.
+/// Checks that an enable whose manifest put another writer's enable beat
+/// succeeds with the other writer's index, instead of returning
+/// `grep_publication_conflict`, and that core reads still work. The server's
+/// session has claimed the namespace with a commit, so the put that loses is
+/// the enable's own. The put finds the other writer's manifests above the
+/// session's position and returns `writer_fenced`, and the server sends the
+/// enable once more in a new session, which reads the other writer's entry
+/// and publishes nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grep_error_publication_conflict_is_store_contention_and_core_reads_survive() {
+async fn an_enable_that_meets_another_writers_enable_succeeds() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("grep-error-conflict");
     let gate = Arc::new(BlockingStore::new(
@@ -1036,8 +1042,9 @@ async fn grep_error_publication_conflict_is_store_contention_and_core_reads_surv
     // With the tail folded, the enable's publication is its only manifest
     // put.
     writer
-        .maintenance(loonfs_test_support::ids::writer_id("grep-error-seed"))
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the seed");
     writer.shutdown().await.expect("shutdown writer");
@@ -1047,8 +1054,13 @@ async fn grep_error_publication_conflict_is_store_contention_and_core_reads_surv
     let rival_store =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("rival store")) as SharedObjectStore;
     let rival = grep_worker(&rival_store, "grep-error-rival").await;
-    gate.block_next();
     let client = &harness.client;
+    let claim = NamespacePath::parse(namespace_id.as_str(), "/claim.txt").expect("claim target");
+    client
+        .put_file(&claim, b"claim")
+        .await
+        .expect("the server's session claims the namespace with a commit");
+    gate.block_next();
     let (result, ()) = futures::join!(client.enable_grep_index(&namespace_id), async {
         gate.wait_until_blocked().await;
         assert!(matches!(
@@ -1060,15 +1072,20 @@ async fn grep_error_publication_conflict_is_store_contention_and_core_reads_surv
         ));
         gate.release();
     });
-    assert_grep_api_error_and_core_read(
-        client,
-        &namespace_id,
-        result,
-        503,
-        ErrorCode::StoreContention,
-        "grep index publication",
-    )
-    .await;
+    let enabled = result.expect("the enable finds the other writer's index");
+    assert!(
+        matches!(
+            enabled.status,
+            loonfs_types::GrepIndexStatus::Backfilling { .. }
+        ),
+        "{enabled:?}"
+    );
+    let core = NamespacePath::parse(namespace_id.as_str(), "/core.txt").expect("core target");
+    let bytes = client
+        .read_file(&core)
+        .await
+        .expect("a lost enable must not affect core reads");
+    assert_eq!(bytes, b"core remains readable");
     harness.server.abort();
 }
 
@@ -2412,14 +2429,51 @@ async fn seed_grep_error_namespace_on(writer: &LoonFs<Writable>, namespace_id: &
         .expect("write core isolation sentinel");
 }
 
-async fn grep_error_worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
+async fn grep_error_worker(store: &SharedObjectStore) -> TestGrepWorker {
     grep_worker(store, "grep-error-worker").await
 }
 
-/// A worker composed the way the server composes its own: grep's keyspace
-/// on the given store, its filesystem reads and snapshots on handles over
-/// the same store.
-async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
+/// A grep worker with a writer runtime of its own, whose publishing calls
+/// run on that runtime's writer session of the namespace they name.
+struct TestGrepWorker {
+    worker: GrepWorker<SharedObjectStore>,
+    writer: LoonFs<Writable>,
+}
+
+impl TestGrepWorker {
+    fn session(&self, namespace_id: &NamespaceId) -> loonfs::Namespace<Writable> {
+        self.writer
+            .open_namespace(namespace_id)
+            .expect("open the namespace")
+    }
+
+    async fn enable(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs_grep::Result<loonfs_grep::GrepEnableOutcome> {
+        self.worker.enable(&self.session(namespace_id)).await
+    }
+
+    async fn disable(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs_grep::Result<loonfs_grep::GrepDisableOutcome> {
+        self.worker.disable(&self.session(namespace_id)).await
+    }
+
+    fn steps(
+        &self,
+        namespace_id: &NamespaceId,
+        publish_interval_ms: u64,
+    ) -> loonfs_grep::GrepSteps<'_, SharedObjectStore> {
+        self.worker
+            .steps(&self.session(namespace_id), publish_interval_ms)
+    }
+}
+
+/// Builds a grep worker over `store` whose publications run on a writer
+/// runtime named `actor`.
+async fn grep_worker(store: &SharedObjectStore, actor: &str) -> TestGrepWorker {
     let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
@@ -2430,13 +2484,14 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         .build()
         .await
         .expect("build writer");
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(actor));
-    GrepWorker::new(
-        store.clone(),
-        reader,
-        maintenance,
-        loonfs_grep::GrepStepBudget::default(),
-    )
+    TestGrepWorker {
+        worker: GrepWorker::new(
+            store.clone(),
+            reader,
+            loonfs_grep::GrepStepBudget::default(),
+        ),
+        writer,
+    }
 }
 
 fn grep_error_request() -> GrepRequest {
@@ -2482,6 +2537,7 @@ async fn build_active_grep_index(
         }
     }
     worker
+        .worker
         .entry(namespace_id)
         .await
         .expect("grep entry")
@@ -2498,18 +2554,18 @@ async fn publish_grep_entry(
     namespace_id: &NamespaceId,
     entry: loonfs_types::format::manifest::ExtensionEntry,
 ) {
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("grep-error-seed"));
-    let basis = maintenance
-        .load_extension_basis(namespace_id)
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    let basis = namespace
+        .load_extension_basis()
         .await
         .expect("load the basis");
-    let published = maintenance
+    let published = namespace
         .publish_extension(&basis, &grep_extension_name(), entry)
         .await
         .expect("publish the entry");
     assert!(matches!(
         published,
-        loonfs::engine::ExtensionPublication::Published(_)
+        loonfs::engine::ExtensionPublication::Published { .. }
     ));
 }
 
@@ -2522,7 +2578,7 @@ async fn start_grep_error_server(
     writer_id: &str,
 ) -> TestHarness {
     let mut config = test_options(root, writer_id);
-    config.grep = JobMode::ServeOnly;
+    config.grep = GrepHandles::ServeOnly;
     start_server_with_config(store, config).await
 }
 
@@ -2533,7 +2589,7 @@ async fn start_grep_maintenance_error_server(
     writer_id: &str,
 ) -> TestHarness {
     let mut config = test_options(root, writer_id);
-    config.grep = JobMode::ServeAndMaintain;
+    config.grep = GrepHandles::ServeAndBuild;
     start_server_with_config(store, config).await
 }
 
@@ -2756,6 +2812,7 @@ mod direct_download {
                 session_fold_at_wal_objects: None,
                 max_staleness_ms: None,
                 monotonic_timer: None,
+                wall_clock: None,
                 execution_budget: None,
                 usage_recorder: None,
                 store: Some(store),
@@ -2996,6 +3053,7 @@ mod direct_download {
                 session_fold_at_wal_objects: None,
                 max_staleness_ms: None,
                 monotonic_timer: None,
+                wall_clock: None,
                 execution_budget: None,
                 usage_recorder: None,
                 store: None,
@@ -3479,6 +3537,7 @@ mod direct_download {
                 session_fold_at_wal_objects: None,
                 max_staleness_ms: None,
                 monotonic_timer: None,
+                wall_clock: None,
                 execution_budget: None,
                 usage_recorder: None,
                 store: Some(store),

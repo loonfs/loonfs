@@ -136,7 +136,10 @@ async fn publish_while_the_put_is_written_and_collected(
         let namespace = crate::test_support::namespace_store(local, &namespace_id);
         assert_eq!(
             namespace
-                .fold_wal_tail(None, &namespace.start_clock())
+                .fixture_writer_session()
+                .await
+                .expect("the writer's session")
+                .fold()
                 .await
                 .expect("fold")
                 .response

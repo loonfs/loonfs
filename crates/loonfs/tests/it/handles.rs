@@ -140,11 +140,9 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
             ))
             .build()
             .await
-            .expect("build maintenance")
-            .maintenance(loonfs_test_support::ids::writer_id(
-                "handle-test-maintenance",
-            ));
+            .expect("build maintenance");
         let status = maintenance
+            .maintenance()
             .diagnostics(&namespace_id)
             .await
             .expect("namespace status");
@@ -217,9 +215,7 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
     let namespace_id = namespace_id("demo");
     block_on(async {
         let writer = writer(temp_dir.path()).await;
-        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
-            "handle-test-maintenance",
-        ));
+        let maintenance = writer.clone();
         writer
             .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
@@ -252,12 +248,11 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
             .await
             .expect("leave a tail below the threshold");
         let step = maintenance
-            .maintain_metadata_with_options(
-                &namespace_id,
-                &MaintainMetadataOptions {
-                    max_wal_tail_objects: std::num::NonZeroU64::MIN,
-                },
-            )
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .maintain_metadata_with_options(&MaintainMetadataOptions {
+                max_wal_tail_objects: std::num::NonZeroU64::MIN,
+            })
             .await
             .expect("fold what the writer left");
         assert_matches!(
@@ -420,11 +415,9 @@ fn an_ordinary_writer_folds_on_its_own_without_scheduled_maintenance() {
             ))
             .build()
             .await
-            .expect("build maintenance")
-            .maintenance(loonfs_test_support::ids::writer_id(
-                "handle-test-maintenance",
-            ));
+            .expect("build maintenance");
         let status = maintenance
+            .maintenance()
             .diagnostics(&namespace_id)
             .await
             .expect("status after writes");
@@ -529,11 +522,9 @@ fn a_commit_at_a_preexisting_write_stopped_tail_waits_for_the_fold_and_is_commit
             ))
             .build()
             .await
-            .expect("build maintenance")
-            .maintenance(loonfs_test_support::ids::writer_id(
-                "handle-test-maintenance",
-            ));
+            .expect("build maintenance");
         let status = maintenance
+            .maintenance()
             .diagnostics(&namespace_id)
             .await
             .expect("status after the folding publish");
@@ -639,9 +630,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
                 .build()
                 .await
                 .expect("build maintenance")
-                .maintenance(loonfs_test_support::ids::writer_id(
-                    "handle-test-maintenance",
-                ));
+                .maintenance();
         let status = maintenance
             .diagnostics(&namespace_id)
             .await
@@ -767,10 +756,9 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
             .wait_for_fold()
             .await
             .expect("settle the released fold");
-        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
-            "parked-fold-inspection",
-        ));
+        let maintenance = writer.clone();
         let status = maintenance
+            .maintenance()
             .diagnostics(&namespace_id)
             .await
             .expect("inspect the folded namespace");
@@ -813,9 +801,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
                 .build()
                 .await
                 .expect("build maintenance")
-                .maintenance(loonfs_test_support::ids::writer_id(
-                    "handle-test-maintenance",
-                ))
+                .maintenance()
                 .diagnostics(&namespace_id)
                 .await
                 .expect("status before the shutdown")
@@ -846,11 +832,9 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             ))
             .build()
             .await
-            .expect("build maintenance")
-            .maintenance(loonfs_test_support::ids::writer_id(
-                "handle-test-maintenance",
-            ));
+            .expect("build maintenance");
         let status = maintenance
+            .maintenance()
             .diagnostics(&namespace_id)
             .await
             .expect("status after the shutdown");
@@ -1055,9 +1039,7 @@ fn maintenance_snapshot_and_retention_are_explicit_one_shot_calls() {
                 .build()
                 .await
                 .expect("build maintenance");
-        let maintenance = maintenance_runtime.maintenance(loonfs_test_support::ids::writer_id(
-            "handle-test-maintenance",
-        ));
+        let maintenance = maintenance_runtime.clone();
         let snapshot = maintenance_runtime
             .open_namespace(&namespace_id)
             .expect("open namespace")
@@ -1069,7 +1051,9 @@ fn maintenance_snapshot_and_retention_are_explicit_one_shot_calls() {
             .expect("create snapshot");
         assert!(snapshot.snapshot_id.manifest_no() > ManifestNo(0));
         let retention = maintenance
-            .advance_retention_floor(&namespace_id)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .advance_retention_floor()
             .await
             .expect("advance retention");
         assert_eq!(retention.retention_floor_seq, snapshot.captured_seq);
@@ -1111,8 +1095,9 @@ async fn namespace_deletion_drops_cached_reads_even_when_its_answer_is_lost() {
             .await
             .expect("put");
         writer
-            .maintenance(loonfs_test_support::ids::writer_id("delete-lost-answer"))
-            .fold_wal(&namespace_id)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold the tail so the tombstone is the only manifest put");
         let reader = writer.read_only();

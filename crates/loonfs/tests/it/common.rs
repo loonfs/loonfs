@@ -1,7 +1,7 @@
 //! Shared fixtures for the crate's integration tests.
 
 use loonfs::publish::{CommitCandidate, CommitIntent};
-use loonfs::test_support::maintenance_past_the_grace_window;
+use loonfs::test_support::OffsetWallClock;
 use loonfs::{
     ActorId, AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Commit, CommitSeq,
     CompleteUploadBody, DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes,
@@ -159,14 +159,14 @@ pub(crate) fn metadata_options(max_wal_tail_objects: u64) -> MaintainMetadataOpt
     }
 }
 
-/// Runs compaction units until no family group is due. Under a run policy
-/// whose delta run limit is one, such as the maintenance runtime of
+/// Runs compaction units of `namespace` until no family group is due. Under
+/// a run policy whose delta run limit is one, such as the writer of
 /// [`open_compacting_runtime_with_async`] has, every group ends in one base
 /// run and the retention floor's rules have been applied.
-pub(crate) async fn compact_until_done(maintenance: &Maintenance, namespace_id: &NamespaceId) {
+pub(crate) async fn compact_until_done(namespace: &Namespace<Writable>) {
     for _ in 0..32 {
-        let step = maintenance
-            .compact_metadata(namespace_id, &loonfs::MaintenanceCancellation::new())
+        let step = namespace
+            .compact_metadata(&loonfs::MaintenanceCancellation::new())
             .await
             .expect("compact metadata");
         if step.compaction == loonfs::MetadataCompactionOutcome::NotNeeded {
@@ -176,14 +176,16 @@ pub(crate) async fn compact_until_done(maintenance: &Maintenance, namespace_id: 
     panic!("compaction did not finish within 32 steps");
 }
 
-/// One handle set per test fixture: a writer, its derived reader, and an
-/// maintenance handle sharing the same store, exercised through the blocking
-/// helpers below.
+/// One handle set per test fixture: a writer, its derived reader, and its
+/// maintenance handle, exercised through the blocking helpers below. Every
+/// maintenance call that publishes runs on the writer's sessions.
 pub(crate) struct TestRuntime {
     pub(crate) writer: LoonFs<Writable>,
     pub(crate) reader: LoonFs<ReadOnly>,
     pub(crate) maintenance: Maintenance,
-    store: SharedObjectStore,
+    /// The writer's wall clock, which a retention advance moves past the
+    /// grace window of every commit that the fixture made.
+    clock: Arc<OffsetWallClock>,
     /// The fixture holds one handle per namespace it writes, as a host
     /// would, so its helpers keep publishing through one session.
     namespaces: Mutex<HashMap<NamespaceId, Namespace<Writable>>>,
@@ -228,9 +230,9 @@ pub(crate) async fn open_runtime_with_async(
     open_fixture(store, writer_id, configure, |builder| builder).await
 }
 
-/// Opens the fixture like [`open_runtime_with_async`], with a maintenance
-/// runtime whose run policy has a delta run limit of one, so that
-/// [`compact_until_done`] leaves one base run in each family group.
+/// Opens the fixture like [`open_runtime_with_async`], with a writer whose
+/// run policy has a delta run limit of one, so that [`compact_until_done`]
+/// leaves one base run in each family group.
 pub(crate) async fn open_compacting_runtime_with_async(
     store: SharedObjectStore,
     writer_id: &str,
@@ -246,37 +248,32 @@ async fn open_fixture(
     store: SharedObjectStore,
     writer_id: &str,
     configure: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
-    configure_maintenance: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
+    configure_run_policy: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
 ) -> TestRuntime {
-    let writer = configure(
+    let clock = Arc::new(OffsetWallClock::default());
+    let writer = configure(configure_run_policy(
         LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
-            .writer_id(loonfs_test_support::ids::writer_id(writer_id)),
-    )
+            .writer_id(loonfs_test_support::ids::writer_id(writer_id))
+            .wall_clock(Arc::clone(&clock) as Arc<dyn loonfs::WallClock>),
+    ))
     .build()
     .await
     .expect("build writer");
     let reader = writer.read_only();
-    let maintenance = configure_maintenance(
-        LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
-            .writer_id(loonfs_test_support::ids::writer_id(writer_id)),
-    )
-    .build()
-    .await
-    .expect("build maintenance")
-    .maintenance(loonfs_test_support::ids::writer_id(writer_id));
+    let maintenance = writer.maintenance();
     TestRuntime {
         writer,
         reader,
         maintenance,
-        store,
+        clock,
         namespaces: Mutex::default(),
     }
 }
 
 impl TestRuntime {
-    /// Advances the namespace's retention floor to the head through
-    /// [`maintenance_past_the_grace_window`], so the advance can pass every
-    /// commit this fixture made.
+    /// Advances the namespace's retention floor to the head through the
+    /// fixture's writer session, with the writer's clock past the grace
+    /// window, so the advance can pass every commit this fixture made.
     pub(crate) async fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
@@ -289,22 +286,18 @@ impl TestRuntime {
     }
 
     /// Advances the namespace's retention floor toward `options.target`
-    /// through [`maintenance_past_the_grace_window`].
-    ///
-    /// That handle belongs to another runtime, which has no writer session
-    /// for the namespace, so an advance that moves the floor creates a floor
-    /// object at the WAL tip and then folds the namespace. The advance claims
-    /// no writer epoch, so this fixture's writer session isn't fenced. Its
-    /// next commit collides with the floor object and plans again against
-    /// the new floor.
+    /// through the fixture's writer session, with the writer's clock past
+    /// the grace window. An advance that moves the floor puts a floor object
+    /// at the session's tip, after the commits admitted before it, and then
+    /// folds the namespace.
     pub(crate) async fn advance_retention_floor_with_options(
         &self,
         namespace_id: &NamespaceId,
         options: &AdvanceRetentionFloorOptions,
     ) -> loonfs::Result<AdvanceRetentionResponse> {
-        maintenance_past_the_grace_window(self.store.clone())
-            .await
-            .advance_retention_floor_with_options(namespace_id, options)
+        let namespace = self.namespace_writer(namespace_id)?;
+        self.clock
+            .past_the_grace_window(namespace.advance_retention_floor_with_options(options))
             .await
     }
 
@@ -490,8 +483,8 @@ impl TestRuntime {
         options: MaintainMetadataOptions,
     ) -> loonfs::Result<MaintainMetadataReport> {
         block_on(
-            self.maintenance
-                .maintain_metadata_with_options(namespace_id, &options),
+            self.namespace_writer(namespace_id)?
+                .maintain_metadata_with_options(&options),
         )
     }
 
@@ -499,7 +492,7 @@ impl TestRuntime {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<FoldWalResponse> {
-        block_on(self.maintenance.fold_wal(namespace_id))
+        block_on(self.namespace_writer(namespace_id)?.fold_wal())
     }
 
     pub(crate) fn stat_path_blocking(

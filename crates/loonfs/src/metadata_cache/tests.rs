@@ -56,8 +56,13 @@ async fn snapshot_fold_reads(creation: SnapshotCreation, max_segment_bytes: usiz
             .await
             .expect("put log");
     }
-    let maintenance = runtime.maintenance(writer_id("snapshot-maintenance"));
-    maintenance.fold_wal(&demo()).await.expect("fold logs");
+    let maintenance = runtime.clone();
+    maintenance
+        .open_namespace(&demo())
+        .expect("open namespace")
+        .fold_wal()
+        .await
+        .expect("fold logs");
     // Each append extends its folded chain, so the fold that writes the
     // appended bytes reads the chain's layout from the folded segments.
     for path in ["/first.log", "/second.log"] {
@@ -79,7 +84,12 @@ async fn snapshot_fold_reads(creation: SnapshotCreation, max_segment_bytes: usiz
     let mut operation = Box::pin(async {
         match creation {
             SnapshotCreation::Fold => {
-                maintenance.fold_wal(&demo()).await.expect("fold tail");
+                maintenance
+                    .open_namespace(&demo())
+                    .expect("open namespace")
+                    .fold_wal()
+                    .await
+                    .expect("fold tail");
             }
             SnapshotCreation::Snapshot => {
                 namespace
@@ -172,8 +182,9 @@ async fn same_shape_store(
         .await
         .expect("put the folded file");
     writer
-        .maintenance(writer_id("same-shape-maintenance"))
-        .fold_wal(&demo())
+        .open_namespace(&demo())
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the first file into segments");
     namespace
@@ -711,8 +722,9 @@ async fn small_content_objects_are_read_from_the_store_once() {
                 .expect("put file");
             // A fold writes inline bytes to a content object.
             writer
-                .maintenance(writer_id("object-cache-maintenance"))
-                .fold_wal(&demo())
+                .open_namespace(&demo())
+                .expect("open namespace")
+                .fold_wal()
                 .await
                 .expect("fold");
             store.reset();
@@ -794,8 +806,9 @@ async fn reads_of_empty_files_keep_no_content_objects() {
         // A read of an empty file in the WAL tail reads no content object,
         // so the files are folded first.
         writer
-            .maintenance(writer_id("object-cache-maintenance"))
-            .fold_wal(&demo())
+            .open_namespace(&demo())
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold");
         for path in &paths {
@@ -866,8 +879,9 @@ async fn write_long_named_entries(root: &Path) {
         .await
         .expect("create the entries");
     writer
-        .maintenance(writer_id("long-names-maintenance"))
-        .fold_wal(&demo())
+        .open_namespace(&demo())
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the entries into segments");
     writer.shutdown().await.expect("shutdown");

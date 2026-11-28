@@ -12,7 +12,7 @@ use loonfs_client::{Client, ClientConfig};
 use loonfs_http::HttpMetrics;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
-use loonfs_test_support::ids::{namespace_id, writer_id};
+use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
 use loonfs_types::{CapabilityDocument, API_GROUP_FILESYSTEM_V0, API_GROUP_QUERY_V0};
@@ -36,7 +36,6 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
             &config.config,
             &config.memory,
             config.writer_id.clone(),
-            config.maintenance_writer_id.clone(),
             store,
             &HttpMetrics::new(),
             Some(metrics_path.clone().into_os_string()),
@@ -170,7 +169,6 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
                 test_config(temp_dir.path(), "shutdown-deadline-writer").scheduler_config(),
                 Arc::new(loonfs_http::Namespaces::new(writer.clone())),
                 None,
-                None,
                 &loonfs::metrics::DefaultMetricsRecorder::new(),
             ),
             deadline_ms: shutdown_deadline_ms,
@@ -279,8 +277,9 @@ async fn write_and_fold(writer: &LoonFs<Writable>, namespace_id: &loonfs::Namesp
         .await
         .expect("write a file");
     writer
-        .maintenance(writer_id("seed-maintenance"))
-        .fold_wal(namespace_id)
+        .open_namespace(namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the file");
 }
@@ -440,26 +439,22 @@ async fn shutdown_abandons_a_parked_sweep_at_its_deadline_and_settles_the_runtim
     store.release();
 }
 
-/// Checks that, in the `serve_only` and `disabled` maintenance modes, `app`
+/// Checks that, with `sweep_store = false`, `app`
 /// builds the scheduler over the HTTP API's table of writer sessions, and
 /// that `AppState::run_due_steps` closes an idle session in that table
 /// without a store request.
 #[tokio::test]
-async fn app_state_run_due_steps_closes_an_idle_session_when_the_server_does_not_maintain() {
-    use crate::config::JobMode;
-
+async fn app_state_run_due_steps_closes_an_idle_session_when_the_server_does_not_sweep() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    for (index, mode) in [JobMode::ServeOnly, JobMode::Disabled]
-        .into_iter()
-        .enumerate()
-    {
+    for (index, mode) in [true, false].into_iter().enumerate() {
         let mut app_config = test_config(temp_dir.path(), "unmaintained-server");
-        app_config.grep.mode = JobMode::Disabled;
-        app_config.maintenance = mode;
+        app_config.grep = None;
+        app_config.serve_maintenance_api = mode;
+        app_config.sweep_store = false;
         app_config.idle_session_close_after_ms = std::num::NonZeroU64::MIN;
         let (_, state) = app(
             app_config.validate().expect("validate config"),
@@ -508,11 +503,11 @@ async fn app_state_run_due_steps_closes_an_idle_session_when_the_server_does_not
         assert_eq!(
             sessions_open(),
             0,
-            "`AppState::run_due_steps` closes an idle session in {mode:?} mode"
+            "`AppState::run_due_steps` closes an idle session with `serve_maintenance_api = {mode}`"
         );
         assert!(
             store.take().is_empty(),
-            "`AppState::run_due_steps` makes no store request when the server doesn't maintain"
+            "`AppState::run_due_steps` makes no store request for a session that never published"
         );
         state.http.runtime.shutdown().await.expect("shutdown");
     }
@@ -559,7 +554,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let mut config = test_config(temp_dir.path(), "hidden-maintenance-writer");
-    config.maintenance = crate::config::JobMode::MaintainOnly;
+    config.serve_maintenance_api = false;
     let (router, state) = app(
         config.validate().expect("validate the test config"),
         options_with_store(store),
@@ -897,7 +892,11 @@ root = "unused"
     });
     config.content_token_secret = "test-content-token-secret".into();
     config.writer_id = loonfs_test_support::ids::writer_id(writer_id);
-    config.grep.mode = crate::config::JobMode::ServeAndMaintain;
+    config.grep = Some(crate::config::GrepConfig {
+        serve_queries: true,
+        max_cache_bytes: None,
+        worker: Default::default(),
+    });
     config.min_publish_interval_ms = 0;
     config.store = StoreConfig::LocalFs(LocalFsStoreConfig {
         root: root.display().to_string(),

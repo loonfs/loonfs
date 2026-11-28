@@ -1340,7 +1340,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
                 &basis,
                 &namespace_id,
                 &spec,
-                &MetadataCompactionCancellation::default(),
+                &MaintenanceCancellation::default(),
             )
             .await
             .expect("build the filter")
@@ -1365,7 +1365,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
             &namespace_id,
             &spec,
             policy,
-            &MetadataCompactionCancellation::default(),
+            &MaintenanceCancellation::default(),
         )
         .await
         .expect("compact")
@@ -1450,7 +1450,7 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
             &basis,
             &namespace_id,
             &spec,
-            &MetadataCompactionCancellation::default(),
+            &MaintenanceCancellation::default(),
         )
         .await
         .expect("build the filter")
@@ -1540,7 +1540,7 @@ async fn kept_inode_filter_and_walk_reads(
             },
             CommitSeq(0),
         ),
-        &MetadataCompactionCancellation::default(),
+        &MaintenanceCancellation::default(),
     )
     .await
     .expect("build the filter")

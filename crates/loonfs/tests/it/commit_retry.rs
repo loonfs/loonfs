@@ -106,8 +106,9 @@ async fn compact_receipt_past_horizon(
     let mut folded = false;
     for _ in 0..32 {
         let step = runtime
-            .maintenance
-            .maintain_metadata(namespace_id)
+            .namespace_writer(namespace_id)
+            .expect("open namespace")
+            .maintain_metadata()
             .await
             .expect("upkeep step");
         if matches!(step.compaction, MetadataCompactionOutcome::NotNeeded) {

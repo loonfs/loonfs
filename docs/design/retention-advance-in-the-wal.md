@@ -1,6 +1,6 @@
 # Retention advance in the WAL
 
-This note describes a retention advance that any process can make without the writer epoch. The process writes the advance to the WAL as a "floor object", which is a WAL object with no commits that records the new [retention floor](../specs/glossary.md#retention-floor). The floor object is created at the next WAL number, so the WAL orders the advance against every restore, and the namespace's writer session isn't fenced. The fold that covers the floor object then publishes the new floor in a manifest.
+[One writer per namespace](one-writer-per-namespace.md) changes this note: only the namespace's writer session makes a retention advance, and it puts the floor object at its own epoch from its publication queue. This note describes a retention advance written to the WAL. The writer writes the advance to the WAL as a "floor object", which is a WAL object with no commits that records the new [retention floor](../specs/glossary.md#retention-floor). The floor object is created at the next WAL number, so the WAL orders the advance against every restore. The fold that covers the floor object then publishes the new floor in a manifest.
 
 ## The problem
 

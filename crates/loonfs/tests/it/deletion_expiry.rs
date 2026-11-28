@@ -91,7 +91,7 @@ async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_withou
         .build()
         .await
         .expect("build writer");
-    let maintenance = writer.maintenance(writer_id("expiry-writer"));
+    let maintenance = writer.clone();
     let namespace_id = namespace_id("expiry");
     let actor = loonfs_test_support::test_actor();
     writer
@@ -111,7 +111,12 @@ async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_withou
         .commit(intent("delete", delete_directories(0..below_floor)))
         .await
         .expect("delete directories");
-    maintenance.fold_wal(&namespace_id).await.expect("fold");
+    maintenance
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
+        .await
+        .expect("fold");
     let above_floor = namespace
         .commit(intent(
             "delete-above-floor",
@@ -122,7 +127,9 @@ async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_withou
     // Every folded commit is now a grace window old.
     clock.advance_ms(loonfs::GC_GRACE_WINDOW_MS);
     let advanced = maintenance
-        .advance_retention_floor(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .advance_retention_floor()
         .await
         .expect("advance the floor");
     assert_eq!(advanced.retention_floor_seq, deleted.committed_seq);

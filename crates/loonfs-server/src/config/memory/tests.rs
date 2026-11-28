@@ -2,7 +2,7 @@
 
 use super::{MemorySource, MIB};
 use crate::config::tests::assert_invalid_field;
-use crate::config::{JobMode, ServerConfig};
+use crate::config::{GrepConfig, ServerConfig};
 use std::fs;
 use tempfile::tempdir;
 
@@ -24,8 +24,13 @@ root = "unused"
 #[test]
 fn four_gib_derives_each_budget_and_folds_unused_grep_into_segments() {
     let mut config = memory_config("memory_limit_bytes = 4294967296");
-    for mode in [JobMode::ServeOnly, JobMode::Disabled, JobMode::MaintainOnly] {
-        config.grep.mode = mode;
+    let grep = |serve_queries| GrepConfig {
+        serve_queries,
+        max_cache_bytes: None,
+        worker: Default::default(),
+    };
+    for mode in [Some(grep(true)), None, Some(grep(false))] {
+        config.grep = mode;
         let memory = config.memory_sizing(Some(1)).expect("explicit limit wins");
         assert_eq!(
             memory.fixed.map(|(_, bytes)| bytes),
@@ -60,7 +65,7 @@ fn four_gib_derives_each_budget_and_folds_unused_grep_into_segments() {
         assert_eq!(memory.managed, 741_552_948);
         assert_eq!(
             memory.segment.bytes,
-            if mode.serves() {
+            if mode.is_some_and(|grep| grep.serve_queries) {
                 370_776_474
             } else {
                 444_931_768
@@ -70,7 +75,11 @@ fn four_gib_derives_each_budget_and_folds_unused_grep_into_segments() {
         assert_eq!(memory.content_object.bytes, 74_155_294);
         assert_eq!(
             memory.grep.bytes,
-            if mode.serves() { 74_155_294 } else { 0 }
+            if mode.is_some_and(|grep| grep.serve_queries) {
+                74_155_294
+            } else {
+                0
+            }
         );
         assert_eq!(memory.admitted.bytes, 74_155_294);
         assert_eq!(memory.compaction_input.bytes, 37_077_647);
@@ -133,7 +142,7 @@ max_head_bytes = 8388608
 max_wal_tail_bytes = 0
 max_content_object_bytes = 12582912
 [grep]
-mode = "serve_only"
+serve_queries = true
 max_cache_bytes = 0
 "#,
     );

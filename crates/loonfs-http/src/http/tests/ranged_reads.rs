@@ -2,8 +2,8 @@
 //! 400, and 416 responses, the download limit, and the content objects that
 //! a ranged read reads and never writes.
 
+use super::fixtures::GrepHandles;
 use super::fixtures::{self, serve, test_app, test_options, TestAppOptions, TestOptions};
-use crate::JobMode;
 use axum::body::Bytes;
 use axum::http::{header, HeaderMap, StatusCode};
 use loonfs::{LoonFs, SharedObjectStore};
@@ -77,8 +77,9 @@ async fn fixture(configure: impl FnOnce(&mut TestOptions)) -> Fixture {
         .await
         .expect("revision 1");
     writer
-        .maintenance(writer_id("ranged-seed-maintenance"))
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold revision 1");
     let snapshot = namespace
@@ -102,7 +103,7 @@ async fn fixture(configure: impl FnOnce(&mut TestOptions)) -> Fixture {
     )
     .expect("the fold wrote one span object");
     let mut options = test_options(directory.path(), "ranged-server");
-    options.grep = JobMode::Disabled;
+    options.grep = GrepHandles::Disabled;
     configure(&mut options);
     let (router, _state) = test_app(
         options,

@@ -3,7 +3,7 @@
 
 use super::group_compaction::GroupCompactionReport;
 use super::plan::{group_run_descriptors, CompactionPlacement, MetadataCompactionSpec};
-use super::step::{CompactionUnitOutcome, MetadataCompactionCancellation};
+use super::step::{CompactionUnitOutcome, MaintenanceCancellation};
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::{MAX_CONTENTION_ATTEMPTS, METADATA_COMPACTION_BUDGET_MS};
@@ -37,37 +37,49 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Swaps the rebuilt run in for the input it replaces.
     ///
     /// The publication starts from `basis`, the manifest that the unit planned
-    /// from, or loads the current manifest when `basis` is `None`. Each attempt
-    /// checks the current manifest that `update_manifest` found.
-    /// That manifest must still contain the segments the unit compacted, and the
-    /// replacement keeps every run published meanwhile. A lost manifest put is
-    /// retried over the manifest that won, while changes to the unit's input
-    /// abandon the output.
+    /// from. Each attempt checks the current manifest that `update_manifest`
+    /// found. That manifest must still contain the segments the unit
+    /// compacted, and the replacement keeps every run published meanwhile. A
+    /// lost manifest put is retried over the manifest that won, while changes
+    /// to the unit's input abandon the output. An abandonment that a manifest
+    /// that won a put of the unit computed returns `head_moved` (see
+    /// `ManifestUpdate::published_or_unchanged`), and a cancelled unit or one
+    /// past its budget returns its outcome whatever manifest it found.
     ///
     /// The publication budget starts during finalization rather than at the start
     /// of the potentially long rebuild.
     pub(crate) async fn finalize_metadata_compaction(
         &self,
-        basis: Option<Held<LoadedManifest>>,
+        basis: Held<LoadedManifest>,
         spec: &MetadataCompactionSpec,
         input_keys: &BTreeSet<String>,
         result: GroupCompactionReport,
-        cancellation: &MetadataCompactionCancellation,
+        cancellation: &MaintenanceCancellation,
         publication: &CompactionPublication,
     ) -> Result<CompactionUnitOutcome> {
         let output_segments = &result.output_segments;
+        let built_on = basis.manifest_no();
         // `None` stands for the publication, and `Some` for every other outcome.
         let finalized = self
             .update_manifest(
-                basis,
+                Some(basis),
                 &publication.publication,
                 |current: LoadedManifest| async move {
-                    let settled = |outcome| Ok(ManifestChange::Finished(Some(outcome)));
+                    let stopped = |outcome| {
+                        Ok(ManifestChange::Finished(Some(Unpublished::Stopped(
+                            outcome,
+                        ))))
+                    };
+                    let settled = |outcome| {
+                        Ok(ManifestChange::Finished(Some(Unpublished::Settled(
+                            outcome,
+                        ))))
+                    };
                     if publication.expired() {
-                        return settled(CompactionUnitOutcome::Abandoned);
+                        return stopped(CompactionUnitOutcome::Abandoned);
                     }
                     if cancellation.is_cancelled() {
-                        return settled(CompactionUnitOutcome::Cancelled);
+                        return stopped(CompactionUnitOutcome::Cancelled);
                     }
                     let previous = current.payload();
                     if !previous.status.is_active() {
@@ -106,18 +118,22 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     // The last check before the swap that makes this output reader
                     // truth. Everything above it is reads and objects nothing references.
                     if cancellation.is_cancelled() {
-                        return settled(CompactionUnitOutcome::Cancelled);
+                        return stopped(CompactionUnitOutcome::Cancelled);
                     }
                     if publication.expired() {
-                        return settled(CompactionUnitOutcome::Abandoned);
+                        return stopped(CompactionUnitOutcome::Abandoned);
                     }
                     Ok(ManifestChange::Next(Box::new(manifest), None))
                 },
             )
-            .await;
+            .await
+            .and_then(|update| match update.response {
+                Some(Unpublished::Stopped(_)) => Ok(update),
+                _ => update.published_or_unchanged(built_on),
+            });
         match finalized {
             Ok(ManifestUpdate {
-                response: Some(outcome),
+                response: Some(Unpublished::Stopped(outcome) | Unpublished::Settled(outcome)),
                 ..
             }) => Ok(outcome),
             Ok(update) => Ok(CompactionUnitOutcome::Published {
@@ -148,6 +164,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
             Err(error) => Err(error),
         }
     }
+}
+
+/// How a compaction unit's publication ended without a put.
+enum Unpublished {
+    /// The unit was cancelled or ran out of its budget, which doesn't depend
+    /// on the manifest that the attempt found.
+    Stopped(CompactionUnitOutcome),
+    /// The manifest that the attempt found ends the unit, such as a manifest
+    /// that no longer lists the unit's input runs.
+    Settled(CompactionUnitOutcome),
 }
 
 /// The object keys of the spec's runs for its group, or `None` when the

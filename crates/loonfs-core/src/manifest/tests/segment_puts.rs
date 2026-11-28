@@ -157,6 +157,13 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
         } else {
             assert_eq!(expected.len(), 7);
         }
+        let position = crate::publish::NamespaceCommitEngine::new(
+            crate::test_support::namespace_store(&store, &namespace_id),
+            crate::test_support::writer_at("test-writer", 0).writer_id,
+        )
+        .load_position()
+        .await
+        .expect("the session's position");
         store.inner().inner().reset();
         store.block_next();
         let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
@@ -168,7 +175,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
             ..crate::test_support::namespace_store(&store, &namespace_id)
         };
         let (result, verified_manifest) =
-            tokio::try_join!(namespace.fold_wal_tail(None, &deadline), async {
+            tokio::try_join!(namespace.fold_wal_tail_from(&position, &deadline), async {
                 store.wait_until_blocked().await;
                 let manifest = captured
                     .lock()
@@ -242,10 +249,10 @@ async fn a_failed_segment_put_prevents_fold_publication() {
         },
         ..crate::test_support::namespace_store(&store, &namespace_id)
     }
-    .fold_wal_tail(
-        None,
-        &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
-    )
+    .fixture_writer_session()
+    .await
+    .expect("the writer's session")
+    .fold()
     .await;
     assert!(matches!(
         result,

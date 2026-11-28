@@ -6,36 +6,121 @@
 //! segments.
 
 use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
+use loonfs::test_support::OffsetWallClock;
 use loonfs::{
-    CommitId, DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, Namespace,
-    ReadOnly, SharedObjectStore, Writable,
+    CommitId, DestinationBehavior, LoonFs, MaintainMetadataOptions, Namespace, ReadOnly,
+    SharedObjectStore, Writable,
 };
 use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome,
-    GrepError, GrepProgress, GrepReorganizeOutcome, GrepService, GrepStepBudget, GrepWorker,
-    NamespaceReads, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES, DEFAULT_GREP_PUBLISH_INTERVAL_MS,
+    GrepError, GrepProgress, GrepReorganizeOutcome, GrepService, GrepStepBudget, GrepSteps,
+    GrepWorker, NamespaceReads, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+    DEFAULT_GREP_PUBLISH_INTERVAL_MS,
 };
 use loonfs_types::GrepIndex;
 use loonfs_types::{
     AbsolutePath, CommitSeq, GrepRequest, GrepResponse, GrepScope, NamespaceId, PageRequest,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// The writable runtime of each store that a test opened, with its wall
+/// clock.
+type SharedWriters = Mutex<Vec<(SharedObjectStore, LoonFs<Writable>, Arc<OffsetWallClock>)>>;
+
+static SHARED_WRITERS: SharedWriters = Mutex::new(Vec::new());
+
+/// Returns the one writable runtime of `store`, and its wall clock, building
+/// them on first use.
+///
+/// The helpers that write a namespace and the grep hosts on one store share
+/// this runtime, as one process that writes and indexes the store does, so
+/// a grep step's publication and a test's commit publish through one writer
+/// session of the namespace and never claim the namespace from each other.
+pub(crate) async fn shared_writer(
+    store: &SharedObjectStore,
+) -> (LoonFs<Writable>, Arc<OffsetWallClock>) {
+    if let Some((_, writer, clock)) = SHARED_WRITERS
+        .lock()
+        .expect("the shared writers lock")
+        .iter()
+        .find(|(shared, _, _)| Arc::ptr_eq(shared, store))
+    {
+        return (writer.clone(), Arc::clone(clock));
+    }
+    let clock = Arc::new(OffsetWallClock::default());
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("grep-test-writer"))
+        .wall_clock(Arc::clone(&clock) as Arc<dyn loonfs::WallClock>)
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
+        .build()
+        .await
+        .expect("build the store's writer");
+    let mut writers = SHARED_WRITERS.lock().expect("the shared writers lock");
+    if let Some((_, writer, clock)) = writers
+        .iter()
+        .find(|(shared, _, _)| Arc::ptr_eq(shared, store))
+    {
+        return (writer.clone(), Arc::clone(clock));
+    }
+    writers.push((store.clone(), writer.clone(), Arc::clone(&clock)));
+    (writer, clock)
+}
+
+/// Makes `writer` the one writable runtime of `store` (see
+/// [`shared_writer`]), for a test that builds its writer with settings of its
+/// own. Call it before any grep host on `store` is built.
+pub(crate) fn share_writer(store: &SharedObjectStore, writer: &LoonFs<Writable>) {
+    let mut writers = SHARED_WRITERS.lock().expect("the shared writers lock");
+    assert!(
+        !writers
+            .iter()
+            .any(|(shared, _, _)| Arc::ptr_eq(shared, store)),
+        "the store's writer is shared before any grep host on the store is built"
+    );
+    writers.push((
+        store.clone(),
+        writer.clone(),
+        Arc::new(OffsetWallClock::default()),
+    ));
+}
+
+/// Opens `namespace_id` on the one writable runtime of `store` (see
+/// [`shared_writer`]), which a grep host on `store` registered.
+pub(crate) fn writer_session(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+) -> Namespace<Writable> {
+    let writers = SHARED_WRITERS.lock().expect("the shared writers lock");
+    let (_, writer, _) = writers
+        .iter()
+        .find(|(shared, _, _)| Arc::ptr_eq(shared, store))
+        .expect("a grep host on the store registered its writer");
+    writer
+        .open_namespace(namespace_id)
+        .expect("open the namespace's writer session")
+}
 
 pub(crate) struct GrepHost {
     pub(crate) store: SharedObjectStore,
     pub(crate) reader: LoonFs<ReadOnly>,
-    /// The writable runtime that the maintenance handle comes from.
+    /// The store's writable runtime (see [`shared_writer`]), which the
+    /// worker publishes through.
     pub(crate) writer: LoonFs<Writable>,
-    pub(crate) maintenance: Maintenance,
+    /// The writable runtime again, which the tests run their maintenance
+    /// calls through.
+    pub(crate) maintenance: LoonFs<Writable>,
     pub(crate) service: GrepService,
     pub(crate) worker: GrepWorker<SharedObjectStore>,
     pub(crate) block_cache: Arc<GrepBlockCache>,
 }
 
 impl GrepHost {
-    pub(crate) async fn new(store: &SharedObjectStore, actor: &str) -> Self {
-        Self::with_reader(store, actor, |builder| builder).await
+    pub(crate) async fn new(store: &SharedObjectStore) -> Self {
+        Self::with_reader(store, |builder| builder).await
     }
 
     /// `configure` adjusts the reader the service and worker read through.
@@ -45,7 +130,6 @@ impl GrepHost {
     /// default interval reads it within a second.)
     pub(crate) async fn with_reader(
         store: &SharedObjectStore,
-        actor: &str,
         configure: impl FnOnce(loonfs::LoonFsBuilder<ReadOnly>) -> loonfs::LoonFsBuilder<ReadOnly>,
     ) -> Self {
         let reader = configure(
@@ -59,27 +143,70 @@ impl GrepHost {
         .build()
         .await
         .expect("build reader");
-        let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
-            .writer_id(loonfs_test_support::ids::writer_id(actor))
-            .build()
-            .await
-            .expect("build maintenance");
-        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(actor));
+        let (writer, _) = shared_writer(store).await;
+        let maintenance = writer.clone();
         let block_cache = default_block_cache();
         Self {
             store: store.clone(),
             reader: reader.clone(),
             maintenance: maintenance.clone(),
             service: GrepService::new(Arc::clone(&block_cache)),
-            worker: GrepWorker::new(
-                store.clone(),
-                reader,
-                maintenance.clone(),
-                GrepStepBudget::default(),
-            ),
+            worker: GrepWorker::new(store.clone(), reader, GrepStepBudget::default()),
             writer,
             block_cache,
         }
+    }
+
+    /// Returns a host over the same store and runtimes whose worker draws
+    /// its steps from `budget`.
+    pub(crate) fn with_budget(&self, budget: &GrepStepBudget) -> Self {
+        let block_cache = default_block_cache();
+        Self {
+            store: self.store.clone(),
+            reader: self.reader.clone(),
+            writer: self.writer.clone(),
+            maintenance: self.maintenance.clone(),
+            service: GrepService::new(Arc::clone(&block_cache)),
+            worker: GrepWorker::new(self.store.clone(), self.reader.clone(), budget.clone()),
+            block_cache,
+        }
+    }
+
+    /// Returns the worker's steps for `namespace_id`, which publish through
+    /// the writer session of the store's one writable runtime (see
+    /// [`writer_session`]), so the worker publishes as the namespace's
+    /// writer.
+    pub(crate) fn steps_of(
+        &self,
+        namespace_id: &NamespaceId,
+        publish_interval_ms: u64,
+    ) -> GrepSteps<'_, SharedObjectStore> {
+        self.worker.steps(
+            &writer_session(&self.store, namespace_id),
+            publish_interval_ms,
+        )
+    }
+
+    /// Enables grep on `namespace_id` through the namespace's writer
+    /// session, as [`Self::steps_of`] publishes.
+    pub(crate) async fn enable_of(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs_grep::Result<GrepEnableOutcome> {
+        self.worker
+            .enable(&writer_session(&self.store, namespace_id))
+            .await
+    }
+
+    /// Disables grep on `namespace_id` through the namespace's writer
+    /// session, as [`Self::steps_of`] publishes.
+    pub(crate) async fn disable_of(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs_grep::Result<GrepDisableOutcome> {
+        self.worker
+            .disable(&writer_session(&self.store, namespace_id))
+            .await
     }
 
     /// Runs a grep request with this host's grep service, object store, and
@@ -111,7 +238,7 @@ impl GrepHost {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndex, GrepError> {
-        let lifecycle = match self.worker.enable(namespace_id).await? {
+        let lifecycle = match self.enable_of(namespace_id).await? {
             GrepEnableOutcome::Enabled { state } | GrepEnableOutcome::AlreadyEnabled { state } => {
                 state
             }
@@ -143,9 +270,7 @@ impl GrepHost {
         namespace_id: &NamespaceId,
         captured_seq: CommitSeq,
     ) -> Result<GrepIndexStatus, GrepError> {
-        let mut steps = self
-            .worker
-            .steps(namespace_id, DEFAULT_GREP_PUBLISH_INTERVAL_MS);
+        let mut steps = self.steps_of(namespace_id, DEFAULT_GREP_PUBLISH_INTERVAL_MS);
         loop {
             let status = match steps.pending_status() {
                 Some(status) => status.clone(),
@@ -183,7 +308,7 @@ impl GrepHost {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndex, GrepError> {
-        match self.worker.disable(namespace_id).await? {
+        match self.disable_of(namespace_id).await? {
             GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {
                 self.worker.get_grep_index(namespace_id).await
             }
@@ -243,22 +368,26 @@ pub(crate) mod control {
 /// Publishes `entry` as grep's entry in the namespace's next manifest,
 /// whatever grep would make of it.
 pub(crate) async fn publish_grep_entry(
-    maintenance: &Maintenance,
+    maintenance: &LoonFs<Writable>,
     namespace_id: &NamespaceId,
     entry: loonfs_types::format::manifest::ExtensionEntry,
 ) {
     let basis = maintenance
-        .load_extension_basis(namespace_id)
+        .open_namespace(namespace_id)
+        .expect("open namespace")
+        .load_extension_basis()
         .await
         .expect("load the basis");
     let published = maintenance
+        .open_namespace(namespace_id)
+        .expect("open namespace")
         .publish_extension(&basis, &loonfs_grep::entry::grep_extension_name(), entry)
         .await
         .expect("publish grep's entry");
     assert!(
         matches!(
             published,
-            loonfs::engine::ExtensionPublication::Published(_)
+            loonfs::engine::ExtensionPublication::Published { .. }
         ),
         "no other publication races a test's own"
     );
@@ -271,17 +400,7 @@ pub(crate) async fn writable_namespace(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> (LoonFs<Writable>, Namespace<Writable>) {
-    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id(&format!(
-            "{namespace_id}-writer"
-        )))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let (writer, _) = shared_writer(store).await;
     writer
         .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -300,40 +419,34 @@ pub(crate) fn request(pattern: &str) -> GrepRequest {
     }
 }
 
-pub(crate) async fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
-    GrepHost::new(store, "grep-worker-tests").await.worker
-}
-
 pub(crate) async fn drive_worker_step(
-    worker: &GrepWorker<SharedObjectStore>,
+    host: &GrepHost,
     namespace_id: &NamespaceId,
     policy: GramIndexBuildPolicy,
 ) {
-    worker
-        .steps(namespace_id, 0)
+    host.steps_of(namespace_id, 0)
         .build_step(policy)
         .await
         .expect("grep build step");
-    worker
-        .steps(namespace_id, 0)
+    host.steps_of(namespace_id, 0)
         .reorganize_step(policy)
         .await
         .expect("grep reorganize step");
 }
 
 pub(crate) async fn drive_worker_to_current(
-    worker: &GrepWorker<SharedObjectStore>,
+    host: &GrepHost,
     namespace_id: &NamespaceId,
     policy: GramIndexBuildPolicy,
 ) {
     for _ in 0..512 {
-        let build = worker
-            .steps(namespace_id, 0)
+        let build = host
+            .steps_of(namespace_id, 0)
             .build_step(policy)
             .await
             .expect("grep build step");
-        let reorganize = worker
-            .steps(namespace_id, 0)
+        let reorganize = host
+            .steps_of(namespace_id, 0)
             .reorganize_step(policy)
             .await
             .expect("grep reorganize step");
@@ -379,33 +492,25 @@ pub(crate) fn page_request(cursor: Option<String>, matches: u32) -> PageRequest<
     }
 }
 
-/// Folds the tail through `maintenance`, then advances the floor to the head
-/// through a runtime whose wall clock is one default grace window ahead, so
-/// the advance can pass every commit made before the call.
-///
-/// That runtime is separate from the test's others and has no writer session
-/// for the namespace, so the advance creates a floor object at the WAL tip,
-/// folds it, and claims no writer epoch. A writer session for the namespace
-/// in another runtime isn't fenced. Its next commit collides with the floor
-/// object and plans again against the new floor, so a test can keep writing
-/// through that session after the advance.
+/// Folds the tail, then advances the floor to the head with the wall clock
+/// of the store's writer one default grace window ahead, so the advance can
+/// pass every commit made before the call. Both run as the namespace's
+/// writer session in the store's writable runtime (see [`shared_writer`]),
+/// so a test can keep writing through that session after the advance.
 pub(crate) async fn fold_wal_and_advance_retention(
     store: &SharedObjectStore,
-    maintenance: &Maintenance,
     namespace_id: &NamespaceId,
 ) -> CommitSeq {
-    maintenance
-        .maintain_metadata_with_options(
-            namespace_id,
-            &MaintainMetadataOptions {
-                max_wal_tail_objects: std::num::NonZeroU64::MIN,
-            },
-        )
+    let (writer, clock) = shared_writer(store).await;
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace
+        .maintain_metadata_with_options(&MaintainMetadataOptions {
+            max_wal_tail_objects: std::num::NonZeroU64::MIN,
+        })
         .await
         .expect("fold wal");
-    loonfs::test_support::maintenance_past_the_grace_window(store.clone())
-        .await
-        .advance_retention_floor(namespace_id)
+    clock
+        .past_the_grace_window(namespace.advance_retention_floor())
         .await
         .expect("advance retention")
         .retention_floor_seq

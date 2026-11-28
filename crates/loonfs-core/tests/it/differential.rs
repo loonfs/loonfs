@@ -14,7 +14,6 @@ use loonfs_core::publish::{
     CommitCandidate, CommitIntent, FilesystemOperation, InlineContent, NamespaceCommitEngine,
 };
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
-use loonfs_core::time::OperationClock;
 use loonfs_model::metadata::{
     DirentryBindingRecord as ModelBindingRecord, DirentryBindingState as ModelBindingState,
     InodeRecord as ModelInodeRecord, MetadataState as ModelMetadataState,
@@ -28,7 +27,6 @@ use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, MetadataRow, RevisionSummary};
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::format::wal::WalDelta;
-use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
     Attributes, AttributesRevisionNo, Checksum, CommitId, CommitSeq, ContentId, ContentRef,
@@ -1309,7 +1307,6 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         append(b"+three"),
         append(b"+four"),
     ];
-    let deadline = || OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
     let mut engine = NamespaceCommitEngine::new(
         namespace_store(&store, &namespace_id),
         context.writer_id.clone(),
@@ -1331,11 +1328,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
             .pop()
             .expect("one result")
             .expect("commit");
-        namespace_store(&store, &namespace_id)
-            .fold_wal_tail(None, &deadline())
-            .await
-            .expect("fold");
-        engine.invalidate_projection();
+        engine.fold().await.expect("fold");
     }
 
     let mut commits = Vec::new();

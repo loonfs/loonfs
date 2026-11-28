@@ -2,10 +2,8 @@
 //! WAL-tail fold, and the metadata compaction that a fold starts, and the
 //! waits for them.
 
-use super::PublisherRegistry;
 use super::{FoldWhen, NamespaceFold, NamespacePublisher, NamespacePublisherState};
 use crate::trace::phase_event;
-use crate::Maintenance;
 use crate::{Error, FoldWalOutcome, Result};
 use futures::FutureExt;
 use loonfs_core::Phase;
@@ -139,17 +137,12 @@ impl NamespacePublisher {
 
     /// Runs compaction units over this session's namespace while compaction
     /// is due, through the namespace's one compaction path (see
-    /// [`Maintenance::compact_namespace`]).
+    /// [`Self::compact_namespace`]).
     async fn run_compaction(&self) {
-        let Some(maintenance) = self.maintenance() else {
+        if self.context.writer.upgrade().is_none() {
             return;
-        };
-        let result = Box::pin(maintenance.compact_namespace(
-            &self.namespace_id,
-            None,
-            &self.compaction_cancellation,
-        ))
-        .await;
+        }
+        let result = Box::pin(self.compact_namespace(None, &self.stop)).await;
         if let Err(error) = result {
             phase_event!(
                 self.context.runtime_core,
@@ -162,31 +155,13 @@ impl NamespacePublisher {
         }
     }
 
-    /// The runtime's maintenance, acting as this session's writer. `None`
-    /// once the writer or the session table is gone.
-    fn maintenance(&self) -> Option<Maintenance> {
-        let writer = self.context.writer.upgrade()?;
-        let publisher = PublisherRegistry {
-            shared: self.shared.upgrade()?,
-        };
-        let writer_id = writer.writer_id.clone();
-        Some(Maintenance::new(
-            self.context.runtime_core.clone(),
-            publisher,
-            writer,
-            writer_id,
-        ))
-    }
-
     /// Folds the tail through the namespace's one fold path (see
-    /// [`PublisherRegistry::fold_namespace`]) when it's at the fold trigger.
-    /// Returns whether the fold published a manifest.
+    /// [`Self::fold`]) when it's at the fold trigger. Returns whether the
+    /// fold published a manifest.
     async fn run_fold(&self) -> bool {
-        let (Some(_writer), Some(shared)) = (self.context.writer.upgrade(), self.shared.upgrade())
-        else {
+        let Some(_writer) = self.context.writer.upgrade() else {
             return false;
         };
-        let registry = PublisherRegistry { shared };
         let when = FoldWhen::Due {
             max_wal_tail_objects: self
                 .context
@@ -194,7 +169,12 @@ impl NamespacePublisher {
                 .session_fold_at_wal_objects()
                 .get(),
         };
-        match registry.fold_namespace(&self.namespace_id, when).await {
+        // The session's own fold isn't stopped by its close: the commits
+        // that the close drains can wait at the write stop for it.
+        match self
+            .fold(when, &loonfs_core::MaintenanceCancellation::default())
+            .await
+        {
             Ok(NamespaceFold::Folded(folded)) => {
                 let published = folded.response.outcome == FoldWalOutcome::Published;
                 if published {

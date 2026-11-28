@@ -121,7 +121,7 @@ async fn reorganization_reads_one_span_per_refill_and_preserves_rows() {
             filter_inline: built.inline_filter_hex(),
         });
     }
-    let host = GrepHost::new(&store, "grep-span-refills").await;
+    let host = GrepHost::new(&store).await;
     host.writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -150,8 +150,7 @@ async fn reorganization_reads_one_span_per_refill_and_preserves_rows() {
     assert_eq!(cache_before.evictions, 0);
     recording.reset();
     let outcome = host
-        .worker
-        .steps(&namespace_id, 0)
+        .steps_of(&namespace_id, 0)
         .reorganize_step(GramIndexBuildPolicy {
             max_delta_runs: nonzero_usize(8),
             max_decoded_input_rows_per_step: nonzero_usize(65_536),

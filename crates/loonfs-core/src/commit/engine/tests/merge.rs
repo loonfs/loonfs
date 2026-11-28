@@ -766,23 +766,23 @@ async fn advance_floor_and_compact(
         .fold_as_test_writer()
         .await
         .expect("fold");
-    let mut maintainer = NamespaceFixture::new(
+    let mut other_writer = NamespaceFixture::new(
         store,
         namespace_id,
         &crate::test_support::writer_at(
-            "maintainer",
+            "other-writer",
             crate::test_support::grace_elapsed_after(1_000),
         ),
     );
-    maintainer.namespace.run_policy = crate::test_support::one_delta_run_policy();
-    let advanced = maintainer
+    other_writer.namespace.run_policy = crate::test_support::one_delta_run_policy();
+    let advanced = other_writer
         .engine()
         .advance_retention_floor(target)
         .await
         .expect("advance the floor");
     let mut compacted = false;
     for _ in 0..32 {
-        let outcome = maintainer
+        let outcome = other_writer
             .engine()
             .compact_from_current()
             .await

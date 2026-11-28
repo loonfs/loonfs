@@ -3,8 +3,8 @@
 //! JSON body.
 
 use super::direct_download::LoopbackIssuer;
+use super::fixtures::GrepHandles;
 use super::fixtures::{self, test_app, test_options, TestAppOptions};
-use crate::JobMode;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use loonfs::SharedObjectStore;
@@ -64,7 +64,7 @@ async fn fixture(name: &str, max_staleness_ms: u64) -> Fixture {
         .inode_id;
     writer.shutdown().await.expect("writer shutdown");
     let mut options = test_options(directory.path(), name);
-    options.grep = JobMode::Disabled;
+    options.grep = GrepHandles::Disabled;
     let (router, _state) = test_app(
         options,
         TestAppOptions {

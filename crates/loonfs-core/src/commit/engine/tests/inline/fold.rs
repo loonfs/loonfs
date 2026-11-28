@@ -43,8 +43,8 @@ async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
         .await
         .expect("during");
     let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-        .fold_wal_tail(
-            Some(input.clone()),
+        .fold_wal_tail_from(
+            &input,
             &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
         )
         .await
@@ -112,10 +112,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             .expect("during fold");
         engine.invalidate_projection();
         let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-            .fold_wal_tail(
-                Some(input.clone()),
-                &OperationClock::start(0, timer.clone()),
-            )
+            .fold_wal_tail_from(&input, &OperationClock::start(0, timer.clone()))
             .await
             .expect("fold");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
@@ -219,8 +216,8 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
     let input = engine.writer_position().expect("fold input");
     engine.invalidate_projection();
     let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-        .fold_wal_tail(
-            Some(input),
+        .fold_wal_tail_from(
+            &input,
             &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
         )
         .await
@@ -294,8 +291,8 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     store.reset();
     assert!(matches!(
         crate::test_support::namespace_store(&failing, &engine.namespace.namespace_id)
-            .fold_wal_tail(
-                Some(input.clone()),
+            .fold_wal_tail_from(
+                &input,
                 &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default()))
             )
             .await,
@@ -330,8 +327,8 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     let timer = Arc::new(ManualClock::stepping(20 * 60 * 1000));
     assert!(matches!(
         crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-            .fold_wal_tail(
-                Some(input.clone()),
+            .fold_wal_tail_from(
+                &input,
                 &crate::time::OperationClock::start(0, timer.clone())
             )
             .await,
@@ -350,8 +347,8 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     );
     store.reset();
     let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-        .fold_wal_tail(
-            Some(input),
+        .fold_wal_tail_from(
+            &input,
             &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
         )
         .await
@@ -422,12 +419,12 @@ async fn competing_engines_write_their_own_objects_and_publish_one_manifest() {
     let first_timer = Arc::new(StdMonotonicTimer::default());
     let deadline = crate::time::OperationClock::start(0, first_timer);
     let namespace = crate::test_support::namespace_store(&blocked, &first.namespace.namespace_id);
-    let first_fold = namespace.fold_wal_tail(Some(first_input), &deadline);
+    let first_fold = namespace.fold_wal_tail_from(&first_input, &deadline);
     let second_fold = async {
         blocked.wait_until_blocked().await;
         let result = crate::test_support::namespace_store(&store, &second.namespace.namespace_id)
-            .fold_wal_tail(
-                Some(second_input),
+            .fold_wal_tail_from(
+                &second_input,
                 &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
             )
             .await;
@@ -435,10 +432,9 @@ async fn competing_engines_write_their_own_objects_and_publish_one_manifest() {
         result
     };
     let (first_result, second_result) = tokio::join!(first_fold, second_fold);
-    assert_eq!(
-        first_result.expect("first fold").response.outcome,
-        FoldWalOutcome::AlreadyCurrent
-    );
+    // The second fold's manifest ends the first fold without a put, so the
+    // first fold reports its position behind.
+    assert!(matches!(first_result, Err(CoreError::HeadMoved(_))));
     assert_eq!(
         second_result.expect("second fold").response.outcome,
         FoldWalOutcome::Published
@@ -644,8 +640,8 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         segment_cache: Arc::clone(&engine.namespace.segment_cache),
         ..crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
     }
-    .fold_wal_tail(
-        Some(input.clone()),
+    .fold_wal_tail_from(
+        &input,
         &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
     )
     .await
@@ -704,10 +700,10 @@ async fn a_published_fold_moves_the_position_with_its_tail() {
     .await
     .expect("commit before the fold");
     let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-        .fold_wal_tail(
-            None,
-            &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
-        )
+        .fixture_writer_session()
+        .await
+        .expect("the writer's session")
+        .fold()
         .await
         .expect("a maintenance fold");
     let published = folded.published().expect("the fold publishes a manifest");
@@ -823,8 +819,8 @@ async fn new_commits_wait_at_the_inline_tail_limit_until_a_fold() {
         "{refused}"
     );
     let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-        .fold_wal_tail(
-            engine.writer_position(),
+        .fold_wal_tail_from(
+            &engine.writer_position().expect("a writer position"),
             &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
         )
         .await

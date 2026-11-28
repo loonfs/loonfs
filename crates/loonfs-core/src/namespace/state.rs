@@ -24,9 +24,19 @@ pub struct NamespaceReadState {
     /// that replay read to reach the head (format spec, "Replaying the
     /// visible WAL").
     pub retention_floor_seq: CommitSeq,
+    /// The `retention_floor_seq` of the manifest that replay read the WAL
+    /// tail above.
+    pub(crate) manifest_retention_floor_seq: CommitSeq,
 }
 
 impl NamespaceReadState {
+    /// Whether a floor object in the WAL tail raised the view's floor above
+    /// the manifest's, so that no manifest records the view's floor yet and
+    /// a fold of the tail publishes it.
+    pub fn raises_retention_floor(&self) -> bool {
+        self.retention_floor_seq > self.manifest_retention_floor_seq
+    }
+
     /// Returns the head after the WAL object `payload`, whose floor is the
     /// higher of this head's floor and the floor that a floor object records.
     pub(crate) fn after_wal_object(
@@ -67,6 +77,7 @@ impl From<&NamespaceManifestPayload> for NamespaceReadState {
             wal_no: manifest.folded_wal_no,
             folded_wal_no: manifest.folded_wal_no,
             retention_floor_seq: manifest.retention_floor_seq,
+            manifest_retention_floor_seq: manifest.retention_floor_seq,
         }
     }
 }

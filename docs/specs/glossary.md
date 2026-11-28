@@ -225,7 +225,7 @@ A set of related row families compacted together to keep them consistent (for ex
 
 ### Fold
 
-Writing committed records from the WAL tail into new metadata segments and publishing the next manifest so readers replay fewer WAL objects. Folding does not change visible history and can be run by any process. See [Folding the WAL](format.md#7-folding-the-wal).
+Writing committed records from the WAL tail into new metadata segments and publishing the next manifest so readers replay fewer WAL objects. Folding does not change visible history, and the namespace's writer session runs it. See [Folding the WAL](format.md#7-folding-the-wal).
 
 ### Fold age
 
@@ -335,11 +335,11 @@ A service-proxied content read fetching a single byte range via an HTTP `Range` 
 
 ### Writer session
 
-A process's active right to commit to a namespace, identified by a monotonic writer epoch. Because epoch takeover through object storage takes around 200 ms, most deployments share one long-lived writer session per namespace inside a server. See [Writer ownership](format.md#61-writer-ownership).
+A process's active right to write a namespace's WAL and publish its manifests, identified by a monotonic writer epoch. Every commit, fold, compaction result, extension entry, retention window change, and retention floor advance of an active namespace is published by the namespace's writer session, and a process that needs to publish one claims the namespace first. Because epoch takeover through object storage takes around 200 ms, most deployments share one long-lived writer session per namespace inside a server. See [Writer ownership](format.md#61-writer-ownership).
 
 ### Writer epoch
 
-A monotonic counter in the manifest incremented each time a new writer session claims a namespace. Once the new session writes its fence, older epochs cannot commit. Creating a [floor object](#floor-object) copies the current manifest's epoch without incrementing it or fencing the writer.
+A monotonic counter in the manifest incremented each time a new writer session claims a namespace. Once the new session writes its fence, older epochs cannot commit. A [floor object](#floor-object) has the writer session's own epoch.
 
 ### Epoch claim
 
@@ -347,15 +347,11 @@ A manifest publication incrementing the writer epoch by 1. The claim must be fol
 
 ### Fence
 
-A commitless WAL object written by a new writer session at the next WAL number to block commits from older writer epochs. Fences are never deleted (even after retirement), ensuring stale WAL writes always collide. (A [floor object](#floor-object) is also commitless, but copies the current epoch and fences no writer.)
+A commitless WAL object written by a new writer session at the next WAL number to block commits from older writer epochs. Fences are never deleted (even after retirement), ensuring stale WAL writes always collide. (A [floor object](#floor-object) is also commitless, but the writer puts it with its own epoch, so it fences no writer.)
 
 ### Floor object
 
-A commitless WAL object recording a new `retention_floor_seq` at the next WAL number so retention advances are ordered against restores in the WAL. Any process can write one using the current manifest's writer epoch without fencing the active writer (a colliding writer simply rediscovers and re-validates against the new floor). Floor objects are never deleted, and the next fold copies the floor into a manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
-
-### Maintainer
-
-The role that folds the WAL, compacts metadata, publishes extension entries, advances the [retention floor](#retention-floor), and runs garbage collection. Any process can act as maintainer, including one without a writer session for the namespace, because no maintainer publication claims an epoch. See [Maintenance roles](../design/maintenance-roles.md) and [Publishing a manifest](format.md#72-publishing-a-manifest).
+A commitless WAL object recording a new `retention_floor_seq` at the next WAL number so retention advances are ordered against restores in the WAL. The namespace's writer puts one at its tip, as one item of its queue, with its own writer epoch. Floor objects are never deleted, and the next fold copies the floor into a manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Job
 

@@ -1,6 +1,6 @@
 //! Namespace deletion status published as successive manifests.
 
-use crate::commit::publish_view::WriterPosition;
+use crate::commit::publish_view::{load_writer_position, WriterPosition};
 use crate::commit::session_epoch::SessionEpoch;
 use crate::error::{CoreError, Result};
 use crate::manifest::publish::{ManifestChange, ManifestSender, ManifestUpdate};
@@ -21,8 +21,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// A writer session passes its writer position as `position`. An attempt
     /// that builds on the position's manifest takes the head from the position
-    /// instead of reading the WAL tail, and the attempt's fold folds the
-    /// position's tail. After that fold, the position moves onto the fold's
+    /// instead of reading the WAL tail, and any other attempt takes the head
+    /// and the tail from the writer's load. The attempt's fold folds that
+    /// tail. After that fold, the position moves onto the fold's
     /// manifest by [`WriterPosition::move_to`], and the deletion drops the
     /// position when the position can't move.
     ///
@@ -53,18 +54,23 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     .expect("the deletion's position lock should not be poisoned")
                     .clone()
                     .filter(|held| held.read_basis().basis.manifest() == &current.manifest());
-                let head = match &held {
-                    Some(held) => held.read_basis().head.clone(),
+                let held = match held {
+                    Some(held) => held,
                     // The writer anchor's load returns `writer_fenced` for
                     // another writer's epoch, `namespace_corrupt` for a lower
                     // one, and then `namespace_deleted` for a tombstone (see
                     // `WriterAnchor`).
-                    None => self
-                        .load_writer_read_anchor(acquired_writer, clock.observe())
-                        .await?
-                        .read_state
-                        .clone(),
+                    None => {
+                        let anchor = self
+                            .load_writer_read_anchor(acquired_writer, clock.observe())
+                            .await?;
+                        load_writer_position(
+                            &anchor,
+                            &self.current_segments(anchor.current_manifest()),
+                        )?
+                    }
                 };
+                let head = held.read_basis().head.clone();
                 if let Some(expected) = options.expected_head_seq {
                     if head.seq != expected {
                         return Err(CoreError::StaleHeadPrecondition {
@@ -75,11 +81,20 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 }
                 if current.payload().folded_wal_no < head.wal_no {
                     clock.ensure_metadata_publication_budget(&self.namespace_id)?;
-                    let folded = self.fold_wal_tail(held.clone(), clock).await?;
+                    let mut held = held;
+                    let moved = match self.fold_wal_tail_from(&held, clock).await {
+                        Ok(folded) => held.move_to(&folded.current).then_some(held),
+                        // The position is behind: its manifest is gone, or a
+                        // manifest that won the fold's put ended the fold
+                        // without a put. The next attempt drops it and loads
+                        // the writer's anchor, which returns `writer_fenced`
+                        // when another writer claimed the namespace.
+                        Err(CoreError::HeadMoved(_)) => None,
+                        Err(error) => return Err(error),
+                    };
                     *position
                         .lock()
-                        .expect("the deletion's position lock should not be poisoned") =
-                        held.and_then(|mut held| held.move_to(&folded.current).then_some(held));
+                        .expect("the deletion's position lock should not be poisoned") = moved;
                     return Ok(ManifestChange::Again);
                 }
                 let payload = current.payload().tombstone(clock.request_at_ms());

@@ -587,7 +587,7 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
     let remote_server = harness.start_external_server(harness.write_server_config_with(
         "remote",
         "index-remote",
-        "\n[grep]\nmode = \"serve_and_maintain\"\n",
+        "\n[grep]\nserve_queries = true\n",
     ));
     assert_success(&harness.run(&[
         "--json",
@@ -692,7 +692,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
     let remote_server = harness.start_external_server(harness.write_server_config_with(
         "remote",
         "maintenance-parity",
-        "\n[grep]\nmode = \"serve_and_maintain\"\n",
+        "\n[grep]\nserve_queries = true\n",
     ));
     let add_remote = harness.run(&[
         "--json",

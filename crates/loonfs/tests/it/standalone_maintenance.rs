@@ -59,20 +59,20 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_oldest_commit_reaches_the_f
         })
         .build()
         .await
-        .expect("maintenance with a longer fold age")
-        .maintenance(loonfs_test_support::ids::writer_id("patient-worker"));
+        .expect("maintenance with a longer fold age");
     let maintenance = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("fresh-worker"))
         .wall_clock(clock.clone())
         .build()
         .await
-        .expect("maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id("fresh-worker"));
+        .expect("maintenance");
 
     clock.set_ms(COMMITTED_AT_MS + fold_age_ms - 1);
     assert_eq!(
         maintenance
-            .maintain_metadata(&namespace_id)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .maintain_metadata()
             .await
             .expect("young tail")
             .wal_fold,
@@ -82,7 +82,9 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_oldest_commit_reaches_the_f
     clock.set_ms(COMMITTED_AT_MS + fold_age_ms);
     assert_eq!(
         patient
-            .maintain_metadata(&namespace_id)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .maintain_metadata()
             .await
             .expect("longer fold age")
             .wal_fold,
@@ -91,7 +93,9 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_oldest_commit_reaches_the_f
     );
     assert_matches!(
         maintenance
-            .maintain_metadata(&namespace_id)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .maintain_metadata()
             .await
             .expect("fold at the fold age")
             .wal_fold,
@@ -101,13 +105,16 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_oldest_commit_reaches_the_f
         })
     );
     let diagnostics = maintenance
+        .maintenance()
         .diagnostics(&namespace_id)
         .await
         .expect("diagnostics");
     assert_eq!(diagnostics.wal_tail_objects, 0, "{diagnostics:?}");
     assert_eq!(
         maintenance
-            .maintain_metadata(&namespace_id)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .maintain_metadata()
             .await
             .expect("folded tail")
             .wal_fold,
@@ -149,15 +156,14 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         .writer_id(loonfs_test_support::ids::writer_id("system"))
         .build()
         .await
-        .expect("system maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id("system"));
+        .expect("system maintenance");
     let future_runtime = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("future"))
         .wall_clock(clock.clone())
         .build()
         .await
         .expect("future maintenance");
-    let future = future_runtime.maintenance(loonfs_test_support::ids::writer_id("future"));
+    let future = future_runtime.clone();
     let snapshot = future_runtime
         .open_namespace(&namespace_id)
         .expect("open namespace")
@@ -169,7 +175,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         .expect("snapshot");
     assert_eq!(snapshot.created_at_ms, clock.now_ms());
     assert_eq!(snapshot.expires_at_ms, Some(clock.now_ms() + 1_000));
-    let derived = writer.maintenance(loonfs_test_support::ids::writer_id("derived"));
+    let derived = writer.clone();
     for maintenance in [future, derived] {
         let object_key = loonfs_objectstore::keys::metadata_segment(
             &namespace_id,
@@ -180,7 +186,11 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
             .await
             .expect("unreferenced segment");
         store.reset();
-        let kept = system.gc(&namespace_id).await.expect("system collection");
+        let kept = system
+            .maintenance()
+            .gc(&namespace_id)
+            .await
+            .expect("system collection");
         assert_eq!(kept.deleted.metadata_segments, 0);
         assert!(!store
             .take()
@@ -192,6 +202,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
             .expect("segment")
             .is_some());
         let collected = maintenance
+            .maintenance()
             .gc(&namespace_id)
             .await
             .expect("future collection");

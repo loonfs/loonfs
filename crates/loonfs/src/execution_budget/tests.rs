@@ -14,7 +14,7 @@ use crate::{
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::bounded;
-use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
+use loonfs_test_support::ids::{namespace_id, test_actor};
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +33,10 @@ struct GatedRuntime {
     _root: TempDir,
     store: Arc<BlockingStore<LocalFsStore>>,
     runtime: LoonFs<Writable>,
+    /// The writable handles of the namespaces with work, which keep their
+    /// writer sessions open with their epochs, so a fold or a compaction
+    /// claims nothing.
+    held: std::sync::Mutex<Vec<Namespace<Writable>>>,
 }
 
 async fn gated_runtime(
@@ -62,6 +66,7 @@ async fn gated_runtime(
         _root: root,
         store,
         runtime,
+        held: std::sync::Mutex::default(),
     }
 }
 
@@ -98,14 +103,16 @@ impl GatedRuntime {
             .runtime
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        let maintenance = self.runtime.maintenance(writer_id("budget-setup"));
+        let maintenance = self.runtime.clone();
         for index in 0..2 {
             namespace
                 .put_file(&format!("/folded-{index}"), b"body", &test_actor())
                 .await
                 .expect("put a file");
             maintenance
-                .fold_wal(&namespace_id)
+                .open_namespace(&namespace_id)
+                .expect("open namespace")
+                .fold_wal()
                 .await
                 .expect("fold the file into a delta run");
         }
@@ -113,26 +120,34 @@ impl GatedRuntime {
             .put_file("/tail", b"body", &test_actor())
             .await
             .expect("put the file that stays in the tail");
+        self.held
+            .lock()
+            .expect("the held handles lock")
+            .push(namespace);
         namespace_id
     }
 
     fn start_fold(&self, namespace_id: &NamespaceId) -> JoinHandle<()> {
-        let maintenance = self.runtime.maintenance(writer_id("budget-folds"));
+        let maintenance = self.runtime.clone();
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             maintenance
-                .fold_wal(&namespace_id)
+                .open_namespace(&namespace_id)
+                .expect("open namespace")
+                .fold_wal()
                 .await
                 .expect("fold the tail");
         })
     }
 
     fn start_compaction(&self, namespace_id: &NamespaceId) -> JoinHandle<()> {
-        let maintenance = self.runtime.maintenance(writer_id("budget-compactions"));
+        let maintenance = self.runtime.clone();
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             maintenance
-                .compact_metadata(&namespace_id, &crate::MaintenanceCancellation::new())
+                .open_namespace(&namespace_id)
+                .expect("open namespace")
+                .compact_metadata(&crate::MaintenanceCancellation::new())
                 .await
                 .expect("compact the delta runs");
         })
@@ -405,7 +420,19 @@ async fn shutting_down_one_runtime_leaves_the_budget_usable() {
         },
     )
     .await;
-    let waiting = leaving.start_fold(&leaving_namespace);
+    let waiting = {
+        let runtime = leaving.runtime.clone();
+        let namespace_id = leaving_namespace.clone();
+        tokio::spawn(async move {
+            let error = runtime
+                .open_namespace(&namespace_id)
+                .expect("open namespace")
+                .fold_wal()
+                .await
+                .expect_err("the shutdown ends the fold's wait for its permit");
+            assert_eq!(error.code(), crate::ErrorCode::ShuttingDown);
+        })
+    };
     wait_for_stats(
         &budget,
         ExecutionBudgetStats {
@@ -790,14 +817,16 @@ async fn an_explicit_collection_waits_for_a_collection_permit() {
         .create_namespace(&namespace_id, &test_actor())
         .await
         .expect("create namespace");
-    let maintenance = gated.runtime.maintenance(writer_id("budget-collector"));
+    let maintenance = gated.runtime.clone();
 
     maintenance
+        .maintenance()
         .gc(&namespace_id)
         .await
         .expect("a collection with a free permit runs");
     let held = budget.collection_permit().await;
-    let mut collection = Box::pin(maintenance.gc(&namespace_id));
+    let collector = maintenance.maintenance();
+    let mut collection = Box::pin(collector.gc(&namespace_id));
     assert!(
         bounded(Duration::from_millis(500), collection.as_mut())
             .await

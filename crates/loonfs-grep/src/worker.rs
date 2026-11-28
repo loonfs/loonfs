@@ -17,14 +17,16 @@ use crate::cache::GrepBlockCache;
 use crate::entry::{GrepEntry, GrepIndexStatus};
 use crate::reads::NamespaceReads;
 use crate::{GrepError, GrepStepBudget, Result};
+use loonfs::engine::ExtensionBasis;
 use loonfs::engine::{DecodedBlockCacheConfig, DecodedBlockCacheStats};
-use loonfs::{CoreError, LoonFs, Maintenance, ReadOnly};
+use loonfs::{CoreError, LoonFs, Namespace, ReadOnly, Writable};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT, DEFAULT_TARGET_BLOCK_BYTES,
 };
 use loonfs_types::GrepIndex;
 use loonfs_types::{CommitSeq, NamespaceId};
+use reorganize::reorganize_due;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
@@ -157,16 +159,22 @@ pub enum GrepReorganizeOutcome {
 /// Bounded writer of grep's index.
 ///
 /// The worker writes grep segments into one store, and it publishes grep's
-/// entry in the namespace's manifests through a [`Maintenance`]. It reads
-/// namespace state through a read-only `LoonFs`. Scheduling is external to
-/// this type. A build or reorganize step that finds work waits for a permit
+/// entry in the namespace's manifests through the writable
+/// [`Namespace`](loonfs::Namespace) that its caller passes to
+/// [`Self::enable`], [`Self::disable`] and [`Self::steps`], so the entry is
+/// published as the namespace's writer session, which claims the namespace
+/// first when it has no writer epoch. A run of steps loads the manifest
+/// that its change builds on from the session's position, so the change and
+/// its publication start from the same manifest. The worker reads namespace
+/// state otherwise, grep's entry for [`Self::entry`] and [`Self::index_due`]
+/// included, through a read-only `LoonFs`, so a read of the index opens no
+/// writer session. Scheduling is external to this type. A build or reorganize step that finds work waits for a permit
 /// of the worker's [`GrepStepBudget`] before it reads file content or index
 /// segments.
 #[derive(Clone)]
 pub struct GrepWorker<S> {
     store: S,
     reader: LoonFs<ReadOnly>,
-    maintenance: Maintenance,
     step_budget: GrepStepBudget,
     /// The index blocks that build and reorganize steps read, which keeps
     /// the `texts` blocks that later build steps look up again, and the value
@@ -189,19 +197,13 @@ impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
 }
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
-    /// Creates a worker that writes grep segments into `store`, reads through
-    /// `reader`, and publishes grep's entry through `maintenance`. Its steps
-    /// share `step_budget` with every other worker given a clone of it.
-    pub fn new(
-        store: S,
-        reader: LoonFs<ReadOnly>,
-        maintenance: Maintenance,
-        step_budget: GrepStepBudget,
-    ) -> Self {
+    /// Creates a worker that writes grep segments into `store` and reads
+    /// through `reader`. Its steps share `step_budget` with every other worker
+    /// given a clone of it.
+    pub fn new(store: S, reader: LoonFs<ReadOnly>, step_budget: GrepStepBudget) -> Self {
         Self {
             store,
             reader,
-            maintenance,
             step_budget,
             blocks: Arc::new(GrepBlockCache::new(DecodedBlockCacheConfig::new(
                 GREP_WORKER_BLOCK_CACHE_DECODED_BYTES,
@@ -232,22 +234,40 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         NamespaceReads::new(self.reader.clone(), namespace_id)
     }
 
-    /// Starts a run of steps over `namespace_id` whose changes are published
-    /// once `publish_interval_ms` has passed since the change began, and when
-    /// the caller calls [`GrepSteps::publish`].
-    pub fn steps(&self, namespace_id: &NamespaceId, publish_interval_ms: u64) -> GrepSteps<'_, S> {
-        GrepSteps::new(self, namespace_id, publish_interval_ms)
+    /// Starts a run of steps over `namespace`'s namespace whose changes are
+    /// published through `namespace`, the namespace's writer session, once
+    /// `publish_interval_ms` has passed since the change began, and when the
+    /// caller calls [`GrepSteps::publish`].
+    pub fn steps(
+        &self,
+        namespace: &Namespace<Writable>,
+        publish_interval_ms: u64,
+    ) -> GrepSteps<'_, S> {
+        GrepSteps::new(self, namespace, publish_interval_ms)
+    }
+
+    /// Loads the namespace's current manifest through the read-only handle,
+    /// for a read of grep's entry that opens no writer session. A run of
+    /// steps loads the basis of its change from the writer session's
+    /// position instead (see [`GrepSteps`]).
+    async fn load_basis(&self, namespace_id: &NamespaceId) -> Result<ExtensionBasis> {
+        Ok(self
+            .reader
+            .namespace(namespace_id)
+            .load_extension_basis()
+            .await?)
     }
 
     /// Enables grep by publishing a backfilling entry at the namespace's
-    /// head. Enabling an enabled index changes nothing.
+    /// head, through `namespace`, the namespace's writer session. Enabling an
+    /// enabled index changes nothing.
     ///
     /// If grep's entry is invalid, enabling returns
     /// [`GrepError::IndexCorrupt`], whose message says to disable grep first
     /// (see [`Self::disable`]). If the entry has another version, enabling
     /// returns [`GrepError::UnsupportedVersion`].
-    pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
-        let mut steps = self.steps(namespace_id, 0);
+    pub async fn enable(&self, namespace: &Namespace<Writable>) -> Result<GrepEnableOutcome> {
+        let mut steps = self.steps(namespace, 0);
         let pending = steps.pending().await?;
         if let Some(entry) = pending.enabled_entry() {
             return Ok(GrepEnableOutcome::AlreadyEnabled {
@@ -265,7 +285,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         })
     }
 
-    /// Disables grep by publishing an entry that lists no segments. The
+    /// Disables grep by publishing an entry that lists no segments, through
+    /// `namespace`, the namespace's writer session. The
     /// segments become garbage-collection candidates and are never deleted
     /// synchronously.
     ///
@@ -274,8 +295,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// again. If the entry has another version, disabling returns
     /// [`GrepError::UnsupportedVersion`] and leaves the entry in place, so a
     /// build never discards an index that it can't read.
-    pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
-        let mut steps = self.steps(namespace_id, 0);
+    pub async fn disable(&self, namespace: &Namespace<Writable>) -> Result<GrepDisableOutcome> {
+        let mut steps = self.steps(namespace, 0);
         let pending = steps.pending_for_disable().await?;
         if pending.enabled_entry().is_some() {
             pending.set_entry(GrepEntry::disabled());
@@ -297,11 +318,41 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .map_or(GrepIndexStatus::Disabled {}, |entry| entry.status().clone()))
     }
 
-    /// Reads grep's entry from the namespace's current manifest, or `None`
-    /// when grep was never enabled.
+    /// Returns whether the namespace's grep index has work that a run of
+    /// steps under `policy` would do: the work that [`GrepSteps::step`] finds
+    /// from the same entry, which is a reorganization, a backfill, or an
+    /// incremental build step that plans a unit from the change feed. The
+    /// check reads grep's entry through the read-only handle, and the change
+    /// feed for an active entry, as the steps' own plan does (a backfilling
+    /// entry is due without a listing), and writes nothing, so a host can
+    /// claim a namespace for its index only when the index has work.
+    pub async fn index_due(
+        &self,
+        namespace_id: &NamespaceId,
+        policy: GramIndexBuildPolicy,
+    ) -> Result<bool> {
+        let basis = self.load_basis(namespace_id).await?;
+        let pending = steps::PendingEntry::new(basis)?;
+        let Some(entry) = pending.enabled_entry() else {
+            return Ok(false);
+        };
+        if reorganize_due(entry, policy) {
+            return Ok(true);
+        }
+        match build::find_build_work(&self.reads(namespace_id), entry, policy).await {
+            Ok(planned) => Ok(planned.is_some()),
+            // A cursor below the retention floor restarts the backfill.
+            Err(error) if below_retention_floor(&error) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Reads grep's entry from the namespace's current manifest through the
+    /// read-only handle, or `None` when grep was never enabled. An entry that
+    /// doesn't decode returns [`GrepError::IndexCorrupt`].
     pub async fn entry(&self, namespace_id: &NamespaceId) -> Result<Option<GrepEntry>> {
-        let mut steps = self.steps(namespace_id, 0);
-        Ok(steps.pending().await?.published().cloned())
+        let basis = self.load_basis(namespace_id).await?;
+        Ok(steps::PendingEntry::new(basis)?.published().cloned())
     }
 
     /// Returns the grep index's state and maintenance progress.

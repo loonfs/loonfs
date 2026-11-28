@@ -83,6 +83,7 @@ impl AclPages {
             .build()
             .await
             .expect("writer");
+        crate::common::share_writer(&store, &writer);
         let namespace_id = NamespaceId::parse(name).expect("namespace");
         writer
             .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -100,7 +101,7 @@ impl AclPages {
             .with_context(subject("prn_root").into());
         let pages = Self {
             _directory: directory,
-            host: GrepHost::new(&store, name).await,
+            host: GrepHost::new(&store).await,
             store,
             namespace_id,
             admin,
@@ -345,8 +346,7 @@ async fn a_base_reorganization_of_an_acl_namespace_scans_as_the_service() {
     for _ in 0..4 {
         pages
             .host
-            .worker
-            .steps(&pages.namespace_id, 0)
+            .steps_of(&pages.namespace_id, 0)
             .reorganize_step(to_base)
             .await
             .expect("a reorganize step");

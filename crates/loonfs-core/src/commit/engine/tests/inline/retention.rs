@@ -134,16 +134,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     let later = publish(&mut engine, &context, later)
         .await
         .expect("advance history");
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     engine.fold().await.expect("fold later history");
-    // Another process creates a floor object at the number after the
-    // session's tip, so the session's own put finds the number taken, and
-    // the session's advance ends as an advance without a session does.
-    let planned = namespace.load_current_manifest().await.expect("planned");
-    namespace
-        .publish_floor_object(&planned, later.committed_seq)
-        .await
-        .expect("another process creates a floor object");
     assert_eq!(
         crate::commit::engine::tests::advance_in_session(&mut engine, later.committed_seq)
             .await

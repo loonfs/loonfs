@@ -46,31 +46,26 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
             return Ok(GrepBuildOutcome::NotEnabled);
         };
         let reads = self.worker.reads(&self.namespace_id);
-        let planned = match entry.status() {
-            GrepIndexStatus::Backfilling {
+        let planned = match find_build_work(&reads, &entry, policy).await {
+            Ok(Some(BuildWork::Backfill {
                 captured_seq,
                 cursor_inode_id,
-            } => plan_backfill_unit(&reads, *captured_seq, *cursor_inode_id, policy).await,
-            status @ GrepIndexStatus::Active { .. } => {
-                let resume = status
-                    .active_watermark()
-                    .expect("an active grep status should have a watermark");
-                match plan_incremental_unit(&reads, resume, policy).await {
-                    Ok(Some(planned)) => Ok(planned),
-                    Ok(None) => {
-                        return self
-                            .finish_step(
-                                GrepBuildOutcome::UpToDate {
-                                    built_through_seq: resume.built_through_seq(),
-                                },
-                                GrepBuildOutcome::Superseded,
-                            )
-                            .await;
-                    }
-                    Err(error) => Err(error),
-                }
+            })) => plan_backfill_unit(&reads, captured_seq, cursor_inode_id, policy).await,
+            Ok(Some(BuildWork::Incremental(planned))) => Ok(planned),
+            Ok(None) => {
+                let Some(resume) = entry.status().active_watermark() else {
+                    return Ok(GrepBuildOutcome::NotEnabled);
+                };
+                return self
+                    .finish_step(
+                        GrepBuildOutcome::UpToDate {
+                            built_through_seq: resume.built_through_seq(),
+                        },
+                        GrepBuildOutcome::Superseded,
+                    )
+                    .await;
             }
-            GrepIndexStatus::Disabled {} => return Ok(GrepBuildOutcome::NotEnabled),
+            Err(error) => Err(error),
         };
         let planned = match planned {
             Ok(planned) => planned,
@@ -189,7 +184,7 @@ struct CollectedIndexUnit {
 
 /// The file revisions one build step examines, and the progress it publishes
 /// once their content is indexed.
-struct PlannedIndexUnit {
+pub(super) struct PlannedIndexUnit {
     pending: Vec<PendingRevisionContent>,
     progress: CollectedProgress,
 }
@@ -298,6 +293,51 @@ async fn plan_backfill_unit(
             next_cursor,
         },
     })
+}
+
+/// The work that a build step does from an enabled entry.
+pub(super) enum BuildWork {
+    /// The next files of the backfill, listed from the files at
+    /// `captured_seq` after `cursor_inode_id`. A backfilling entry always has
+    /// this work, because the backfill ends only when a step that lists the
+    /// last files moves the entry out of that status.
+    Backfill {
+        captured_seq: CommitSeq,
+        cursor_inode_id: Option<InodeId>,
+    },
+    /// The next changes of the change feed, planned from the entry's
+    /// watermark (see [`plan_incremental_unit`]).
+    Incremental(PlannedIndexUnit),
+}
+
+/// Returns the work that a build step from `entry` does, or `None` when the
+/// index is up to date or grep is disabled. A backfilling entry returns its
+/// work without a request, and an active entry reads the change feed. A
+/// cursor below the retention floor returns that error, and the step
+/// restarts the backfill.
+pub(super) async fn find_build_work(
+    reads: &NamespaceReads,
+    entry: &GrepEntry,
+    policy: GramIndexBuildPolicy,
+) -> Result<Option<BuildWork>> {
+    match entry.status() {
+        GrepIndexStatus::Backfilling {
+            captured_seq,
+            cursor_inode_id,
+        } => Ok(Some(BuildWork::Backfill {
+            captured_seq: *captured_seq,
+            cursor_inode_id: *cursor_inode_id,
+        })),
+        status @ GrepIndexStatus::Active { .. } => {
+            let resume = status
+                .active_watermark()
+                .expect("an active grep status should have a watermark");
+            Ok(plan_incremental_unit(reads, resume, policy)
+                .await?
+                .map(BuildWork::Incremental))
+        }
+        GrepIndexStatus::Disabled {} => Ok(None),
+    }
 }
 
 /// Plans one incremental step from the semantic change feed. Reads no file

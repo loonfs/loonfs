@@ -12,7 +12,7 @@ use crate::{
 use futures::future::BoxFuture;
 use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::WriterPosition;
-use loonfs_core::{Administrator, FloorObjectReport, Phase, PublicationReport};
+use loonfs_core::{Administrator, Phase, PublicationReport};
 use loonfs_types::Commit;
 use loonfs_types::{CommitSeq, NamespaceId};
 use std::collections::HashMap;
@@ -66,6 +66,11 @@ pub(super) struct RegistryShared {
     /// contain panics to keep the registry usable, so this (not a task
     /// join error) is what a drain reports.
     pub(super) panicked_units: AtomicUsize,
+    /// A narrowed per-segment row budget for the sessions' compaction units,
+    /// for the tests that need many compacted segments (see
+    /// [`PublisherRegistry::narrow_segment_row_budget`]).
+    #[cfg(test)]
+    segment_row_budget: Mutex<Option<std::num::NonZeroUsize>>,
 }
 
 pub(super) struct RegistryState {
@@ -199,7 +204,7 @@ impl NamespaceSession {
     pub(crate) async fn close(&self) -> std::result::Result<CloseNamespaceReport, CoreError> {
         let publisher = &self.publisher;
         let drained_commits = publisher.close_session()?;
-        publisher.compaction_cancellation.cancel();
+        publisher.stop.cancel();
         publisher.end_session_work().await;
         Ok(CloseNamespaceReport {
             drained_commits,
@@ -215,6 +220,7 @@ impl NamespacePublisher {
     async fn end_session_work(&self) {
         self.forget_if_ended();
         self.wait_for_worker().await;
+        self.wait_for_maintenance().await;
         if let Err(error) = self.wait_for_fold().await {
             phase_event!(
                 self.context.runtime_core,
@@ -242,6 +248,13 @@ impl NamespacePublisher {
 impl RegistryShared {
     pub(super) fn lock_state(&self) -> std::sync::MutexGuard<'_, RegistryState> {
         lock_state(&self.state)
+    }
+
+    /// Returns the narrowed row budget of the sessions' compaction units, if
+    /// a test set one.
+    #[cfg(test)]
+    pub(super) fn segment_row_budget(&self) -> Option<std::num::NonZeroUsize> {
+        *lock_state(&self.segment_row_budget)
     }
 
     fn live_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {
@@ -308,6 +321,8 @@ impl PublisherRegistry {
                     turns: HashMap::new(),
                 }),
                 panicked_units: AtomicUsize::new(0),
+                #[cfg(test)]
+                segment_row_budget: Mutex::new(None),
             }),
         }
     }
@@ -376,21 +391,42 @@ impl PublisherRegistry {
         Ok(session)
     }
 
-    /// Waits until the namespace's session in this runtime, if it's fenced,
-    /// has finished its work and left the table, so that the next
-    /// [`Self::open_session`] starts a new session instead of returning the
-    /// fence. A session that isn't fenced is left alone.
+    /// Waits until the namespace's session in this runtime, if it admits no
+    /// more work because it's fenced or closed, has finished its work and
+    /// left the table, so that the next [`Self::open_session`] starts a new
+    /// session instead of returning the session's `writer_fenced` or
+    /// `writer_session_closed`. A session that admits work is left alone.
     ///
-    /// The fence cancelled the session's compaction (see
-    /// [`NamespacePublisher::release_engine`]), and a fenced session admits
-    /// and starts nothing more, so the wait ends once the commits it admitted
-    /// and a running fold end.
-    pub(crate) async fn wait_for_fenced_session(&self, namespace_id: &NamespaceId) {
+    /// A fence and a close cancel the session's compaction (see
+    /// [`NamespacePublisher::release_engine`]), and such a session admits and
+    /// starts nothing more, so the wait ends once the commits and the
+    /// maintenance that it admitted and a running fold end.
+    pub(crate) async fn wait_for_ended_session(&self, namespace_id: &NamespaceId) {
         let Some(publisher) = self.live_publisher(namespace_id) else {
             return;
         };
-        if publisher.session_is_fenced() {
+        if publisher.session_is_fenced() || publisher.session_closed() {
             publisher.end_session_work().await;
+        }
+    }
+
+    /// Opens the namespace's session as [`Self::open_session`] does, for an
+    /// operation on another namespace than the caller's, such as a fork's
+    /// fold of its source. When this runtime's session for the namespace is
+    /// fenced or closed and still ending, the call waits for it to end (see
+    /// [`Self::wait_for_ended_session`]) and opens a new session, as the
+    /// server's retry does for a request's own namespace. An open that still
+    /// fails returns its error, which identifies the namespace.
+    pub(crate) async fn open_session_once_ended(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> std::result::Result<Arc<NamespaceSession>, CoreError> {
+        match self.open_session(namespace_id) {
+            Err(CoreError::WriterFenced(_) | CoreError::WriterSessionClosed { .. }) => {
+                self.wait_for_ended_session(namespace_id).await;
+                self.open_session(namespace_id)
+            }
+            opened => opened,
         }
     }
 
@@ -478,23 +514,15 @@ impl PublisherRegistry {
         self.shared.live_publisher(namespace_id)
     }
 
-    /// Submits an advance of the retention floor to `target`, planned from
-    /// `planned`, to the queue of the namespace's writer session in this
-    /// runtime, and returns `None` without submitting when the runtime has
-    /// no writer session for the namespace that admits work and isn't
-    /// fenced.
+    /// Narrows the rows one segment that the sessions' compaction units
+    /// write may contain, so a namespace a test can build in seconds
+    /// compacts into many segments.
     ///
-    /// The queue orders the advance like a deletion: commits admitted before
-    /// it publish first, and commits admitted after it are validated against
-    /// the new floor.
-    pub(crate) async fn submit_retention_advance(
-        &self,
-        namespace_id: &NamespaceId,
-        planned: LoadedManifest,
-        target: CommitSeq,
-    ) -> Option<Result<FloorObjectReport>> {
-        let publisher = self.live_publisher(namespace_id)?;
-        publisher.submit_retention_advance(planned, target).await
+    /// Test-only: folds keep the shipped segment shape, and planning and
+    /// publishing are the shipped path either way.
+    #[cfg(test)]
+    pub(crate) fn narrow_segment_row_budget(&self, max_rows_per_segment: std::num::NonZeroUsize) {
+        *lock_state(&self.shared.segment_row_budget) = Some(max_rows_per_segment);
     }
 
     /// Returns the writer sessions that this runtime's reads start from.
@@ -514,14 +542,6 @@ impl PublisherRegistry {
         let publisher = self.live_publisher(namespace_id)?;
         let slot = publisher.lock_engine().await;
         slot.wal_tail_bytes()
-    }
-
-    /// Drops the position of the namespace's writer session in this
-    /// runtime, if the runtime has one, once no other task has the session's
-    /// engine locked. The session's next unit runs discovery, and a fold
-    /// without a position loads the tail from the store.
-    pub(crate) async fn drop_session_position(&self, namespace_id: &NamespaceId) {
-        self.shared.drop_position(namespace_id).await;
     }
 
     /// Returns the namespace's writer position (see
@@ -574,6 +594,7 @@ impl PublisherRegistry {
             .collect();
         for publisher in &publishers {
             publisher.wait_for_worker().await;
+            publisher.wait_for_maintenance().await;
         }
         let mut task_error = None;
         for publisher in &publishers {

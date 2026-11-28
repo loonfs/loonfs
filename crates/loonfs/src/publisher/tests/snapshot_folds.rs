@@ -87,7 +87,7 @@ async fn finish(creations: Vec<JoinHandle<crate::Result<()>>>) {
 }
 
 #[tokio::test]
-async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
+async fn creations_wait_for_a_fold_permit_when_they_fold() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let unfolded = NamespaceId::parse("unfolded").expect("namespace id");
@@ -115,10 +115,13 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
     let permits = hold_every_fold_permit(&writer).await;
     let mut creations = start_creations(&writer, &unfolded);
     creations.extend(start_creations(&writer, &folded));
-    // A snapshot folds under its namespace's fold lock, and a fork folds the
-    // source's tail into itself without that lock, so the snapshot and the
-    // fork of each namespace both wait for a permit.
-    wait_for_fold_waiters(&writer, 4).await;
+    // A snapshot of a tail with a commit folds under its namespace's fold
+    // lock, and a fork folds the source's tail into itself without that
+    // lock, so the snapshot and the fork of the unfolded namespace both wait
+    // for a permit. A snapshot of the folded namespace, whose session has no
+    // position, has nothing to fold, so it writes its record on the current
+    // manifest without a permit, and only the fork of that namespace waits.
+    wait_for_fold_waiters(&writer, 3).await;
     bounded(
         Duration::from_secs(10),
         writer.fork_namespace_with_options(
@@ -193,11 +196,29 @@ async fn dropped_creations_return_their_fold_permits() {
     seed_unfolded_tail(store.as_ref(), &namespace_id).await;
 
     // The snapshot takes the namespace's fold lock and the permit, and parks
-    // at its manifest put, and the fork waits for the lock.
+    // at its manifest put (its session's claim), and then the fork waits for
+    // the permit.
     store.block_next();
-    let creations = start_creations(&writer, &namespace_id);
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let snapshot = tokio::spawn(async move { namespace.create_snapshot().await.map(|_| ()) });
     store.wait_until_blocked().await;
     assert_eq!(writer.execution_budget().stats().folds_running, 1);
+    let fork_writer = writer.clone();
+    let source = namespace_id.clone();
+    let fork = tokio::spawn(async move {
+        fork_writer
+            .fork_namespace(
+                &source,
+                &NamespaceId::parse("dropped-fork").expect("fork namespace id"),
+                &loonfs_test_support::test_actor(),
+            )
+            .await
+            .map(|_| ())
+    });
+    wait_for_fold_waiters(&writer, 1).await;
+    let creations = vec![snapshot, fork];
 
     for creation in &creations {
         creation.abort();

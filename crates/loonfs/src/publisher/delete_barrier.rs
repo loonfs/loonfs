@@ -32,7 +32,7 @@ impl NamespacePublisher {
                 queued
             };
             self.report_queue_depth();
-            self.compaction_cancellation.cancel();
+            self.stop.cancel();
             // A deleted session has ended. It leaves the table before the
             // delete's callers hear the outcome, so an open after that
             // starts a fresh session whose publish fails on the durable

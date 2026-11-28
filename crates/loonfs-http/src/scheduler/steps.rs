@@ -80,8 +80,9 @@ impl Scheduler {
     /// step because it's due at most once per `gc_interval_ms`, and a session
     /// with a commit at every interval has index work at every interval. A
     /// session that was closed or fenced, or whose namespace is gone, closes as
-    /// soon as no caller has its handle. A scheduler without a maintenance
-    /// handle runs the close step alone.
+    /// soon as no caller has its handle. The metadata and collection steps
+    /// run on the session's writable handle, which the step clones and drops
+    /// before the close step.
     ///
     /// A close that fails or panics counts as a failed `close` call, and the
     /// next maintenance interval tries again.
@@ -90,33 +91,34 @@ impl Scheduler {
         let Some(entry) = inner.namespaces.entry(namespace_id) else {
             return;
         };
-        let (seq, open, positioned, metadata_due) = {
+        let (writer, seq, open, positioned, metadata_due) = {
             let held = lock(&entry);
             let positioned = held.handle.has_current_writer_position();
             (
+                held.handle.clone(),
                 held.handle.last_published_seq(),
                 held.handle.session_status() == NamespaceSessionStatus::Open,
                 positioned,
                 metadata_due(&held, positioned, inner.timer.monotonic_now_ms()),
             )
         };
-        let metadata = match &inner.maintenance {
-            Some(maintenance) if open && metadata_due => Some(
-                self.maintain_metadata(maintenance, namespace_id, Some(&entry))
+        let metadata = if open && metadata_due {
+            Some(
+                self.maintain_metadata(&writer, namespace_id, Some(&entry))
                     .await,
-            ),
-            _ => None,
+            )
+        } else {
+            None
         };
+        // The close step checks that the table's handle is the only one.
+        drop(writer);
         let due = match metadata {
             _ if !open => Due::Close(Close::Ended),
             Some(Err(code)) if code.is_namespace_gone() => Due::Close(Close::Ended),
             metadata => {
-                // Metadata that another process maintains needs no step from
-                // this host.
-                let metadata_settled = inner.maintenance.is_none()
-                    || metadata.map_or(!positioned, |answer| {
-                        answer == Ok(MetadataMaintenanceOutcome::CaughtUp)
-                    });
+                let metadata_settled = metadata.map_or(!positioned, |answer| {
+                    answer == Ok(MetadataMaintenanceOutcome::CaughtUp)
+                });
                 let held = lock(&entry);
                 let now_ms = inner.timer.monotonic_now_ms();
                 if self.collection_pending(&held, seq)
@@ -137,19 +139,18 @@ impl Scheduler {
         // A collection or an index step that finds the namespace gone ends
         // the session, as the metadata step does.
         let close = match due {
-            Due::Collection => match &inner.maintenance {
-                Some(maintenance) => self
-                    .gc(maintenance, namespace_id, Some(&entry), seq)
-                    .await
-                    .is_err_and(ErrorCode::is_namespace_gone)
-                    .then_some(Close::Ended),
-                None => None,
-            },
+            Due::Collection => self
+                .gc(&inner.maintenance, namespace_id, Some(&entry), seq)
+                .await
+                .is_err_and(ErrorCode::is_namespace_gone)
+                .then_some(Close::Ended),
             Due::Index => match &inner.grep {
-                Some(grep) => self
-                    .maintain_index(grep, namespace_id, Some(&entry), seq)
-                    .await
-                    .then_some(Close::Ended),
+                Some(grep) => {
+                    let writer = lock(&entry).handle.clone();
+                    self.maintain_index(grep, &writer, namespace_id, Some(&entry), seq)
+                        .await
+                        .then_some(Close::Ended)
+                }
                 None => None,
             },
             Due::Close(close) => Some(close),
@@ -171,16 +172,16 @@ impl Scheduler {
     }
 
     /// Whether a collection step is pending for a held session at `seq`:
-    /// this host maintains the store, the session has published, its seq
-    /// moved since the last collection, and `gc_interval_ms` passed since
-    /// that collection.
+    /// this host sweeps the store, the session has published, its seq moved
+    /// since the last collection, and `gc_interval_ms` passed since that
+    /// collection.
     fn collection_pending(
         &self,
         held: &HeldNamespace<SchedulerState>,
         seq: Option<CommitSeq>,
     ) -> bool {
         let inner = &self.inner;
-        inner.maintenance.is_some()
+        inner.config.sweep_store
             && seq.is_some()
             && held.host_state.collection_pending(
                 seq,
@@ -190,7 +191,7 @@ impl Scheduler {
     }
 
     /// Whether an index step is pending for a held session at `seq`: this
-    /// host maintains the grep index, and the index is marked dirty or the
+    /// host builds the grep index, and the index is marked dirty or the
     /// scheduler last brought it up to date at another seq.
     fn index_pending(&self, held: &HeldNamespace<SchedulerState>, seq: Option<CommitSeq>) -> bool {
         self.inner.grep.is_some() && (held.index_dirty || held.host_state.indexed_seq != seq)
@@ -258,8 +259,8 @@ impl Scheduler {
             gc_interval_ms = config.gc_interval_ms.get(),
             sweep_interval_ms = config.sweep_interval_ms.get(),
             max_concurrent_maintenance = config.max_concurrent_maintenance.get(),
-            maintains = inner.maintenance.is_some(),
-            maintains_grep_index = inner.grep.is_some(),
+            sweep_store = config.sweep_store,
+            builds_grep_index = inner.grep.is_some(),
             "maintenance scheduler started"
         );
         let scheduler = self.clone();

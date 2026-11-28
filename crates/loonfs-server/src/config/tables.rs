@@ -1,6 +1,5 @@
 //! The server config file's `[metadata_cache]` and `[grep]` tables.
 
-use super::JobMode;
 use crate::{Result, ServerError};
 use loonfs::SsdSegmentBlocks;
 use loonfs_grep::GrepWorkerConfig;
@@ -88,13 +87,17 @@ impl MetadataCacheSsdConfig {
 }
 
 /// The server's `[grep]` table.
+///
+/// A config with the table builds the grep index of each namespace that the
+/// server writes, as the namespace's writer, and serves the routes that
+/// enable, disable, and report the index when the server serves the
+/// maintenance API group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrepConfig {
-    /// Whether this server serves grep queries, and whether it serves the
-    /// index-maintenance endpoints and its scheduler builds and collects
-    /// the index.
-    pub mode: JobMode,
+    /// Whether this server serves grep queries. Defaults to `true`.
+    #[serde(default = "default_serve_queries")]
+    pub serve_queries: bool,
     pub max_cache_bytes: Option<usize>,
     /// Flattening preserves the existing `[grep]` keys while leaving the
     /// worker policy itself as their one in-memory owner.
@@ -102,12 +105,6 @@ pub struct GrepConfig {
     pub worker: GrepWorkerConfig,
 }
 
-impl Default for GrepConfig {
-    fn default() -> Self {
-        Self {
-            mode: JobMode::Disabled,
-            max_cache_bytes: None,
-            worker: GrepWorkerConfig::default(),
-        }
-    }
+fn default_serve_queries() -> bool {
+    true
 }

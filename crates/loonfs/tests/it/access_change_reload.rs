@@ -135,7 +135,7 @@ async fn fixture(name: &str) -> Fixture {
             .read_only()
             .with_context(subject("prn_user").into())
             .namespace(&namespace_id),
-        maintenance: writer.maintenance(writer_id(name)),
+        maintenance: writer.maintenance(),
         writer,
         namespace_id,
         actor,
@@ -152,11 +152,7 @@ async fn fixture(name: &str) -> Fixture {
             .put_file(&format!("/fill-{index}"), b"fill", actor)
             .await
             .expect("fill");
-        fixture
-            .maintenance
-            .fold_wal(&fixture.namespace_id)
-            .await
-            .expect("fold");
+        fixture.service.fold_wal().await.expect("fold");
     }
     // Each fold moves the publisher's cached position to the fold's
     // manifest, so the next commit starts from that position.
@@ -176,8 +172,8 @@ async fn fixture(name: &str) -> Fixture {
 impl Fixture {
     async fn compact(&self) {
         let outcome = self
-            .maintenance
-            .compact_metadata(&self.namespace_id, &MaintenanceCancellation::new())
+            .service
+            .compact_metadata(&MaintenanceCancellation::new())
             .await
             .expect("compact");
         assert_matches!(
@@ -333,55 +329,6 @@ async fn eventual_reads_past_the_staleness_reload_nothing_after_a_compaction() {
     }
 }
 
-/// Checks that after another runtime's compaction, the writer's runtime
-/// moves its position onto the compaction's manifests without a reload, and
-/// that later commits and the reads after them reload nothing.
-///
-/// The first read's manifest check finds the compaction's manifests, loads
-/// them, and moves the writer's position onto them, so no commit loads the
-/// namespace from the store.
-#[tokio::test]
-async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
-    let fixture = fixture("other-compaction").await;
-    let other_store: SharedObjectStore = fixture.recording.clone();
-    let other = LoonFs::builder_with_store(other_store, loonfs::Context::Service)
-        .writer_id(writer_id("other-compaction-maintenance"))
-        .monotonic_timer(fixture.clock.clone())
-        .build()
-        .await
-        .expect("maintenance runtime");
-    let outcome = other
-        .maintenance(writer_id("other-compaction-maintenance"))
-        .compact_metadata(&fixture.namespace_id, &MaintenanceCancellation::new())
-        .await
-        .expect("compact");
-    assert_matches!(
-        outcome.compaction,
-        MetadataCompactionOutcome::Published { .. }
-    );
-    fixture.recording.reset();
-    fixture
-        .user
-        .strong()
-        .stat("/m/doc")
-        .await
-        .expect("first read");
-    let operations = fixture.recording.take();
-    assert!(
-        operations
-            .iter()
-            .all(|operation| !matches!(operation, RecordedOperation::List { .. })),
-        "the first read loads the compaction's manifests, not a listing: {operations:?}"
-    );
-    for (round, kind) in COMMIT_KINDS.into_iter().enumerate() {
-        let user_granted = fixture.commit(kind, round).await;
-        fixture.recording.reset();
-        let read = fixture.user.strong().stat("/m/doc").await;
-        assert_eq!(read.is_ok(), user_granted, "{kind}: read access to /m/doc");
-        fixture.assert_no_reload(&format!("user after {kind}"));
-    }
-}
-
 /// The maintenance and snapshot calls that a test runs on the writer's
 /// runtime, in an order where the delete finds the snapshot an earlier call
 /// created.
@@ -403,11 +350,12 @@ const MAINTENANCE_CALLS: [&str; 5] = [
 async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
     let fixture = fixture("own-maintenance").await;
     let (maintenance, namespace_id) = (&fixture.maintenance, &fixture.namespace_id);
+    let service = &fixture.service;
     let mut snapshot = None;
     for (round, call) in MAINTENANCE_CALLS.into_iter().enumerate() {
         fixture.commit("put_file", 2 * round).await;
         match call {
-            "fold_wal" => drop(maintenance.fold_wal(namespace_id).await.expect(call)),
+            "fold_wal" => drop(service.fold_wal().await.expect(call)),
             "create_snapshot" => {
                 let options = CreateSnapshotOptions {
                     name: Some("keep".to_owned()),
@@ -424,7 +372,7 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
             "advance_retention_floor" => {
                 // Every commit so far is now a grace window old.
                 fixture.wall_clock.advance_ms(loonfs::GC_GRACE_WINDOW_MS);
-                let advanced = maintenance.advance_retention_floor(namespace_id).await;
+                let advanced = service.advance_retention_floor().await;
                 assert!(advanced.expect(call).retention_floor_seq.0 > 0, "{call}");
             }
             _ => drop(maintenance.gc(namespace_id).await.expect(call)),

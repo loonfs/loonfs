@@ -5,7 +5,7 @@
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::publish::CommitIntent;
-use loonfs::test_support::maintenance_past_the_grace_window;
+use loonfs::test_support::advance_retention_floor_past_the_grace_window;
 use loonfs::{LoonFs, StoreConfig};
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
@@ -391,9 +391,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
         )
         .await
         .expect("create snapshot");
-    let advanced = maintenance_past_the_grace_window(harness.store.clone())
-        .await
-        .advance_retention_floor(&namespace)
+    let advanced = advance_retention_floor_past_the_grace_window(harness.store.clone(), &namespace)
         .await
         .expect("advance the retention floor");
     assert!(

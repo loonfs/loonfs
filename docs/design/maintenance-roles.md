@@ -1,5 +1,7 @@
 # Maintenance roles
 
+[One writer per namespace](one-writer-per-namespace.md) replaces this note.
+
 This note describes which processes can publish a namespace's manifests and delete its objects, and what fences a rival. A namespace has two roles:
 
 - The "writer" commits and deletes the namespace, under the [writer epoch](../specs/glossary.md#writer-epoch).
@@ -77,7 +79,7 @@ Folds, compactions, snapshots, and retention advances claim no epoch, so none of
 - [Creating and verifying a snapshot](../specs/format.md#82-creating-and-verifying-a-snapshot) describes the fold before a snapshot as a maintainer's fold.
 - [Deleting a namespace](../specs/format.md#94-deleting-a-namespace) describes the fold before the tombstone as a maintainer's fold, and the tombstone as a publication under the writer epoch.
 
-In the API specification, the maintenance jobs say which role each runs under, and the glossary defines the [maintainer](../specs/glossary.md#maintainer).
+In the API specification, the maintenance jobs say which role each runs under, and [The maintainer](#the-maintainer) above describes the maintainer's rules.
 
 ## Alternatives considered
 

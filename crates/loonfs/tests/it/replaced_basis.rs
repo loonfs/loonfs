@@ -4,8 +4,8 @@
 
 use crate::common::{compact_until_done, expect_code};
 use loonfs::{
-    AttributeChanges, Commit, DestinationBehavior, ErrorCode, LoonFs, Maintenance, Namespace,
-    NamespaceId, PutFileOptions, Writable,
+    AttributeChanges, Commit, DestinationBehavior, ErrorCode, LoonFs, Namespace, NamespaceId,
+    PutFileOptions, Writable,
 };
 use loonfs_objectstore::keys::{metadata_manifest_prefix, metadata_segment_prefix};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
@@ -34,31 +34,6 @@ const FORKED_CONTENT: &[u8] = b"/a from the fork";
 /// The files that the two folds write, one per fold.
 const FOLDED_FILES: [&str; 2] = ["/e", "/g"];
 
-/// Returns a store that blocks the next metadata segment read, and the set
-/// of segment keys that, with every manifest of `namespace`, report an
-/// ancient age, so a collection removes a replaced manifest's segments at
-/// once.
-fn aged_blocking_store(
-    directory: &Path,
-    namespace: &NamespaceId,
-) -> (Arc<AgedBlockingStore>, Arc<Mutex<BTreeSet<String>>>) {
-    let old_segments = Arc::new(Mutex::new(BTreeSet::<String>::new()));
-    let selected = old_segments.clone();
-    let manifest_prefix = metadata_manifest_prefix(namespace);
-    let store = Arc::new(BlockingStore::new(
-        MetadataMapStore::aged(
-            LocalFsStore::new(directory).expect("store"),
-            KeyPredicate::new(move |key| {
-                key.starts_with(&manifest_prefix)
-                    || selected.lock().expect("old segments").contains(key)
-            }),
-        ),
-        KeyPredicate::metadata_segment(),
-        OperationSelector::Get,
-    ));
-    (store, old_segments)
-}
-
 /// The metadata segments that `namespace` has now.
 async fn segment_keys(store: &impl ObjectStore, namespace: &NamespaceId) -> BTreeSet<String> {
     store
@@ -71,17 +46,6 @@ async fn segment_keys(store: &impl ObjectStore, namespace: &NamespaceId) -> BTre
                 .is_some_and(|parsed| parsed.family() == DurableObjectFamily::MetadataSegment)
         })
         .collect()
-}
-
-/// Selects every metadata segment that `namespace` has now, so a collection
-/// removes the ones that a compaction replaces.
-async fn select_old_segments(
-    store: &impl ObjectStore,
-    namespace: &NamespaceId,
-    old_segments: &Mutex<BTreeSet<String>>,
-) {
-    let keys = segment_keys(store, namespace).await;
-    old_segments.lock().expect("old segments").extend(keys);
 }
 
 /// Creates `namespace` with [`SHARED_FILE`] in it.
@@ -137,7 +101,7 @@ async fn annotate_shared_file(
 /// collection removes.
 async fn fold_twice(seed: &LoonFs<Writable>, namespace: &NamespaceId) {
     let seed_namespace = seed.open_namespace(namespace).expect("open namespace");
-    let seed_maintenance = seed.maintenance(writer_id("seed"));
+    let seed_maintenance = seed.clone();
     annotate_shared_file(&seed_namespace, "folded", "yes")
         .await
         .expect("annotate the shared file");
@@ -147,40 +111,93 @@ async fn fold_twice(seed: &LoonFs<Writable>, namespace: &NamespaceId) {
             .await
             .expect("file");
         seed_maintenance
-            .fold_wal(namespace)
+            .open_namespace(namespace)
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold the file");
     }
 }
 
-/// Opens a runtime on `store` under `name`, so that it holds no segment of
-/// the namespace it reads.
-async fn cold_runtime(store: Arc<AgedBlockingStore>, name: &str) -> LoonFs<Writable> {
+/// Returns a store that blocks the next metadata segment read, and the set
+/// of segment keys that, with every manifest of `namespace`, report an
+/// ancient age, so a collection removes a replaced manifest's segments at
+/// once.
+fn aged_blocking_store(
+    directory: &Path,
+    namespace: &NamespaceId,
+) -> (Arc<AgedBlockingStore>, Arc<Mutex<BTreeSet<String>>>) {
+    let old_segments = Arc::new(Mutex::new(BTreeSet::<String>::new()));
+    let selected = old_segments.clone();
+    let manifest_prefix = metadata_manifest_prefix(namespace);
+    let store = Arc::new(BlockingStore::new(
+        MetadataMapStore::aged(
+            LocalFsStore::new(directory).expect("store"),
+            KeyPredicate::new(move |key| {
+                key.starts_with(&manifest_prefix)
+                    || selected.lock().expect("old segments").contains(key)
+            }),
+        ),
+        KeyPredicate::metadata_segment(),
+        OperationSelector::Get,
+    ));
+    (store, old_segments)
+}
+
+/// Selects every metadata segment that `namespace` has now, so a collection
+/// removes the ones that a compaction replaces.
+async fn select_old_segments(
+    store: &impl ObjectStore,
+    namespace: &NamespaceId,
+    old_segments: &Mutex<BTreeSet<String>>,
+) {
+    let keys = segment_keys(store, namespace).await;
+    old_segments.lock().expect("old segments").extend(keys);
+}
+
+/// Claims `namespace` for its session with a commit that reads no segment,
+/// so the session has its writer epoch and a position, and its compaction
+/// below plans from the position while the commit under test plans. A cold
+/// writer's first commit loads, claims and plans with the session's engine
+/// locked, so the session's compaction couldn't run while that commit's plan
+/// waits.
+async fn claim(namespace: &Namespace<Writable>) {
+    namespace
+        .create_directory("/claimed", &test_actor())
+        .await
+        .expect("the session claims the namespace");
+}
+
+/// Opens the runtime that seeds the namespace on `store`, with the default
+/// compaction policy, so the seed's own compaction leaves the delta runs
+/// that the cold writer's compaction replaces.
+async fn seed_runtime(store: Arc<AgedBlockingStore>) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store, loonfs::Context::Service)
-        .writer_id(writer_id(name))
+        .writer_id(writer_id("seed"))
         .build()
         .await
         .expect("runtime")
 }
 
-/// Opens a cold runtime whose maintenance compacts every family group that
+/// Opens a runtime on `store` under `name`, which caches no segment of the
+/// namespace it reads, and whose sessions compact every family group that
 /// has a delta run.
-async fn maintainer_runtime(store: Arc<AgedBlockingStore>) -> LoonFs<Writable> {
+async fn cold_runtime(store: Arc<AgedBlockingStore>, name: &str) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store, loonfs::Context::Service)
-        .writer_id(writer_id("maintainer"))
+        .writer_id(writer_id(name))
         .run_policy(loonfs_core::test_support::one_delta_run_policy())
         .build()
         .await
         .expect("runtime")
 }
 
-/// Waits until the plan's segment read is blocked, replaces `namespace`'s
-/// manifest with a compaction, removes the replaced manifest's segments
-/// with a collection, and lets the read go on.
+/// Waits until the plan's segment read is blocked, replaces the manifest of
+/// `namespace`'s session with the session's own compaction, removes the
+/// replaced manifest's segments with a collection, and lets the read go on.
 async fn replace_and_collect(
     store: &AgedBlockingStore,
-    maintenance: &Maintenance,
-    namespace: &NamespaceId,
+    writer: &LoonFs<Writable>,
+    namespace: &Namespace<Writable>,
 ) {
     loonfs_test_support::clock::bounded(
         std::time::Duration::from_secs(10),
@@ -188,8 +205,8 @@ async fn replace_and_collect(
     )
     .await
     .expect("the plan reached an uncached segment");
-    compact_until_done(maintenance, namespace).await;
-    let gc = maintenance.gc(namespace).await.expect("GC");
+    compact_until_done(namespace).await;
+    let gc = writer.maintenance().gc(namespace.id()).await.expect("GC");
     assert!(
         gc.deleted.metadata_segments > 0,
         "the collection removed the replaced manifest's segments"
@@ -198,7 +215,7 @@ async fn replace_and_collect(
 }
 
 /// Checks through a fresh reader that `namespace` has the folded files,
-/// that [`SHARED_FILE`] holds `content`, and that its attributes hold each
+/// that [`SHARED_FILE`] contains `content`, and that its attributes have each
 /// of `attributes`.
 async fn assert_shared_file(
     store: Arc<AgedBlockingStore>,
@@ -240,16 +257,16 @@ async fn assert_shared_file(
     }
 }
 
-/// Checks that a writer whose session planned a commit on a manifest that a
-/// compaction replaced, and whose segments a collection then removed, plans
-/// the commit again on the current manifest and commits it, instead of
-/// reporting the namespace corrupt.
+/// Checks that a writer whose session planned a commit on a manifest that
+/// the session's own compaction replaced, and whose segments a collection
+/// then removed, plans the commit again on the current manifest and commits
+/// it, instead of reporting the namespace corrupt.
 #[tokio::test]
 async fn a_write_planned_on_a_replaced_manifest_commits_on_the_current_one() {
     let directory = tempdir().expect("tempdir");
     let namespace = NamespaceId::parse("writer-gc-probe").expect("namespace");
     let (store, old_segments) = aged_blocking_store(directory.path(), &namespace);
-    let seed = cold_runtime(store.clone(), "seed").await;
+    let seed = seed_runtime(store.clone()).await;
     create_namespace_with_shared_file(&seed, &namespace).await;
     fold_twice(&seed, &namespace).await;
     seed.shutdown().await.expect("end the seed writer");
@@ -257,12 +274,13 @@ async fn a_write_planned_on_a_replaced_manifest_commits_on_the_current_one() {
 
     let writer = cold_runtime(store.clone(), "cold-writer").await;
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
-    let maintainer = maintainer_runtime(store.clone()).await;
-    let maintenance = maintainer.maintenance(writer_id("maintainer"));
+    claim(&namespace_writer).await;
     store.block_next();
     let write = annotate_shared_file(&namespace_writer, "written", "cold");
-    let (committed, ()) =
-        tokio::join!(write, replace_and_collect(&store, &maintenance, &namespace));
+    let (committed, ()) = tokio::join!(
+        write,
+        replace_and_collect(&store, &writer, &namespace_writer)
+    );
     committed.expect("the write commits on the current manifest");
 
     assert_shared_file(
@@ -273,23 +291,19 @@ async fn a_write_planned_on_a_replaced_manifest_commits_on_the_current_one() {
     )
     .await;
     writer.shutdown().await.expect("shut down the writer");
-    maintainer
-        .shutdown()
-        .await
-        .expect("shut down the maintainer");
 }
 
-/// Checks that a merge whose plan read this namespace on a manifest that a
-/// compaction replaced, and whose segments a collection then removed, plans
-/// again on the current manifest and commits, instead of reporting the
-/// namespace corrupt.
+/// Checks that a merge whose plan read this namespace on a manifest that the
+/// session's own compaction replaced, and whose segments a collection then
+/// removed, plans again on the current manifest and commits, instead of
+/// reporting the namespace corrupt.
 #[tokio::test]
 async fn a_merge_planned_on_a_replaced_manifest_commits_on_the_current_one() {
     let directory = tempdir().expect("tempdir");
     let namespace = NamespaceId::parse("merge-gc-probe").expect("namespace");
     let fork = NamespaceId::parse("merge-gc-probe-fork").expect("fork");
     let (store, old_segments) = aged_blocking_store(directory.path(), &namespace);
-    let seed = cold_runtime(store.clone(), "seed").await;
+    let seed = seed_runtime(store.clone()).await;
     create_namespace_with_shared_file(&seed, &namespace).await;
     // The fork keeps the manifest before the folds below, so the collection
     // can remove the folds' segments once a compaction replaces them.
@@ -303,26 +317,24 @@ async fn a_merge_planned_on_a_replaced_manifest_commits_on_the_current_one() {
 
     let writer = cold_runtime(store.clone(), "cold-writer").await;
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
-    let maintainer = maintainer_runtime(store.clone()).await;
-    let maintenance = maintainer.maintenance(writer_id("maintainer"));
+    claim(&namespace_writer).await;
     store.block_next();
     let actor = test_actor();
     let merge = namespace_writer.merge_fork(&fork, &actor);
-    let (merged, ()) = tokio::join!(merge, replace_and_collect(&store, &maintenance, &namespace));
+    let (merged, ()) = tokio::join!(
+        merge,
+        replace_and_collect(&store, &writer, &namespace_writer)
+    );
     merged.expect("the merge commits on the current manifest");
 
     assert_shared_file(store, &namespace, FORKED_CONTENT, &[("folded", "yes")]).await;
     writer.shutdown().await.expect("shut down the writer");
-    maintainer
-        .shutdown()
-        .await
-        .expect("shut down the maintainer");
 }
 
 /// Checks that a replay commit whose plan read the rebase's new fork on a
-/// manifest that a compaction replaced, and whose segments a collection
-/// then removed, plans again on the current manifest and commits, instead
-/// of reporting the new fork corrupt.
+/// manifest that the session's own compaction replaced, and whose segments
+/// a collection then removed, plans again on the current manifest and
+/// commits, instead of reporting the new fork corrupt.
 #[tokio::test]
 async fn a_replay_planned_on_a_replaced_manifest_commits_on_the_current_one() {
     let directory = tempdir().expect("tempdir");
@@ -330,7 +342,7 @@ async fn a_replay_planned_on_a_replaced_manifest_commits_on_the_current_one() {
     let fork = NamespaceId::parse("replay-gc-probe-fork").expect("fork");
     let rebase = NamespaceId::parse("replay-gc-probe-rebase").expect("new fork");
     let (store, old_segments) = aged_blocking_store(directory.path(), &rebase);
-    let seed = cold_runtime(store.clone(), "seed").await;
+    let seed = seed_runtime(store.clone()).await;
     create_namespace_with_shared_file(&seed, &main).await;
     seed.fork_namespace(&main, &fork, &test_actor())
         .await
@@ -345,21 +357,16 @@ async fn a_replay_planned_on_a_replaced_manifest_commits_on_the_current_one() {
 
     let writer = cold_runtime(store.clone(), "cold-writer").await;
     let rebase_writer = writer.open_namespace(&rebase).expect("open the new fork");
-    let maintainer = maintainer_runtime(store.clone()).await;
-    let maintenance = maintainer.maintenance(writer_id("maintainer"));
+    claim(&rebase_writer).await;
     store.block_next();
     let actor = test_actor();
     let replay = rebase_writer.replay_fork(&fork, &actor);
-    let (replayed, ()) = tokio::join!(replay, replace_and_collect(&store, &maintenance, &rebase));
+    let (replayed, ()) = tokio::join!(replay, replace_and_collect(&store, &writer, &rebase_writer));
     let replayed = replayed.expect("the replay commits on the current manifest");
     assert_eq!(replayed.conflicts, Vec::new());
 
     assert_shared_file(store, &rebase, FORKED_CONTENT, &[("folded", "yes")]).await;
     writer.shutdown().await.expect("shut down the writer");
-    maintainer
-        .shutdown()
-        .await
-        .expect("shut down the maintainer");
 }
 
 /// Checks that a merge whose plan finds a segment of this namespace's
@@ -432,8 +439,9 @@ async fn a_fork_whose_sources_layout_segment_is_missing_reports_corruption() {
         .put_file(SHARED_FILE, &[b's'; 1024], &test_actor())
         .await
         .expect("the shared file");
-    seed.maintenance(writer_id("seed"))
-        .fold_wal(&source)
+    seed.open_namespace(&source)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the shared file");
     seed.open_namespace(&source)

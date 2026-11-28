@@ -17,7 +17,7 @@ use crate::common::store;
 use loonfs::test_support::fresh_reader;
 use loonfs::{
     AdvanceRetentionFloorOptions, CommitSeq, DestinationBehavior, FileRevision, LoonFs,
-    Maintenance, MergeForkOptions, Namespace, NamespaceId, PoolGcResponse, PoolId, PutFileOptions,
+    MergeForkOptions, Namespace, NamespaceId, PoolGcResponse, PoolId, PutFileOptions,
     RetentionTarget, SharedObjectStore, Writable,
 };
 use loonfs_core::limits::GC_GRACE_WINDOW_MS;
@@ -44,7 +44,7 @@ struct Family {
     directory: TempDir,
     store: SharedObjectStore,
     clock: Arc<ManualClock>,
-    maintenance: Maintenance,
+    maintenance: LoonFs<Writable>,
     source: Namespace<Writable>,
     source_id: NamespaceId,
     fork_id: NamespaceId,
@@ -75,7 +75,7 @@ async fn family() -> Family {
         .build()
         .await
         .expect("build writer");
-    let maintenance = writer.maintenance(writer_id("merge-collection"));
+    let maintenance = writer.clone();
     let actor = loonfs_test_support::test_actor();
     // The pool's member list is listed in key order, so the collection reads
     // the source's roots before the fork's.
@@ -96,7 +96,9 @@ async fn family() -> Family {
         .expect("put version 1")
         .committed_seq;
     maintenance
-        .fold_wal(&fork_id)
+        .open_namespace(&fork_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold version 1");
     let v2_seq = fork
@@ -113,7 +115,9 @@ async fn family() -> Family {
         .expect("put version 2")
         .committed_seq;
     maintenance
-        .fold_wal(&fork_id)
+        .open_namespace(&fork_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold version 2");
     let pool_id = loonfs_core::test_support::load_pool_id(store.as_ref(), &fork_id).await;
@@ -192,12 +196,11 @@ impl Family {
             .expect("the merge commits");
         let advanced = self
             .maintenance
-            .advance_retention_floor_with_options(
-                &self.fork_id,
-                &AdvanceRetentionFloorOptions {
-                    target: RetentionTarget::Seq(self.v2_seq),
-                },
-            )
+            .open_namespace(&self.fork_id)
+            .expect("open namespace")
+            .advance_retention_floor_with_options(&AdvanceRetentionFloorOptions {
+                target: RetentionTarget::Seq(self.v2_seq),
+            })
             .await
             .expect("advance the fork's retention floor");
         assert_eq!(advanced.retention_floor_seq, self.v2_seq);
@@ -295,6 +298,7 @@ async fn a_pool_collection_after_the_merge_snapshots_grace_window_keeps_the_merg
     family.clock.advance_ms(GC_GRACE_WINDOW_MS + HOUR_MS);
     let fork_collection = family
         .maintenance
+        .maintenance()
         .gc(&family.fork_id)
         .await
         .expect("collect the fork");

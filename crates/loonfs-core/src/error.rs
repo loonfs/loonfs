@@ -137,6 +137,16 @@ pub enum CoreError {
     /// read of the whole file uses.
     #[error("a ranged read doesn't verify the file, so it takes no resumed prefix")]
     PrefixForRangedRead,
+    /// An extension's change was given a basis that another namespace's
+    /// manifest was loaded from.
+    #[error(
+        "invalid extension basis: it was loaded from namespace `{basis_namespace_id}`, not \
+         `{namespace_id}`"
+    )]
+    InvalidExtensionBasis {
+        namespace_id: loonfs_types::NamespaceId,
+        basis_namespace_id: loonfs_types::NamespaceId,
+    },
     /// The requested range starts at or past the end of the file. No data
     /// was read.
     #[error(
@@ -510,7 +520,8 @@ impl CoreError {
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
             | CoreError::ResumedPrefix(_)
-            | CoreError::PrefixForRangedRead => ErrorCode::InvalidRequest,
+            | CoreError::PrefixForRangedRead
+            | CoreError::InvalidExtensionBasis { .. } => ErrorCode::InvalidRequest,
             CoreError::RangeNotSatisfiable { .. } => ErrorCode::RangeNotSatisfiable,
             CoreError::SnapshotNotFound { .. } | CoreError::SnapshotManifestMissing { .. } => {
                 ErrorCode::SnapshotNotFound
@@ -708,6 +719,7 @@ impl CoreError {
             | CoreError::ResumePrefixIncomplete { .. }
             | CoreError::ResumedPrefix(_)
             | CoreError::PrefixForRangedRead
+            | CoreError::InvalidExtensionBasis { .. }
             | CoreError::RangeNotSatisfiable { .. }
             | CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }

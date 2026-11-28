@@ -22,7 +22,7 @@ pub use scheduler::{
     DEFAULT_SWEEP_INTERVAL_MS,
 };
 pub use state::{
-    AuthPolicy, HeldNamespace, HostState, HttpConfig, HttpHandles, HttpState, JobMode, Namespaces,
+    AuthPolicy, HeldNamespace, HostState, HttpConfig, HttpHandles, HttpState, Namespaces,
     WriterSessions, DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS,
     DEFAULT_REQUEST_DEADLINE_MS,
 };

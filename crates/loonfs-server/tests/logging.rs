@@ -15,7 +15,7 @@ use bytes::Bytes;
 use common::http_split_support::test_config;
 use loonfs::{ConfiguredObjectStoreKind, LoonFs, SharedObjectStore, TraceMode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_server::{app, AppConfig, JobMode};
+use loonfs_server::{app, AppConfig};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationSelector};
 use std::convert::Infallible;
@@ -221,7 +221,7 @@ async fn missing_path_has_one_debug_completion_and_no_errors() {
         "logging-missing-path",
         "logging-missing-path",
     );
-    config.maintenance = JobMode::ServeOnly;
+    config.sweep_store = false;
     let (router, state) = app(
         config.validate().expect("validate the test config"),
         AppConfig::default(),
@@ -269,7 +269,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
         "logging-expected-errors",
         "logging-expected-errors",
     );
-    config.maintenance = JobMode::ServeOnly;
+    config.sweep_store = false;
     config.max_concurrent_uploads = std::num::NonZeroUsize::MIN;
     let (router, state) = app(
         config.validate().expect("validate the test config"),
@@ -389,7 +389,7 @@ async fn store_fault_has_one_error_from_the_boundary() {
     let store_root = temp_dir.path().join("store");
     let key_prefix = "logging-store-fault";
     let mut config = test_config(store_root.clone(), "logging-store-fault", key_prefix);
-    config.maintenance = JobMode::ServeOnly;
+    config.sweep_store = false;
 
     let failing = Arc::new(FailStore::new(
         LocalFsStore::with_key_prefix(&store_root, Some(key_prefix)).expect("build local store"),

@@ -28,9 +28,13 @@ impl ResolvedTarget {
         // The steps' changes are kept in memory between publications, so the
         // wait reads the pending status, and each step keeps the run locked
         // across its awaits.
+        let writer = host
+            .runtime
+            .open_namespace(namespace_id)
+            .map_err(crate::error::CliError::from)?;
         let steps = tokio::sync::Mutex::new(
             host.grep_worker
-                .steps(namespace_id, DEFAULT_GREP_PUBLISH_INTERVAL_MS),
+                .steps(&writer, DEFAULT_GREP_PUBLISH_INTERVAL_MS),
         );
         let progress = wait_for_grep_index(
             target_seq,

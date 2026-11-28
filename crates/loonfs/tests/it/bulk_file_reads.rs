@@ -538,8 +538,9 @@ async fn a_fork_targets_snapshot_enumerates_the_source_state() {
     let at_fork = listed_files(&fs.reader, &source).await;
     // The source folds its tail, so the fork inherits the source's segments
     // and has no fold of its own.
-    fs.maintenance
-        .fold_wal(&source)
+    fs.namespace_writer(&source)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the source");
 

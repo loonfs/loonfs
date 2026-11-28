@@ -46,7 +46,7 @@ impl StepsFixture {
         ));
         let store: SharedObjectStore = segment_reads.clone();
         let (_writer, namespace) = writable_namespace(&store, &namespace_id).await;
-        let host = GrepHost::new(&store, &format!("{name}-grep")).await;
+        let host = GrepHost::new(&store).await;
         Self {
             _directory: directory,
             segment_reads,
@@ -167,7 +167,7 @@ async fn a_run_of_steps_reorganizes_a_full_delta_level_while_builds_are_due() {
     let fixture = StepsFixture::new("full-delta-level").await;
     fixture.commit_files(0, 8).await;
     assert_matches!(
-        fixture.host.worker.enable(&fixture.namespace_id).await,
+        fixture.host.enable_of(&fixture.namespace_id).await,
         Ok(GrepEnableOutcome::Enabled { .. })
     );
     let policy = GramIndexBuildPolicy {
@@ -175,7 +175,7 @@ async fn a_run_of_steps_reorganizes_a_full_delta_level_while_builds_are_due() {
         max_delta_runs: nonzero_usize(2),
         ..GramIndexBuildPolicy::default()
     };
-    let mut steps = fixture.host.worker.steps(&fixture.namespace_id, 0);
+    let mut steps = fixture.host.steps_of(&fixture.namespace_id, 0);
     let mut reorganized_while_backfilling = 0;
     for _ in 0..64 {
         let (before, _) = fixture.published().await;
@@ -223,7 +223,7 @@ async fn build_step_index_reads_stay_bounded_while_a_writer_keeps_committing() {
         max_mid_runs: nonzero_usize(4),
         ..GramIndexBuildPolicy::default()
     };
-    let mut steps = fixture.host.worker.steps(&fixture.namespace_id, 0);
+    let mut steps = fixture.host.steps_of(&fixture.namespace_id, 0);
     let mut builds = 0;
     let mut most_reads = 0;
     for round in 0..ROUNDS {
@@ -275,7 +275,7 @@ async fn two_build_steps_over_the_same_runs_read_each_texts_block_once() {
             )
         })
         .collect();
-    let mut steps = fixture.host.worker.steps(&fixture.namespace_id, 0);
+    let mut steps = fixture.host.steps_of(&fixture.namespace_id, 0);
     let mut backfill_gets = Vec::new();
     // Each commit copies the backfilled files, so each build step looks up
     // every backfilled value in the backfill's runs.

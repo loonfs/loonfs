@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 mod content_preparation;
 mod lifecycle;
+mod maintenance;
 mod merges;
 mod reads;
 mod reads_by_inode;
@@ -217,8 +218,8 @@ impl Namespace<Writable> {
     ///
     /// This doesn't start a fold, and it doesn't wait for the metadata
     /// compaction that a fold starts.
-    /// [`Maintenance::fold_wal`](crate::Maintenance::fold_wal) folds the tail
-    /// now, and [`LoonFs::drain`] also waits for the compaction.
+    /// [`Self::fold_wal`] folds the tail now, and [`LoonFs::drain`] also
+    /// waits for the compaction.
     pub async fn wait_for_fold(&self) -> Result<()> {
         trace::in_operation(
             operation_span!(self.core, "wait_for_fold", self.namespace_id),

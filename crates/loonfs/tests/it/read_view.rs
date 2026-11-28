@@ -65,11 +65,17 @@ async fn read_during_compaction_and_collection(
             .await
             .expect("file");
         runtime
-            .maintenance
-            .maintain_metadata_with_options(&namespace, &metadata_options(1))
+            .namespace_writer(&namespace)
+            .expect("open namespace")
+            .maintain_metadata_with_options(&metadata_options(1))
             .await
             .expect("fold");
-        compact_until_done(&runtime.maintenance, &namespace).await;
+        compact_until_done(
+            &runtime
+                .namespace_writer(&namespace)
+                .expect("open namespace"),
+        )
+        .await;
     }
     let segment_keys = store
         .list_prefix(&loonfs_objectstore::keys::metadata_segment_prefix(
@@ -146,16 +152,18 @@ async fn read_during_compaction_and_collection(
             .await
             .expect("replace captured file");
         runtime
-            .maintenance
-            .fold_wal(&namespace)
+            .namespace_writer(&namespace)
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold replacement");
         let mut published = false;
         let mut converged = false;
         for _ in 0..16 {
             let outcome = runtime
-                .maintenance
-                .compact_metadata(&namespace, &loonfs::MaintenanceCancellation::new())
+                .namespace_writer(&namespace)
+                .expect("open namespace")
+                .compact_metadata(&loonfs::MaintenanceCancellation::new())
                 .await
                 .expect("compact");
             if matches!(
@@ -886,12 +894,12 @@ async fn a_view_at_an_earlier_sequence_reads_that_sequence_until_the_floor_passe
     assert_eq!(ahead.code(), ErrorCode::InvalidRequest);
 
     runtime
-        .maintenance
-        .maintain_metadata_with_options(&namespace_id, &metadata_options(1))
+        .namespace_writer(&namespace_id)
+        .expect("open namespace")
+        .maintain_metadata_with_options(&metadata_options(1))
         .await
         .expect("fold the WAL");
-    loonfs::test_support::maintenance_past_the_grace_window(store.clone())
-        .await
+    runtime
         .advance_retention_floor(&namespace_id)
         .await
         .expect("advance the retention floor");
@@ -929,8 +937,9 @@ async fn a_view_lists_every_retained_revision_with_its_wal_tail() {
         .await
         .expect("create a");
     runtime
-        .maintenance
-        .maintain_metadata_with_options(&namespace_id, &metadata_options(1))
+        .namespace_writer(&namespace_id)
+        .expect("open namespace")
+        .maintain_metadata_with_options(&metadata_options(1))
         .await
         .expect("fold the first revision into the manifest");
     let replace = PutFileOptions {
@@ -1022,8 +1031,9 @@ async fn a_view_below_the_manifest_head_lists_full_pages_of_retained_revisions()
             .expect("replace a");
     }
     runtime
-        .maintenance
-        .maintain_metadata_with_options(&namespace_id, &metadata_options(1))
+        .namespace_writer(&namespace_id)
+        .expect("open namespace")
+        .maintain_metadata_with_options(&metadata_options(1))
         .await
         .expect("fold every revision into the manifest");
 
@@ -1260,10 +1270,9 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         .expect("file");
     runtime
         .writer
-        .maintenance(loonfs_test_support::ids::writer_id(
-            "missing-current-segment",
-        ))
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold");
     runtime.writer.drain().await.expect("drain");

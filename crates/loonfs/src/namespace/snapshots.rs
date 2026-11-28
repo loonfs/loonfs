@@ -99,10 +99,18 @@ impl Namespace<Writable> {
     /// stays listed until garbage collection deletes it. A snapshot without a
     /// TTL doesn't expire.
     ///
-    /// Folds the WAL tail first when it isn't folded, and waits for a fold
-    /// permit from the runtime's execution budget either way. The fold is the
+    /// A session with a position, or a namespace whose head has a commit
+    /// above its manifest's head, folds the WAL tail first, as this session,
+    /// so a session without its writer epoch claims it first, and waits for
+    /// a fold permit from the runtime's execution budget. The fold is the
     /// namespace's one fold path, so it waits for a fold in progress, such as
-    /// the session's own, and it starts from the session's position.
+    /// the session's own, and it starts from the session's position. A tail
+    /// of only fences counts as empty. Otherwise the snapshot's record is
+    /// written on the current manifest and verified, and the call claims
+    /// nothing. A verification that finds the manifest replaced tries again,
+    /// up to `MAX_CONTENTION_ATTEMPTS` attempts in all, and then returns
+    /// `store_contention` (format spec, "Creating and verifying a
+    /// snapshot").
     pub async fn create_snapshot_with_options(
         &self,
         options: &CreateSnapshotOptions,
@@ -115,9 +123,9 @@ impl Namespace<Writable> {
                     .map(|ttl_ms| expires_at_ms(self.core.now_ms(), ttl_ms));
                 let administrator = self.administrator().await?;
                 let administrator = &administrator;
-                self.mode
-                    .publisher
-                    .snapshot_after_fold(&self.namespace_id, |basis| {
+                self.session()
+                    .admit()?
+                    .snapshot_after_fold(|basis| {
                         let engine = self.engine();
                         async move {
                             engine

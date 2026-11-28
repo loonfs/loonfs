@@ -821,7 +821,7 @@ async fn a_revision_listing_paged_across_a_compaction_neither_repeats_nor_skips(
         .expect("first revision page");
     assert_eq!(revision_numbers(&first), [6, 5]);
 
-    compact_until_done(&fs.maintenance, &namespace_id).await;
+    compact_until_done(&fs.namespace_writer(&namespace_id).expect("open namespace")).await;
     let reader = fresh_reader(store(temp_dir.path())).await;
     let namespace = reader.namespace(&namespace_id);
     let second = namespace

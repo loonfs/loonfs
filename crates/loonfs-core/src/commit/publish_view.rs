@@ -363,7 +363,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
 /// Returns the position at `anchor`'s head above the anchor's manifest,
 /// with the check that confirmed the manifest when the anchor loaded it.
-fn load_writer_position<S: ObjectStore + ?Sized>(
+pub(crate) fn load_writer_position<S: ObjectStore + ?Sized>(
     anchor: &WriterAnchor,
     loaded_basis: &LoadedMetadataBasis<'_, S>,
 ) -> Result<WriterPosition> {

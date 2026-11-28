@@ -18,7 +18,7 @@ use super::run_iterator::{
     MetadataSegmentRowIterator,
 };
 use super::step::CompactionUnitOutcome;
-use super::step::MetadataCompactionCancellation;
+use super::step::MaintenanceCancellation;
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, Result};
 use crate::segment::build::{MetadataSegmentPuts, MetadataSegmentWriter};
@@ -65,7 +65,7 @@ pub(crate) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
     run_policy: MetadataRunPolicy,
-    cancellation: &MetadataCompactionCancellation,
+    cancellation: &MaintenanceCancellation,
 ) -> Result<std::result::Result<GroupCompactionReport, CompactionUnitOutcome>> {
     let input_runs = resolve_input_runs(segments, spec)?;
     let kept_inodes =
@@ -125,7 +125,7 @@ enum ChainFilter {
 }
 
 struct CompactionControl<'a> {
-    cancellation: &'a MetadataCompactionCancellation,
+    cancellation: &'a MaintenanceCancellation,
 }
 
 impl CompactionControl<'_> {

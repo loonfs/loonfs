@@ -7,9 +7,7 @@ use crate::scheduler::retries::CallFailure;
 use crate::{HostState, Namespaces};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::metrics::MetricsRecorder;
-use loonfs::{
-    CommitSeq, Maintenance, MaintenanceCancellation, NamespaceId, SharedObjectStore, WriterId,
-};
+use loonfs::{CommitSeq, Maintenance, MaintenanceCancellation, NamespaceId, SharedObjectStore};
 use loonfs_grep::{GramIndexBuildPolicy, GrepWorker};
 use loonfs_objectstore::layout::{list_namespace_ids, list_pool_ids, MAX_NAMESPACE_IDS_PER_PAGE};
 use loonfs_objectstore::ObjectStoreError;
@@ -105,6 +103,12 @@ pub(crate) struct StepRetry {
 /// Runs each open session's due steps every `maintenance_interval_ms`, and
 /// sweeps every namespace in the store every `sweep_interval_ms`.
 ///
+/// Every step that publishes a manifest or writes a WAL object runs on the
+/// namespace's writable handle, as the namespace's writer session, which
+/// claims the namespace first when it has no writer epoch (format spec,
+/// "Writer ownership"). So a step that has work due on a namespace that
+/// another server writes displaces that server.
+///
 /// Every maintenance interval, a session that has a writer position
 /// gets a metadata step when the step's retry time has come: a fold of the
 /// WAL tail if one is due, then compaction units if one is due, through the
@@ -141,47 +145,44 @@ pub(crate) struct StepRetry {
 /// reaches one hour. A session that was closed or fenced, or whose namespace
 /// is gone, closes once no caller has its handle.
 ///
-/// A scheduler built without a maintenance writer ID belongs to a host that
-/// doesn't maintain the store, such as the reference server when its
-/// maintenance mode is `serve_only` or `disabled`. Folds, compactions,
-/// sweeps, and collections are another process's work there, so the
-/// scheduler runs no metadata, collection, or index step and sweeps nothing,
-/// and it closes a session on the idle age and ownership conditions alone,
-/// because the session's metadata needs no step from this host. The close
-/// writes nothing and sends no store requests.
+/// A scheduler whose config doesn't set `sweep_store` belongs to a host that
+/// leaves the store's sweeps and collections to another process. It still
+/// runs the metadata and index steps of the sessions that it holds, because
+/// those are the work of each namespace's writer, and it runs no collection
+/// step and sweeps nothing.
 ///
 /// A sweep runs at start and then every `sweep_interval_ms`, beside the
 /// session steps. It covers namespaces without held sessions and garbage
-/// still inside its grace window. It runs the steps of every namespace that it
-/// lists, and it doesn't wait for a held entry's retry times. A namespace
-/// whose metadata call returns `namespace_deleted` or `namespace_not_found`
-/// gets only its collection. A namespace without a held entry keeps no retry
-/// state, because the next sweep is its retry.
+/// still inside its grace window. For a namespace without a held session,
+/// the sweep first reads what maintenance is due (see
+/// [`Maintenance::due_maintenance`], and on a server with grep,
+/// [`GrepWorker::index_due`](loonfs_grep::GrepWorker::index_due)), and it
+/// opens a held session only for a namespace with a fold, a compaction
+/// unit, a retention advance, or index work due. The session claims the
+/// namespace at its first publication, so a sweep over a namespace with
+/// nothing due writes nothing to it. It runs the metadata, index, and retention steps of
+/// every namespace that it holds a session for or opened one for, and it
+/// doesn't wait for a held entry's retry times. A namespace that the check or
+/// the metadata call finds deleted or missing gets only its collection. A
+/// namespace without a held entry keeps no retry state, because the next
+/// sweep is its retry.
 ///
 /// A sweep also advances each active namespace's retention floor to the last
 /// commit at or before the current time minus the namespace's retention
-/// window. The advance reads the namespace's window from the manifest that
-/// it loads to find the floor, so a namespace without a window costs that
-/// one load and publishes nothing. The session steps don't advance the
-/// floor on their own schedule, because an advance checks that the
-/// manifest's segments exist and publishes a manifest, and a window measured
-/// in days needs no finer schedule than the sweep. A namespace whose floor
-/// already reached its cutoff publishes nothing. When a sweep reaches a
-/// namespace whose session steps are running, it leaves the advance to those
-/// steps, which make the advance after they finish. The sweep can't wait for
-/// steps that may be running a long compaction, and skipping the day's
-/// advance would make the window a day longer for exactly the namespaces
-/// that are busiest.
+/// window. The session steps don't advance the floor on their own schedule,
+/// because an advance checks that the manifest's segments exist and
+/// publishes a manifest, and a window measured in days needs no finer
+/// schedule than the sweep. A namespace whose floor already reached its
+/// cutoff publishes nothing. When a sweep reaches a namespace whose session
+/// steps are running, it leaves the advance to those steps, which make the
+/// advance after they finish. The sweep can't wait for steps that may be
+/// running a long compaction, and skipping the day's advance would make the
+/// window a day longer for exactly the namespaces that are busiest.
 ///
-/// An advance whose floor moves creates a floor object in the WAL, through
-/// the namespace's writer session in this host when the host has one,
-/// and then folds the namespace, so a manifest records the new floor. For a
-/// namespace that the host has no session for, the advance creates the
-/// floor object itself and opens no session. The advance claims no writer
-/// epoch, so a writer session of the namespace in another process isn't
-/// fenced, and the session plans its next commit against the new floor. A
-/// failed advance keeps no retry state either, and the next sweep tries it
-/// again.
+/// An advance whose floor moves creates a floor object in the WAL through
+/// the namespace's writer session, as one item of the session's queue, and
+/// then folds the namespace, so a manifest records the new floor. A failed
+/// advance keeps no retry state either, and the next sweep tries it again.
 ///
 /// The scheduler starts a session's steps without waiting for the steps
 /// that other sessions started at the interval before, so a long step on one
@@ -300,13 +301,17 @@ pub struct SchedulerConfig {
     /// scheduler waits before it closes the session, when the session has
     /// nothing due and no caller.
     pub idle_session_close_after_ms: NonZeroU64,
+    /// Whether the scheduler sweeps the store and collects the held
+    /// sessions' namespaces. A host that leaves sweeps and collections to
+    /// another process sets this to `false`.
+    pub sweep_store: bool,
 }
 
 struct SchedulerInner {
     store: SharedObjectStore,
-    /// The maintenance of the runtime that `namespaces` was built from, for a
-    /// host that maintains the store, and `None` for one that doesn't.
-    maintenance: Option<Maintenance>,
+    /// The maintenance of the runtime that `namespaces` was built from, which
+    /// reads what maintenance is due and collects garbage.
+    maintenance: Maintenance,
     grep: Option<GrepIndexing>,
     namespaces: Arc<Namespaces<SchedulerState>>,
     timer: Arc<dyn MonotonicTimer>,
@@ -319,8 +324,8 @@ struct SchedulerInner {
     metrics: SchedulerMetrics,
 }
 
-/// The grep worker of a host that maintains the grep index, and the build
-/// policy of its steps.
+/// The grep worker of a host that builds the grep index of the namespaces
+/// that it writes, and the build policy of its steps.
 pub struct GrepIndexing {
     worker: GrepWorker<SharedObjectStore>,
     policy: GramIndexBuildPolicy,
@@ -337,16 +342,14 @@ impl Scheduler {
     /// Builds a scheduler over the sessions of `namespaces`, with the cadence
     /// and limits in `config`, and starts no loop. The scheduler reads the
     /// store and the monotonic timer of the runtime that `namespaces` was
-    /// built from, and it runs maintenance through that runtime too.
-    /// `maintenance_writer_id` is the writer ID that the maintenance of a
-    /// host that maintains the store records, and `None` for a host that
-    /// runs only the close step.
-    /// `grep` is the indexing of a host that maintains the grep index, and
-    /// `None` otherwise. The scheduler registers its metrics with `recorder`.
+    /// built from, and it runs maintenance through that runtime too, on the
+    /// writable handles of the table's sessions. `grep` is the indexing of a
+    /// host that builds the grep index of the namespaces that it writes, and
+    /// `None` otherwise. The scheduler registers its metrics with
+    /// `recorder`.
     pub fn new(
         config: SchedulerConfig,
         namespaces: Arc<Namespaces<SchedulerState>>,
-        maintenance_writer_id: Option<WriterId>,
         grep: Option<GrepIndexing>,
         recorder: &dyn MetricsRecorder,
     ) -> Self {
@@ -355,7 +358,7 @@ impl Scheduler {
             inner: Arc::new(SchedulerInner {
                 store: runtime.object_store(),
                 timer: runtime.monotonic_timer(),
-                maintenance: maintenance_writer_id.map(|writer_id| runtime.maintenance(writer_id)),
+                maintenance: runtime.maintenance(),
                 grep,
                 namespaces,
                 config,
@@ -398,11 +401,12 @@ impl Scheduler {
     /// After the [`Scheduler`] is stopped, no namespace starts its steps, no
     /// pool starts its collection, and a running compaction unit stops at its
     /// next block.
-    /// A scheduler without a maintenance writer ID lists nothing and returns a
-    /// report of zero namespaces and pools that isn't complete.
+    /// A scheduler whose config doesn't set `sweep_store` lists nothing and
+    /// returns a report of zero namespaces and pools that isn't complete.
     pub async fn run_sweep(&self) -> SweepReport {
         let inner = &self.inner;
-        let Some(maintenance) = &inner.maintenance else {
+        let maintenance = &inner.maintenance;
+        if !inner.config.sweep_store {
             return SweepReport {
                 namespaces: 0,
                 pools: 0,
@@ -410,7 +414,7 @@ impl Scheduler {
                 complete: false,
                 next_reclamation_at_ms: None,
             };
-        };
+        }
         let started_at_ms = inner.timer.monotonic_now_ms();
         let (namespaces, mut listing) = self.sweep_every_namespace(maintenance).await;
         let mut pools = Covered::default();

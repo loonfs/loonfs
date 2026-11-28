@@ -262,7 +262,7 @@ async fn a_session_fold_that_loses_to_a_claim_folds_the_new_writers_log() {
     fixture.assert_sees_the_takeover().await;
 }
 
-/// Checks that when a fold through A's maintenance folds over B's claim, a
+/// Checks that when a fold through A's session folds over B's claim, a
 /// read in A's runtime still sees B's commit, because A's position doesn't
 /// move past B's claim.
 #[tokio::test]
@@ -275,12 +275,13 @@ async fn a_maintenance_fold_over_a_claim_leaves_the_former_writer_reading_the_cl
         .await
         .expect("A's commit");
     let peer = fixture.peer(None).await;
-    let maintenance = fixture
-        .writer
-        .maintenance(writer_id("fold-over-claim-maintenance"));
+    let maintenance = fixture.writer.clone();
 
     fixture.gate.block_next();
-    let (folded, ()) = futures::join!(maintenance.fold_wal(&fixture.namespace_id), async {
+    let handle = maintenance
+        .open_namespace(&fixture.namespace_id)
+        .expect("open namespace");
+    let (folded, ()) = futures::join!(handle.fold_wal(), async {
         bounded(STEP, fixture.gate.wait_until_blocked())
             .await
             .expect("the fold waits at its manifest put");
@@ -317,13 +318,14 @@ impl Takeover {
         );
     }
 
-    /// Runs a fold through A's maintenance and returns the manifest it
+    /// Runs a fold through A's session and returns the manifest it
     /// published.
     async fn maintenance_fold(&self) -> ManifestNo {
         let folded = self
             .writer
-            .maintenance(writer_id("takeover-maintenance"))
-            .fold_wal(&self.namespace_id)
+            .open_namespace(&self.namespace_id)
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold");
         assert_eq!(folded.outcome, FoldWalOutcome::Published);
@@ -378,7 +380,7 @@ impl Takeover {
 /// Checks that a read in A's runtime with an interval of 0 sees B's commit
 /// when B claims the namespace after a manifest of A's own.
 ///
-/// A's fold through maintenance publishes A's manifest while A's commit
+/// A's session's fold publishes A's manifest while A's commit
 /// waits at its WAL put, and moves A's position onto it without waiting for
 /// the commit. The read's check finds the next number, which is B's claim,
 /// and its drop of the position waits for A's commit.
@@ -405,7 +407,7 @@ async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
 /// isn't taken as A's own.
 ///
 /// B claims the namespace while A's commit waits at its WAL put, and then a
-/// fold through A's maintenance folds over B's claim, so A's own manifest
+/// fold through A's session folds over B's claim, so A's own manifest
 /// follows B's claim and has B's writer epoch. A's position can't move onto
 /// that manifest, so the fold ends the position that reads start from at
 /// once, without waiting for A's commit, and a read in A's runtime loads the
@@ -453,7 +455,7 @@ async fn a_check_finds_a_cached_claim_with_its_successor_head() {
             let claim = fixture.current_manifest_no().await;
             fixture
                 .writer
-                .maintenance(writer_id("takeover-maintenance"))
+                .maintenance()
                 .diagnostics(&fixture.namespace_id)
                 .await
                 .expect("diagnostics");

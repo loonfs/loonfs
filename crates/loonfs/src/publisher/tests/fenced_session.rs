@@ -158,10 +158,12 @@ async fn a_fenced_session_starts_no_fold_or_compaction() {
     publisher.start_compaction();
     assert_no_work(publisher);
     assert_eq!(store.counts(), requests);
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let maintenance = writer.clone();
     assert_eq!(
         maintenance
-            .fold_wal(old.id())
+            .open_namespace(old.id())
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("explicit fold")
             .outcome,
@@ -188,11 +190,11 @@ async fn a_fenced_session_cancels_its_compaction_unit_and_records_one_displaceme
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let (writer, old, recorder) = superseded_session(store).await;
     let publisher = &old.session().publisher;
-    assert!(!publisher.compaction_cancellation.is_cancelled());
+    assert!(!publisher.stop.is_cancelled());
     assert_eq!(counter(&recorder, "loonfs.publisher.displacements"), 0);
     discover_fence(&old).await;
     assert!(
-        publisher.compaction_cancellation.is_cancelled(),
+        publisher.stop.is_cancelled(),
         "the unit that found the fence cancelled the session's compaction"
     );
     // A later unit of the fenced session finds the same fence, and the
@@ -284,11 +286,6 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
             .code(),
         ErrorCode::WriterFenced
     );
-    writer
-        .maintenance(loonfs_test_support::ids::writer_id("maintenance"))
-        .fold_wal(old.id())
-        .await
-        .expect("explicit fold records its outcome in the fenced session");
     {
         let state = publisher.lock_state();
         assert_eq!(state.next_task_id, 0);

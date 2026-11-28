@@ -1,20 +1,15 @@
-//! The compaction loop, `Maintenance::compact_metadata`, and the store
+//! The compaction loop, `Namespace::compact_metadata`, and the store
 //! requests of other maintenance calls, over a live runtime.
 
 use crate::metrics::DefaultMetricsRecorder;
-use crate::test_support::{counter, maintenance_past_the_grace_window, writer};
-use crate::{
-    LoonFs, Maintenance, MetadataCompactionOutcome, NamespaceId, SharedObjectStore, Writable,
-};
+use crate::test_support::{counter, writer, writer_with_offset_clock};
+use crate::{LoonFs, MetadataCompactionOutcome, NamespaceId, SharedObjectStore, Writable};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{
-    Intercept, InterceptStore, Interceptor, OperationContext, OperationSelector,
-};
 use loonfs_types::format::manifest::{
     decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
 };
@@ -24,31 +19,25 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tempfile::tempdir;
 
-/// A writer and a maintenance of a second runtime over one store, the
-/// maintenance with a metrics recorder of its own.
+/// A writer over one store with a metrics recorder of its own, and the
+/// writer again, through which the tests run their maintenance calls.
 async fn manual_deployment(
     root: &std::path::Path,
-) -> (LoonFs<Writable>, Maintenance, Arc<DefaultMetricsRecorder>) {
+) -> (
+    LoonFs<Writable>,
+    LoonFs<Writable>,
+    Arc<DefaultMetricsRecorder>,
+) {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = LoonFs::builder_with_store(Arc::clone(&store), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("manual-writer"))
-        .build()
-        .await
-        .expect("build the writer");
-    let standalone = LoonFs::builder_with_store(Arc::clone(&store), crate::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "standalone-maintenance",
-        ))
         .metrics_recorder(recorder.clone())
         .build()
         .await
-        .expect("build the standalone maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id(
-            "standalone-maintenance",
-        ));
-    (writer, standalone, recorder)
+        .expect("build the writer");
+    (writer.clone(), writer, recorder)
 }
 
 #[tokio::test]
@@ -69,6 +58,7 @@ async fn a_maintenance_gc_step_records_the_collection_counters_once() {
 
     assert_eq!(counter(&recorder.snapshot(), "loonfs.gc.retained", &[]), 0);
     let gc = maintenance
+        .maintenance()
         .gc(&namespace)
         .await
         .expect("run the maintenance GC step");
@@ -85,6 +75,7 @@ async fn a_maintenance_gc_step_records_the_collection_counters_once() {
     );
 
     let pool_gc = maintenance
+        .maintenance()
         .gc_pool(&pool_id)
         .await
         .expect("run the pool's collection");
@@ -96,6 +87,7 @@ async fn a_maintenance_gc_step_records_the_collection_counters_once() {
         "the pool's collection records its retained count exactly once"
     );
     let missing = maintenance
+        .maintenance()
         .gc_pool(&crate::PoolId::generate())
         .await
         .expect_err("a pool without a record");
@@ -105,7 +97,7 @@ async fn a_maintenance_gc_step_records_the_collection_counters_once() {
 /// Writes one file and folds the tail, so each call leaves one more delta run.
 async fn write_and_fold(
     writer: &LoonFs<Writable>,
-    maintenance: &Maintenance,
+    maintenance: &LoonFs<Writable>,
     namespace_id: &NamespaceId,
     path: &str,
 ) {
@@ -115,7 +107,9 @@ async fn write_and_fold(
         .await
         .expect("put a file");
     maintenance
-        .fold_wal(namespace_id)
+        .open_namespace(namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the tail");
 }
@@ -144,7 +138,7 @@ async fn current_manifest_payload<S: ObjectStore + ?Sized>(
 /// Returns the attribute keys.
 async fn write_a_large_attribute_base(
     writer: &LoonFs<Writable>,
-    maintenance: &Maintenance,
+    maintenance: &LoonFs<Writable>,
     namespace_id: &NamespaceId,
 ) -> Vec<loonfs_types::AttributeKey> {
     use crate::publish::{parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation};
@@ -202,7 +196,12 @@ async fn write_a_large_attribute_base(
             .expect("write the base attribute history");
     }
     drop(permits);
-    maintenance.fold_wal(namespace_id).await.expect("fold base");
+    maintenance
+        .open_namespace(namespace_id)
+        .expect("open namespace")
+        .fold_wal()
+        .await
+        .expect("fold base");
     keys
 }
 
@@ -247,7 +246,7 @@ async fn the_compaction_loop_compacts_a_tier_of_deltas_without_reading_a_larger_
         .build()
         .await
         .expect("writer");
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let maintenance = writer.clone();
     let namespace = namespace_id("tier-above-a-large-base");
     writer
         .create_namespace(&namespace, &loonfs_test_support::test_actor())
@@ -265,7 +264,12 @@ async fn the_compaction_loop_compacts_a_tier_of_deltas_without_reading_a_larger_
             .update_attributes("/file", &loonfs_test_support::test_actor(), changes)
             .await
             .expect("write delta");
-        maintenance.fold_wal(&namespace).await.expect("fold delta");
+        maintenance
+            .open_namespace(&namespace)
+            .expect("open namespace")
+            .fold_wal()
+            .await
+            .expect("fold delta");
     }
     let attribute_runs = |manifest: &NamespaceManifestPayload| {
         manifest
@@ -285,7 +289,9 @@ async fn the_compaction_loop_compacts_a_tier_of_deltas_without_reading_a_larger_
 
     store.reset();
     let report = maintenance
-        .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
+        .open_namespace(&namespace)
+        .expect("open namespace")
+        .maintain_metadata_while_due(&crate::MaintenanceCancellation::new())
         .await
         .expect("run the compaction loop");
     assert!(
@@ -313,221 +319,12 @@ async fn the_compaction_loop_compacts_a_tier_of_deltas_without_reading_a_larger_
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Lets a rival write one commit and fold it before each manifest write it
-/// sees while it has races left, so the compaction unit that reaches its
-/// publication loses that race.
-#[derive(Debug)]
-struct RivalFold {
-    rival: LocalFsStore,
-    namespace_id: NamespaceId,
-    races_left: std::sync::atomic::AtomicUsize,
-    races_run: std::sync::atomic::AtomicUsize,
-}
-
-#[async_trait::async_trait]
-impl Interceptor for RivalFold {
-    type Guard = ();
-
-    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
-        use std::sync::atomic::Ordering::SeqCst;
-        if OperationSelector::Put.matches(context.kind())
-            && loonfs_objectstore::layout::manifest_no_of(context.key()).is_some()
-            && self
-                .races_left
-                .try_update(SeqCst, SeqCst, |left| left.checked_sub(1))
-                .is_ok()
-        {
-            self.races_run.fetch_add(1, SeqCst);
-            loonfs_core::test_support::NamespaceFixture::new(
-                &self.rival,
-                &self.namespace_id,
-                &loonfs_core::test_support::WriterAt {
-                    writer_id: loonfs_test_support::ids::writer_id("rival"),
-                    now_ms: 1_000,
-                },
-            )
-            .append_wal_objects(1)
-            .await
-            .expect("the rival writes");
-            loonfs_core::test_support::namespace_store(&self.rival, &self.namespace_id)
-                .fold_wal_tail(
-                    None,
-                    &loonfs_core::time::OperationClock::start(
-                        0,
-                        Arc::new(loonfs_types::StdMonotonicTimer::default()),
-                    ),
-                )
-                .await
-                .expect("the rival folds");
-        }
-        (Intercept::Continue, ())
-    }
-}
-
-/// Checks that a unit whose put loses to a fold publishes its output over the
-/// fold's manifest, and that the metadata loop counts only abandoned units as
-/// lost races and stops after three.
-#[tokio::test]
-async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_units() {
-    use std::sync::atomic::Ordering::SeqCst;
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace = namespace_id("losing-loop");
-    let store = Arc::new(InterceptStore::with_interceptor(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        RivalFold {
-            rival: LocalFsStore::new(temp_dir.path()).expect("store"),
-            namespace_id: namespace.clone(),
-            races_left: 0.into(),
-            races_run: 0.into(),
-        },
-    ));
-    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("writer"))
-        .build()
-        .await
-        .expect("writer");
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-    writer
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("create the namespace");
-    for index in 0..loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() + 2 {
-        write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
-    }
-    // One race: the unit's put loses to the rival's fold, and the next
-    // attempt publishes over the fold's manifest.
-    let before = current_manifest_payload(store.as_ref(), &namespace)
-        .await
-        .manifest_no;
-    store.interceptor().races_left.store(1, SeqCst);
-    let outcome = maintenance
-        .compact_metadata(&namespace, &crate::MaintenanceCancellation::new())
-        .await
-        .expect("a lost put is retried, not an error");
-    let MetadataCompactionOutcome::Published { manifest_no, .. } = outcome.compaction else {
-        panic!("a unit that loses one put publishes, got {outcome:?}");
-    };
-    assert_eq!(store.interceptor().races_run.load(SeqCst), 1);
-    // The rival's claim and fold took the numbers after `before`.
-    assert!(
-        manifest_no.0 > before.0 + 1,
-        "the unit publishes over the rival's fold, {manifest_no} after {before}"
-    );
-    assert_eq!(
-        current_manifest_payload(store.as_ref(), &namespace)
-            .await
-            .manifest_no,
-        manifest_no
-    );
-
-    // Every put loses: each unit abandons after its attempts run out, and
-    // the loop stops after three abandoned units in a row.
-    store.interceptor().races_run.store(0, SeqCst);
-    store.interceptor().races_left.store(64, SeqCst);
-    assert_eq!(
-        maintenance
-            .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
-            .await
-            .expect("a lost race is an outcome, not an error")
-            .response
-            .outcome,
-        crate::MetadataMaintenanceOutcome::Due
-    );
-    assert_eq!(
-        store.interceptor().races_run.load(SeqCst),
-        3 * loonfs_core::limits::MAX_CONTENTION_ATTEMPTS,
-        "the loop stops after three abandoned units"
-    );
-}
-
-/// Returns the kind and key of each request for `namespace_id`'s manifest
-/// boundary and manifests in `operations`, in order.
-fn control_requests(
-    namespace_id: &NamespaceId,
-    operations: &[loonfs_test_support::stores::RecordedOperation],
-) -> Vec<(&'static str, String)> {
-    use loonfs_test_support::stores::RecordedOperation;
-    let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(namespace_id);
-    let boundary = loonfs_objectstore::keys::boundary(namespace_id);
-    operations
-        .iter()
-        .filter(|operation| operation.key() == boundary || operation.key().starts_with(&manifests))
-        .map(|operation| {
-            let kind = match operation {
-                RecordedOperation::Head { .. } => "head",
-                RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. } => "get",
-                RecordedOperation::List { .. } => "list",
-                _ => "write",
-            };
-            (kind, operation.key().to_owned())
-        })
-        .collect()
-}
-
-/// Checks that the first compaction of a runtime without a writer session
-/// finds the newest manifest once, and plans from it with no request first.
-#[tokio::test]
-async fn a_compaction_without_a_session_finds_the_newest_manifest_once() {
-    use loonfs_objectstore::keys::{boundary, metadata_manifest_object, metadata_manifest_prefix};
-    use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
-
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::any(),
-    ));
-    let namespace = namespace_id("first-compaction");
-    let writer = writer(store.clone(), "writer").await;
-    let folds = writer.maintenance(loonfs_test_support::ids::writer_id("folds"));
-    writer
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("create the namespace");
-    for index in 0..loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() + 2 {
-        write_and_fold(&writer, &folds, &namespace, &format!("/file-{index}")).await;
-    }
-    writer.shutdown().await.expect("shut down the writer");
-    let maintenance = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
-        .build()
-        .await
-        .expect("maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-
-    // The find, then the unit's put and boundary read.
-    let current = current_manifest_payload(store.as_ref(), &namespace)
-        .await
-        .manifest_no;
-    let unit = current.successor().expect("the unit's number");
-    store.reset();
-    let report = maintenance
-        .compact_metadata(&namespace, &crate::MaintenanceCancellation::new())
-        .await
-        .expect("compact");
-    let MetadataCompactionOutcome::Published { manifest_no, .. } = report.compaction else {
-        panic!("the first compaction publishes, got {report:?}");
-    };
-    assert_eq!(manifest_no, unit);
-    let boundary_key = boundary(&namespace);
-    assert_eq!(
-        control_requests(&namespace, &store.take()),
-        vec![
-            ("get", boundary_key.clone()),
-            ("list", metadata_manifest_prefix(&namespace)),
-            ("get", metadata_manifest_object(&namespace, &current)),
-            ("get", boundary_key.clone()),
-            ("write", metadata_manifest_object(&namespace, &unit)),
-            ("get", boundary_key),
-        ]
-    );
-}
-
 #[tokio::test]
 async fn a_metadata_loop_call_stops_after_its_unit_cap() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = writer(store.clone(), "writer").await;
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let maintenance = writer.clone();
     let namespace = namespace_id("backlog");
     writer
         .create_namespace(&namespace, &loonfs_test_support::test_actor())
@@ -536,6 +333,9 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
     // One unit compacts at most eight runs of one family group, and each
     // folded write adds a run to several groups, so 32 folded writes need at
     // least four units in each of those groups.
+    // One handle keeps the writer session open across the calls, so no call
+    // claims the namespace again.
+    let held = writer.open_namespace(&namespace).expect("open namespace");
     for index in 0..4 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() {
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
@@ -544,8 +344,8 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
         let before = current_manifest_payload(store.as_ref(), &namespace)
             .await
             .manifest_no;
-        let response = maintenance
-            .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
+        let response = held
+            .maintain_metadata_while_due(&crate::MaintenanceCancellation::new())
             .await
             .expect("run the metadata loop");
         if published.is_empty() {
@@ -567,7 +367,7 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
     }
     assert_eq!(
         published[0],
-        loonfs_types::u64_from_usize(super::compaction::MAX_COMPACTION_UNITS_PER_CALL),
+        loonfs_types::u64_from_usize(crate::publisher::MAX_COMPACTION_UNITS_PER_CALL),
         "one call publishes exactly the cap"
     );
     assert!(
@@ -633,13 +433,18 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .monotonic_timer(Arc::new(ManualClock::new(0)))
         .build()
         .await
-        .expect("maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-    maintenance.fold_wal(&idle).await.expect("fold the tail");
+        .expect("maintenance");
+    maintenance
+        .open_namespace(&idle)
+        .expect("open namespace")
+        .fold_wal()
+        .await
+        .expect("fold the tail");
     // The first collection of `retired` retires the deleted namespace, and
     // the second deletes what is left under its prefix.
     for namespace in [&idle, &retired, &retired] {
         maintenance
+            .maintenance()
             .gc(namespace)
             .await
             .expect("collect what the setup left behind");
@@ -650,7 +455,9 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     cancelled.cancel();
     assert_eq!(
         maintenance
-            .maintain_metadata_while_due(&idle, &cancelled)
+            .open_namespace(&idle)
+            .expect("open namespace")
+            .maintain_metadata_while_due(&cancelled)
             .await
             .expect("cancellation is not completion")
             .response
@@ -691,7 +498,9 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     ] {
         store.reset();
         let metadata = maintenance
-            .maintain_metadata_while_due(namespace, &crate::MaintenanceCancellation::new())
+            .open_namespace(namespace)
+            .expect("open namespace")
+            .maintain_metadata_while_due(&crate::MaintenanceCancellation::new())
             .await;
         if metadata_error.is_none() {
             assert_eq!(
@@ -710,7 +519,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
             "the metadata loop on `{namespace}`"
         );
         store.reset();
-        let gc = maintenance.gc(namespace).await;
+        let gc = maintenance.maintenance().gc(namespace).await;
         assert_eq!(
             requests(store.counts()),
             gc_requests,
@@ -753,8 +562,9 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
             .expect("put a file");
     }
     writer
-        .maintenance(loonfs_test_support::ids::writer_id("writer"))
-        .fold_wal(&namespace)
+        .open_namespace(&namespace)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold commits 1 and 2");
     writer.shutdown().await.expect("shut down the writer");
@@ -764,7 +574,7 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
     let segments = loonfs_objectstore::keys::metadata_segment_prefix(&namespace);
     // Each advance runs in a new runtime, so no cache has the segments that
     // the fold wrote.
-    let maintenance = || maintenance_past_the_grace_window(store.clone());
+    let advancer = || writer_with_offset_clock(store.clone(), "advancer");
     for (floor, advances) in [
         (
             CommitSeq(1),
@@ -792,14 +602,16 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
             ],
         ),
     ] {
-        let advancing = maintenance().await;
-        advancing
-            .advance_retention_floor_with_options(
-                &namespace,
+        let (advancing, clock) = advancer().await;
+        let advancing = advancing
+            .open_namespace(&namespace)
+            .expect("open namespace");
+        clock
+            .past_the_grace_window(advancing.advance_retention_floor_with_options(
                 &AdvanceRetentionFloorOptions {
                     target: RetentionTarget::Seq(floor),
                 },
-            )
+            ))
             .await
             .expect("advance the floor");
         let manifest = metadata_manifest_object(
@@ -809,15 +621,18 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
                 .manifest_no,
         );
         for (target, reads_a_segment) in advances {
-            let maintenance = maintenance().await;
+            let (maintenance, clock) = advancer().await;
+            let maintenance = maintenance
+                .open_namespace(&namespace)
+                .expect("open namespace");
             store.reset();
-            let advanced = maintenance
-                .advance_retention_floor_with_options(
-                    &namespace,
-                    &AdvanceRetentionFloorOptions { target },
-                )
-                .await
-                .expect("an advance that moves nothing");
+            let advanced =
+                clock
+                    .past_the_grace_window(maintenance.advance_retention_floor_with_options(
+                        &AdvanceRetentionFloorOptions { target },
+                    ))
+                    .await
+                    .expect("an advance that moves nothing");
             assert_eq!(advanced.retention_floor_seq, floor, "{target:?}");
             let operations: Vec<_> = store
                 .take()
@@ -843,202 +658,9 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
             assert_eq!(
                 operations, expected,
                 "{target:?} finds the current manifest and plans from that manifest's floor, \
-                 with no read of the WAL"
+                 with no read of the WAL and no claim"
             );
         }
-    }
-}
-
-/// Checks that a retention advance whose floor object is put after another
-/// runtime's writer session deleted the namespace returns
-/// `namespace_deleted` from the floor object's check, and sends nothing after
-/// that check, because the check finds the tombstone, so no fold follows.
-#[tokio::test]
-async fn an_advance_whose_floor_object_follows_a_deletion_returns_namespace_deleted() {
-    use crate::{AdvanceRetentionFloorOptions, CommitSeq, ErrorCode, RetentionTarget};
-    use loonfs_test_support::stores::{
-        request_lines, BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
-    };
-
-    let directory = tempdir().expect("tempdir");
-    let actor = loonfs_test_support::test_actor();
-    let namespace = namespace_id("deleted-during-advance");
-    let writer_store: SharedObjectStore =
-        Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let writer = writer(Arc::clone(&writer_store), "writer").await;
-    writer
-        .create_namespace(&namespace, &actor)
-        .await
-        .expect("create the namespace");
-    for path in ["/a", "/b"] {
-        writer
-            .open_namespace(&namespace)
-            .expect("open the namespace")
-            .put_file(path, b"body", &actor)
-            .await
-            .expect("put a file");
-    }
-    writer
-        .maintenance(loonfs_test_support::ids::writer_id("writer"))
-        .fold_wal(&namespace)
-        .await
-        .expect("fold commits 1 and 2");
-    writer.drain().await.expect("the fold's compaction settles");
-    // The session commits a WAL tail above the planned manifest, and the
-    // deletion folds that tail before its tombstone. The handle keeps the
-    // session open until the deletion, so the deletion puts no fence.
-    let session = writer
-        .open_namespace(&namespace)
-        .expect("open the namespace");
-    session
-        .put_file("/c", b"body", &actor)
-        .await
-        .expect("put a file");
-    let planned = current_manifest_payload(writer_store.as_ref(), &namespace).await;
-
-    // The advancing runtime's floor object put waits while the writer
-    // session publishes the namespace's tombstone.
-    let store = Arc::new(RecordingStore::new(
-        BlockingStore::new(
-            LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace)),
-            OperationSelector::PutCreateIfAbsent,
-        ),
-        KeyPredicate::any(),
-    ));
-    let advancing = maintenance_past_the_grace_window(store.clone()).await;
-    store.inner().block_next();
-    store.reset();
-    let (advanced, ()) = tokio::join!(
-        advancing.advance_retention_floor_with_options(
-            &namespace,
-            &AdvanceRetentionFloorOptions {
-                target: RetentionTarget::Seq(CommitSeq(1)),
-            },
-        ),
-        async {
-            store.inner().wait_until_blocked().await;
-            session
-                .delete()
-                .await
-                .expect("the writer session deletes the namespace");
-            store.inner().release();
-        }
-    );
-    let error = advanced.expect_err("the advance finds the tombstone");
-    assert_eq!(error.code(), ErrorCode::NamespaceDeleted, "{error:?}");
-
-    let tombstone = current_manifest_payload(writer_store.as_ref(), &namespace).await;
-    assert!(tombstone.status.is_deleted());
-    let manifest = |number: u64| format!("MetadataManifest {number:020}");
-    let lines = request_lines(&store.take());
-    let floor_object = format!("put {namespace} WalObject ");
-    let put = lines
-        .iter()
-        .position(|line| line.starts_with(&floor_object))
-        .unwrap_or_else(|| panic!("the floor object's put: {lines:?}"));
-    assert_eq!(
-        lines[put + 1..],
-        [
-            // The check after the put finds a manifest after the planned
-            // one, and loads the newest manifest, which is the tombstone.
-            format!("head {namespace} {}", manifest(planned.manifest_no.0 + 1)),
-            format!("get {namespace} Boundary"),
-            format!("list namespaces/{namespace}/manifests/"),
-            format!("get {namespace} {}", manifest(tombstone.manifest_no.0)),
-            format!("get {namespace} Boundary"),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn an_advance_past_the_manifests_floor_finds_a_floor_object_in_the_tail_when_it_publishes() {
-    use crate::{AdvanceRetentionFloorOptions, CommitSeq, RetentionTarget};
-    use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
-
-    // The tail's floor object, the target, the floor after the advance, and
-    // the floor objects that the advance creates.
-    for (tail_floor, target, floor, floor_objects) in [
-        // The publication's discovery finds the tail's floor object, which
-        // already covers the target.
-        (CommitSeq(2), CommitSeq(1), CommitSeq(2), 0),
-        // The target is above the tail's floor object.
-        (CommitSeq(1), CommitSeq(2), CommitSeq(2), 1),
-    ] {
-        let directory = tempdir().expect("tempdir");
-        let store = Arc::new(RecordingStore::new(
-            LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::any(),
-        ));
-        let actor = loonfs_test_support::test_actor();
-        let namespace = namespace_id("tail");
-        let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
-            .writer_id(loonfs_test_support::ids::writer_id("writer"))
-            .build()
-            .await
-            .expect("writer");
-        writer
-            .create_namespace(&namespace, &actor)
-            .await
-            .expect("create the namespace");
-        for path in ["/a", "/b"] {
-            writer
-                .open_namespace(&namespace)
-                .expect("open the namespace")
-                .put_file(path, b"body", &actor)
-                .await
-                .expect("put a file");
-        }
-        writer
-            .maintenance(loonfs_test_support::ids::writer_id("writer"))
-            .fold_wal(&namespace)
-            .await
-            .expect("fold commits 1 and 2");
-        writer.shutdown().await.expect("shut down the writer");
-        // A floor object that no fold covers, as an advance whose fold
-        // failed leaves it.
-        let core = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace);
-        let planned = core
-            .load_current_manifest()
-            .await
-            .expect("find the current manifest");
-        core.publish_floor_object(&planned, tail_floor)
-            .await
-            .expect("create the floor object");
-
-        let maintenance = maintenance_past_the_grace_window(store.clone()).await;
-        store.reset();
-        let advanced = maintenance
-            .advance_retention_floor_with_options(
-                &namespace,
-                &AdvanceRetentionFloorOptions {
-                    target: RetentionTarget::Seq(target),
-                },
-            )
-            .await
-            .expect("advance the floor");
-        let wal = loonfs_objectstore::keys::wal_prefix(&namespace);
-        let wal_puts = store
-            .take()
-            .iter()
-            .filter(|operation| {
-                matches!(
-                    operation,
-                    RecordedOperation::Put { .. } | RecordedOperation::PutStreamed { .. }
-                ) && operation.key().starts_with(&wal)
-            })
-            .count();
-        assert_eq!(advanced.retention_floor_seq, floor, "target {target:?}");
-        assert_eq!(wal_puts, floor_objects, "target {target:?}");
-        // No manifest recorded the view's floor, so the advance folds the
-        // tail.
-        assert_eq!(
-            current_manifest_payload(store.as_ref(), &namespace)
-                .await
-                .retention_floor_seq,
-            floor,
-            "target {target:?}"
-        );
     }
 }
 
@@ -1131,7 +753,7 @@ const LARGE_FOLD_FILE: &str = "/large/f-02048.txt";
 async fn write_a_large_batch_and_fold<S: ObjectStore + ?Sized>(
     store: &S,
     namespace: &crate::Namespace<Writable>,
-    maintenance: &Maintenance,
+    maintenance: &LoonFs<Writable>,
     namespace_id: &NamespaceId,
 ) {
     use crate::publish::{CommitIntent, FilesystemOperation};
@@ -1168,7 +790,9 @@ async fn write_a_large_batch_and_fold<S: ObjectStore + ?Sized>(
             .expect("commit the batch");
     }
     maintenance
-        .fold_wal(namespace_id)
+        .open_namespace(namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold the batch");
     let manifest = current_manifest_payload(store, namespace_id).await;
@@ -1206,7 +830,7 @@ async fn a_read_after_a_fold_or_a_compaction_unit_sends_no_segment_get() {
         .build()
         .await
         .expect("writer");
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let maintenance = writer.clone();
     let namespace_id = namespace_id("read-after-maintenance");
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -1241,7 +865,9 @@ async fn a_read_after_a_fold_or_a_compaction_unit_sends_no_segment_get() {
     let mut units = 0;
     loop {
         match maintenance
-            .compact_metadata(&namespace_id, &crate::MaintenanceCancellation::new())
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .compact_metadata(&crate::MaintenanceCancellation::new())
             .await
             .expect("compact one unit")
             .compaction
@@ -1302,7 +928,7 @@ async fn a_restarted_runtime_reads_a_folded_file_from_the_ssd_tier() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open the namespace");
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let maintenance = writer.clone();
     write_a_large_batch_and_fold(store.as_ref(), &namespace, &maintenance, &namespace_id).await;
     writer.shutdown().await.expect("shutdown");
     cache.close().await;
@@ -1335,15 +961,12 @@ async fn a_restarted_runtime_reads_a_folded_file_from_the_ssd_tier() {
     assert_eq!(segment_gets, 0, "{:?}", cache.stats());
     assert!(cache.stats().segment_ssd.expect("the SSD tier").hits > 0);
 }
-
-/// Checks that an extension's publication in a runtime whose writer session
-/// on the namespace hasn't committed, so reads there start from the cached
-/// head, drops that runtime's cached head and caches
-/// the published manifest, so the next read finds the published entry with
-/// one discovery that reads no manifest, and the read after it sends no
-/// request.
+/// Checks that an extension's publication through a writer session that
+/// hasn't committed, so reads there started from the cached head, moves the
+/// session's position onto the published manifest, so the next read finds
+/// the published entry with no request.
 #[tokio::test]
-async fn a_read_after_an_extension_publication_runs_one_discovery() {
+async fn a_read_after_an_extension_publication_starts_from_the_sessions_position() {
     use crate::StatOptions;
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
     use loonfs_types::format::manifest::ExtensionEntry;
@@ -1380,7 +1003,7 @@ async fn a_read_after_an_extension_publication_runs_one_discovery() {
         .build()
         .await
         .expect("maintenance runtime");
-    let maintenance = runtime.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let maintenance = runtime.clone();
     let stat = StatOptions::default();
     let namespace_handle = runtime
         .open_namespace(&namespace)
@@ -1393,14 +1016,21 @@ async fn a_read_after_an_extension_publication_runs_one_discovery() {
     let name = ExtensionName::parse("grep").expect("extension name");
     let entry = ExtensionEntry::new(1, Vec::new(), serde_json::Map::new());
     let basis = maintenance
-        .load_extension_basis(&namespace)
+        .open_namespace(&namespace)
+        .expect("open namespace")
+        .load_extension_basis()
         .await
         .expect("load the basis");
     let published = maintenance
+        .open_namespace(&namespace)
+        .expect("open namespace")
         .publish_extension(&basis, &name, entry.clone())
         .await
         .expect("publish the entry");
-    let loonfs_core::ExtensionPublication::Published(published) = published else {
+    let loonfs_core::ExtensionPublication::Published {
+        basis: published, ..
+    } = published
+    else {
         panic!("no other publication races the test's own");
     };
     assert!(published.manifest().manifest_no > basis.manifest().manifest_no);
@@ -1417,10 +1047,9 @@ async fn a_read_after_an_extension_publication_runs_one_discovery() {
         .await
         .expect("find the entry");
     assert_eq!(found, Some(entry));
-    // Discovery reads the boundary, lists the manifests, reads the boundary
-    // again, replays the two WAL objects above the cached manifest and finds
-    // the next one missing, and checks the manifest with a successor HEAD
-    // and a boundary read.
+    // The publication is the writer session's, so the session's position
+    // moved onto the published manifest, and the read starts from it with
+    // no request.
     let counts = store.counts();
     assert_eq!(
         (
@@ -1429,7 +1058,7 @@ async fn a_read_after_an_extension_publication_runs_one_discovery() {
             counts.gets,
             counts.heads
         ),
-        (3, 1, 3, 1),
+        (0, 0, 0, 0),
         "{:?}",
         store.snapshot()
     );
@@ -1444,4 +1073,138 @@ async fn a_read_after_an_extension_publication_runs_one_discovery() {
         "{:?}",
         store.snapshot()
     );
+}
+
+/// Checks that a compaction unit whose put loses to the session's own fold,
+/// which put its manifest at the same number while the unit's put was in
+/// flight, publishes its output over the fold's manifest. The store parks
+/// the unit's manifest put until the session has committed and folded.
+#[tokio::test]
+async fn a_unit_whose_put_loses_to_the_sessions_fold_publishes_over_it() {
+    use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector};
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace = namespace_id("losing-to-a-fold");
+    let store = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+            &namespace,
+        )),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create the namespace");
+    let session = writer.open_namespace(&namespace).expect("open namespace");
+    for index in 0..loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() + 2 {
+        write_and_fold(&writer, &writer, &namespace, &format!("/file-{index}")).await;
+    }
+    let before = current_manifest_payload(store.as_ref(), &namespace)
+        .await
+        .manifest_no;
+    store.block_next();
+    let cancellation = crate::MaintenanceCancellation::new();
+    let (outcome, folded) = tokio::join!(session.compact_metadata(&cancellation), async {
+        store.wait_until_blocked().await;
+        session
+            .put_file("/during", b"during", &loonfs_test_support::test_actor())
+            .await
+            .expect("a commit while the unit's put waits");
+        let folded = session.fold_wal().await.expect("the session's fold");
+        store.release();
+        folded
+    });
+    assert_eq!(
+        folded.manifest_no.0,
+        before.0 + 1,
+        "the fold took the number"
+    );
+    let outcome = outcome.expect("a lost put is retried, not an error");
+    let MetadataCompactionOutcome::Published { manifest_no, .. } = outcome.compaction else {
+        panic!("a unit that loses one put publishes, got {outcome:?}");
+    };
+    assert_eq!(
+        manifest_no.0,
+        before.0 + 2,
+        "the unit publishes over the fold's manifest"
+    );
+    let current = current_manifest_payload(store.as_ref(), &namespace).await;
+    assert_eq!(
+        current.head_seq, folded.manifest_head_seq,
+        "the fold's commit stays"
+    );
+    drop(session);
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that the metadata loop counts only abandoned units as lost races
+/// and stops after three.
+///
+/// The test support's same-epoch publisher puts a copy of the newest
+/// manifest at the next number before each selected manifest put (see
+/// [`NewerManifestStore`](loonfs_test_support::stores::NewerManifestStore)).
+/// In a runtime, at most one publication of each kind is put and not yet
+/// recorded, so the session's own publications never make the loop abandon
+/// three units. Only a store that breaks the format, or a publisher
+/// at the session's epoch that the design doesn't allow, reaches that limit,
+/// and the limit is there so that such a store can't make the loop run
+/// without end.
+#[tokio::test]
+async fn the_loop_stops_after_three_abandoned_units() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace = namespace_id("losing-loop");
+    let rival: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store = Arc::new(loonfs_test_support::stores::NewerManifestStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        rival,
+        namespace.clone(),
+        loonfs_test_support::stores::KeyPredicate::prefix(
+            loonfs_objectstore::keys::metadata_manifest_prefix(&namespace),
+        ),
+        loonfs_test_support::stores::OperationSelector::PutCreateIfAbsent,
+    ));
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create the namespace");
+    for index in 0..loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() + 2 {
+        write_and_fold(&writer, &writer, &namespace, &format!("/file-{index}")).await;
+    }
+    let session = writer.open_namespace(&namespace).expect("open namespace");
+    // The session claims the namespace first, so the puts that lose below are
+    // the units'.
+    session
+        .put_file("/claim", b"claim", &loonfs_test_support::test_actor())
+        .await
+        .expect("the session claims");
+
+    // Every put loses: each unit abandons after its attempts run out, and
+    // the loop stops after three abandoned units in a row.
+    store.arm();
+    assert_eq!(
+        session
+            .maintain_metadata_while_due(&crate::MaintenanceCancellation::new())
+            .await
+            .expect("a lost race is an outcome, not an error")
+            .response
+            .outcome,
+        crate::MetadataMaintenanceOutcome::Due
+    );
+    assert_eq!(
+        store.published(),
+        3 * loonfs_core::limits::MAX_CONTENTION_ATTEMPTS,
+        "the loop stops after three abandoned units"
+    );
+    store.arm_for(0);
+    writer.shutdown().await.expect("shutdown");
 }

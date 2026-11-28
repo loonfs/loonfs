@@ -10,6 +10,7 @@ use crate::DeleteNamespaceOptions;
 use loonfs_types::format::manifest::{ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef};
 use loonfs_types::format::segment_blocks::BlockHandle;
 use loonfs_types::{ExtensionName, IndexSegmentId};
+use std::assert_matches;
 
 fn grep() -> ExtensionName {
     ExtensionName::parse("grep").expect("extension name")
@@ -65,10 +66,17 @@ pub(super) async fn publish_entry<S: ObjectStore + Clone>(
     let engine = fixture.engine();
     let basis = engine.load_extension_basis().await.expect("basis");
     let published = engine
+        .namespace
+        .fixture_writer_session()
+        .await
+        .expect("the fixture's writer session")
         .publish_extension(&basis, &grep(), entry_after(&basis, status))
         .await
         .expect("publish");
-    let ExtensionPublication::Published(published) = published.response else {
+    let ExtensionPublication::Published {
+        basis: published, ..
+    } = published.response
+    else {
         panic!("no other publication races this one");
     };
     published.find_entry(&grep()).cloned().expect("the entry")
@@ -128,7 +136,10 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
             .await
             .expect("write");
         crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal_tail(None, &fixture.namespace.start_clock())
+            .fixture_writer_session()
+            .await
+            .expect("the writer's session")
+            .fold()
             .await
             .expect("fold");
     }
@@ -169,6 +180,10 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
     );
     fixture
         .engine()
+        .namespace
+        .fixture_writer_session()
+        .await
+        .expect("the fixture's writer session")
         .set_retention_window(
             loonfs_types::RetentionWindow::new(2 * crate::limits::GC_GRACE_WINDOW_MS).ok(),
         )
@@ -209,23 +224,27 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
     assert_eq!(kept.state(), entry.state());
 }
 
-/// A publication that copies an extension's entry, which another process
-/// makes after an extension's change loaded its basis.
+/// A publication of the session's own that copies an extension's entry,
+/// which the session publishes after an extension's change took its
+/// position.
 #[derive(Debug, Clone, Copy)]
-enum EntryCopy {
+enum OwnCopy {
     Fold,
     Compaction,
     RetentionAdvance,
     RetentionWindow,
 }
 
-impl EntryCopy {
+impl OwnCopy {
     async fn publish(self, store: &LocalFsStore, namespace_id: &NamespaceId) {
         let fixture = NamespaceFixture::new(store, namespace_id, &test_context());
         match self {
             Self::Fold => {
                 let folded = crate::test_support::namespace_store(store, namespace_id)
-                    .fold_wal_tail(None, &fixture.namespace.start_clock())
+                    .fixture_writer_session()
+                    .await
+                    .expect("the writer's session")
+                    .fold()
                     .await
                     .expect("fold");
                 assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
@@ -255,29 +274,38 @@ impl EntryCopy {
                 .expect("advance");
             }
             Self::RetentionWindow => {
-                fixture
-                    .engine()
-                    .set_retention_window(
-                        loonfs_types::RetentionWindow::new(2 * crate::limits::GC_GRACE_WINDOW_MS)
-                            .ok(),
-                    )
-                    .await
-                    .expect("window");
+                crate::test_support::change_retention_window(&fixture.engine()).await;
             }
         }
     }
 }
 
-/// Checks that an extension's publication that loses its put to a fold, a
-/// compaction, a retention advance, or a retention window change is
-/// published over the manifest that won, which copied the entry.
+/// Returns the position of the namespace's writer session, which an
+/// extension's change publishes from.
+async fn session_position(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+) -> crate::publish::WriterPosition {
+    crate::test_support::namespace_store(store, namespace_id)
+        .fixture_writer_session()
+        .await
+        .expect("the writer's session")
+        .load_position()
+        .await
+        .expect("the session's position")
+}
+
+/// Checks that an extension's publication whose put loses to the session's
+/// own fold, compaction, retention advance, or retention window change,
+/// published after the change took its position, is built again over the
+/// manifest that won, which copied the entry, and changes only the entry.
 #[tokio::test]
-async fn an_extension_publication_that_loses_to_a_copy_of_its_entry_is_rebuilt_over_it() {
+async fn an_extension_publication_that_loses_to_the_sessions_copy_of_its_entry_is_rebuilt() {
     for copy in [
-        EntryCopy::Fold,
-        EntryCopy::Compaction,
-        EntryCopy::RetentionAdvance,
-        EntryCopy::RetentionWindow,
+        OwnCopy::Fold,
+        OwnCopy::Compaction,
+        OwnCopy::RetentionAdvance,
+        OwnCopy::RetentionWindow,
     ] {
         let directory = tempdir().expect("directory");
         let store = LocalFsStore::new(directory.path()).expect("store");
@@ -289,7 +317,7 @@ async fn an_extension_publication_that_loses_to_a_copy_of_its_entry_is_rebuilt_o
                 .write_file_bytes(path, path.as_bytes(), None)
                 .await
                 .expect("write");
-            EntryCopy::Fold.publish(&store, &namespace_id).await;
+            OwnCopy::Fold.publish(&store, &namespace_id).await;
         }
         publish_entry(&fixture, "active").await;
         fixture
@@ -301,6 +329,7 @@ async fn an_extension_publication_that_loses_to_a_copy_of_its_entry_is_rebuilt_o
             .load_extension_basis()
             .await
             .expect("basis");
+        let position = session_position(&store, &namespace_id).await;
         copy.publish(&store, &namespace_id).await;
         let winner = current_manifest(&store, &namespace_id).await;
         assert!(
@@ -308,13 +337,15 @@ async fn an_extension_publication_that_loses_to_a_copy_of_its_entry_is_rebuilt_o
             "{copy:?}"
         );
 
-        let rebuilt = fixture
-            .engine()
-            .publish_extension(&stale, &grep(), entry_after(&stale, "rebuilt"))
+        let rebuilt = crate::test_support::namespace_store(&store, &namespace_id)
+            .publish_extension_from(&position, &stale, &grep(), entry_after(&stale, "rebuilt"))
             .await
             .expect("publish");
         assert!(
-            matches!(rebuilt.response, ExtensionPublication::Published(_)),
+            matches!(
+                rebuilt.response,
+                ExtensionPublication::Published { rebuilt: true, .. }
+            ),
             "{copy:?}"
         );
         let current = current_manifest(&store, &namespace_id).await;
@@ -340,12 +371,68 @@ async fn an_extension_publication_that_loses_to_a_copy_of_its_entry_is_rebuilt_o
     }
 }
 
-/// Checks that an extension's publication that loses its put to another
-/// change of its entry publishes nothing, that the next one builds on the
-/// winner, and that a publication over a tombstone returns
-/// `namespace_deleted`.
+/// Checks that an extension's publication whose position's manifest a
+/// collection deleted returns `head_moved` and publishes nothing, instead of
+/// building on the newest manifest, which could be another writer's claim.
 #[tokio::test]
-async fn an_extension_publication_that_loses_to_another_change_of_its_entry_publishes_nothing() {
+async fn an_extension_publication_over_a_collected_position_manifest_reports_the_position_behind() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("extension-collected").expect("namespace");
+    let fixture = NamespaceFixture::new(&store, &namespace_id, &test_context());
+    fixture.create().await.expect("create");
+    fixture
+        .write_file_bytes("/a", b"a", None)
+        .await
+        .expect("write");
+    OwnCopy::Fold.publish(&store, &namespace_id).await;
+    publish_entry(&fixture, "active").await;
+    let basis = fixture
+        .engine()
+        .load_extension_basis()
+        .await
+        .expect("basis");
+    let position = session_position(&store, &namespace_id).await;
+    let collected = position.read_basis().basis.manifest_no();
+    // A window change publishes the manifest after the position's, and a
+    // collection deletes the position's manifest, the only one old enough.
+    OwnCopy::RetentionWindow
+        .publish(&store, &namespace_id)
+        .await;
+    let newest = current_manifest(&store, &namespace_id).await;
+    let report = crate::test_support::namespace_store(
+        &loonfs_test_support::stores::MetadataMapStore::aged(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::exact(metadata_manifest_object(&namespace_id, &collected)),
+        ),
+        &namespace_id,
+    )
+    .gc(&WriterAt {
+        now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
+        ..test_context()
+    }
+    .clock())
+    .await
+    .expect("collect");
+    assert_eq!(report.deleted.manifests, 1);
+
+    let published = crate::test_support::namespace_store(&store, &namespace_id)
+        .publish_extension_from(&position, &basis, &grep(), entry_after(&basis, "next"))
+        .await;
+    assert_matches!(published, Err(CoreError::HeadMoved(_)));
+    assert_eq!(
+        current_manifest(&store, &namespace_id).await.manifest(),
+        newest.manifest(),
+        "the publication puts nothing"
+    );
+}
+
+/// Checks that an extension's publication whose entry the session's own
+/// later change replaced, such as a disable, publishes nothing and returns
+/// `Superseded`, that the next one builds on the winner, and that a
+/// publication over a tombstone returns `namespace_deleted`.
+#[tokio::test]
+async fn an_extension_publication_whose_entry_the_session_replaced_publishes_nothing() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("extension-superseded").expect("namespace");
@@ -355,14 +442,17 @@ async fn an_extension_publication_that_loses_to_another_change_of_its_entry_publ
         .write_file_bytes("/a", b"a", None)
         .await
         .expect("write");
-    EntryCopy::Fold.publish(&store, &namespace_id).await;
+    OwnCopy::Fold.publish(&store, &namespace_id).await;
     let engine = fixture.engine();
     let stale = engine.load_extension_basis().await.expect("basis");
     let won = publish_entry(&fixture, "won").await;
     let winner = current_manifest(&store, &namespace_id).await;
+    // The session's position follows its own publication of `won`.
+    let position = session_position(&store, &namespace_id).await;
 
-    let lost = engine
-        .publish_extension(&stale, &grep(), entry_after(&stale, "lost"))
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let lost = namespace
+        .publish_extension_from(&position, &stale, &grep(), entry_after(&stale, "lost"))
         .await
         .expect("publish");
     assert!(matches!(lost.response, ExtensionPublication::Superseded));
@@ -376,6 +466,7 @@ async fn an_extension_publication_that_loses_to_another_change_of_its_entry_publ
     assert_eq!(next.runs[..1], won.runs);
 
     let basis = engine.load_extension_basis().await.expect("basis");
+    let position = session_position(&store, &namespace_id).await;
     engine
         .delete_namespace(
             &crate::test_support::administrator(&engine),
@@ -383,8 +474,8 @@ async fn an_extension_publication_that_loses_to_another_change_of_its_entry_publ
         )
         .await
         .expect("delete");
-    let deleted = engine
-        .publish_extension(&basis, &grep(), entry_after(&basis, "deleted"))
+    let deleted = namespace
+        .publish_extension_from(&position, &basis, &grep(), entry_after(&basis, "deleted"))
         .await
         .expect_err("a tombstone has no successor");
     assert!(

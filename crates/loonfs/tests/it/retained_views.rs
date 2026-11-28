@@ -189,8 +189,9 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         match stage {
             "folded" => {
                 let step = runtime
-                    .maintenance
-                    .maintain_metadata_with_options(&source, &metadata_options(1))
+                    .namespace_writer(&source)
+                    .expect("open namespace")
+                    .maintain_metadata_with_options(&metadata_options(1))
                     .await
                     .expect("fold WAL");
                 assert_matches!(
@@ -219,8 +220,9 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     .expect("commit after fork")
                     .committed_seq;
                 runtime
-                    .maintenance
-                    .maintain_metadata_with_options(&source, &metadata_options(1))
+                    .namespace_writer(&source)
+                    .expect("open namespace")
+                    .maintain_metadata_with_options(&metadata_options(1))
                     .await
                     .expect("materialize source head before advancing retention");
                 let advanced = runtime
@@ -234,8 +236,9 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 let mut finished = false;
                 for _ in 0..32 {
                     let step = runtime
-                        .maintenance
-                        .compact_metadata(&source, &loonfs::MaintenanceCancellation::new())
+                        .namespace_writer(&source)
+                        .expect("open namespace")
+                        .compact_metadata(&loonfs::MaintenanceCancellation::new())
                         .await
                         .expect("rebuild metadata after retention");
                     if step.compaction == MetadataCompactionOutcome::NotNeeded {

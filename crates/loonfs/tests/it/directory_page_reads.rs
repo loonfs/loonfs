@@ -41,9 +41,7 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
     let namespace_id = namespace_id("directory-page-reads");
     let actor = loonfs_test_support::test_actor();
     let writer = writer(store.clone(), "directory-page-writer").await;
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
-        "directory-page-maintenance",
-    ));
+    let maintenance = writer.clone();
     writer
         .create_namespace(&namespace_id, &actor)
         .await
@@ -56,7 +54,9 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
         .await
         .expect("directory");
     maintenance
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold parents");
     let parent_inode_keys = family_keys(&store, &namespace_id, MetadataRowFamily::Inodes).await;
@@ -75,14 +75,18 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
                 .expect("create file");
         }
         maintenance
-            .fold_wal(&namespace_id)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold batch");
     }
     for (replaced, index) in (0..300).step_by(3).enumerate() {
         if replaced % 25 == 24 {
             maintenance
-                .fold_wal(&namespace_id)
+                .open_namespace(&namespace_id)
+                .expect("open namespace")
+                .fold_wal()
                 .await
                 .expect("fold replacements");
         }
@@ -100,7 +104,9 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
             .expect("replace file");
     }
     maintenance
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("fold replacements");
     let child_inode_keys: BTreeSet<_> =
@@ -216,9 +222,7 @@ async fn a_cold_recursive_page_sends_at_most_one_data_get_to_each_segment() {
     let namespace_id = namespace_id("cold-recursive-page");
     let actor = loonfs_test_support::test_actor();
     let writer = writer(store.clone(), "cold-recursive-writer").await;
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
-        "cold-recursive-maintenance",
-    ));
+    let maintenance = writer.clone();
     writer
         .create_namespace(&namespace_id, &actor)
         .await
@@ -264,12 +268,16 @@ async fn a_cold_recursive_page_sends_at_most_one_data_get_to_each_segment() {
             .await
             .expect("commit tree batch");
         maintenance
-            .fold_wal(&namespace_id)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold tree batch");
     }
     let report = maintenance
-        .maintain_metadata_while_due(&namespace_id, &MaintenanceCancellation::new())
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .maintain_metadata_while_due(&MaintenanceCancellation::new())
         .await
         .expect("compact");
     assert!(report.response.compaction_units > 0);

@@ -98,6 +98,7 @@ pub(crate) fn move_read_basis(
             *tail = Arc::new(after);
         }
         head.retention_floor_seq = head.retention_floor_seq.max(payload.retention_floor_seq);
+        head.manifest_retention_floor_seq = payload.retention_floor_seq;
         *basis = MetadataBasis::new(loaded.manifest());
     }
     held.merge(manifest);

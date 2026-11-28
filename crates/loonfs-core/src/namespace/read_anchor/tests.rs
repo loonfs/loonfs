@@ -13,15 +13,14 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, ObjectStoreExtension};
 use loonfs_test_support::stores::{
     publish_next_manifest, BlockingStore, Intercept, InterceptStore, Interceptor, KeyPredicate,
-    MetadataMapStore, NewerManifestStore, OperationContext, OperationSelector, RecordedOperation,
-    RecordingStore,
+    MetadataMapStore, OperationContext, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{CommitSeq, ErrorCode, ManifestNo, NamespaceId, WalNo, WriterEpoch};
 use std::assert_matches;
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use tempfile::TempDir;
 
 /// A namespace whose WAL tail has a fence at WAL 1 and `commits` commits
@@ -56,8 +55,9 @@ async fn fixture(name: &str, commits: usize) -> Fixture {
 }
 
 /// Returns the fixture of [`fixture`] with four commits, and a fold of the
-/// tail at WAL 3 (the fence and the first two commits) that another process
-/// built before the last two commits and hasn't put yet.
+/// tail at WAL 3 (the fence and the first two commits) that the writer
+/// session built from its position before the last two commits and hasn't
+/// put yet.
 ///
 /// The test builds the fold in the store, then takes its manifest out, so
 /// that the manifest arrives later as a put that the process started before
@@ -65,8 +65,12 @@ async fn fixture(name: &str, commits: usize) -> Fixture {
 async fn fixture_with_an_earlier_fold(name: &str) -> (Fixture, Rival) {
     let mut fixture = fixture(name, 2).await;
     let namespace = namespace_store(fixture.store(), &fixture.namespace_id);
+    let position = fixture
+        .writer
+        .writer_position()
+        .expect("the writer's position");
     let folded = namespace
-        .fold_wal_tail(None, &namespace.start_clock())
+        .fold_wal_tail_from(&position, &namespace.start_clock())
         .await
         .expect("fold WAL 1 to 3")
         .response;
@@ -95,22 +99,6 @@ impl Fixture {
     /// intercepts.
     fn store(&self) -> LocalFsStore {
         LocalFsStore::new(self.directory.path()).expect("store")
-    }
-
-    /// Returns a store that records every request, over a store that
-    /// publishes the next manifest before every GET of a WAL object once the
-    /// test arms it.
-    fn publishing_before_wal_gets(&self) -> RecordingStore<NewerManifestStore<LocalFsStore>> {
-        RecordingStore::new(
-            NewerManifestStore::new(
-                self.store(),
-                Arc::new(self.store()),
-                self.namespace_id.clone(),
-                KeyPredicate::prefix(wal_prefix(&self.namespace_id)),
-                OperationSelector::Get,
-            ),
-            KeyPredicate::any(),
-        )
     }
 
     /// Returns a store that records every request, over a store where
@@ -145,10 +133,10 @@ enum Rival {
     /// Puts a manifest that it built earlier, a fold of part of the tail
     /// (see [`fixture_with_an_earlier_fold`]).
     Puts { key: String, bytes: Bytes },
-    /// Folds the WAL tail.
+    /// Folds the WAL tail in the fixture's writer session.
     Folds,
     /// Commits two more WAL objects in the fixture's writer session, and then
-    /// folds the WAL tail.
+    /// folds the WAL tail in that session.
     CommitsAndFolds,
     /// Claims the namespace for another writer, which publishes a claim
     /// manifest and puts a fence.
@@ -197,22 +185,21 @@ impl RivalBeforeChecks {
                     .expect("the rival publishes its fold");
             }
             Rival::Folds => {
-                let namespace = namespace_store(rival, namespace_id);
-                namespace
-                    .fold_wal_tail(None, &namespace.start_clock())
+                self.writer
+                    .lock()
                     .await
-                    .expect("the rival folds");
+                    .fold()
+                    .await
+                    .expect("the writer folds");
             }
             Rival::CommitsAndFolds => {
                 let mut writer = self.writer.lock().await;
                 for name in ["raced-0", "raced-1"] {
-                    publish(&mut writer, name).await.expect("the rival commits");
+                    publish(&mut writer, name)
+                        .await
+                        .expect("the writer commits");
                 }
-                let namespace = namespace_store(rival, namespace_id);
-                namespace
-                    .fold_wal_tail(None, &namespace.start_clock())
-                    .await
-                    .expect("the rival folds");
+                writer.fold().await.expect("the writer folds");
             }
             Rival::Claims => {
                 namespace_store(rival, namespace_id)
@@ -309,36 +296,6 @@ fn tail_wal_numbers(anchor: &NamespaceReadAnchor) -> Vec<u64> {
         .iter()
         .map(|object| object.envelope().payload().wal_no.0)
         .collect()
-}
-
-/// Checks that a retention advance from a process without a writer session
-/// creates its floor object when another process publishes a manifest before
-/// every GET of the advance's discovery, so that the discovery finds a newer
-/// manifest after every WAL read, and that the discovery reads each WAL
-/// number once.
-#[tokio::test]
-async fn an_advance_creates_its_floor_object_when_every_wal_get_is_followed_by_a_newer_manifest() {
-    let fixture = fixture("busy-advance", 10).await;
-    let planned = namespace_store(fixture.store(), &fixture.namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("load the planned manifest");
-    let store = fixture.publishing_before_wal_gets();
-    store.inner().arm();
-    let advanced = namespace_store(&store, &fixture.namespace_id)
-        .publish_floor_object(&planned, CommitSeq(5))
-        .await
-        .expect("the advance creates its floor object");
-    assert_eq!(advanced.retention_floor_seq, CommitSeq(5));
-
-    // WAL 1 to 11 are the fence and the commits, and the reads in windows of
-    // 1, 2, 4, and 8 numbers end at 15.
-    let sent = sent(&fixture.namespace_id, &store.take());
-    assert_eq!(sent.wal_gets, (1..=15).collect::<Vec<_>>());
-    assert_eq!(store.inner().published(), sent.wal_gets.len());
-    assert!(store.inner().published() > crate::limits::MAX_CONTENTION_ATTEMPTS);
-    // Two passes, and the check after the floor object's put.
-    assert_eq!((sent.manifest_lists, sent.manifest_heads), (2, 3));
 }
 
 /// Checks that a discovery whose check finds a newer manifest continues from
@@ -600,14 +557,9 @@ async fn a_collection_during_a_discovery_hides_no_acknowledged_commit() {
     let reader = namespace_store(&store, &namespace_id);
     let (anchor, ()) = futures::join!(reader.load_read_anchor(observed_now()), async {
         store.inner().wait_until_blocked().await;
-        let rival_namespace = namespace_store(&rival, &namespace_id);
-        rival_namespace
-            .fold_wal_tail(None, &rival_namespace.start_clock())
-            .await
-            .expect("fold the tail");
+        writer.fold().await.expect("fold the tail");
         // A manifest after the fold, so the fold's manifest isn't current.
-        NamespaceFixture::new(&rival, &namespace_id, &context)
-            .engine()
+        writer
             .set_retention_window(loonfs_types::RetentionWindow::new(2 * grace).ok())
             .await
             .expect("set the retention window");

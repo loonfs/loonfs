@@ -13,7 +13,7 @@
 //! A walk of the basis's directory tree finds those inodes.
 
 use super::plan::{group_run_descriptors, MetadataCompactionSpec};
-use super::step::{CompactionUnitOutcome, MetadataCompactionCancellation};
+use super::step::{CompactionUnitOutcome, MaintenanceCancellation};
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, Result};
 use crate::limits::{DIRECTORY_PAGE_RAW_SCAN_LIMIT, MAX_KEPT_INODE_WALK_DEPTH};
@@ -115,7 +115,7 @@ pub(crate) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
     basis: &VerifiedMetadataSegments<'_, S>,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    cancellation: &MetadataCompactionCancellation,
+    cancellation: &MaintenanceCancellation,
 ) -> Result<std::result::Result<KeptInodeFilter, CompactionUnitOutcome>> {
     let group = spec.group();
     if !spec.placement().may_drop_rows_below_the_retention_floor() || !removes_hidden_rows(group) {
@@ -208,7 +208,7 @@ impl TrashScan {
     async fn next<S: ObjectStore + ?Sized>(
         &mut self,
         segments: &VerifiedMetadataSegments<'_, S>,
-        cancellation: &MetadataCompactionCancellation,
+        cancellation: &MaintenanceCancellation,
     ) -> Result<ControlFlow<WalkStop, Option<(InodeId, InodeKind)>>> {
         loop {
             while let Some(deletion) = self.unread.pop_front() {
@@ -255,7 +255,7 @@ struct KeptInodeWalk<'a, 'c, S: ObjectStore + ?Sized> {
     /// The basis manifest's retention floor. A deletion at or below it that
     /// no restore cancelled has expired.
     retention_floor_seq: CommitSeq,
-    cancellation: &'c MetadataCompactionCancellation,
+    cancellation: &'c MaintenanceCancellation,
 }
 
 impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {

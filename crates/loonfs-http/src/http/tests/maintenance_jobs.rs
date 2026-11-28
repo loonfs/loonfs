@@ -47,7 +47,7 @@ async fn write_delta_runs(store: SharedObjectStore, namespaces: &[&NamespaceId])
         .build()
         .await
         .expect("writer");
-    let maintenance = writer.maintenance(writer_id("history-maintenance"));
+    let maintenance = writer.clone();
     for namespace_id in namespaces {
         writer
             .create_namespace(namespace_id, &actor)
@@ -61,7 +61,9 @@ async fn write_delta_runs(store: SharedObjectStore, namespaces: &[&NamespaceId])
                 .expect("put a file");
             // Each fold publishes the commit as its own delta run.
             maintenance
-                .fold_wal(namespace_id)
+                .open_namespace(namespace_id)
+                .expect("open namespace")
+                .fold_wal()
                 .await
                 .expect("fold the tail");
         }
@@ -103,7 +105,7 @@ async fn one_metadata_run_does_the_work_of_repeated_metadata_steps() {
     let [stepped, looping] = ["stepped", "looping"].map(namespace_id);
     write_delta_runs(store.clone(), &[&stepped, &looping]).await;
     let mut options = test_options(directory.path(), "metadata-loop");
-    options.grep = JobMode::Disabled;
+    options.grep = GrepHandles::Disabled;
     let (router, state) = test_app(
         options,
         TestAppOptions {
@@ -115,11 +117,16 @@ async fn one_metadata_run_does_the_work_of_repeated_metadata_steps() {
     .expect("app");
 
     store.reset();
+    // One handle for every step, so the steps share one session and claim
+    // once, as the run does.
+    let writer = state
+        .runtime
+        .open_namespace(&stepped)
+        .expect("open namespace");
     let mut units = 0;
     loop {
-        let step = state
-            .maintenance
-            .maintain_metadata_with_options(&stepped, &MaintainMetadataOptions::default())
+        let step = writer
+            .maintain_metadata_with_options(&MaintainMetadataOptions::default())
             .await
             .expect("metadata step");
         match step.compaction {
@@ -384,4 +391,63 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
         "the fork keeps its own copy"
     );
     state.runtime.shutdown().await.expect("shutdown writer");
+}
+
+/// Checks that a `metadata` job for a namespace that another runtime writes
+/// runs as the namespace's writer: the server claims the namespace and folds
+/// the other runtime's tail, and the other runtime's next commit returns
+/// `writer_fenced`.
+#[tokio::test]
+async fn a_maintenance_job_for_a_namespace_another_runtime_writes_claims_it() {
+    let directory = tempdir().expect("tempdir");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = namespace_id("written-elsewhere");
+    let actor = loonfs_test_support::test_actor();
+    let other = loonfs::test_support::writer(store.clone(), "other-runtime").await;
+    other
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create namespace");
+    let session = other.open_namespace(&namespace_id).expect("open namespace");
+    session
+        .put_file("/tail.txt", b"tail", &actor)
+        .await
+        .expect("a commit in the tail");
+    let epoch = || async {
+        loonfs_core::test_support::namespace_store(&store, &namespace_id)
+            .load_read_state()
+            .await
+            .expect("the head")
+            .writer_epoch
+    };
+    let before = epoch().await;
+    let mut options = test_options(directory.path(), "job-claims");
+    options.grep = GrepHandles::Disabled;
+    let (router, _state) = test_app(
+        options,
+        TestAppOptions {
+            store: Some(store.clone()),
+            ..TestAppOptions::default()
+        },
+    )
+    .await
+    .expect("app");
+
+    let (status, body) = run(
+        &router,
+        &namespace_id,
+        r#"{"kind":"metadata","max_wal_tail_objects":1}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        epoch().await.0,
+        before.0 + 1,
+        "the job claims the namespace"
+    );
+    let fenced = session
+        .put_file("/later.txt", b"later", &actor)
+        .await
+        .expect_err("the displaced writer's next commit");
+    assert_eq!(fenced.code(), loonfs::ErrorCode::WriterFenced);
 }

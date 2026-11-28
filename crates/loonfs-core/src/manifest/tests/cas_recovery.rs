@@ -356,84 +356,6 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
     }
 }
 
-/// Checks that an advance without a writer session creates a floor object
-/// and then folds it, each with put-if-absent, and claims no epoch. The
-/// fold of a tail with the floor object and no commits publishes a manifest
-/// that changes nothing but the floor and the folded WAL number, and
-/// writers read the new floor.
-#[tokio::test]
-async fn an_advance_without_a_session_creates_a_floor_object_and_folds_it() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let context = test_context();
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .create()
-        .await
-        .expect("bootstrap");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .write_file_bytes("/file", b"data", None)
-        .await
-        .expect("write");
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_as_test_writer()
-        .await
-        .expect("fold");
-    let before = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current");
-    store.reset();
-    let advanced = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(context.now_ms),
-        ),
-    )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
-    .await
-    .expect("advance")
-    .response;
-    // The floor object and the fold.
-    assert_eq!(store.counts().create_if_absent_puts, 2);
-    assert_eq!(store.counts().compare_and_swaps, 0);
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let after = namespace.load_current_manifest().await.expect("current");
-    let mut expected = before.payload().clone();
-    expected.manifest_no = expected.manifest_no.successor().expect("next");
-    expected.folded_wal_no = expected.folded_wal_no.successor().expect("next");
-    expected.retention_floor_seq = before.payload().head_seq;
-    expected.publication_id = after.payload().publication_id.clone();
-    assert_eq!(after.payload(), &expected);
-    assert_eq!(advanced.retention_floor_seq, before.payload().head_seq);
-    let expected = after.payload().clone();
-    let anchor = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_read_anchor(crate::test_support::observed_now())
-        .await
-        .expect("writer floor");
-    assert_eq!(anchor.retention_floor_seq(), expected.head_seq);
-    store.reset();
-    crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(context.now_ms),
-        ),
-    )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
-    .await
-    .expect("already advanced");
-    assert_eq!(store.counts().puts, 0);
-}
-
 /// Checks that a manifest put that succeeds, followed by a read of the
 /// manifest boundary that fails, returns `outcome_unknown` for the
 /// manifest's key.
@@ -618,7 +540,7 @@ async fn a_fold_whose_manifest_put_succeeds_without_an_answer_reports_published(
 }
 
 #[tokio::test]
-async fn a_snapshot_losing_manifest_publication_keeps_the_winner() {
+async fn a_snapshot_whose_fold_loses_to_another_fold_reports_its_position_behind() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
@@ -645,19 +567,24 @@ async fn a_snapshot_losing_manifest_publication_keeps_the_winner() {
         snapshot
     };
     let (losing, winning) = futures::join!(losing, winning);
-    let losing = losing.expect("losing publication still keeps the winner");
+    // The winner's manifest ends the losing fold without a put, so the losing
+    // snapshot doesn't take its record at a manifest that it didn't publish.
+    assert_matches!(losing, Err(CoreError::HeadMoved(_)));
     let winning = winning.expect("winner");
-    let losing = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&losing.snapshot_id)
-        .await
-        .expect("record")
-        .expect("present");
     let winning = crate::test_support::namespace_store(&store, &namespace_id)
         .load_snapshot_record(&winning.snapshot_id)
         .await
         .expect("record")
         .expect("present");
-    assert_eq!(losing.state.manifest(), winning.state.manifest());
+    assert_eq!(
+        winning.state.manifest().manifest_no,
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
+            .await
+            .expect("current")
+            .payload()
+            .manifest_no
+    );
     let statistics = crate::test_support::namespace_store(&store, &namespace_id)
         .load_statistics()
         .await
@@ -739,7 +666,9 @@ async fn an_ambiguous_window_change_confirms_its_own_put() {
 
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("window-change").expect("namespace");
-    let change_key = metadata_manifest_object(&namespace_id, &ManifestNo(3));
+    // The change's session claims the namespace at manifest 3, so the change
+    // is manifest 4.
+    let change_key = metadata_manifest_object(&namespace_id, &ManifestNo(4));
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::new(move |key| key == change_key),
@@ -753,7 +682,7 @@ async fn an_ambiguous_window_change_confirms_its_own_put() {
         .await
         .expect("create");
     // The change was written, and the read-back finds the change's own
-    // publication ID, so the change publishes manifest 3 and no other.
+    // publication ID, so the change publishes manifest 4 and no other.
     let changed = crate::test_support::change_retention_window(
         &crate::test_support::NamespaceFixture::new(
             &store,
@@ -764,7 +693,7 @@ async fn an_ambiguous_window_change_confirms_its_own_put() {
     )
     .await;
     assert_eq!(store.remaining(), 0, "the change's put lost its response");
-    assert_eq!(changed.manifest().payload().manifest_no, ManifestNo(3));
+    assert_eq!(changed.manifest().payload().manifest_no, ManifestNo(4));
     let current = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
@@ -868,17 +797,12 @@ async fn a_successor_that_copies_its_predecessor_gets_its_own_publication_id() {
     );
 }
 
-/// Checks that a fold whose manifest put loses its response, and that then
-/// finds another process's fold at its number, ends on that fold's manifest
-/// with the check of the position it folded from, not with the start of its
-/// own clock.
-///
-/// A third manifest was published before the fold's clock started, so no
-/// check at that start could have found the other fold the newest. A writer
-/// position that took the start of the clock would let an eventual read
-/// skip the check that finds the third manifest.
+/// Checks that a fold whose put loses its response, and whose number another
+/// process's fold took, doesn't return a result from that fold, or from the
+/// manifest above it, but reports its position behind, so the session loads
+/// its position again with the writer's load.
 #[tokio::test]
-async fn a_fold_that_finds_another_fold_after_a_lost_put_keeps_its_position_check() {
+async fn a_fold_that_finds_another_fold_after_a_lost_put_reports_its_position_behind() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let context = test_context();
@@ -909,7 +833,7 @@ async fn a_fold_that_finds_another_fold_after_a_lost_put_keeps_its_position_chec
             },
             None,
             None,
-            position_checked.clone(),
+            position_checked,
         )
         .await
         .expect("position")
@@ -918,7 +842,10 @@ async fn a_fold_that_finds_another_fold_after_a_lost_put_keeps_its_position_chec
     // that fold, before this fold's clock starts.
     let folded_namespace = crate::test_support::namespace_store(&local, &namespace_id);
     folded_namespace
-        .fold_wal_tail(None, &folded_namespace.start_clock())
+        .fixture_writer_session()
+        .await
+        .expect("the writer's session")
+        .fold()
         .await
         .expect("another process's fold");
     crate::test_support::change_retention_window(
@@ -944,24 +871,14 @@ async fn a_fold_that_finds_another_fold_after_a_lost_put_keeps_its_position_chec
     );
     store.fail_next(1);
     let folded = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(
-            Some(position),
+        .fold_wal_tail_from(
+            &position,
             &crate::time::OperationClock::start(
                 0,
                 Arc::new(crate::time::StdMonotonicTimer::default()),
             ),
         )
-        .await
-        .expect("fold");
+        .await;
     assert_eq!(store.remaining(), 0, "the fold's put lost its response");
-    assert_eq!(
-        folded.response.outcome,
-        crate::FoldWalOutcome::AlreadyCurrent
-    );
-    assert_eq!(folded.current.manifest_no(), other_fold);
-    assert_eq!(
-        folded.current.checked(),
-        &position_checked,
-        "the found fold keeps the check of the position's manifest"
-    );
+    assert!(matches!(folded, Err(CoreError::HeadMoved(_))));
 }

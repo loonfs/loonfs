@@ -41,7 +41,7 @@ impl Harness {
         let mut config = test_options(directory.path(), "inline-host");
         config.inline_content = inline_content;
         config.http.serves_maintenance = false;
-        config.grep = JobMode::Disabled;
+        config.grep = GrepHandles::Disabled;
         let (router, state) = test_app(config, options_with_store(store.clone()))
             .await
             .expect("app");

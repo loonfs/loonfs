@@ -7,6 +7,7 @@ use super::{GramIndexBuildPolicy, GrepBuildOutcome, GrepReorganizeOutcome, GrepW
 use crate::entry::{grep_extension_name, GrepEntry, GrepEntryError, GrepIndexStatus};
 use crate::{GrepError, Result};
 use loonfs::engine::{ExtensionBasis, ExtensionPublication};
+use loonfs::{Namespace, Writable};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::NamespaceId;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,9 +26,11 @@ pub enum GrepPublishOutcome {
     Published,
     /// The steps changed nothing since the last publication.
     NothingPending,
-    /// Another process changed grep's entry after the manifest that the
-    /// change built on, so the change wasn't published, and its segments are
-    /// left to the collector.
+    /// The writer session's position, confirmed as the newest manifest,
+    /// lists another grep entry than the one the change built on, such as
+    /// after the session's own disable, so the change wasn't published, and
+    /// its segments are left to the collector. When another writer changed
+    /// the entry, the publication returns `writer_fenced` instead.
     Superseded,
 }
 
@@ -76,7 +79,7 @@ impl PublicationCounts {
 
 /// The change that a run's steps made to grep's entry since the manifest
 /// that the change builds on.
-pub(super) struct PendingEntry {
+pub(crate) struct PendingEntry {
     pub(super) basis: ExtensionBasis,
     /// The entry that the basis lists, or `None` when grep was never enabled
     /// or when a disable replaces an invalid entry (see
@@ -95,7 +98,7 @@ impl PendingEntry {
     /// In a fork, the change clears a reorganization that the fork inherited
     /// from its source (see [`GrepEntry::without_inherited_reorganize`]), so
     /// the fork's first change publishes the entry without it.
-    fn new(basis: ExtensionBasis) -> Result<Self> {
+    pub(crate) fn new(basis: ExtensionBasis) -> Result<Self> {
         match decode_published(&basis) {
             Ok(published) => Ok(Self::from_published(basis, published)),
             Err(error) => Err(invalid_entry(&basis, error)),
@@ -146,12 +149,12 @@ impl PendingEntry {
 
     /// Returns the entry that the basis lists, or `None` when grep was never
     /// enabled or when disabling replaces an entry that grep rejects.
-    pub(super) fn published(&self) -> Option<&GrepEntry> {
+    pub(crate) fn published(&self) -> Option<&GrepEntry> {
         self.published.as_ref()
     }
 
     /// Returns the pending entry when the index is enabled.
-    pub(super) fn enabled_entry(&self) -> Option<&GrepEntry> {
+    pub(crate) fn enabled_entry(&self) -> Option<&GrepEntry> {
         self.entry
             .as_ref()
             .filter(|entry| !matches!(entry.status(), GrepIndexStatus::Disabled {}))
@@ -211,12 +214,16 @@ fn invalid_entry(basis: &ExtensionBasis, error: GrepEntryError) -> GrepError {
 /// the change loaded the manifest it builds on, and [`Self::publish`]
 /// publishes what's pending. When another manifest follows that manifest
 /// first with the same grep entry, the change is published over it. When
-/// another process changed the entry, nothing is published, the step
-/// returns `Superseded`, and the next step plans from the current manifest.
+/// the session's position lists another entry, nothing is published, the
+/// step returns `Superseded`, and the next step plans from the position's
+/// manifest. When another writer claimed the namespace, the publication
+/// returns `writer_fenced`.
 /// A run that's dropped before it publishes leaves its segments to the
 /// collector.
 pub struct GrepSteps<'w, S> {
     pub(super) worker: &'w GrepWorker<S>,
+    /// The namespace's writer session, which publishes the run's changes.
+    namespace: Namespace<Writable>,
     pub(super) namespace_id: NamespaceId,
     publish_interval_ms: u64,
     pending: Option<PendingEntry>,
@@ -225,12 +232,13 @@ pub struct GrepSteps<'w, S> {
 impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
     pub(super) fn new(
         worker: &'w GrepWorker<S>,
-        namespace_id: &NamespaceId,
+        namespace: &Namespace<Writable>,
         publish_interval_ms: u64,
     ) -> Self {
         Self {
             worker,
-            namespace_id: namespace_id.clone(),
+            namespace: namespace.clone(),
+            namespace_id: namespace.id().clone(),
             publish_interval_ms,
             pending: None,
         }
@@ -267,31 +275,30 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
         self.pending.as_ref()?.entry.as_ref().map(GrepEntry::status)
     }
 
-    /// Returns the pending change, which starts from the current manifest
-    /// when nothing is pending.
+    /// Returns the pending change, which starts from the manifest of the
+    /// writer session's position when nothing is pending.
     pub(super) async fn pending(&mut self) -> Result<&mut PendingEntry> {
         self.pending_from(PendingEntry::new).await
     }
 
-    /// Returns a disable's pending change, which starts from the current
-    /// manifest when nothing is pending, and replaces that manifest's grep
-    /// entry when the entry is invalid (see [`PendingEntry::for_disable`]).
+    /// Returns a disable's pending change, which starts from the manifest of
+    /// the writer session's position when nothing is pending, and replaces
+    /// that manifest's grep entry when the entry is invalid (see
+    /// [`PendingEntry::for_disable`]).
     pub(super) async fn pending_for_disable(&mut self) -> Result<&mut PendingEntry> {
         self.pending_from(PendingEntry::for_disable).await
     }
 
     /// Returns the pending change, and when nothing is pending, starts one
-    /// from the current manifest with `start`.
+    /// with `start` from the manifest of the writer session's position (see
+    /// [`Namespace::load_extension_basis`]), the manifest that the change's
+    /// publication builds on.
     async fn pending_from(
         &mut self,
         start: fn(ExtensionBasis) -> Result<PendingEntry>,
     ) -> Result<&mut PendingEntry> {
         if self.pending.is_none() {
-            let basis = self
-                .worker
-                .maintenance
-                .load_extension_basis(&self.namespace_id)
-                .await?;
+            let basis = self.namespace.load_extension_basis().await?;
             self.pending = Some(start(basis)?);
         }
         Ok(self
@@ -319,8 +326,8 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
     /// last publication.
     ///
     /// After a publication, the next step starts from the published manifest.
-    /// After another process changed the entry, or after an error, the next
-    /// step loads the current manifest. A change that's published or
+    /// After a superseded change, or after an error, the next step loads the
+    /// manifest of the session's position. A change that's published or
     /// superseded is recorded in
     /// [`GrepWorker::publication_stats`].
     pub async fn publish(&mut self) -> Result<GrepPublishOutcome> {
@@ -336,19 +343,16 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
             .as_ref()
             .expect("a changed pending change should have an entry");
         let publication = self
-            .worker
-            .maintenance
+            .namespace
             .publish_extension(&pending.basis, &grep_extension_name(), entry.encode())
             .await?;
         let counts = &self.worker.publications;
         match publication {
-            ExtensionPublication::Published(basis) => {
-                let first_put = pending.basis.manifest().manifest_no.successor().ok()
-                    == Some(basis.manifest().manifest_no);
-                let outcome = if first_put {
-                    &counts.published
-                } else {
+            ExtensionPublication::Published { basis, rebuilt } => {
+                let outcome = if rebuilt {
                     &counts.rebuilt
+                } else {
+                    &counts.published
                 };
                 outcome.fetch_add(1, Ordering::Relaxed);
                 self.pending = Some(PendingEntry::new(basis)?);

@@ -286,9 +286,13 @@ async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty()
             drop(steps);
             store.release();
         } else {
-            server.disable_index(&namespace_id).await;
-            store.release();
-            steps.await;
+            // The index step publishes through the writer session's engine,
+            // so the disable, another publication of that session, waits for
+            // the step's put, which the gate releases.
+            let ((), ()) = tokio::join!(server.disable_index(&namespace_id), async {
+                store.release();
+                steps.await;
+            });
         }
         assert_eq!(
             with_held(&server.scheduler.inner.namespaces, &namespace_id, |held| {

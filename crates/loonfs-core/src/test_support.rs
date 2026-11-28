@@ -660,23 +660,37 @@ impl<S: ObjectStore> NamespaceStore<S> {
 ///
 /// The fork's discovery then finds the folded manifest and no WAL tail, so
 /// the fork has no manifest 2.
-pub async fn fold_before_fork<S: ObjectStore>(
+pub async fn fold_before_fork<S: ObjectStore + Clone>(
     namespace: &NamespaceStore<S>,
 ) -> crate::Result<Option<crate::commit::publish_view::WriterPosition>> {
     folded_manifest(namespace).await?;
     Ok(None)
 }
 
-/// Folds the namespace's WAL tail and returns the manifest that covers it,
-/// with the manifest boundary that the fold read: the basis that a snapshot
-/// of the current head keeps.
-pub async fn folded_manifest<S: ObjectStore>(
+/// Returns the manifest that covers the namespace's WAL tail, folded
+/// through the fixture's writer session.
+///
+/// The manifest comes with the manifest boundary that the fold read: the
+/// basis that a snapshot of the current head keeps (see
+/// [`NamespaceStore::fixture_writer_session`]). A namespace without an
+/// unfolded WAL object returns its current manifest without a fold.
+pub async fn folded_manifest<S: ObjectStore + Clone>(
     namespace: &NamespaceStore<S>,
 ) -> crate::Result<Held<LoadedManifest>> {
-    let folded = namespace
-        .fold_wal_tail(None, &namespace.start_clock())
+    let anchor = namespace
+        .load_live_read_anchor(namespace.start_clock().observe())
         .await?;
-    Ok(folded.current)
+    if anchor.current_manifest().folded_wal_no() == anchor.read_state.wal_no {
+        // Nothing to fold, so the snapshot keeps the current manifest, and no
+        // writer claims the namespace for it.
+        return Ok(anchor.held().clone());
+    }
+    Ok(namespace
+        .fixture_writer_session()
+        .await?
+        .fold()
+        .await?
+        .current)
 }
 
 /// Returns the inode ID of the item visible at `absolute_path` in the
@@ -846,6 +860,42 @@ impl<S: ObjectStore + Clone> NamespaceWriterEngine<S> {
 }
 
 impl<S: ObjectStore + Clone> NamespaceStore<S> {
+    /// Returns a writer session that continues the writer epoch of the
+    /// namespace's newest manifest, as the session of the writer that claimed
+    /// it would, so its publications claim nothing. A namespace that no
+    /// writer has claimed gets a new session of `test-writer`, which claims
+    /// first.
+    ///
+    /// A test fixture commits through a new session per commit, so this is
+    /// how such a test folds, compacts, or advances the floor as the
+    /// fixture's writer.
+    ///
+    /// The session publishes at the newest writer's epoch without a claim,
+    /// from any store handle, which the design rules out for a real process:
+    /// only the session that claimed an epoch publishes under it. It exists
+    /// for the tests of the publication loop that builds again over a winner
+    /// of the same epoch, and it goes when that loop goes.
+    pub async fn fixture_writer_session(
+        &self,
+    ) -> crate::Result<crate::publish::NamespaceCommitEngine<S>> {
+        let manifest = self.load_current_manifest().await?;
+        let payload = manifest.payload();
+        Ok(match &payload.writer {
+            Some(writer) => crate::publish::NamespaceCommitEngine::with_acquired_session(
+                self.clone(),
+                writer.writer_id.clone(),
+                crate::namespace::writer_epoch::AcquiredWriter {
+                    writer_id: writer.writer_id.clone(),
+                    writer_epoch: payload.writer_epoch,
+                },
+            ),
+            None => crate::publish::NamespaceCommitEngine::new(
+                self.clone(),
+                writer_at("test-writer", 0).writer_id,
+            ),
+        })
+    }
+
     /// Folds the WAL tail through a new commit engine of the writer
     /// `test-writer`, as [`NamespaceWriterEngine::fold_in_new_session`] does
     /// for a test that has no writer of its own.
@@ -857,28 +907,35 @@ impl<S: ObjectStore + Clone> NamespaceStore<S> {
 }
 
 impl<S: ObjectStore> NamespaceWriterEngine<S> {
-    /// Loads the namespace's current manifest and runs one metadata
-    /// compaction unit planned from it, without a cancellation.
-    pub async fn compact_from_current(&self) -> crate::error::Result<crate::CompactionUnitOutcome> {
-        let basis = self
+    /// Runs one metadata compaction unit planned from the position of the
+    /// fixture's writer session (see [`NamespaceStore::fixture_writer_session`]),
+    /// without a cancellation.
+    pub async fn compact_from_current(&self) -> crate::error::Result<crate::CompactionUnitOutcome>
+    where
+        S: Clone,
+    {
+        let position = self
             .namespace
-            .load_current_basis(self.namespace.start_clock().origin())
+            .fixture_writer_session()
+            .await?
+            .load_position()
             .await?;
-        self.compact_metadata_unit(
-            basis,
-            &crate::compaction::MetadataCompactionCancellation::default(),
+        self.compact_metadata_unit_from(
+            &position,
+            &crate::compaction::MaintenanceCancellation::default(),
         )
         .await
     }
 }
 
-/// Publishes a manifest through `engine` that changes nothing but the
+/// Publishes a manifest through the fixture's writer session (see
+/// [`NamespaceStore::fixture_writer_session`]) that changes nothing but the
 /// retention window, and returns it.
 ///
 /// The new window is one millisecond longer than the current one, or twice
 /// the grace window when the namespace has none, so every call publishes a
 /// manifest at the same head.
-pub async fn change_retention_window<S: ObjectStore>(
+pub async fn change_retention_window<S: ObjectStore + Clone>(
     engine: &NamespaceWriterEngine<S>,
 ) -> Held<LoadedManifest> {
     let window_ms = engine
@@ -892,6 +949,10 @@ pub async fn change_retention_window<S: ObjectStore>(
             window.get() + 1
         });
     engine
+        .namespace
+        .fixture_writer_session()
+        .await
+        .expect("the fixture's writer session")
         .set_retention_window(loonfs_types::RetentionWindow::new(window_ms).ok())
         .await
         .expect("change the retention window")

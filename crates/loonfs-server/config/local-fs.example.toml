@@ -46,15 +46,24 @@ memory_limit_bytes = 4294967296
 # operator work are exempt. Defaults to 60000 ms.
 #request_deadline_ms = 60000
 
-# Whether this server serves the maintenance API group, runs the maintenance
-# scheduler, both, or neither. `serve_and_maintain` is the default. The other
-# values are `serve_only`, `maintain_only`, and `disabled`. A mode that does
-# not serve the group answers its routes with `route_not_found`; a mode that
-# does not maintain leaves background work to another process. The scheduler
-# runs the due steps of the sessions this process wrote to, and sweeps every
-# namespace in the store periodically. It folds WAL tails, compacts
-# metadata, builds the grep index, and collects garbage.
-#maintenance = "serve_and_maintain"
+# Whether this server serves the maintenance API group. A server that
+# doesn't serve it answers those routes with `route_not_found`. The jobs that
+# publish run as the namespace's writer, so a job claims a namespace that
+# another server writes. Defaults to true.
+#serve_maintenance_api = true
+
+# Whether the scheduler sweeps every namespace in the store periodically,
+# advances retention floors on that schedule, and collects garbage. The
+# scheduler always runs the due steps of the sessions this process writes to:
+# it folds their WAL tails, compacts their metadata, and builds their grep
+# index. A sweep claims a namespace when it has a fold, a compaction unit, a
+# retention advance, or index work due, including a namespace that another
+# server writes, so keep this true only on a store with one server. With more
+# than one server on a store, set it to false on every server and run
+# maintenance jobs against each namespace's writer. With this and
+# `serve_maintenance_api` both false, nothing collects and no floor advances
+# unless another process calls the maintenance jobs. Defaults to true.
+#sweep_store = true
 
 # Largest request body accepted for service-proxied upload content, in
 # bytes. The server never holds the body whole. It forwards one transfer
@@ -170,12 +179,12 @@ memory_limit_bytes = 4294967296
 
 # Omit the `[grep]` table and this server composes no grep at all: uniform
 # `not_supported` responses, and no `query.grep` feature or limits advertised.
-# A `[grep]` table must set `mode`.
-# `serve_only` answers searches over an index another process maintains;
-# `maintain_only` maintains the index without answering searches; `disabled`
-# turns both off again.
+# With the table, the server builds the grep index of each namespace that it
+# writes, and serves the index routes when it serves the maintenance API
+# group. `serve_queries` says whether this server answers searches, and
+# defaults to true.
 #[grep]
-#mode = "serve_and_maintain"
+#serve_queries = true
 # Bounded indexing input budgets; every value must be greater than zero,
 # and `max_files_per_step` can be at most 1000.
 #max_files_per_step = 256

@@ -300,7 +300,9 @@ async fn http_maintenance_snapshot_and_retention_are_idempotent_and_soft() {
         }
     );
     assert_eq!(first.captured_seq, CommitSeq(1));
-    assert_eq!(first.manifest_no, ManifestNo(4));
+    // The tail has the seed's commit, so the snapshot's session claims the
+    // namespace (manifest 4) and folds the tail (manifest 5).
+    assert_eq!(first.manifest_no, ManifestNo(5));
     let listed = collect_snapshot_records(&client, &namespace)
         .await
         .expect("list first snapshot");
@@ -595,7 +597,7 @@ async fn http_metadata_run_folds_a_tail_once_its_oldest_commit_reaches_the_serve
 
         let harness = start_server(loonfs_server::ServerConfig {
             fold_age_ms: std::num::NonZeroU64::new(fold_age_ms).expect("a nonzero fold age"),
-            maintenance: loonfs_server::JobMode::ServeOnly,
+            sweep_store: false,
             ..test_config(store_root, "loonfs-server-fold-age", key_prefix)
         })
         .await;
@@ -658,7 +660,7 @@ async fn http_snapshot_manifest_consumption_is_strict_when_manifest_is_corrupted
         "loonfs-server-maintenance-corrupt",
         "http-maintenance-corrupt",
     );
-    warm_config.maintenance = loonfs_server::JobMode::ServeOnly;
+    warm_config.sweep_store = false;
     let harness = start_server(warm_config).await;
     // A new server must read the corrupted manifest; the first server has a valid cached snapshot.
     let mut cold_config = test_config(
@@ -666,7 +668,7 @@ async fn http_snapshot_manifest_consumption_is_strict_when_manifest_is_corrupted
         "loonfs-server-cold-reader",
         "http-maintenance-corrupt",
     );
-    cold_config.maintenance = loonfs_server::JobMode::ServeOnly;
+    cold_config.sweep_store = false;
     let cold = start_server(cold_config).await;
     let client = harness.client.clone();
     let cold_client = cold.client.clone();

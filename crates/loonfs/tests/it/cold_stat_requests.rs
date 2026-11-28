@@ -88,12 +88,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     let namespace_id = NamespaceId::parse("coldstat").expect("valid namespace id");
 
     let writer = writer(store.clone(), "coldstat-writer").await;
-    let maintenance = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("coldstat-maintenance"))
-        .build()
-        .await
-        .expect("build maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id("coldstat-maintenance"));
+    let maintenance = writer.clone();
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -115,7 +110,9 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .await
         .expect("seed the first manifest");
     maintenance
-        .fold_wal(&namespace_id)
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
         .await
         .expect("publish first manifest");
     let live_context = loonfs_core::test_support::namespace_store(&store, &namespace_id)
@@ -178,7 +175,9 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             .await
             .expect("write the file that every run lists");
         maintenance
-            .fold_wal(&namespace_id)
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .fold_wal()
             .await
             .expect("fold the batch into one delta run");
     }

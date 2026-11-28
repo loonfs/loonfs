@@ -75,7 +75,8 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
     let timer = Arc::new(StdMonotonicTimer::default());
     let deadline = crate::time::OperationClock::start(0, timer.clone());
     let namespace = crate::test_support::namespace_store(&blocked, namespace_id);
-    let fold = namespace.fold_wal_tail(engine.writer_position(), &deadline);
+    let position = engine.writer_position().expect("a writer position");
+    let fold = namespace.fold_wal_tail_from(&position, &deadline);
     let collect_during_fold = async {
         blocked.wait_until_blocked().await;
         assert!(crate::test_support::span_object_keys(
@@ -130,12 +131,12 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
     let timer = Arc::new(StdMonotonicTimer::default());
     let deadline = crate::time::OperationClock::start(0, timer.clone());
     let namespace = crate::test_support::namespace_store(&blocked, namespace_id);
-    let loser = namespace.fold_wal_tail(Some(input.clone()), &deadline);
+    let loser = namespace.fold_wal_tail_from(&input, &deadline);
     let winner = async {
         blocked.wait_until_blocked().await;
         let folded = crate::test_support::namespace_store(&store, namespace_id)
-            .fold_wal_tail(
-                Some(input),
+            .fold_wal_tail_from(
+                &input,
                 &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
             )
             .await
@@ -149,9 +150,8 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
         blocked.release();
     };
     let (lost, ()) = tokio::join!(loser, winner);
-    assert_eq!(
-        lost.expect("losing fold").response.outcome,
-        FoldWalOutcome::AlreadyCurrent
-    );
+    // The winner's manifest ends the losing fold without a put, so the losing
+    // fold reports its position behind.
+    assert!(matches!(lost, Err(CoreError::HeadMoved(_))));
     assert_files_readable(&store, namespace_id, "competing-gc", &values).await;
 }

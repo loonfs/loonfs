@@ -3,7 +3,6 @@
 //! and merges on a runtime that has merges turned off.
 
 use super::{MergeOutcome, PlannedCommit, PlannedMerge};
-use crate::engine::{ExtensionEntry, ExtensionName, ExtensionPublication};
 use crate::publish::{CommitIntent, FilesystemOperation};
 use crate::publisher::MergeReservation;
 use crate::{
@@ -13,13 +12,10 @@ use crate::{
 use futures::future::BoxFuture;
 use loonfs_core::limits::MAX_TAIL_COMMIT_AGE_MS;
 use loonfs_core::MergeRequest;
-use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_test_support::stores::{
-    request_lines, BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
-};
+use loonfs_test_support::stores::{request_lines, KeyPredicate, RecordingStore};
 use loonfs_types::{
     AbsolutePath, CommitSeq, ContentId, ContentLayout, DeleteDirectoryBehavior, ExtentObject,
     ManifestNo, MergeConflictKind,
@@ -127,7 +123,7 @@ impl Family {
 
     /// Returns the current manifest numbers of `main` and the fork.
     async fn manifest_nos(&self) -> Vec<Option<ManifestNo>> {
-        let maintenance = self.main.maintenance();
+        let maintenance = self.runtime.maintenance();
         let mut numbers = Vec::new();
         for namespace in [&self.main, &self.fork] {
             let diagnostics = maintenance
@@ -485,10 +481,7 @@ async fn a_merge_reads_the_forks_tail_above_a_folded_manifest() {
         ..
     } = family().await;
     let fork_id = fork.id().clone();
-    main.maintenance()
-        .fold_wal(&fork_id)
-        .await
-        .expect("fold the fork's first commit");
+    fork.fold_wal().await.expect("fold the fork's first commit");
     let last = fork
         .put_file("/c.txt", b"c", &actor())
         .await
@@ -1226,12 +1219,7 @@ async fn a_merge_after_the_forks_fold_writes_only_the_appended_pieces() {
     let merger = actor();
     let merge = || family.main.merge_fork(family.fork.id(), &merger);
     merge().await.expect("the first merge");
-    family
-        .main
-        .maintenance()
-        .fold_wal(family.fork.id())
-        .await
-        .expect("fold the fork");
+    family.fork.fold_wal().await.expect("fold the fork");
     let (content_id, folded) = family.layout(&family.fork, "/b.txt").await;
     let (merged_id, merged) = family.layout(&family.main, "/b.txt").await;
     assert_eq!(merged_id, content_id);
@@ -1304,24 +1292,24 @@ async fn a_merge_folds_a_fork_whose_tail_has_a_commit_older_than_the_max_age() {
 }
 
 /// Checks that a merge that folds its fork takes the fork's snapshot when
-/// another process replaced the fold's manifest at the same head before the
-/// snapshot was verified.
+/// another process claimed the fork and replaced the fold's manifest before
+/// the snapshot was verified.
 ///
 /// The fork's tail has a commit older than [`MAX_TAIL_COMMIT_AGE_MS`], so the
-/// merge folds the fork from the position of the fork's writer session, and
-/// the fold moves the position onto the manifest it published. The store
-/// blocks the snapshot record's write until a second runtime on the same
-/// store has published an extension's entry on the fork, as a grep worker in
-/// another process does. The verification then finds the newer manifest,
-/// and the fork's tail is empty, so the next attempt's fold finds the
-/// newer manifest only if it doesn't start from the position.
+/// merge folds the fork as the fork's writer session in this runtime. The
+/// store blocks the snapshot record's write until a second runtime on the
+/// same store has claimed the fork and published an extension's entry on
+/// it. The verification then finds the newer manifests, and the next
+/// attempt finds the fork's tail empty but for the claim's fence, so it
+/// takes the snapshot at the newest manifest without a fold or a claim.
 #[tokio::test]
 async fn a_merge_snapshots_its_fork_after_another_process_replaced_the_folds_manifest() {
+    use loonfs_test_support::stores::{BlockingStore, OperationSelector};
     let directory = tempfile::tempdir().expect("tempdir");
     let fork_id = namespace_id("main-fork");
     let blocking = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(snapshot_prefix(&fork_id)),
+        KeyPredicate::prefix(loonfs_objectstore::keys::snapshot_prefix(&fork_id)),
         OperationSelector::PutCreateIfAbsent,
     ));
     let store: crate::SharedObjectStore = blocking.clone();
@@ -1332,20 +1320,27 @@ async fn a_merge_snapshots_its_fork_after_another_process_replaced_the_folds_man
         .build()
         .await
         .expect("the other process's runtime");
-    let maintenance = other.maintenance(writer_id("other-process"));
     let replace = async {
         blocking.wait_until_blocked().await;
-        let basis = maintenance
-            .load_extension_basis(&fork_id)
+        let fork = other.open_namespace(&fork_id).expect("open the fork");
+        let basis = fork
+            .load_extension_basis()
             .await
-            .expect("load the extension basis");
-        let name = ExtensionName::parse("grep").expect("extension name");
-        let entry = ExtensionEntry::new(1, Vec::new(), serde_json::Map::new());
-        let published = maintenance
+            .expect("the other process loads the fork's basis");
+        let name = loonfs_types::ExtensionName::parse("grep").expect("extension name");
+        let entry = loonfs_types::format::manifest::ExtensionEntry::new(
+            1,
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+        let published = fork
             .publish_extension(&basis, &name, entry)
             .await
             .expect("publish the extension's entry");
-        assert_matches!(published, ExtensionPublication::Published(_));
+        assert_matches!(
+            published,
+            crate::engine::ExtensionPublication::Published { .. }
+        );
         blocking.release();
     };
     clock.advance_ms(MAX_TAIL_COMMIT_AGE_MS + 1);
@@ -1354,6 +1349,7 @@ async fn a_merge_snapshots_its_fork_after_another_process_replaced_the_folds_man
     let (merged, ()) = tokio::join!(family.main.merge_fork(&fork_id, &merger), replace);
     merged.expect("the merge");
     assert_eq!(family.fresh_read(&family.main, "/b.txt").await, b"b");
+    other.shutdown().await.expect("shutdown the other process");
 }
 
 /// Checks that `main`'s fold keeps a file within the extent cap across fork,
@@ -1373,8 +1369,7 @@ async fn fork_append_merge_cycles_keep_mains_layout_within_the_extent_cap() {
     main.put_file("/log", &expected, &actor())
         .await
         .expect("the file");
-    let maintenance = main.maintenance();
-    let fold_main = || maintenance.fold_wal(main.id());
+    let fold_main = || main.fold_wal();
     fold_main().await.expect("fold main");
     let mut extents = 1;
     for cycle in 1..=32 {

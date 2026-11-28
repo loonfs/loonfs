@@ -4,7 +4,7 @@ use crate::{
     FoldWalResponse, ManifestNo, MetadataMaintenanceResponse, MetadataSkippedWork, NamespaceId,
 };
 
-/// What one [`Maintenance::maintain_metadata_while_due`](crate::Maintenance::maintain_metadata_while_due)
+/// What one [`Namespace::maintain_metadata_while_due`](crate::Namespace::maintain_metadata_while_due)
 /// call did, and when its work next comes due.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataMaintenanceReport {
