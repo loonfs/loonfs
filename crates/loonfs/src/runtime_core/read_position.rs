@@ -12,6 +12,7 @@ use loonfs_core::publish::{
 };
 use loonfs_core::CoreError;
 use loonfs_core::Phase;
+use loonfs_types::ManifestNo;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::Instrument;
 
@@ -19,25 +20,41 @@ use tracing::Instrument;
 ///
 /// The publisher registry implements this trait. The runtime core keeps a
 /// weak reference to the registry, because the registry keeps the core.
+/// Reads take a session's position and check it. A read never changes the
+/// position itself, because only the session's queues do, and a read whose
+/// check finds a newer manifest asks the session to settle its position.
 pub(crate) trait HeadPositions: Send + Sync {
     /// Returns the position slot of the namespace's writer session, or
     /// `None` when the runtime has no session for the namespace.
     fn read_position_slot(&self, namespace_id: &NamespaceId) -> Option<Arc<ReadPositionSlot>>;
 
-    /// Drops the position of the namespace's writer session, both the copy
-    /// that reads take and the commit engine's own, once no other task has
-    /// the engine locked, so the session's next publish loads the namespace
-    /// from the store.
-    fn drop_position<'a>(&'a self, namespace_id: &'a NamespaceId) -> BoxFuture<'a, ()>;
-
-    /// Moves the position of the namespace's writer session onto `newest`,
-    /// a manifest above the position's that a read's check found, once no
-    /// other task has the engine locked.
-    fn move_position<'a>(
+    /// Settles the position of the namespace's writer session after a read's
+    /// check found its manifest, manifest `replaced`, replaced (see
+    /// `NamespacePublisher::settle_replaced_position`). A runtime without a
+    /// session for the namespace does nothing.
+    fn settle_replaced_position<'a>(
         &'a self,
         namespace_id: &'a NamespaceId,
-        newest: Held<LoadedManifest>,
-    ) -> BoxFuture<'a, ()>;
+        replaced: ManifestNo,
+    ) -> BoxFuture<'a, Result<(), CoreError>>;
+}
+
+/// What the session's check of its position found for a read (see
+/// [`RuntimeCore::checked_writer_position`]).
+#[derive(Debug)]
+pub(crate) enum CheckedPosition {
+    /// The runtime has no writer session for the namespace, or the session
+    /// has no position, so the read starts from the read cache as a read in
+    /// a runtime without the session does.
+    Absent,
+    /// The read starts from this position, which a check confirmed within
+    /// the read's maximum staleness.
+    Confirmed(Arc<WriterPosition>),
+    /// The session has a position that its check didn't confirm, after the
+    /// session settled it once. The read loads the namespace's head from the
+    /// store as a `strong` read does, because the read cache's head can be
+    /// older than commits that the session acknowledged.
+    Unconfirmed,
 }
 
 /// The position of one writer session's commit engine, kept where reads can
@@ -60,8 +77,8 @@ pub(crate) struct ReadPositionSlot {
     /// last brought it up to `published`.
     position: Mutex<Option<Arc<WriterPosition>>>,
     /// The session's checks of the position, which the reads that need a
-    /// check share.
-    check: SharedCheck<Result<(), CoreError>>,
+    /// check share, and whether each confirmed the position.
+    check: SharedCheck<Result<bool, CoreError>>,
 }
 
 /// What [`ReadPositionSlot::follow_stored`] replaced in the slot.
@@ -302,35 +319,35 @@ impl ReadPositionSlot {
 
 impl RuntimeCore {
     /// Returns the position of the namespace's writer session in this
-    /// runtime for a read with `max_staleness_ms` to start from, or `None`
-    /// when the read starts from the read cache instead.
+    /// runtime for a read with `max_staleness_ms` to start from, or how the
+    /// read starts from the read cache instead.
     ///
     /// A read takes the position as it is while the position's last check is
     /// younger than `max_staleness_ms`. A read without one (a
-    /// `strong` read), or past it, needs a check of the position (see
-    /// [`Self::check_writer_position`]). It waits for the check in flight,
-    /// and then takes the position if that check confirmed it within the
-    /// maximum staleness, or else shares the next check or runs it
+    /// `strong` read), or past it, needs the session's check of the position
+    /// (see [`Self::check_writer_position`]). It waits for the check in
+    /// flight, and then takes the position if that check confirmed it within
+    /// the maximum staleness, or else shares the next check or runs it
     /// (see [`SharedCheck`]). So a wave of concurrent reads costs at most two
     /// checks.
     pub(crate) async fn checked_writer_position(
         &self,
         namespace_id: &NamespaceId,
         max_staleness_ms: Option<u64>,
-    ) -> Result<Option<Arc<WriterPosition>>, CoreError> {
+    ) -> Result<CheckedPosition, CoreError> {
         let Some(positions) = self
             .inner
             .head_positions
             .get()
             .and_then(std::sync::Weak::upgrade)
         else {
-            return Ok(None);
+            return Ok(CheckedPosition::Absent);
         };
         let Some(slot) = positions.read_position_slot(namespace_id) else {
-            return Ok(None);
+            return Ok(CheckedPosition::Absent);
         };
         let Some(position) = slot.current() else {
-            return Ok(None);
+            return Ok(CheckedPosition::Absent);
         };
         let fresh = |position: &WriterPosition| {
             max_staleness_ms.is_some_and(|max_staleness_ms| {
@@ -338,14 +355,15 @@ impl RuntimeCore {
             })
         };
         if fresh(&position) {
-            return Ok(Some(position));
+            return Ok(CheckedPosition::Confirmed(position));
         }
-        slot.check
+        let confirmed = slot
+            .check
             .run(
                 || {
                     slot.current()
                         .filter(|position| fresh(position))
-                        .map(|_| Ok(()))
+                        .map(|_| Ok(true))
                 },
                 || {
                     self.check_writer_position(namespace_id, positions.as_ref(), &slot)
@@ -357,7 +375,11 @@ impl RuntimeCore {
                 },
             )
             .await?;
-        Ok(slot.current())
+        Ok(match slot.current() {
+            Some(position) if confirmed => CheckedPosition::Confirmed(position),
+            Some(_) => CheckedPosition::Unconfirmed,
+            None => CheckedPosition::Absent,
+        })
     }
 
     /// Records `check`, a check that found its manifest the newest, on the
@@ -386,32 +408,50 @@ impl RuntimeCore {
             .filter(|position| position.basis().is_confirmed_by(check))
     }
 
-    /// Checks the position (see [`WriterPosition::check`]), and applies
-    /// what the check found: it records a check that found the position's
-    /// manifest the newest, moves the position onto the newest manifest of
-    /// its writer epoch (see [`HeadPositions::move_position`]), or drops this
-    /// runtime's view of the namespace (see
-    /// [`RuntimeCore::forget_namespace_view`]). A move or a drop waits for a
-    /// publish that has the engine locked.
+    /// Checks the position (see [`WriterPosition::check`]), records a check
+    /// that found the position's manifest the newest, and returns whether a
+    /// check did.
+    ///
+    /// A check that finds a newer manifest asks the session to settle its
+    /// position (see [`HeadPositions::settle_replaced_position`]), and then
+    /// checks the position that the session has once more. The newer manifest
+    /// is the session's own publication between its put and its record, so
+    /// the position follows it once the publication records it and the
+    /// second check confirms it, or another writer's claim, so the settle's
+    /// writer's load fences the session, which then has no position. The
+    /// check runs at most twice, and a second check that finds a newer
+    /// manifest returns `false`. A settle that finds the session fenced
+    /// returns `false` too, so the read starts from the read cache.
     async fn check_writer_position(
         &self,
         namespace_id: &NamespaceId,
         positions: &dyn HeadPositions,
         slot: &ReadPositionSlot,
-    ) -> Result<(), CoreError> {
-        let Some(position) = slot.current() else {
-            return Ok(());
-        };
-        let observed = self.observation();
+    ) -> Result<bool, CoreError> {
         let namespace = self.namespace_store(namespace_id);
-        match position.check(&namespace, observed).await? {
-            PositionCheck::Newest(checked) => slot.record_check(&checked),
-            PositionCheck::MoveTo(newest) => {
-                positions.move_position(namespace_id, newest.clone()).await;
-                slot.record_check(&newest);
+        for settled in [false, true] {
+            let Some(position) = slot.current() else {
+                return Ok(false);
+            };
+            match position.check(&namespace, self.observation()).await? {
+                PositionCheck::Newest(checked) => {
+                    slot.record_check(&checked);
+                    return Ok(true);
+                }
+                PositionCheck::Replaced if settled => return Ok(false),
+                PositionCheck::Replaced => {
+                    let replaced = position.basis().manifest_no();
+                    match positions
+                        .settle_replaced_position(namespace_id, replaced)
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(CoreError::WriterFenced(_)) => return Ok(false),
+                        Err(error) => return Err(error),
+                    }
+                }
             }
-            PositionCheck::Drop => self.forget_namespace_view(namespace_id).await,
         }
-        Ok(())
+        Ok(false)
     }
 }

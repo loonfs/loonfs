@@ -2,7 +2,6 @@
 
 use super::lifecycle::AdministratorRead;
 use crate::pagers::SnapshotsPager;
-use crate::publisher::NamespaceChange;
 use crate::trace::{self, operation_span};
 use crate::{
     CreateSnapshotOptions, DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result,
@@ -169,8 +168,7 @@ impl Namespace<Writable> {
             .map_err(Error::from);
         self.mode
             .publisher
-            .finish_namespace_mutation(&self.namespace_id, result, |_| NamespaceChange::Unchanged)
-            .await
+            .finish_namespace_mutation(&self.namespace_id, result)
     }).await
     }
 
@@ -193,8 +191,7 @@ impl Namespace<Writable> {
             .map_err(Error::from);
         self.mode
             .publisher
-            .finish_namespace_mutation(&self.namespace_id, result, |_| NamespaceChange::Unchanged)
-            .await
+            .finish_namespace_mutation(&self.namespace_id, result)
     }).await
     }
 }

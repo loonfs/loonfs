@@ -1291,17 +1291,20 @@ async fn a_merge_folds_a_fork_whose_tail_has_a_commit_older_than_the_max_age() {
     assert_eq!(family.fresh_read(&family.main, "/c.txt").await, b"c");
 }
 
-/// Checks that a merge that folds its fork takes the fork's snapshot when
+/// Checks that a merge that folds its fork returns `writer_fenced` when
 /// another process claimed the fork and replaced the fold's manifest before
-/// the snapshot was verified.
+/// the snapshot was verified, and that the merge sent again takes the fork's
+/// snapshot, as the server's retry does.
 ///
 /// The fork's tail has a commit older than [`MAX_TAIL_COMMIT_AGE_MS`], so the
 /// merge folds the fork as the fork's writer session in this runtime. The
 /// store blocks the snapshot record's write until a second runtime on the
 /// same store has claimed the fork and published an extension's entry on
-/// it. The verification then finds the newer manifests, and the next
-/// attempt finds the fork's tail empty but for the claim's fence, so it
-/// takes the snapshot at the newest manifest without a fold or a claim.
+/// it. The verification then finds the newer manifests, so the fork's
+/// session finds its position behind and loads it again, which finds the
+/// claim. The merge sent again opens a new session of the fork, which finds
+/// the fork's tail empty but for the claim's fence, so it takes the snapshot
+/// at the newest manifest without a fold or a claim.
 #[tokio::test]
 async fn a_merge_snapshots_its_fork_after_another_process_replaced_the_folds_manifest() {
     use loonfs_test_support::stores::{BlockingStore, OperationSelector};
@@ -1347,7 +1350,17 @@ async fn a_merge_snapshots_its_fork_after_another_process_replaced_the_folds_man
     blocking.block_next();
     let merger = actor();
     let (merged, ()) = tokio::join!(family.main.merge_fork(&fork_id, &merger), replace);
-    merged.expect("the merge");
+    assert_eq!(
+        merged
+            .expect_err("the fork's session finds the claim")
+            .code(),
+        ErrorCode::WriterFenced
+    );
+    family
+        .main
+        .merge_fork(&fork_id, &merger)
+        .await
+        .expect("the merge sent again");
     assert_eq!(family.fresh_read(&family.main, "/b.txt").await, b"b");
     other.shutdown().await.expect("shutdown the other process");
 }

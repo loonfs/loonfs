@@ -208,11 +208,9 @@ impl PublishedLock<'_> {
     /// manifest. A session without its writer epoch drops every position,
     /// and so does a session whose epoch isn't the one that `position` was
     /// loaded under. A position below the recorded manifest moves onto it by
-    /// the rule of `WriterPosition::move_to`, or it's dropped when it can't
-    /// move there. A position on that manifest takes the manifest's check
-    /// when it's younger (see [`WriterPosition::merge_check`]), so a read
-    /// doesn't repeat a check that a publication just made. A position above
-    /// it stays where it is.
+    /// the rule of `WriterPosition::move_to`, with the check that the
+    /// publication made, or it's dropped when it can't move there. A position
+    /// on that manifest or above it stays where it is.
     pub fn follow(&self, position: &WriterPosition) -> FollowOutcome {
         let WriterSessionStatus::Acquired {
             writer,
@@ -224,18 +222,11 @@ impl PublishedLock<'_> {
         if position.read_basis().head.writer_epoch != writer.writer_epoch {
             return FollowOutcome::Dropped;
         }
-        let recorded_no = recorded.manifest_no();
-        let position_no = position.basis.manifest_no();
-        if recorded_no < position_no
-            || (recorded_no == position_no && !position.basis.would_merge(recorded))
-        {
+        if recorded.manifest_no() <= position.basis.manifest_no() {
             return FollowOutcome::Unchanged;
         }
         let mut moved = position.clone();
-        if recorded_no == position_no {
-            moved.merge_check(recorded);
-            FollowOutcome::Moved(Box::new(moved))
-        } else if moved.move_to(recorded) {
+        if moved.move_to(recorded) {
             FollowOutcome::Moved(Box::new(moved))
         } else {
             FollowOutcome::Dropped

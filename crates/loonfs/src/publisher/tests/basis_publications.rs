@@ -7,6 +7,7 @@
 //! number, while its commits continue.
 
 use super::*;
+use loonfs_core::publish::{UnitBasis, UnitReport};
 use loonfs_core::ExtensionPublication;
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_test_support::stores::RecordedOperation;
@@ -1055,12 +1056,16 @@ async fn a_fold_writes_its_segments_once_whatever_publishes_before_its_turn() {
 }
 
 /// Checks that a window change that the session's newest published manifest
-/// already has, whose confirmation finds that the session lost its writer
-/// epoch meanwhile, loads the session's position again with the lane that it
-/// keeps: the session claims once, and the call returns the unchanged
-/// window.
+/// already has, whose confirmation runs while a commit's unknown outcome ends
+/// the session's writer epoch and the commit's retry claims it again, finds
+/// the claim's manifest after its own and loads the session's position
+/// again without another claim: the session claims once, and the call
+/// returns the unchanged window.
+///
+/// The confirmation keeps no lock of the session, so the commit's claim
+/// doesn't wait for it.
 #[tokio::test]
-async fn a_confirmation_that_finds_the_epoch_lost_claims_with_the_lane_it_keeps() {
+async fn a_confirmation_that_finds_the_sessions_own_claim_loads_the_position_without_a_claim() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("confirm-claims").expect("namespace id");
     let store = Arc::new(RecordingStore::new(
@@ -1122,34 +1127,22 @@ async fn a_confirmation_that_finds_the_epoch_lost_claims_with_the_lane_it_keeps(
         .await
         .expect("the confirmation checks the position");
     failing.fail_next(1);
-    let committing = namespace.clone();
-    let commit = tokio::spawn(async move {
-        committing
-            .commit_candidate(CommitCandidate::new(create_directory_request(
-                "unknown", "unknown",
-            )))
-            .await
-    });
-    let publisher = namespace.session().publisher.clone();
-    bounded(Duration::from_secs(10), async {
-        while !matches!(*publisher.session.lock(), WriterSessionStatus::Unacquired) {
-            tokio::task::yield_now().await;
-        }
-    })
+    bounded(
+        Duration::from_secs(10),
+        namespace.commit_candidate(CommitCandidate::new(create_directory_request(
+            "unknown", "unknown",
+        ))),
+    )
     .await
-    .expect("the commit's unknown outcome ends the session's epoch");
+    .expect("the commit claims while the confirmation waits")
+    .expect("the commit's retry replays its receipt");
     gate.release();
     let changed = bounded(Duration::from_secs(10), change)
         .await
-        .expect("the window change doesn't wait for the lane that it keeps")
+        .expect("the window change settles")
         .expect("join the window change")
         .expect("change the window");
     assert_eq!(changed.retention_window_ms, Some(retention_window(0).get()));
-    bounded(Duration::from_secs(10), commit)
-        .await
-        .expect("the commit settles")
-        .expect("join the commit")
-        .expect("the commit commits");
     let manifests = metadata_manifest_prefix(&namespace_id);
     let manifest_puts = store
         .take()
@@ -1160,5 +1153,76 @@ async fn a_confirmation_that_finds_the_epoch_lost_claims_with_the_lane_it_keeps(
         })
         .count();
     assert_eq!(manifest_puts, 1, "the session claims once");
+    writer.shutdown().await.expect("shut down writer");
+}
+
+/// Checks that a value that a unit computed from the session's own state is
+/// returned only when the session's check confirms a position with the
+/// writer epoch that the session had before the unit ran.
+///
+/// The unit's first run computes its value under the session's epoch, and
+/// then a commit's WAL put ends with an unknown outcome, which ends the
+/// epoch, and the commit's retry claims a new epoch and loads a new position.
+/// The check then confirms that new position, so the session runs the unit
+/// once more and returns the second run's value.
+#[tokio::test]
+async fn a_value_confirmed_under_a_newer_epoch_is_computed_again() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("confirm-epoch").expect("namespace id");
+    let failing = Arc::new(
+        FailStore::new(
+            Arc::new(LocalFsStore::new(directory.path()).expect("store")),
+            KeyPredicate::prefix(wal_prefix(&namespace_id)),
+            OperationSelector::PutCreateIfAbsent,
+            InjectedError::Transport("lost acknowledgment".into()),
+        )
+        .apply_then_fail(),
+    );
+    let writer =
+        crate::LoonFs::builder_with_store(failing.clone() as SharedStore, crate::Context::Service)
+            .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+            .config(crate::RuntimeConfig {
+                min_publish_interval_ms: 0,
+                ..crate::RuntimeConfig::default()
+            })
+            .build()
+            .await
+            .expect("build writer");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "first", "first",
+        )))
+        .await
+        .expect("the session's first commit");
+    let publisher = namespace.session().publisher.clone();
+    let runs = std::sync::atomic::AtomicUsize::new(0);
+    let (runs, namespace, failing) = (&runs, &namespace, &failing);
+    let value: crate::Result<&str> = publisher
+        .run_confirmed(move || async move {
+            if runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                return Ok(UnitReport::from_store("second"));
+            }
+            failing.fail_next(1);
+            namespace
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "unknown", "unknown",
+                )))
+                .await
+                .expect("the commit's retry claims and replays its receipt");
+            Ok(UnitReport {
+                value: "first",
+                basis: UnitBasis::Session,
+            })
+        })
+        .await;
+    assert_eq!(value.expect("the unit's value"), "second");
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 2);
     writer.shutdown().await.expect("shut down writer");
 }

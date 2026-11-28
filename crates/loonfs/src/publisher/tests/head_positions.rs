@@ -226,19 +226,15 @@ async fn writer_epoch(
         .writer_epoch
 }
 
-/// Checks that a change of unknown effect drops the position, and that the
-/// next commit stores one again.
+/// Checks that a session without a position, such as one that the test hook
+/// dropped, stores one again at its next commit.
 #[tokio::test]
-async fn an_unknown_change_drops_the_read_position_until_the_next_commit() {
+async fn a_session_without_a_position_stores_one_at_its_next_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let (writer, namespace) = published_namespace(store).await;
     let namespace_id = namespace.id().clone();
-    writer
-        .mode
-        .publisher
-        .invalidate_namespace(&namespace_id, NamespaceChange::Unknown)
-        .await;
+    writer.mode.publisher.drop_session_view(&namespace_id).await;
     assert!(writer.core.writer_position(&namespace_id).is_none());
     let commit = namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
@@ -496,12 +492,14 @@ async fn the_release_after_a_fold_brings_both_stored_positions_up_to_it() {
         .expect("the fold doesn't wait for the engine")
         .expect("fold");
     assert_eq!(folded.outcome, FoldWalOutcome::Published);
-    let checked = writer
+    let crate::runtime_core::CheckedPosition::Confirmed(checked) = writer
         .core
         .checked_writer_position(&namespace_id, None)
         .await
         .expect("a read's check between the record and the release")
-        .expect("a position");
+    else {
+        panic!("the check confirms a position");
+    };
     assert_eq!(
         checked.read_basis().basis().manifest_no(),
         folded.manifest_no

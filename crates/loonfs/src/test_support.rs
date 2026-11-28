@@ -154,17 +154,28 @@ pub async fn set_root_access(
 }
 
 /// Drops `writer`'s views of the namespace (its writer session's position and
-/// its cached head) the way a change of unknown effect does, so the
-/// runtime's next read of the namespace loads it from the store.
+/// its cached head), so the runtime's next read of the namespace and the
+/// session's next unit load it from the store.
 pub async fn drop_namespace_view(
     writer: &LoonFs<Writable>,
     namespace_id: &loonfs_types::NamespaceId,
 ) {
+    writer.mode.publisher.drop_session_view(namespace_id).await;
+}
+
+/// Returns the number of the manifest that the position of `writer`'s
+/// session of the namespace is on, or `None` without a position.
+///
+/// A test checks with it that a read leaves the position where it is.
+pub fn writer_position_manifest_no(
+    writer: &LoonFs<Writable>,
+    namespace_id: &loonfs_types::NamespaceId,
+) -> Option<loonfs_types::ManifestNo> {
     writer
         .mode
         .publisher
-        .invalidate_namespace(namespace_id, crate::publisher::NamespaceChange::Unknown)
-        .await;
+        .current_position(namespace_id)
+        .map(|position| position.read_basis().basis().manifest_no())
 }
 
 /// Builds a reader with nothing cached, so its first read loads the current

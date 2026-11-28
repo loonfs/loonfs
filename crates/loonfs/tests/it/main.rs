@@ -52,6 +52,7 @@ mod publication;
 mod publish_discovery;
 mod read_consistency;
 mod read_view;
+mod refusal_confirmation;
 mod replaced_basis;
 mod restore_deleted;
 mod retained_views;
