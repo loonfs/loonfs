@@ -309,6 +309,87 @@ async fn a_publication_from_an_old_basis_puts_with_no_request_first() {
     );
 }
 
+/// A change to a folded manifest that a reader refuses when it decodes the
+/// manifest, for
+/// [`a_publication_that_readers_would_refuse_panics_before_any_request`].
+#[derive(Debug, Clone, Copy)]
+enum Refused {
+    /// A second run that lists the segments of the manifest's run.
+    SegmentInTwoRuns,
+    /// The manifest's run and a copy of it with new segment IDs, both in the
+    /// base tier, so each of the run's family groups has two base runs.
+    TwoBaseRunsInOneGroup,
+}
+
+/// Checks that a publication of the lane whose manifest a reader would refuse
+/// panics with the validation's message before it sends any request, so the
+/// store has no manifest at that number.
+#[tokio::test]
+async fn a_publication_that_readers_would_refuse_panics_before_any_request() {
+    use futures::FutureExt;
+    use loonfs_types::format::manifest::{MetadataRunRef, RunTier};
+    for refused in [Refused::SegmentInTwoRuns, Refused::TwoBaseRunsInOneGroup] {
+        let directory = tempdir().expect("directory");
+        let (store, namespace_id) = created_namespace(directory.path()).await;
+        crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &test_context())
+            .write_file_bytes("/file.txt", b"file\n", None)
+            .await
+            .expect("write a file");
+        let basis = crate::test_support::folded_manifest(&crate::test_support::namespace_store(
+            store.inner(),
+            &namespace_id,
+        ))
+        .await
+        .expect("fold the file's commit");
+        let mut payload = basis.manifest().payload().clone();
+        let [run] = payload.runs.as_slice() else {
+            panic!("the fold lists one run");
+        };
+        let mut copy = MetadataRunRef {
+            run_no: payload.next_run_no,
+            ..run.clone()
+        };
+        let expected = match refused {
+            Refused::SegmentInTwoRuns => "duplicate metadata segment id",
+            Refused::TwoBaseRunsInOneGroup => {
+                payload.runs[0].tier = RunTier::Base;
+                copy.tier = RunTier::Base;
+                for descriptor in &mut copy.segments {
+                    descriptor.segment_id = loonfs_types::MetadataSegmentId::generate();
+                }
+                "holds base-tier runs"
+            }
+        };
+        payload.next_run_no = loonfs_types::RunNo(payload.next_run_no.0 + 1);
+        payload.runs.push(copy);
+        let lane = crate::test_support::lane_at_manifest(basis);
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let deadline = OperationClock::start(0, crate::test_support::std_timer());
+        store.reset();
+        let Err(panic) = std::panic::AssertUnwindSafe(async {
+            namespace
+                .publish_manifest_in_turn(lane.lock().await.acquired_turn(), payload, &deadline)
+                .await
+        })
+        .catch_unwind()
+        .await
+        else {
+            panic!("{refused:?}: a manifest that readers refuse should panic");
+        };
+        let message = panic
+            .downcast_ref::<String>()
+            .expect("the assertion's message");
+        assert!(
+            message.starts_with(
+                "a candidate manifest should pass the validation of a reader's decoding"
+            ) && message.contains(expected),
+            "{refused:?}: {message}"
+        );
+        let requests = store.take();
+        assert!(requests.is_empty(), "{refused:?}: {requests:?}");
+    }
+}
+
 /// Checks that a publication whose manifest breaks a successor rule (here, a
 /// changed pool) panics before its put, so the store has no manifest at that
 /// number.

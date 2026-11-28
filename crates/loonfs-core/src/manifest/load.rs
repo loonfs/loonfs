@@ -5,7 +5,7 @@
 //! of a manifest into memory is available only in tests.
 
 use super::error::ManifestLoadError;
-use super::validate::{validate_manifest, validate_namespace_manifest};
+use super::validate::validate_namespace_manifest;
 use crate::commit::publish_view::WriterPosition;
 use crate::engine::RuntimeReadContext;
 use crate::error::{CoreError, MetadataProjectionLoadError};
@@ -551,6 +551,5 @@ pub(crate) fn decode_manifest_at(
         }
     })?;
     validate_namespace_manifest(namespace_id, manifest_no, manifest_key, &manifest)?;
-    validate_manifest(manifest_key, manifest.payload())?;
     Ok(manifest)
 }

@@ -832,6 +832,8 @@ A publisher MUST publish only a manifest that keeps these rules against its basi
 - If the basis isn't `initializing`, the manifest isn't `initializing` either.
 - If the basis is `initializing`, the manifest is one of three: a fork's initializing manifest 2 that folds the source's WAL tail ([Forking a namespace](#92-forking-a-namespace), step 4), the basis's activation, or the basis's namespace tombstone. The activation is the basis with the status set to `active`, and for a fork, with the retention floor raised to the fork point ([Forking a namespace](#92-forking-a-namespace), step 7). The tombstone is the basis with the status set to `deleted` with its `deleted_at_ms`, and with the runs of each extension entry emptied ([Extensions](#124-extensions)). Neither changes any other field except the manifest number and `publication_id`.
 
+Before the put, a publisher MUST check the manifest against every rule that a reader checks when it decodes a manifest, except the rules that need the segments' bytes, so that no publication puts a manifest that readers refuse (for example, one that lists a segment in two runs).
+
 #### Extent assembly and the doubling rule
 
 For each chain with tail pieces, the fold constructs one new "candidate" extent from the prior layout plus ordered tail pieces:

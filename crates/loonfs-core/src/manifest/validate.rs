@@ -1,5 +1,6 @@
-//! Pure validation of loaded manifests and their segments against their
-//! descriptors: identity, checksums, ranges, ordering, and row shape.
+//! Pure validation of a loaded manifest, or of a candidate manifest before
+//! its put, and of segments against their descriptors: identity, checksums,
+//! ranges, ordering, and row shape.
 
 use super::error::ManifestLoadError;
 use crate::segment::row::manifest_row_commit_seq;
@@ -16,6 +17,9 @@ use loonfs_types::{CommitSeq, ManifestNo, NamespaceId, RunNo, WriterEpoch};
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 
+/// Checks that `manifest`, stored or about to be put at `object_key` as
+/// manifest `manifest_no` of `namespace_id`, passes every rule that doesn't
+/// need its segments' bytes (format spec, "Publishing a manifest").
 pub(super) fn validate_namespace_manifest(
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
@@ -36,10 +40,10 @@ pub(super) fn validate_namespace_manifest(
             actual: manifest.payload().manifest_no,
         });
     }
-    Ok(())
+    validate_manifest(object_key, manifest.payload())
 }
 
-pub(super) fn validate_manifest(
+fn validate_manifest(
     object_key: &str,
     payload: &NamespaceManifestPayload,
 ) -> Result<(), ManifestLoadError> {
