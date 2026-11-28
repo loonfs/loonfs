@@ -77,10 +77,10 @@ The published manifest must also pass the manifest validation in [Manifests, run
 
 This section describes how a compaction publishes its output, and what happens when a unit is abandoned or stopped.
 
-Before every publication of its output, a unit finds the current manifest and checks the unit's selected inputs and the unit's elapsed time. While those checks still pass, a unit makes up to eight publication attempts, the bound every manifest publication shares (`MAX_CONTENTION_ATTEMPTS`). An attempt whose put loses to a fold, a retention window change, or another group's compaction builds the replacement over the manifest that won and tries again. A unit whose inputs another process's compaction of the same group replaced returns `abandoned`, and so does a unit that loses all eight attempts. Two deadlines limit those attempts:
+A unit plans from the writer session's position and writes its output segments before it takes its turn in the session's [publication lane](../specs/glossary.md#publication-lane). In its turn, the unit checks its selected inputs and its elapsed time against the session's newest published manifest, which the session has in memory, and publishes the replacement over that manifest with one put. A fold, a retention window change, or another group's compaction that published before the unit's turn keeps the unit's inputs, so the replacement keeps the runs that the earlier publication added. If a compaction of the same group already replaced the unit's inputs, the unit returns `abandoned` without a put. A put that loses returns `writer_fenced`, because only another writer's claim can win it. Two deadlines limit the publication:
 
-- **Unit deadline.** The unit starts its last attempt within `METADATA_COMPACTION_BUDGET_MS` of its own start. A unit past that bound returns `abandoned`.
-- **Publication deadline.** Every attempt of the unit's finalization runs under one 15-minute metadata publication budget, which starts when finalization starts. An attempt past that budget fails with the publication budget error.
+- **Unit deadline.** The unit's turn starts within `METADATA_COMPACTION_BUDGET_MS` of the unit's own start. A unit past that bound returns `abandoned`.
+- **Publication deadline.** The publication runs under one 15-minute metadata publication budget, which starts at the unit's turn. A publication past that budget fails with the publication budget error.
 
 After an abandoned unit, the same call plans its next unit from the newest manifest, and the call stops after three abandoned units in a row.
 

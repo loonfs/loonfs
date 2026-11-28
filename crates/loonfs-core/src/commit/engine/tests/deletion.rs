@@ -191,9 +191,10 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         .pop()
         .expect("result")
         .expect("publish inline content");
-    let Ok(Some(UnitStart::Kept(acquired_writer))) = engine.kept_start() else {
-        panic!("the session has its writer epoch after its commit");
-    };
+    let position = engine
+        .writer_position()
+        .expect("the session keeps its position after its commit");
+    let lane = engine.publication_lane();
     for expected_head_seq in [CommitSeq(0), CommitSeq(1)] {
         let deadline = OperationClock::start(context.now_ms, clock.clone());
         if expected_head_seq == CommitSeq(1) {
@@ -205,9 +206,8 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
                 DeleteNamespaceOptions {
                     expected_head_seq: Some(expected_head_seq),
                 },
-                &acquired_writer,
-                None,
-                &crate::publish::PublicationLane::new().lock().await,
+                position.clone(),
+                &lane.lock().await,
                 &deadline,
             )
             .await
@@ -235,35 +235,21 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
 enum LearnedTombstonePut {
     /// The put is created.
     Created,
-    /// Another deletion's tombstone is written first, and the put collides.
-    Collided,
     /// The put is created, and its response is lost.
     CreatedResponseLost,
-    /// Another deletion's tombstone is written first, and the put fails
-    /// before it reaches the store.
-    LostBeforeTheStore,
 }
 
-/// Checks what a deletion returns for each outcome of its tombstone put that
-/// the deletion learns, and that the session keeps its epoch after each one
-/// (format spec, "Failed and unknown outcomes"): the deletion's own
-/// tombstone returns the deletion's response, and another deletion's
-/// tombstone at that number returns `namespace_deleted`.
+/// Checks that a deletion returns its response for each outcome of its
+/// tombstone put that the deletion learns, and that the session keeps its
+/// epoch after each one (format spec, "Failed and unknown outcomes").
 #[tokio::test]
 async fn a_tombstone_put_whose_outcome_the_deletion_learns_leaves_the_session_its_epoch() {
-    use crate::namespace::writer_epoch::AcquiredWriter;
     use loonfs_test_support::stores::{FailStore, InjectedError};
 
     for put in [
         LearnedTombstonePut::Created,
-        LearnedTombstonePut::Collided,
         LearnedTombstonePut::CreatedResponseLost,
-        LearnedTombstonePut::LostBeforeTheStore,
     ] {
-        let rival = matches!(
-            put,
-            LearnedTombstonePut::Collided | LearnedTombstonePut::LostBeforeTheStore
-        );
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("lost-tombstone").expect("namespace");
         let base = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
@@ -275,75 +261,35 @@ async fn a_tombstone_put_whose_outcome_the_deletion_learns_leaves_the_session_it
         // The deletion claims the writer epoch at manifest 3, folds the
         // claim's fence into manifest 4, and puts its tombstone at manifest 5.
         let tombstone = metadata_manifest_object(&namespace_id, &loonfs_types::ManifestNo(5));
-        let failing = FailStore::new(
+        let store = FailStore::new(
             base.clone(),
             KeyPredicate::exact(&tombstone),
             OperationSelector::PutCreateIfAbsent,
             InjectedError::Transport("lost response".to_owned()),
         );
-        let failing = match put {
-            LearnedTombstonePut::CreatedResponseLost => failing.apply_then_fail(),
-            _ => failing,
+        let store = match put {
+            LearnedTombstonePut::CreatedResponseLost => {
+                let store = store.apply_then_fail();
+                store.fail_next(1);
+                store
+            }
+            LearnedTombstonePut::Created => store,
         };
-        if matches!(
-            put,
-            LearnedTombstonePut::CreatedResponseLost | LearnedTombstonePut::LostBeforeTheStore
-        ) {
-            failing.fail_next(1);
-        }
-        // With a rival, the put waits while the rival publishes.
-        let store = BlockingStore::new(
-            failing,
-            KeyPredicate::exact(&tombstone),
-            OperationSelector::PutCreateIfAbsent,
-        );
-        if rival {
-            store.block_next();
-        }
         let mut engine = NamespaceCommitEngine::new(
             crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context).namespace,
             context.writer_id.clone(),
         );
         let administrator = crate::test_support::administrator_of(&store, &namespace_id);
-        let deleted = engine.delete_namespace_alone(&administrator, Default::default());
-        let (deleted, ()) = tokio::join!(deleted, async {
-            if !rival {
-                return;
-            }
-            store.wait_until_blocked().await;
-            let other = crate::test_support::NamespaceFixture::new(&base, &namespace_id, &context);
-            other
-                .namespace
-                .delete_namespace(
-                    Default::default(),
-                    &AcquiredWriter {
-                        writer_id: context.writer_id.clone(),
-                        writer_epoch: WriterEpoch(1),
-                    },
-                    None,
-                    &crate::publish::PublicationLane::new().lock().await,
-                    &other.namespace.start_clock(),
-                )
-                .await
-                .expect("the rival deletion");
-            store.release();
-        });
-        assert_eq!(store.inner().remaining(), 0, "{put:?}");
-        if rival {
-            assert_matches!(deleted, Err(CoreError::NamespaceDeleted { .. }), "{put:?}");
-            assert_matches!(
-                *engine.session_status().lock(),
-                WriterSessionStatus::NamespaceGone,
-                "{put:?}"
-            );
-        } else {
-            assert_eq!(deleted.expect("the deletion").namespace_id, namespace_id);
-            assert_matches!(
-                *engine.session_status().lock(),
-                WriterSessionStatus::Acquired { .. },
-                "{put:?}"
-            );
-        }
+        let deleted = engine
+            .delete_namespace_alone(&administrator, Default::default())
+            .await;
+        assert_eq!(store.remaining(), 0, "{put:?}");
+        assert_eq!(deleted.expect("the deletion").namespace_id, namespace_id);
+        assert_matches!(
+            *engine.session_status().lock(),
+            WriterSessionStatus::Acquired { .. },
+            "{put:?}"
+        );
         let newest = newest_manifest(&base, &namespace_id).await;
         assert_eq!(newest.manifest_no, loonfs_types::ManifestNo(5), "{put:?}");
         assert!(newest.status.is_deleted(), "{put:?}");

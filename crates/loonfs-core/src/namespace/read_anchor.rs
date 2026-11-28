@@ -366,7 +366,7 @@ fn writer_anchor(anchor: NamespaceReadAnchor) -> CoreResult<WriterAnchor> {
 /// claim has a lower epoch than the claim (format spec, "Writer ownership").
 /// The decoding of a manifest refuses an epoch above zero without a writer
 /// block, so a higher epoch always has one.
-fn ensure_stored_writer_epoch(
+pub(crate) fn ensure_stored_writer_epoch(
     manifest: &NamespaceManifestPayload,
     acquired_writer: &AcquiredWriter,
 ) -> CoreResult<()> {

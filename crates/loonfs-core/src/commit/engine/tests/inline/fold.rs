@@ -4,7 +4,7 @@ use super::*;
 use crate::test_support::WriterAt;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::clock::ManualClock;
-use loonfs_test_support::stores::{BlockingStore, FailStore, InjectedError, OperationSelector};
+use loonfs_test_support::stores::{FailStore, InjectedError, OperationSelector};
 use loonfs_types::ErrorCode;
 use std::assert_matches;
 
@@ -383,96 +383,6 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             assert!(stored.contains(&first) && stored.contains(&retried));
         }
     }
-}
-
-/// Checks that two sessions' folds of the same tail write a span object
-/// each and publish one manifest, whose layout lists the publishing fold's
-/// object, and that the fold of the older session finds the tail folded
-/// after the second session's epoch claim.
-#[tokio::test]
-async fn competing_engines_write_their_own_objects_and_publish_one_manifest() {
-    let (_directory, store, mut first, context) = setup().await;
-    let values = vec![inline(Bytes::from_static(b"shared"))];
-    let content_id = values[0].content_ref().content_id.clone();
-    let candidate = candidate("race", values);
-    publish(&mut first, &context, candidate.clone())
-        .await
-        .expect("publish");
-    let mut second = NamespaceCommitEngine::new(
-        crate::test_support::namespace_store(&store, &first.namespace.namespace_id),
-        context.writer_id.clone(),
-    );
-    publish(&mut second, &context, candidate)
-        .await
-        .expect("replay");
-    let first_input = first.writer_position().expect("first tail");
-    let second_input = second.writer_position().expect("second tail");
-    assert_eq!(first_input.tail, second_input.tail);
-    let basis = second_input.read_basis().basis.manifest_no();
-    let blocked = BlockingStore::new(
-        store.clone(),
-        KeyPredicate::content_blob(),
-        OperationSelector::Put,
-    );
-    blocked.block_next();
-    store.reset();
-    let first_timer = Arc::new(StdMonotonicTimer::default());
-    let deadline = crate::time::OperationClock::start(0, first_timer);
-    let namespace = crate::test_support::namespace_store(&blocked, &first.namespace.namespace_id);
-    let first_fold = namespace.fold_wal_tail_in_new_lane(&first_input, &deadline);
-    let second_fold = async {
-        blocked.wait_until_blocked().await;
-        let result = crate::test_support::namespace_store(&store, &second.namespace.namespace_id)
-            .fold_wal_tail_in_new_lane(
-                &second_input,
-                &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
-            )
-            .await;
-        blocked.release();
-        result
-    };
-    let (first_result, second_result) = tokio::join!(first_fold, second_fold);
-    // The second fold's manifest ends the first fold without a put, so the
-    // first fold reports its position behind.
-    assert!(matches!(first_result, Err(CoreError::HeadMoved(_))));
-    assert_eq!(
-        second_result.expect("second fold").response.outcome,
-        FoldWalOutcome::Published
-    );
-    let keys = content_assemblies(&store);
-    assert_eq!(keys.len(), 2);
-    assert_ne!(keys[0], keys[1]);
-    let layout =
-        crate::test_support::content_layout(&store, &first.namespace.namespace_id, &content_id)
-            .await
-            .expect("the folded layout");
-    let listed = crate::storage::content_location::extent_object_key(
-        &pool_id(&store).await,
-        &layout.extents[0],
-    );
-    assert!(keys.contains(&listed));
-    // The first fold's put loses to the second fold's manifest, and its next
-    // attempt finds the tail folded.
-    assert_eq!(
-        store
-            .snapshot()
-            .iter()
-            .filter(
-                |operation| matches!(operation, RecordedOperation::Put { .. })
-                    && family(operation) == Some(DurableObjectFamily::MetadataManifest)
-            )
-            .count(),
-        2
-    );
-    assert_eq!(
-        crate::test_support::namespace_store(&store, &first.namespace.namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("current manifest")
-            .manifest()
-            .manifest_no,
-        basis.successor().expect("next manifest number")
-    );
 }
 
 /// Checks that a fold whose new span object's key is already occupied by

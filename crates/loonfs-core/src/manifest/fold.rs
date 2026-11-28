@@ -1,17 +1,14 @@
 //! Folds the visible WAL tail and publishes the next manifest number.
 
-use super::publish::{ManifestChange, ManifestSender};
-use super::published::same_head;
 use crate::commit::publication_lane::LaneTurn;
 use crate::commit::publish_view::WriterPosition;
-use crate::commit::session_epoch::SessionEpoch;
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::manifest::load::position_manifest_gone;
 use crate::metadata::MetadataView;
-use crate::namespace::basis::{MetadataBasis, ReadBasis};
-use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
+use crate::namespace::basis::ReadBasis;
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
@@ -24,12 +21,13 @@ use crate::storage::tail_content::{
 };
 use crate::time::{Observation, OperationClock};
 use crate::wal::ProjectedWalTail;
-use crate::wal::WalPublishError;
 use futures::{stream, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::ContentLayoutRecord;
-use loonfs_types::format::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
-use loonfs_types::{CommitSeq, ContentId, ManifestNo, NamespaceId, RunNo};
+use loonfs_types::format::manifest::{
+    ManifestActivity, MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
+};
+use loonfs_types::{CommitSeq, ContentId, ManifestNo, NamespaceId, RunNo, WalNo};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::Instrument;
@@ -119,112 +117,120 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .expect("layout lock should not be poisoned"))
     }
 
-    /// Folds the WAL tail from the position of `turn`, an item's turn in a
-    /// writer session's publication lane, and publishes the next manifest.
+    /// Writes the content objects and segments of the WAL tail of
+    /// `position`, a writer session's position, from the position's
+    /// manifest, before the fold takes its turn in the session's publication
+    /// lane, where [`Self::publish_fold_in_turn`] publishes them.
     ///
-    /// The manifest copies the writer epoch from its predecessor, and its
-    /// retention floor is the higher of its predecessor's floor and the
-    /// floors of the floor objects that the fold covers (format spec,
-    /// "Publishing a manifest"). A tail of floor objects and no commits is
-    /// folded too, into a manifest with no new run. The position is the
-    /// session's, whatever its age, and only an item of a writer session's
-    /// lane has a turn (see
-    /// [`PublicationLane`](crate::publish::PublicationLane)), so every fold
-    /// is an item of a writer session's lane. A position whose manifest is
-    /// missing from the store and at or below the manifest boundary returns
-    /// `head_moved`, so the session drops the position and its next fold
-    /// loads the tail with the writer's load (see `load_held_manifest`), and
-    /// so does a fold that ends without a put on a manifest that won its put
-    /// (see `ManifestUpdate::published_or_unchanged`). The
-    /// publication's first attempt starts from the position's manifest, and
-    /// each later attempt starts from the manifest that the attempt before
-    /// it found (see `update_manifest`).
-    /// A current manifest that folds the tail finishes the fold, and any other
-    /// manifest after the fold's own predecessor makes the fold rebuild against
-    /// it. The rebuild keeps the tail it read when the manifest is at the same
-    /// head (see `same_head`), and loads the tail again otherwise, which
-    /// folds a new writer's log after the writer's claim. When an attempt
-    /// finds a segment of its manifest missing and a newer manifest replaced
-    /// that manifest, the next attempt rebuilds against the newest manifest
-    /// the same way (see [`SegmentKeeper::load_error`](crate::segment::SegmentKeeper::load_error)). A missing
-    /// segment of the current manifest returns `namespace_corrupt`. A
-    /// namespace tombstone stops the fold. A fold that ends records the
-    /// manifest that covers the tail, whether it published that manifest or
-    /// found it current, as the session's newest published manifest, before
-    /// the item drops the lane.
-    pub async fn fold_wal_tail_from(
-        &self,
-        turn: LaneTurn<'_>,
-        clock: &OperationClock,
-    ) -> Result<FoldedWalTail> {
-        let folded = self
-            .fold_wal_tail_from_position(turn.position(), &turn.epoch(self), clock)
-            .await?;
-        turn.record(&folded.current);
-        Ok(folded)
-    }
-
-    /// Folds the WAL tail from `position`, as [`Self::fold_wal_tail_from`]
-    /// describes, with the manifest put sent under `epoch`, without
-    /// recording the manifest.
-    async fn fold_wal_tail_from_position(
+    /// The fold writes each chain's pending pieces as content objects and a
+    /// metadata segment for each family that the tail's commits touched, as
+    /// one new run: the base run when the manifest has no runs, and a delta
+    /// run otherwise. A tail of floor objects and no commits writes no run.
+    /// A position whose manifest already folds its tail writes nothing and
+    /// returns [`FoldWriteOutcome::AlreadyFolded`]. A position whose manifest
+    /// is missing from the store and at or below the manifest boundary
+    /// returns `head_moved`, so the session drops the position and loads it
+    /// again from the store under its writer epoch (see `load_held_manifest`). A missing segment
+    /// of the position's manifest returns `manifest_replaced` when a newer
+    /// manifest replaced it, and `namespace_corrupt` otherwise (see
+    /// [`SegmentKeeper::load_error`](crate::segment::SegmentKeeper::load_error)).
+    pub async fn write_fold_segments(
         &self,
         position: &WriterPosition,
-        epoch: &SessionEpoch<'_>,
         clock: &OperationClock,
-    ) -> Result<FoldedWalTail> {
+    ) -> Result<FoldWriteOutcome> {
         let Some(projection) = self.load_position_projection(position.clone()).await? else {
             return Err(position_manifest_gone(position));
         };
-        let basis = projection
-            .basis
-            .decoded(projection.manifest_segments.loaded_manifest());
-        if basis.manifest().folded_wal_no() == projection.head().wal_no {
+        let manifest = projection.manifest_segments.manifest();
+        let started_folded_wal_no = manifest.payload().folded_wal_no;
+        if started_folded_wal_no == projection.head().wal_no {
             // The manifest that the tail was read above already folds it, and
             // keeps the check that confirmed it.
-            return Ok(FoldedWalTail::new(
+            let basis = projection
+                .basis
+                .decoded(projection.manifest_segments.loaded_manifest());
+            return Ok(FoldWriteOutcome::AlreadyFolded(FoldedWalTail::new(
                 &self.namespace_id,
                 projection.head().seq,
                 basis,
                 FoldWalOutcome::AlreadyCurrent,
+            )));
+        }
+        let layouts = self.materialize_tail_content(&projection).await?;
+        clock.ensure_metadata_publication_budget(&self.namespace_id)?;
+        Ok(FoldWriteOutcome::Written(Box::new(FoldWrites {
+            started_folded_wal_no,
+            head: projection.head().clone(),
+            tail_activity: projection.tail_state.activity(),
+            run: self.write_fold_run(&projection, &layouts).await?,
+        })))
+    }
+
+    /// Publishes the manifest that lists `writes`, a fold's segments, as a
+    /// publication of a writer session's publication lane, whose turn is
+    /// `turn` (see [`Self::publish_manifest_in_turn`]), and returns the
+    /// manifest that covers the tail.
+    ///
+    /// The manifest is the turn's basis, the session's newest published
+    /// manifest, with the fold's run listed after whatever runs the basis
+    /// lists, the fold's head, and the higher of the basis's floor and the
+    /// floors of the floor objects that the fold covers (format spec,
+    /// "Publishing a manifest"). The session's folds run one at a time from
+    /// the session's position, and a publication of the session in between,
+    /// such as a compaction unit, a window change or the session's own
+    /// claim, doesn't change the head or the folded WAL number, so the basis
+    /// has the `folded_wal_no` that the fold started from. When another
+    /// writer folded the tail before the session's claim, the basis covers
+    /// the fold's tail, and the call publishes nothing. A basis that covers
+    /// only part of the fold's tail is bad stored state, and the call returns
+    /// `namespace_corrupt`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `writes` are another namespace's, which is a bug in the
+    /// calling process.
+    pub async fn publish_fold_in_turn(
+        &self,
+        turn: LaneTurn<'_>,
+        writes: Box<FoldWrites>,
+        clock: &OperationClock,
+    ) -> Result<FoldedWalTail> {
+        assert_eq!(
+            writes.head.namespace_id, self.namespace_id,
+            "a fold publishes the segments that it wrote for its own namespace"
+        );
+        let previous = turn.basis().manifest().payload();
+        if previous.folded_wal_no >= writes.head.wal_no && previous.head_seq >= writes.head.seq {
+            return Ok(FoldedWalTail::new(
+                &self.namespace_id,
+                writes.head.seq,
+                turn.basis().clone(),
+                FoldWalOutcome::AlreadyCurrent,
             ));
         }
-        // Each attempt's future borrows the fold through this lock, because a
-        // future that a closure returns can't borrow the closure's own state.
-        let fold = tokio::sync::Mutex::new(FoldAttempts {
-            namespace: self,
-            clock,
-            projection,
-            layouts: None,
-        });
-        let folded = self
-            .update_manifest(
-                Some(basis),
-                clock,
-                ManifestSender::Session(epoch),
-                |current: LoadedManifest| {
-                    let fold = &fold;
-                    async move { fold.lock().await.attempt(current).await }
-                },
-            )
-            .await;
-        let built_on = position.read_basis().basis.manifest_no();
-        let update = match folded.and_then(|update| update.published_or_unchanged(built_on)) {
-            Ok(update) => update,
-            // Every attempt lost its put to another publication or found its
-            // manifest replaced. The fold reports a lost race, so a runtime
-            // that keeps a view of the namespace drops it (see
-            // `CoreError::is_stale_basis`).
-            Err(CoreError::StoreContention { .. }) => {
-                return Err(CoreError::WalPublish(WalPublishError::NumberTaken))
-            }
-            Err(error) => return Err(error),
-        };
+        // No state that this process writes reaches this branch. The session's
+        // folds run one at a time under the namespace's fold lock, so no fold of
+        // the session publishes between this fold's writes and its turn, and a
+        // fold of another writer that the session's claim builds on covers the
+        // whole tail below that writer's fence.
+        if previous.folded_wal_no != writes.started_folded_wal_no {
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "manifest {} folds WAL number {}, but the fold that builds on it in a writer \
+                 session's lane started from folded WAL number {} and folds through {}",
+                previous.manifest_no,
+                previous.folded_wal_no,
+                writes.started_folded_wal_no,
+                writes.head.wal_no
+            )));
+        }
+        let payload = fold_payload(previous, &writes)?;
+        let published = self.publish_manifest_in_turn(turn, payload, clock).await?;
         Ok(FoldedWalTail::new(
             &self.namespace_id,
-            fold.into_inner().projection.head().seq,
-            update.current,
-            update.response,
+            writes.head.seq,
+            published,
+            FoldWalOutcome::Published,
         ))
     }
 
@@ -286,98 +292,135 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
+    /// Returns the manifest after `projection`'s manifest that folds the
+    /// projection's tail, whose content objects `layouts` describe, after it
+    /// writes the tail's segments.
     pub(super) async fn build_namespace_manifest_for_projection(
         &self,
         projection: &ManifestProjection<'_, S>,
         layouts: &HashMap<ContentId, ContentLayoutRecord>,
     ) -> Result<NamespaceManifestPayload> {
-        let activity = projection
-            .manifest_segments
-            .manifest()
-            .payload()
-            .activity
-            .checked_add(projection.tail_state.activity())
-            .ok_or_else(|| {
-                CoreError::NamespaceCorrupt(
-                    "activity counter cannot exceed 9007199254740991".to_owned(),
-                )
-            })?;
-        let head_seq = projection.head().seq;
+        let writes = FoldWrites {
+            started_folded_wal_no: projection
+                .manifest_segments
+                .manifest()
+                .payload()
+                .folded_wal_no,
+            head: projection.head().clone(),
+            tail_activity: projection.tail_state.activity(),
+            run: self.write_fold_run(projection, layouts).await?,
+        };
+        fold_payload(projection.manifest_segments.manifest().payload(), &writes)
+    }
+
+    /// Writes the segments of `projection`'s tail as the fold's new run: the
+    /// base run when the projection's manifest has no runs, a delta run of
+    /// the rows above the manifest's head otherwise, and no run when the head
+    /// is the manifest's.
+    async fn write_fold_run(
+        &self,
+        projection: &ManifestProjection<'_, S>,
+        layouts: &HashMap<ContentId, ContentLayoutRecord>,
+    ) -> Result<Option<FoldRun>> {
+        let previous = projection.manifest_segments.manifest().payload();
         let tail_state = projection.tail_state.combined_rows();
         // A WAL fold keeps existing runs and writes the WAL delta as one new delta
-        // run. Compaction rewrites delta runs into the base separately. The
-        // manifest that first lists a run allocates its number, and an
-        // extension's publication can allocate numbers before the first fold.
-        let run_no = projection
-            .manifest_segments
-            .manifest()
-            .payload()
-            .next_run_no;
-        let (runs, next_run_no) = if projection
-            .manifest_segments
-            .manifest()
-            .payload()
-            .runs
-            .is_empty()
-        {
-            (
-                vec![MetadataRunRef {
-                    run_no,
-                    run_seq: head_seq,
-                    tier: RunTier::Base,
-                    segments: flatten_manifest_segments(
-                        self.build_manifest_segments(&tail_state, layouts).await?,
-                    ),
-                }],
-                next_run_no_after(run_no)?,
-            )
-        } else {
-            let previous_manifest = projection.manifest_segments.manifest();
-            // A fold takes one number for its delta, or none when the head is
-            // unchanged.
-            let mut runs = previous_manifest.payload().runs.clone();
-            let mut next_run_no = run_no;
-            if previous_manifest.payload().head_seq < head_seq {
-                runs.push(MetadataRunRef {
-                    run_no,
-                    run_seq: head_seq,
-                    tier: RunTier::Delta,
-                    segments: flatten_manifest_segments(
-                        self.build_manifest_delta_run_segments(
-                            previous_manifest.payload().head_seq,
-                            &tail_state,
-                            layouts,
-                        )
-                        .await?,
-                    ),
-                });
-                next_run_no = next_run_no_after(run_no)?;
+        // run. Compaction rewrites delta runs into the base separately.
+        let run = if previous.runs.is_empty() {
+            FoldRun {
+                tier: RunTier::Base,
+                segments: flatten_manifest_segments(
+                    self.build_manifest_segments(&tail_state, layouts).await?,
+                ),
             }
-            (runs, next_run_no)
+        } else if previous.head_seq < projection.head().seq {
+            FoldRun {
+                tier: RunTier::Delta,
+                segments: flatten_manifest_segments(
+                    self.build_manifest_delta_run_segments(previous.head_seq, &tail_state, layouts)
+                        .await?,
+                ),
+            }
+        } else {
+            return Ok(None);
         };
-
-        let previous = projection.manifest_segments.manifest().payload();
-        // The head's floor includes every floor object in the tail that the
-        // fold covers (format spec, "Publishing a manifest").
-        Ok(NamespaceManifestPayload {
-            activity,
-            head_seq,
-            writer_epoch: projection.head().writer_epoch,
-            next_run_no,
-            folded_wal_no: projection.head().wal_no,
-            retention_floor_seq: previous
-                .retention_floor_seq
-                .max(projection.head().retention_floor_seq),
-            ..previous
-                .successor(runs)
-                .map_err(|_| no_manifest_after(previous.manifest_no))?
-        })
+        Ok(Some(run))
     }
 }
 
-/// Whether `current` already folds the WAL tail that ends at `head`.
-fn covers_tail(current: &NamespaceManifestPayload, head: &NamespaceReadState) -> bool {
-    current.folded_wal_no >= head.wal_no && current.head_seq >= head.seq
+/// How the writes of a fold before its turn in the publication lane ended
+/// (see [`NamespaceStore::write_fold_segments`]).
+pub enum FoldWriteOutcome {
+    /// The position's manifest already folds the position's tail, so the
+    /// fold writes and publishes nothing.
+    AlreadyFolded(FoldedWalTail),
+    /// The fold wrote the tail's content objects and segments.
+    Written(Box<FoldWrites>),
+}
+
+/// The content objects and segments that a fold wrote for a writer
+/// position's tail, which the fold's publication lists in its turn (see
+/// [`NamespaceStore::publish_fold_in_turn`]).
+pub struct FoldWrites {
+    /// The `folded_wal_no` of the manifest that the fold started from.
+    started_folded_wal_no: WalNo,
+    /// The head that replaying the tail reached.
+    head: NamespaceReadState,
+    /// The activity of the tail's commits.
+    tail_activity: ManifestActivity,
+    /// The run that lists the tail's segments, or `None` when the tail has
+    /// no commit above the manifest's head.
+    run: Option<FoldRun>,
+}
+
+/// The run that a fold writes, which takes its number from the manifest
+/// that lists it.
+struct FoldRun {
+    tier: RunTier,
+    segments: Vec<MetadataSegmentRef>,
+}
+
+/// Returns the manifest after `previous` that lists `writes`, a fold's run,
+/// with the fold's head. The manifest that first lists a run allocates its
+/// number, and an extension's publication can allocate numbers before the
+/// first fold.
+fn fold_payload(
+    previous: &NamespaceManifestPayload,
+    writes: &FoldWrites,
+) -> Result<NamespaceManifestPayload> {
+    let activity = previous
+        .activity
+        .checked_add(writes.tail_activity)
+        .ok_or_else(|| {
+            CoreError::NamespaceCorrupt(
+                "activity counter cannot exceed 9007199254740991".to_owned(),
+            )
+        })?;
+    let mut runs = previous.runs.clone();
+    let mut next_run_no = previous.next_run_no;
+    if let Some(run) = &writes.run {
+        runs.push(MetadataRunRef {
+            run_no: next_run_no,
+            run_seq: writes.head.seq,
+            tier: run.tier,
+            segments: run.segments.clone(),
+        });
+        next_run_no = next_run_no_after(next_run_no)?;
+    }
+    // The head's floor includes every floor object in the tail that the
+    // fold covers (format spec, "Publishing a manifest").
+    Ok(NamespaceManifestPayload {
+        activity,
+        head_seq: writes.head.seq,
+        next_run_no,
+        folded_wal_no: writes.head.wal_no,
+        retention_floor_seq: previous
+            .retention_floor_seq
+            .max(writes.head.retention_floor_seq),
+        ..previous
+            .successor(runs)
+            .map_err(|_| no_manifest_after(previous.manifest_no))?
+    })
 }
 
 #[derive(Clone)]
@@ -432,101 +475,6 @@ impl FoldedWalTail {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn published(&self) -> Option<Held<LoadedManifest>> {
         (self.response.outcome == FoldWalOutcome::Published).then(|| self.current.clone())
-    }
-}
-
-/// One fold's state across its publication attempts.
-struct FoldAttempts<'a, S: ObjectStore> {
-    namespace: &'a NamespaceStore<S>,
-    clock: &'a OperationClock,
-    projection: ManifestProjection<'a, S>,
-    /// The content objects written for the projection's tail, which a
-    /// rebuild over a manifest at the same head uses again.
-    layouts: Option<HashMap<ContentId, ContentLayoutRecord>>,
-}
-
-impl<S: ObjectStore> FoldAttempts<'_, S> {
-    /// Returns the next manifest over `current`, or `Finished` when `current`
-    /// already folds the tail.
-    async fn attempt(&mut self, current: LoadedManifest) -> Result<ManifestChange<FoldWalOutcome>> {
-        let payload = current.payload();
-        ensure_namespace_live(&self.namespace.namespace_id, payload.status)?;
-        if covers_tail(payload, self.projection.head()) {
-            return Ok(ManifestChange::Finished(FoldWalOutcome::AlreadyCurrent));
-        }
-        // Another manifest followed the fold's own predecessor without
-        // folding its tail, such as a compaction or a new writer's claim.
-        // Over a manifest at the same head, everything the fold has is
-        // still right:
-        // - Tail rows: see `same_head`.
-        // - Activity: a successor at the same `head_seq` keeps it, so the
-        //   basis activity plus the tail's is still the total.
-        // - Run numbers: the retry takes its runs and run number from the
-        //   winner.
-        // - Content: the first attempt's extents and layouts still describe
-        //   this tail.
-        if payload.manifest_no != self.projection.basis.manifest_no() {
-            let read_basis = self.projection.basis.read_basis();
-            if same_head(&read_basis.basis, &read_basis.head, &current) {
-                // A check that found no manifest after the projection's
-                // manifest also found none after `current`, a later manifest,
-                // so the projection keeps that check.
-                self.projection.basis.read_basis_mut().basis =
-                    MetadataBasis::new(current.manifest());
-                self.projection.manifest_segments =
-                    self.namespace.current_segments(&current).segments;
-            } else {
-                self.projection = self
-                    .namespace
-                    .load_fold_projection(self.clock.observe())
-                    .await?;
-                self.layouts = None;
-                // The tail was read above a manifest newer than `current`.
-                if self.projection.basis.manifest_no() != payload.manifest_no {
-                    return Ok(ManifestChange::Again);
-                }
-                if covers_tail(payload, self.projection.head()) {
-                    return Ok(ManifestChange::Finished(FoldWalOutcome::AlreadyCurrent));
-                }
-            }
-        }
-        // The projection reads the rows of `current`, which can be a writer
-        // position's manifest kept in memory. A newer manifest may have
-        // replaced that manifest, and a collection may then have deleted its
-        // segments. A read that finds a segment missing then returns
-        // `ManifestReplaced` (see `SegmentKeeper::load_error`), the attempt
-        // returns `Again`, and the next attempt builds on the newest manifest
-        // through the rebuild above, as an attempt after a lost put does. A
-        // missing segment of the current manifest stays `namespace_corrupt`.
-        let built = async {
-            let layouts = match self.layouts.take() {
-                Some(layouts) => layouts,
-                None => {
-                    self.namespace
-                        .materialize_tail_content(&self.projection)
-                        .await?
-                }
-            };
-            self.clock
-                .ensure_metadata_publication_budget(&self.namespace.namespace_id)?;
-            let manifest = self
-                .namespace
-                .build_namespace_manifest_for_projection(&self.projection, &layouts)
-                .await?;
-            Result::Ok((manifest, layouts))
-        }
-        .await;
-        match built {
-            Ok((manifest, layouts)) => {
-                self.layouts = Some(layouts);
-                Ok(ManifestChange::Next(
-                    Box::new(manifest),
-                    FoldWalOutcome::Published,
-                ))
-            }
-            Err(CoreError::ManifestReplaced { .. }) => Ok(ManifestChange::Again),
-            Err(error) => Err(error),
-        }
     }
 }
 

@@ -5,7 +5,7 @@ pub(super) use super::super::load::{
     append_rows_to_metadata, load_manifest_metadata_state_for_inspection_from_manifest,
     load_manifest_segments_for_inspection, load_manifest_state_for_inspection,
 };
-pub(super) use super::super::publish::{encode_manifest, ManifestPublicationOutcome};
+pub(super) use super::super::publish::ManifestPublicationOutcome;
 pub(super) use super::super::retention::RetentionTarget;
 pub(super) use super::super::{fold, load};
 pub(super) use crate::block_cache::ObjectStoreScope;
@@ -13,11 +13,11 @@ pub(super) use crate::changes::list_changes_after;
 pub(super) use crate::compaction::group_compaction::run_metadata_compaction;
 pub(super) use crate::compaction::plan;
 pub(super) use crate::compaction::plan::MetadataCompactionSpec;
-pub(super) use crate::compaction::publication::{input_segment_keys, CompactionPublication};
+pub(super) use crate::compaction::publication::input_segment_keys;
 pub(super) use crate::compaction::retention::retention_clusters;
 pub(super) use crate::compaction::run_iterator::locality_of;
 pub(super) use crate::compaction::step::MaintenanceCancellation;
-pub(super) use crate::compaction::CompactionUnitOutcome;
+pub(super) use crate::compaction::{CompactionUnitOutcome, CompactionWrites};
 pub(super) use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 pub(super) use crate::metadata::{MetadataState, MetadataStateBuilder};
 pub(super) use crate::namespace::state::NamespaceReadState;
@@ -310,7 +310,7 @@ pub(super) fn compact_rows_with_retention(
 }
 
 /// Runs a unit over a plan made earlier, against the current manifest, the
-/// way `NamespaceEngine::compact_metadata_unit_from` runs the plan it makes.
+/// way `NamespaceEngine::write_metadata_compaction_unit` runs the plan it makes.
 ///
 /// For a test that has to do something between the plan and the compaction, which
 /// stands for other publications during a long compaction.
@@ -361,30 +361,40 @@ pub(super) async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
         Err(stopped) => return stopped,
     };
     drop(segments);
-    let timer = crate::test_support::std_timer();
+    publish_compaction_over_current(
+        store,
+        namespace_id,
+        CompactionWrites {
+            namespace_id: namespace_id.clone(),
+            spec: spec.clone(),
+            input_keys,
+            report: compacted,
+            compaction: OperationClock::start(0, crate::test_support::std_timer()),
+        },
+        cancellation,
+    )
+    .await
+    .expect("publish the planned unit")
+}
+
+/// Publishes `writes`, a compaction unit's output, over the current
+/// manifest, as one item of a new publication lane whose session has the
+/// manifest's writer epoch.
+pub(super) async fn publish_compaction_over_current<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    writes: CompactionWrites,
+    cancellation: &MaintenanceCancellation,
+) -> crate::error::Result<CompactionUnitOutcome> {
     let namespace = crate::test_support::namespace_store(store, namespace_id);
     let basis = namespace
         .load_current_basis(crate::test_support::observed_now())
-        .await
-        .expect("load the current manifest");
+        .await?;
+    let lane = crate::test_support::lane_at_manifest(basis);
+    let guard = lane.lock().await;
     namespace
-        .finalize_metadata_compaction(
-            basis,
-            spec,
-            &input_keys,
-            compacted,
-            cancellation,
-            &CompactionPublication {
-                compaction: OperationClock::start(0, Arc::clone(&timer)),
-                publication: OperationClock::start(0, timer),
-                epoch: &crate::commit::session_epoch::SessionEpoch::new(
-                    &crate::publish::PublishedManifest::default(),
-                    &namespace,
-                ),
-            },
-        )
+        .publish_compaction_in_turn(guard.acquired_turn(), writes, cancellation)
         .await
-        .expect("publish the planned unit")
 }
 
 /// What a reader sees right now: every visible inode, resolved the way a
@@ -888,8 +898,8 @@ pub(crate) fn control_requests(
         .collect()
 }
 
-/// Publishes `payload` with one attempt of the publication loop, over the
-/// current manifest that it loads first.
+/// Publishes `payload` with one put, over the current manifest that it loads
+/// first.
 pub(super) async fn publish_once<S: ObjectStore + ?Sized>(
     store: &S,
     payload: NamespaceManifestPayload,
@@ -909,12 +919,7 @@ pub(super) async fn publish_once_within<S: ObjectStore + ?Sized>(
         .load_current_basis(crate::test_support::observed_now())
         .await?;
     namespace
-        .publish_manifest_from(
-            payload,
-            deadline,
-            Some(&basis),
-            crate::manifest::publish::ManifestSender::ClaimOrInitialization,
-        )
+        .publish_manifest_from(payload, deadline, Some(&basis))
         .await
 }
 

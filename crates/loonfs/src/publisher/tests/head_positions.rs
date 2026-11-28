@@ -363,13 +363,12 @@ async fn a_fold_moves_the_read_position_before_the_engine_is_released() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a position that reads start from, and that can't move onto
-/// a manifest this runtime published, is removed by the first read while
-/// the session's engine is idle, so later reads find no position to move.
+/// Checks that a position that reads start from, and that can't follow the
+/// session's status, is removed by the first read while the session's
+/// engine is idle, so later reads find no position to move.
 ///
 /// Another writer claims the namespace, and a fold through this runtime's
-/// session then folds over the claim, so the fold's manifest has the
-/// other writer's epoch.
+/// session then loses its put to the claim, which fences the session.
 #[tokio::test]
 async fn a_read_position_that_cannot_follow_a_publication_is_removed_by_the_next_read() {
     let temp_dir = tempdir().expect("tempdir");
@@ -388,15 +387,15 @@ async fn a_read_position_that_cannot_follow_a_publication_is_removed_by_the_next
         )))
         .await
         .expect("the rival takes over the namespace");
-    let folded = namespace
+    let fenced = namespace
         .fold_wal()
         .await
-        .expect("a fold over the rival's claim");
-    assert_eq!(folded.outcome, FoldWalOutcome::Published);
+        .expect_err("a fold that loses to the rival's claim");
+    assert_eq!(fenced.code(), crate::ErrorCode::WriterFenced, "{fenced:?}");
     let slot = &namespace.session().publisher.read_position;
     assert!(
         slot.current().is_none(),
-        "the position can't follow the fold"
+        "the position can't follow the fenced session"
     );
     assert!(
         slot.stored().is_none(),

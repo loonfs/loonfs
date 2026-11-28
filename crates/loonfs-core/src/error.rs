@@ -540,8 +540,9 @@ impl CoreError {
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::Forbidden { .. } => ErrorCode::Forbidden,
             CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
-            // LoonFS lost its own race on every attempt and published
-            // nothing, so the same request can succeed when it's sent again.
+            // A read or a publication found its manifest replaced and
+            // published nothing, so the same request can succeed when it's
+            // sent again.
             CoreError::ManifestReplaced { .. } | CoreError::HeadMoved(_) => {
                 ErrorCode::StoreContention
             }

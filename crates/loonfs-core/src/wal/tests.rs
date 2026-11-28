@@ -209,55 +209,6 @@ async fn fences_fold_and_stay_after_a_collection() {
         .expect("genesis remains readable");
 }
 
-#[tokio::test]
-async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
-    use loonfs_test_support::stores::{BlockingStore, OperationSelector};
-    let directory = tempfile::tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("fold-race").expect("namespace");
-    let store = BlockingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::exact(loonfs_objectstore::keys::metadata_manifest_object(
-            &namespace_id,
-            &loonfs_types::ManifestNo(4),
-        )),
-        OperationSelector::PutCreateIfAbsent,
-    );
-    let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
-        .create()
-        .await
-        .expect("create");
-    let position = NamespaceCommitEngine::new(
-        crate::test_support::namespace_store(&store, &namespace_id),
-        setup.writer_id.clone(),
-    )
-    .load_position_alone()
-    .await
-    .expect("first fence");
-    store.block_next();
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let clock = namespace.start_clock();
-    let (folded, acquired) = futures::join!(
-        namespace.fold_wal_tail_in_new_lane(&position, &clock),
-        async {
-            store.wait_until_blocked().await;
-            let acquired = crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .acquire_writer_epoch(&setup.writer_id)
-                .await;
-            store.release();
-            acquired
-        }
-    );
-    acquired.expect("second fence");
-    folded.expect("fold retries");
-    let current = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("manifest");
-    assert_eq!(current.payload().head_seq, CommitSeq(0));
-    assert_eq!(current.payload().folded_wal_no, WalNo(2));
-}
-
 /// Checks that an acquisition whose fence puts keep colliding stops when
 /// the acquisition's publication budget runs out, and writes no fence.
 #[tokio::test]
@@ -1066,24 +1017,26 @@ async fn fence_epoch<S: ObjectStore>(
     fence.payload().writer_epoch
 }
 
-/// Checks that a fence put at a number that a collection emptied is dead:
-/// the check after the put finds the fold's `folded_wal_no` at or above the
-/// fence, so the session puts a fence again at the new tip, and that fence
-/// is the tip of the acquired anchor. The dead fence stays.
+/// Checks that a fence put at a number that a collection emptied is dead,
+/// because the check after the put finds the fold's `folded_wal_no` at or
+/// above the fence, and that the acquisition returns `namespace_corrupt`
+/// without a second fence: only a fold of another process between the claim
+/// and the fence can fold the fence's number, and no other process publishes
+/// under the claim's epoch.
 #[tokio::test]
-async fn a_fence_at_an_emptied_number_is_dead_and_the_session_fences_again() {
+async fn a_fence_that_its_check_finds_folded_returns_namespace_corrupt() {
     let (_temp_dir, store, namespace_id, acquired) = acquire_over_an_emptied_number(false).await;
-    let acquired = acquired.expect("the session is acquired");
-    assert_eq!(acquired.writer.writer_epoch, WriterEpoch(2));
-    assert_eq!(acquired.anchor.read_state.wal_no, WalNo(5));
+    let error = acquired.expect_err("a dead fence");
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error:?}");
     assert_eq!(
         fence_epoch(&store, &namespace_id, WalNo(3)).await,
         WriterEpoch(2)
     );
-    assert_eq!(
-        fence_epoch(&store, &namespace_id, WalNo(5)).await,
-        WriterEpoch(2)
-    );
+    assert!(store
+        .head(&wal_object(&namespace_id, &WalNo(5)))
+        .await
+        .expect("head")
+        .is_none());
 }
 
 /// Checks that the check after a fence put applies the writer ownership

@@ -4,8 +4,8 @@
 use crate::compaction::group_compaction::{run_metadata_compaction, GroupCompactionReport};
 use crate::compaction::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
 use crate::compaction::plan::{group_run_descriptors, CompactionPlacement, MetadataCompactionSpec};
-use crate::compaction::publication::{input_segment_keys, CompactionPublication};
-use crate::compaction::{CompactionUnitOutcome, MaintenanceCancellation};
+use crate::compaction::publication::input_segment_keys;
+use crate::compaction::{CompactionUnitOutcome, CompactionWrites, MaintenanceCancellation};
 use crate::manifest::metadata_basis_from_manifest;
 use crate::manifest::publish::encode_manifest;
 use crate::metadata::InodeRecord;
@@ -215,27 +215,24 @@ pub(crate) async fn publish_rewritten<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     rewritten: RewrittenUnit,
 ) -> CompactionUnitOutcome {
-    let timer = super::std_timer();
     let namespace = super::namespace_store(store, namespace_id);
     let basis = namespace
         .load_current_basis(super::observed_now())
         .await
         .expect("load the current manifest");
+    let lane = super::lane_at_manifest(basis);
+    let guard = lane.lock().await;
     namespace
-        .finalize_metadata_compaction(
-            basis,
-            spec,
-            &rewritten.input_keys,
-            rewritten.compacted,
-            &MaintenanceCancellation::default(),
-            &CompactionPublication {
-                compaction: OperationClock::start(0, Arc::clone(&timer)),
-                publication: OperationClock::start(0, timer),
-                epoch: &crate::commit::session_epoch::SessionEpoch::new(
-                    &crate::publish::PublishedManifest::default(),
-                    &namespace,
-                ),
+        .publish_compaction_in_turn(
+            guard.acquired_turn(),
+            CompactionWrites {
+                namespace_id: namespace_id.clone(),
+                spec: spec.clone(),
+                input_keys: rewritten.input_keys,
+                report: rewritten.compacted,
+                compaction: OperationClock::start(0, super::std_timer()),
             },
+            &MaintenanceCancellation::default(),
         )
         .await
         .expect("publish the compaction")

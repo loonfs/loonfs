@@ -475,24 +475,20 @@ async fn a_publication_behind_on_both_runs_returns_what_the_writers_load_finds()
         let runs = std::sync::atomic::AtomicUsize::new(0);
         let (rival_ref, runs_ref, namespace_id) = (&rival, &runs, &fixture.namespace_id);
         let published: crate::Result<()> = publisher
-            .publish_from(
-                || publisher.writer_position(),
-                move |_position| {
-                    let run = runs_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    async move {
-                        if claimed && run == 1 {
-                            rival_ref
-                                .open_namespace(namespace_id)
-                                .expect("open on the rival")
-                                .create_directory("/rival", &loonfs_test_support::test_actor())
-                                .await
-                                .expect("the rival claims with a commit");
-                        }
-                        Err(CoreError::HeadMoved("behind".to_owned()))
+            .run_from_position(move |_position| {
+                let run = runs_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if claimed && run == 1 {
+                        rival_ref
+                            .open_namespace(namespace_id)
+                            .expect("open on the rival")
+                            .create_directory("/rival", &loonfs_test_support::test_actor())
+                            .await
+                            .expect("the rival claims with a commit");
                     }
-                },
-                |_| false,
-            )
+                    Err(CoreError::HeadMoved("behind".to_owned()))
+                }
+            })
             .await;
         assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 2);
         let error = published.expect_err("both runs are behind");
@@ -737,7 +733,7 @@ async fn a_window_change_and_an_extension_entry_take_their_turns_with_a_fold() {
         changed.expect("change the window");
         assert_matches!(
             published.expect("publish the entry"),
-            ExtensionPublication::Published { rebuilt: false, .. }
+            ExtensionPublication::Published { .. }
         );
     }
     let folded = bounded(Duration::from_secs(10), fold)
@@ -877,11 +873,12 @@ async fn an_advance_a_deletion_and_commits_finish_beside_a_fold() {
     fixture.shut_down().await;
 }
 
-/// Checks that two units that both need a claim claim once: a commit of a
-/// new session finds the session without its writer epoch and waits for the
-/// publication lane, which a fold keeps while it claims, and once the commit
-/// has the lane and the engine it finds the fold's claim and starts from
-/// the position that the fold kept, without a load.
+/// Checks that two units that both need a claim claim once: a commit and a
+/// fold of a new session both find the session without its writer epoch.
+/// The commit, which waited for the engine first, claims with the lane and
+/// the engine, and the fold, which waits for the lane meanwhile, then finds
+/// the commit's claim and writes its segments from the position that the
+/// commit kept, without a load, so it folds the commit.
 #[tokio::test]
 async fn a_unit_that_waits_for_a_claim_starts_from_the_kept_position() {
     let fixture = Fixture::new(|builder| builder).await;
@@ -925,7 +922,7 @@ async fn a_unit_that_waits_for_a_claim_starts_from_the_kept_position() {
     assert_matches!(
         bounded(Duration::from_millis(200), &mut fold).await,
         Err(_),
-        "the fold keeps the lane and waits for the engine"
+        "the fold waits for the engine"
     );
     fixture.reset_requests();
     drop(engine);
@@ -939,24 +936,23 @@ async fn a_unit_that_waits_for_a_claim_starts_from_the_kept_position() {
         .expect("the commit settles")
         .expect("join the commit")
         .expect("the commit commits");
-    assert!(
-        folded.manifest_head_seq < committed.committed_seq,
-        "the fold claimed, and the commit is above the fold's manifest"
+    assert_eq!(
+        folded.manifest_head_seq, committed.committed_seq,
+        "the commit claimed, and the fold folds it"
     );
     let operations = fixture.store.snapshot();
-    let fold_put = fixture.manifest(folded.manifest_no);
-    let after_fold = operations
-        .iter()
-        .position(|operation| {
-            matches!(operation, RecordedOperation::Put { .. }) && operation.key() == fold_put
-        })
-        .expect("the fold's manifest put");
     let wal = wal_prefix(&fixture.namespace_id);
+    let commit_put = operations
+        .iter()
+        .rposition(|operation| {
+            matches!(operation, RecordedOperation::Put { .. }) && operation.key().starts_with(&wal)
+        })
+        .expect("the commit's WAL put");
     assert!(
-        !operations[after_fold..].iter().any(|operation| {
+        !operations[commit_put..].iter().any(|operation| {
             operation.key().starts_with(&wal) && !matches!(operation, RecordedOperation::Put { .. })
         }),
-        "the commit reads no WAL object after the fold: {operations:?}"
+        "the fold reads no WAL object after the commit: {operations:?}"
     );
     assert_eq!(
         fixture.manifest_puts(),
@@ -964,4 +960,205 @@ async fn a_unit_that_waits_for_a_claim_starts_from_the_kept_position() {
         "one claim, then the fold"
     );
     other.shutdown().await.expect("shut down the other writer");
+}
+
+/// Checks that a fold writes its segments before it takes the session's
+/// publication lane, so a window change that arrives while the fold writes
+/// takes its turn first, and that the fold then publishes over the window
+/// change's manifest without writing its segments again.
+#[tokio::test]
+async fn a_fold_writes_its_segments_once_whatever_publishes_before_its_turn() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("segments-first").expect("namespace id");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let segments = loonfs_objectstore::keys::metadata_segment_prefix(&namespace_id);
+    let gate = Arc::new(BlockingStore::new(
+        Arc::clone(&store),
+        KeyPredicate::prefix(segments.clone()),
+        OperationSelector::Put,
+    ));
+    let writer =
+        crate::LoonFs::builder_with_store(gate.clone() as SharedStore, crate::Context::Service)
+            .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+            .config(crate::RuntimeConfig {
+                min_publish_interval_ms: 0,
+                ..crate::RuntimeConfig::default()
+            })
+            .monotonic_timer(Arc::new(ManualClock::new(0)))
+            .build()
+            .await
+            .expect("build writer");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "first", "first",
+        )))
+        .await
+        .expect("the session's first commit");
+    writer.drain().await.expect("drain");
+    let before = current_manifest_no(store.as_ref(), &namespace_id).await;
+    store.reset();
+    gate.block_next();
+    let folding = namespace.clone();
+    let fold = tokio::spawn(async move { folding.fold_wal().await });
+    bounded(Duration::from_secs(10), gate.wait_until_blocked())
+        .await
+        .expect("the fold writes its segments");
+    let changed = bounded(
+        Duration::from_secs(2),
+        namespace.set_retention_window(Some(retention_window(0))),
+    )
+    .await
+    .expect("the window change doesn't wait for the fold's segments");
+    changed.expect("change the window");
+    gate.release();
+    let folded = bounded(Duration::from_secs(10), fold)
+        .await
+        .expect("the fold settles")
+        .expect("join the fold")
+        .expect("fold");
+    let window_change = before.successor().expect("next manifest number");
+    assert_eq!(
+        folded.manifest_no,
+        window_change.successor().expect("next manifest number"),
+        "the fold publishes over the window change"
+    );
+    let segment_puts = store
+        .take()
+        .iter()
+        .filter(|operation| {
+            matches!(operation, RecordedOperation::Put { .. })
+                && operation.key().starts_with(&segments)
+        })
+        .count();
+    let listed = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("the fold's manifest")
+        .payload()
+        .runs
+        .last()
+        .expect("the fold's run")
+        .segments
+        .len();
+    assert_eq!(segment_puts, listed, "the fold writes each segment once");
+    writer.shutdown().await.expect("shut down writer");
+}
+
+/// Checks that a window change that the session's newest published manifest
+/// already has, whose confirmation finds that the session lost its writer
+/// epoch meanwhile, loads the session's position again with the lane that it
+/// keeps: the session claims once, and the call returns the unchanged
+/// window.
+#[tokio::test]
+async fn a_confirmation_that_finds_the_epoch_lost_claims_with_the_lane_it_keeps() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("confirm-claims").expect("namespace id");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let failing = Arc::new(
+        FailStore::new(
+            Arc::clone(&store),
+            KeyPredicate::prefix(wal_prefix(&namespace_id)),
+            OperationSelector::PutCreateIfAbsent,
+            InjectedError::Transport("lost acknowledgment".into()),
+        )
+        .apply_then_fail(),
+    );
+    let gate = Arc::new(BlockingStore::new(
+        Arc::clone(&failing),
+        KeyPredicate::manifest(&namespace_id),
+        OperationSelector::Head,
+    ));
+    let writer =
+        crate::LoonFs::builder_with_store(gate.clone() as SharedStore, crate::Context::Service)
+            .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+            .config(crate::RuntimeConfig {
+                min_publish_interval_ms: 0,
+                ..crate::RuntimeConfig::default()
+            })
+            .monotonic_timer(Arc::new(ManualClock::new(0)))
+            .build()
+            .await
+            .expect("build writer");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "first", "first",
+        )))
+        .await
+        .expect("the session's first commit");
+    namespace
+        .set_retention_window(Some(retention_window(0)))
+        .await
+        .expect("set the window");
+    writer.drain().await.expect("drain");
+    store.reset();
+    gate.block_next();
+    let changing = namespace.clone();
+    let change = tokio::spawn(async move {
+        changing
+            .set_retention_window(Some(retention_window(0)))
+            .await
+    });
+    bounded(Duration::from_secs(10), gate.wait_until_blocked())
+        .await
+        .expect("the confirmation checks the position");
+    failing.fail_next(1);
+    let committing = namespace.clone();
+    let commit = tokio::spawn(async move {
+        committing
+            .commit_candidate(CommitCandidate::new(create_directory_request(
+                "unknown", "unknown",
+            )))
+            .await
+    });
+    let publisher = namespace.session().publisher.clone();
+    bounded(Duration::from_secs(10), async {
+        while !matches!(*publisher.session.lock(), WriterSessionStatus::Unacquired) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the commit's unknown outcome ends the session's epoch");
+    gate.release();
+    let changed = bounded(Duration::from_secs(10), change)
+        .await
+        .expect("the window change doesn't wait for the lane that it keeps")
+        .expect("join the window change")
+        .expect("change the window");
+    assert_eq!(changed.retention_window_ms, Some(retention_window(0).get()));
+    bounded(Duration::from_secs(10), commit)
+        .await
+        .expect("the commit settles")
+        .expect("join the commit")
+        .expect("the commit commits");
+    let manifests = metadata_manifest_prefix(&namespace_id);
+    let manifest_puts = store
+        .take()
+        .iter()
+        .filter(|operation| {
+            matches!(operation, RecordedOperation::Put { .. })
+                && operation.key().starts_with(&manifests)
+        })
+        .count();
+    assert_eq!(manifest_puts, 1, "the session claims once");
+    writer.shutdown().await.expect("shut down writer");
 }

@@ -1,12 +1,11 @@
 //! Publication through the next immutable manifest number.
 
-use crate::commit::session_epoch::SessionEpoch;
+use crate::commit::publication_lane::LaneTurn;
 use crate::error::{CoreError, Result};
-use crate::limits::MAX_CONTENTION_ATTEMPTS;
-use crate::manifest::published::PublicationReport;
 use crate::namespace::boundary::KeptBoundary;
-use crate::namespace::control::{ensure_namespace_live, LoadedManifest, NewestManifest};
+use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::held::Held;
+use crate::namespace::read_anchor::ensure_stored_writer_epoch;
 use crate::namespace::store::NamespaceStore;
 use crate::phase::Phase;
 use crate::segment::runs::runs_newest_first;
@@ -44,68 +43,6 @@ pub(crate) fn encode_manifest(
     encode_namespace_manifest_json(payload).expect("a namespace manifest should encode")
 }
 
-pub(crate) enum ManifestChange<T> {
-    Next(Box<NamespaceManifestPayload>, T),
-    Finished(T),
-    Again,
-}
-
-/// Who sends a manifest put.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum ManifestSender<'a> {
-    /// A claim, or a publication that initializes a namespace (a create, an
-    /// activation, a fork's manifests, or the tombstone of an initializing
-    /// namespace), which no writer session's epoch covers.
-    ClaimOrInitialization,
-    /// A writer session, which sends the put under its epoch (see
-    /// [`SessionEpoch::send_put`]).
-    Session(&'a SessionEpoch<'a>),
-}
-
-/// What one call of [`NamespaceStore::update_manifest`] did: the response of
-/// its last attempt, and the manifest that's current after the call.
-pub(crate) struct ManifestUpdate<T> {
-    pub(crate) response: T,
-    /// The manifest that the call published, or that the last attempt built
-    /// on when that attempt returned `Finished`, with the check that found
-    /// it: the start of the call's clock for a manifest that the call
-    /// published or found by a request, and the caller's own check for the
-    /// caller's basis.
-    pub(crate) current: Held<LoadedManifest>,
-    /// Whether the call published `current`.
-    pub(crate) published: bool,
-}
-
-impl<T> ManifestUpdate<T> {
-    /// Returns the response, and the current manifest when the call
-    /// published it.
-    pub(crate) fn into_report(self) -> PublicationReport<T> {
-        PublicationReport {
-            published: self.published.then_some(self.current),
-            response: self.response,
-        }
-    }
-
-    /// Returns this update of a writer session's publication that built on
-    /// manifest `built_on`, the manifest of the session's position, or
-    /// `head_moved` when the update published nothing and ended on a later
-    /// manifest, which won a put of the update. The session then doesn't
-    /// return a result computed from that manifest: it drops the position and
-    /// loads it again with the writer's load, which returns `writer_fenced`
-    /// when the manifest is another writer's (see
-    /// [`NamespaceStore::load_publication_basis`]).
-    pub(crate) fn published_or_unchanged(self, built_on: ManifestNo) -> Result<Self> {
-        if self.published || self.current.manifest_no() == built_on {
-            return Ok(self);
-        }
-        Err(CoreError::HeadMoved(format!(
-            "manifest `{}` won a put of a publication from the writer position's manifest \
-             `{built_on}`, and the publication ended without a put",
-            self.current.manifest_no()
-        )))
-    }
-}
-
 /// A namespace that a create or a fork found at its ID.
 pub(crate) enum ExistingNamespace {
     /// The namespace's newest manifest is active.
@@ -114,129 +51,99 @@ pub(crate) enum ExistingNamespace {
     Initializing(Held<LoadedManifest>),
 }
 
-/// Where the next attempt of [`update_manifest`] starts.
-enum NextAttempt {
-    /// Builds on this manifest without a request first.
-    BuildOn(Held<LoadedManifest>),
-    /// Builds on the newest manifest above this one, which the last attempt
-    /// found to have a successor (see [`NamespaceStore::find_current_above`]).
-    BuildAbove(Held<LoadedManifest>),
-}
-
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Publishes the next manifest after the current one, and tries again after
-    /// a lost put. Each put is sent by `sender`.
+    /// Publishes `payload` as a publication of a writer session's
+    /// publication lane, whose turn is `turn`: puts it once, as the successor of the
+    /// turn's basis, the session's newest published manifest, under the
+    /// session's epoch (see
+    /// [`SessionEpoch::send_put`](crate::commit::session_epoch::SessionEpoch::send_put)), and records the
+    /// published manifest as the session's newest published manifest before
+    /// the lane takes the next publication (format spec, "Publishing a
+    /// manifest").
     ///
-    /// Each attempt passes the manifest that it builds on to `change`. The first
-    /// attempt builds on `basis` without a request, whatever its age, and
-    /// without `basis` it finds the newest manifest from the manifest
-    /// boundary. A `Next` payload is published at the next manifest number with
-    /// put-if-absent, and the put's outcome is settled against the boundary
-    /// (see [`publish_manifest_from`]). After a lost put, the next attempt
-    /// builds on the manifest that won. After `Again`, the next attempt builds
-    /// on the newest manifest above the one that the attempt built on. The call
-    /// returns `store_contention` once [`MAX_CONTENTION_ATTEMPTS`] attempts
-    /// have each lost their put or returned `Again`.
-    /// The caller starts `clock` before the call, so
-    /// `METADATA_PUBLICATION_BUDGET_MS` covers every attempt, from the first
-    /// request to the last put.
+    /// Only the namespace's writer publishes its manifests, and the
+    /// session's publications take turns in its lane, so a lost put (a
+    /// collision, or a put at a number that a collection emptied, which the
+    /// boundary read reports at or below the boundary) can only have lost to
+    /// another writer's claim. The call then returns `writer_fenced` with the
+    /// claim's writer block, read from the manifest that won, records the
+    /// session as fenced, and doesn't put again. A winner with the session's
+    /// own epoch returns `namespace_corrupt`, because no other process
+    /// publishes under that epoch. When the read of the manifest that won
+    /// fails, the call returns that read's error, and the session keeps its
+    /// epoch, so the next publication of the lane puts at the same number,
+    /// loses, and reads the winner.
     ///
-    /// Why can an attempt put without checking its basis first? A put at a
-    /// number that a collection emptied succeeds, but the boundary read after
-    /// the put finds the number at or below the boundary, and the put counts
-    /// as lost (format spec, "Publishing a manifest").
-    pub(crate) async fn update_manifest<T, F, Fut>(
+    /// # Panics
+    ///
+    /// Panics if `turn` is a turn of another namespace's lane, which is a
+    /// bug in the calling process.
+    pub(crate) async fn publish_manifest_in_turn(
         &self,
-        basis: Option<Held<LoadedManifest>>,
+        turn: LaneTurn<'_>,
+        payload: NamespaceManifestPayload,
         clock: &OperationClock,
-        sender: ManifestSender<'_>,
-        mut change: F,
-    ) -> Result<ManifestUpdate<T>>
-    where
-        F: FnMut(LoadedManifest) -> Fut,
-        Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
-    {
-        let mut next = basis.map(NextAttempt::BuildOn);
-        let mut attempt = 0;
-        let update = |response, current, published| ManifestUpdate {
-            response,
-            current,
-            published,
+    ) -> Result<Held<LoadedManifest>> {
+        assert_eq!(
+            turn.basis().manifest().payload().namespace_id,
+            self.namespace_id,
+            "a publication takes a turn of its own namespace's publication lane"
+        );
+        let outcome = turn
+            .epoch(self)
+            .send_put(self.publish_manifest_from(payload, clock, Some(turn.basis())))
+            .await?;
+        let winner = match outcome {
+            ManifestPublicationOutcome::Published(published) => {
+                turn.record(&published);
+                return Ok(published);
+            }
+            ManifestPublicationOutcome::Lost(winner) => winner,
         };
-        loop {
-            attempt += 1;
-            let current = match next.take() {
-                Some(NextAttempt::BuildOn(basis)) => basis,
-                Some(NextAttempt::BuildAbove(basis)) => {
-                    self.find_current_above(
-                        basis.manifest(),
-                        basis.boundary().clone(),
-                        clock.origin(),
-                    )
-                    .await?
-                }
-                None => self.load_current_basis(clock.origin()).await?,
-            };
-            let built_on = current.manifest().object_key.clone();
-            let predecessor = current.manifest().payload().manifest_no;
-            match change(current.manifest().clone()).await? {
-                ManifestChange::Next(payload, result) => {
-                    let mut payload = *payload;
-                    payload.manifest_no = super::fold::next_manifest_no_after(predecessor)?;
-                    let outcome = self
-                        .publish_manifest_from(payload, clock, Some(&current), sender)
-                        .await?;
-                    let winner = match outcome {
-                        ManifestPublicationOutcome::Published(published) => {
-                            return Ok(update(result, published, true));
-                        }
-                        ManifestPublicationOutcome::Lost(winner) => winner,
-                    };
-                    tracing::debug!(
-                        namespace_id = self.namespace_id.as_str(),
-                        attempt,
-                        attempts = MAX_CONTENTION_ATTEMPTS,
-                        "a manifest publication lost its put"
-                    );
-                    // The lost put checked the winner against the manifest
-                    // boundary.
-                    next = Some(NextAttempt::BuildOn(winner));
-                }
-                ManifestChange::Finished(result) => {
-                    return Ok(update(result, current, false));
-                }
-                ManifestChange::Again => next = Some(NextAttempt::BuildAbove(current)),
-            }
-            if attempt >= MAX_CONTENTION_ATTEMPTS {
-                return Err(CoreError::contention_exhausted(&built_on));
-            }
-        }
+        let error = match ensure_stored_writer_epoch(winner.manifest().payload(), turn.writer()) {
+            Err(error) => error,
+            Ok(()) => CoreError::NamespaceCorrupt(format!(
+                "manifest {} of writer epoch {} won the put of the manifest after manifest {}, \
+                 which this session published under that epoch",
+                winner.manifest_no(),
+                turn.writer().writer_epoch,
+                turn.basis().manifest_no()
+            )),
+        };
+        turn.record_error(&error);
+        Err(error)
     }
 
-    /// Publishes the next manifest after the current one of a live namespace,
-    /// through [`Self::update_manifest`].
-    ///
-    /// Each attempt returns `namespace_deleted` when the manifest that the
-    /// attempt builds on is a tombstone, and otherwise passes a copy of that
-    /// manifest's payload to `change`.
-    pub(crate) async fn update_live_manifest<T, F, Fut>(
+    /// Publishes the successor of `current`, the newest manifest of an
+    /// initializing namespace, that `next` builds from `current`'s payload,
+    /// with one put. When a fork's manifest 2 won the put, the call puts once
+    /// more over manifest 2, so an activation or a tombstone of a fork
+    /// builds on the fork's manifest 2. The format allows three manifests
+    /// after manifest 1 of an initializing namespace (a fork's manifest 2,
+    /// the activation, and the tombstone), so the second put's outcome
+    /// settles the namespace's status, and the caller returns a result that
+    /// depends on the manifest that won.
+    pub(crate) async fn publish_over_initializing(
         &self,
-        basis: Option<Held<LoadedManifest>>,
+        current: Held<LoadedManifest>,
         clock: &OperationClock,
-        sender: ManifestSender<'_>,
-        mut change: F,
-    ) -> Result<ManifestUpdate<T>>
-    where
-        F: FnMut(NamespaceManifestPayload) -> Fut,
-        Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
-    {
-        self.update_manifest(basis, clock, sender, |current: LoadedManifest| {
-            let payload = current.payload();
-            let changed = ensure_namespace_live(&payload.namespace_id, payload.status)
-                .map(|()| change(payload.clone()));
-            async move { changed?.await }
-        })
-        .await
+        next: impl Fn(&NamespaceManifestPayload) -> NamespaceManifestPayload,
+    ) -> Result<ManifestPublicationOutcome> {
+        let outcome = self
+            .publish_manifest_from(next(current.manifest().payload()), clock, Some(&current))
+            .await?;
+        match outcome {
+            ManifestPublicationOutcome::Lost(winner)
+                if matches!(
+                    winner.manifest().payload().status,
+                    NamespaceStatus::Initializing {}
+                ) =>
+            {
+                self.publish_manifest_from(next(winner.manifest().payload()), clock, Some(&winner))
+                    .await
+            }
+            settled => Ok(settled),
+        }
     }
 
     /// Returns the current manifest, with the manifest boundary, for a
@@ -305,10 +212,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         payload: NamespaceManifestPayload,
         clock: &OperationClock,
     ) -> Result<Held<LoadedManifest>> {
-        match self
-            .publish_manifest_from(payload, clock, None, ManifestSender::ClaimOrInitialization)
-            .await?
-        {
+        match self.publish_manifest_from(payload, clock, None).await? {
             ManifestPublicationOutcome::Published(basis) => Ok(basis),
             ManifestPublicationOutcome::Lost(current) => Err(existing_namespace(
                 self.namespace_id.clone(),
@@ -320,22 +224,23 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Publishes `payload` once with put-if-absent, as the successor of
     /// `current`, or as manifest 1 when `current` is `None`.
     ///
-    /// Every manifest put goes through this call, which replaces the
-    /// payload's `publication_id` with a new ID before it encodes the
-    /// payload, so a manifest with the same reference is this call's own put
-    /// (format spec, "Conflicting and unknown installations").
+    /// Every manifest put goes through this call, which assigns the
+    /// payload's manifest number and replaces its `publication_id` with a
+    /// new ID before it encodes the payload, so a manifest with the same
+    /// reference is this call's own put (format spec, "Conflicting and
+    /// unknown installations"). A writer session's put comes through
+    /// [`Self::publish_manifest_in_turn`], and a claim's and an initializing
+    /// publication's put come here directly.
     ///
     /// After a put that loses, the call finds the current manifest by probing
     /// above `current` (see [`find_current_above`]). It finds the newest
     /// manifest from the manifest boundary instead when `current` is `None`.
     ///
     /// After a put that succeeds, the call reads the manifest boundary (see
-    /// [`Self::settle_against_boundary`]).
-    ///
-    /// A writer session's put is sent through its [`SessionEpoch`], and the
-    /// session loses its epoch when the call returns `outcome_unknown`: the
-    /// put, or a check after it, failed in a way that leaves the put's
-    /// outcome unknown. Every other result shows the outcome.
+    /// [`Self::settle_against_boundary`]). The call returns
+    /// `outcome_unknown` when the put, or a check after it, failed in a way
+    /// that leaves the put's outcome unknown, and every other result shows
+    /// the outcome.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
@@ -343,13 +248,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
         skip_all,
         fields(phase = Phase::PublishManifest.as_str(), key_class = "manifest")
     )]
-    pub(super) async fn publish_manifest_from(
+    pub(crate) async fn publish_manifest_from(
         &self,
         mut payload: NamespaceManifestPayload,
         clock: &OperationClock,
         current: Option<&Held<LoadedManifest>>,
-        sender: ManifestSender<'_>,
     ) -> Result<ManifestPublicationOutcome> {
+        payload.manifest_no = match current {
+            Some(current) => super::fold::next_manifest_no_after(current.manifest_no())?,
+            None => ManifestNo(1),
+        };
         payload.publication_id = PublicationId::generate();
         let manifest = encode_manifest(payload);
         let namespace_id = manifest.envelope().payload().namespace_id.clone();
@@ -391,10 +299,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     namespace_id: namespace_id.clone(),
                 });
             }
-            if manifest.envelope().payload().writer_epoch < current_manifest.payload().writer_epoch
-            {
-                return Ok(ManifestPublicationOutcome::Lost(current.clone()));
-            }
             match classify_current(current, &candidate, expected_predecessor) {
                 ManifestKind::Installable => {}
                 ManifestKind::Settled(outcome) => return Ok(outcome),
@@ -402,11 +306,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
         assert_legal_successor(manifest.envelope().payload(), current);
         clock.ensure_metadata_publication_budget(namespace_id)?;
-        let sent = self.put_manifest(manifest, &candidate, current, expected_predecessor, clock);
-        match sender {
-            ManifestSender::ClaimOrInitialization => sent.await,
-            ManifestSender::Session(epoch) => epoch.send_put(sent).await,
-        }
+        self.put_manifest(manifest, &candidate, current, expected_predecessor, clock)
+            .await
     }
 
     /// Puts `manifest`, the encoding of `candidate`, with put-if-absent, and

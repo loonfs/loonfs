@@ -489,3 +489,73 @@ async fn closing_a_session_does_not_wait_for_another_sessions_compaction() {
     );
     writer.shutdown().await.expect("shut down writer");
 }
+
+/// Checks that the session's compaction loop stops after three abandoned
+/// units in a row. Each unit here passes its time bound while it writes its
+/// output, as a unit over a slow store would, and the next unit plans the
+/// same window from the same position, so without the limit the loop would
+/// run units without end.
+#[tokio::test]
+async fn the_compaction_loop_stops_after_three_units_past_their_time_bound() {
+    let temp_dir = tempdir().expect("tempdir");
+    let timer = Arc::new(ManualClock::new(0));
+    let slow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let store = Arc::new(FailStore::matching(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        {
+            let (timer, slow) = (Arc::clone(&timer), Arc::clone(&slow));
+            let segments = KeyPredicate::metadata_segment();
+            move |operation| {
+                if slow.load(AtomicOrdering::SeqCst)
+                    && segments.matches(operation.key())
+                    && OperationSelector::Put.matches(operation.kind())
+                {
+                    timer.advance_ms(loonfs_core::limits::METADATA_COMPACTION_BUDGET_MS + 1);
+                }
+                false
+            }
+        },
+        InjectedError::Transport("never injected".to_owned()),
+    ));
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
+        .monotonic_timer(timer)
+        .metrics_recorder(recorder.clone())
+        .build()
+        .await
+        .expect("build writer");
+    let namespace = session_one_fold_short(&writer, store.inner(), "slow-compaction").await;
+
+    // The unit waits for a permit until the store turns slow, so the fold's
+    // own segment writes take no time.
+    let mut permits = Vec::new();
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS.get() {
+        permits.push(writer.execution_budget().compaction_permit().await);
+    }
+    namespace
+        .put_file("/file-due", b"body", &loonfs_test_support::test_actor())
+        .await
+        .expect("put the file whose fold makes compaction due");
+    namespace.wait_for_fold().await.expect("the fold settles");
+    let due = current_manifest(store.inner(), namespace.id()).await;
+    slow.store(true, AtomicOrdering::SeqCst);
+    drop(permits);
+    bounded(Duration::from_secs(30), writer.drain())
+        .await
+        .expect("the compaction loop stops")
+        .expect("drain");
+
+    assert_eq!(compactions(&recorder, "abandoned"), 3);
+    assert_eq!(compactions(&recorder, "completed"), 0);
+    assert_eq!(
+        current_manifest(store.inner(), namespace.id())
+            .await
+            .manifest(),
+        due.manifest(),
+        "an abandoned unit publishes nothing"
+    );
+    slow.store(false, AtomicOrdering::SeqCst);
+    writer.shutdown().await.expect("shut down writer");
+}

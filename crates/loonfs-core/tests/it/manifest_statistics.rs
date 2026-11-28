@@ -151,8 +151,10 @@ async fn a_folds_activity_counts_each_commit_once_and_reads_use_only_manifests()
         assert_eq!(folded.manifest.head_seq, CommitSeq(4));
         assert_eq!(folded.inode_record_count, 5); // Root, two directories, two files.
 
-        // A stale position's fold reports the position behind instead of
-        // folding again, and a fresh engine finds the activity covered.
+        // A stale position's fold in another lane of the session's epoch
+        // loses its put to the first fold instead of folding again, because
+        // no other process publishes under that epoch, and a fresh engine
+        // finds the activity covered.
         let repeated = namespace_store(&store, &ns)
             .fold_wal_tail_in_new_lane(
                 &input,
@@ -164,7 +166,7 @@ async fn a_folds_activity_counts_each_commit_once_and_reads_use_only_manifests()
             .await;
         assert!(matches!(
             repeated,
-            Err(loonfs_core::CoreError::HeadMoved(_))
+            Err(loonfs_core::CoreError::NamespaceCorrupt(_))
         ));
         namespace_engine(&store, &ns, &context)
             .fold_in_new_session()

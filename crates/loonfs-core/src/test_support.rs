@@ -656,19 +656,40 @@ impl<S: ObjectStore> NamespaceStore<S> {
 }
 
 /// The publications of a test that publishes from a position outside the
-/// position's session, as another process or another session would: each is
-/// the one item of a new publication lane.
+/// position's session, as another session of the position's writer epoch
+/// would: each is the one item of a new publication lane whose session has
+/// the position's epoch, with the position's manifest as its newest published
+/// manifest.
 impl<S: ObjectStore> NamespaceStore<S> {
+    /// Returns a new publication lane whose session has the writer epoch of
+    /// `position` and the position's manifest as its newest published
+    /// manifest.
+    async fn lane_at(
+        &self,
+        position: &crate::commit::publish_view::WriterPosition,
+    ) -> crate::Result<crate::publish::PublicationLane> {
+        let basis = self
+            .load_position_basis(position)
+            .await?
+            .expect("the position's manifest should be in the store");
+        Ok(lane_at_manifest(basis))
+    }
+
     /// Folds the WAL tail from `position` (see
-    /// [`NamespaceStore::fold_wal_tail_from`]).
+    /// [`NamespaceStore::write_fold_segments`] and
+    /// [`NamespaceStore::publish_fold_in_turn`]).
     pub async fn fold_wal_tail_in_new_lane(
         &self,
         position: &crate::commit::publish_view::WriterPosition,
         clock: &crate::time::OperationClock,
     ) -> crate::Result<crate::FoldedWalTail> {
-        let lane = crate::publish::PublicationLane::new();
+        let lane = self.lane_at(position).await?;
+        let writes = match self.write_fold_segments(position, clock).await? {
+            crate::FoldWriteOutcome::AlreadyFolded(folded) => return Ok(folded),
+            crate::FoldWriteOutcome::Written(writes) => writes,
+        };
         let guard = lane.lock().await;
-        Box::pin(self.fold_wal_tail_from(guard.turn_from(position.clone()), clock)).await
+        Box::pin(self.publish_fold_in_turn(guard.acquired_turn(), writes, clock)).await
     }
 
     /// Publishes an extension's change from `position` (see
@@ -680,11 +701,45 @@ impl<S: ObjectStore> NamespaceStore<S> {
         name: &loonfs_types::ExtensionName,
         entry: loonfs_types::format::manifest::ExtensionEntry,
     ) -> crate::Result<crate::PublicationReport<crate::ExtensionPublication>> {
-        let lane = crate::publish::PublicationLane::new();
+        let lane = self.lane_at(position).await?;
         let guard = lane.lock().await;
-        self.publish_extension_from(guard.turn_from(position.clone()), basis, name, entry)
+        self.publish_extension_from(guard.acquired_turn(), basis, name, entry)
             .await
     }
+}
+
+impl<S: ObjectStore + Clone> NamespaceStore<S> {
+    /// Deletes the namespace in a new writer session of `writer_id`, which
+    /// claims the namespace first, as another process's deletion would.
+    pub async fn delete_in_new_session(
+        &self,
+        writer_id: &loonfs_types::WriterId,
+    ) -> crate::Result<loonfs_types::DeleteNamespaceResponse> {
+        let administrator = administrator_of(self.store.clone(), &self.namespace_id);
+        crate::publish::NamespaceCommitEngine::new(self.clone(), writer_id.clone())
+            .delete_namespace_alone(&administrator, Default::default())
+            .await
+    }
+}
+
+/// Returns a new publication lane whose session has the writer epoch of
+/// `basis`, a manifest of the namespace, and `basis` as its newest published
+/// manifest.
+///
+/// A test publishes through it over a manifest as the namespace's writer
+/// would.
+pub fn lane_at_manifest(basis: Held<LoadedManifest>) -> crate::publish::PublicationLane {
+    let payload = basis.manifest().payload();
+    let writer = crate::namespace::writer_epoch::AcquiredWriter {
+        writer_id: payload.writer.as_ref().map_or_else(
+            || writer_at("test-writer", 0).writer_id,
+            |writer| writer.writer_id.clone(),
+        ),
+        writer_epoch: payload.writer_epoch,
+    };
+    let lane = crate::publish::PublicationLane::new();
+    lane.published_manifest().lock().acquire(writer, basis);
+    lane
 }
 
 /// Folds the WAL tail of `namespace`, a fork's source, and returns no writer
@@ -904,9 +959,10 @@ impl<S: ObjectStore + Clone> NamespaceStore<S> {
     ///
     /// The session publishes at the newest writer's epoch without a claim,
     /// from any store handle, which the design rules out for a real process:
-    /// only the session that claimed an epoch publishes under it. It exists
-    /// for the tests of the publication loop that builds again over a winner
-    /// of the same epoch, and it goes when that loop goes.
+    /// only the session that claimed an epoch publishes under it. A test that
+    /// publishes through it beside another session of the same epoch makes two
+    /// publishers of one epoch, and a lost put of either returns
+    /// `namespace_corrupt`.
     pub async fn fixture_writer_session(
         &self,
     ) -> crate::Result<crate::publish::NamespaceCommitEngine<S>> {
@@ -940,6 +996,29 @@ impl<S: ObjectStore + Clone> NamespaceStore<S> {
 }
 
 impl<S: ObjectStore> NamespaceWriterEngine<S> {
+    /// Runs one metadata compaction unit planned from `position`, and
+    /// publishes it in a new publication lane whose session has the
+    /// position's writer epoch and manifest, as another session of that
+    /// epoch would.
+    pub async fn compact_in_new_lane(
+        &self,
+        position: &crate::commit::publish_view::WriterPosition,
+    ) -> crate::error::Result<crate::CompactionUnitOutcome> {
+        let cancellation = crate::compaction::MaintenanceCancellation::default();
+        let writes = match self
+            .write_metadata_compaction_unit(position, &cancellation)
+            .await?
+        {
+            crate::CompactionWriteOutcome::Ended(outcome) => return Ok(outcome),
+            crate::CompactionWriteOutcome::Written(writes) => writes,
+        };
+        let lane = self.namespace.lane_at(position).await?;
+        let guard = lane.lock().await;
+        self.namespace
+            .publish_compaction_in_turn(guard.acquired_turn(), writes, &cancellation)
+            .await
+    }
+
     /// Runs one metadata compaction unit planned from the position of the
     /// fixture's writer session (see [`NamespaceStore::fixture_writer_session`]),
     /// without a cancellation.
@@ -948,13 +1027,30 @@ impl<S: ObjectStore> NamespaceWriterEngine<S> {
         S: Clone,
     {
         let mut session = self.namespace.fixture_writer_session().await?;
+        self.compact_in_session(&mut session).await
+    }
+
+    /// Runs one metadata compaction unit planned from the position of
+    /// `session`, a writer session of this namespace, and publishes it in the
+    /// session's publication lane, without a cancellation.
+    pub async fn compact_in_session<T: ObjectStore>(
+        &self,
+        session: &mut crate::publish::NamespaceCommitEngine<T>,
+    ) -> crate::error::Result<crate::CompactionUnitOutcome> {
         let position = session.load_position_alone().await?;
-        self.compact_metadata_unit_from(
-            &position,
-            &session.publication_lane(),
-            &crate::compaction::MaintenanceCancellation::default(),
-        )
-        .await
+        let cancellation = crate::compaction::MaintenanceCancellation::default();
+        let writes = match self
+            .write_metadata_compaction_unit(&position, &cancellation)
+            .await?
+        {
+            crate::CompactionWriteOutcome::Ended(outcome) => return Ok(outcome),
+            crate::CompactionWriteOutcome::Written(writes) => writes,
+        };
+        let lane = session.publication_lane();
+        let guard = lane.lock().await;
+        self.namespace
+            .publish_compaction_in_turn(guard.acquired_turn(), writes, &cancellation)
+            .await
     }
 }
 

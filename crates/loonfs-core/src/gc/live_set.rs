@@ -11,8 +11,8 @@ use super::snapshots::sweep_snapshot_record;
 use crate::error::Result;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::GC_GRACE_WINDOW_MS;
+use crate::manifest::publish::ManifestPublicationOutcome;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
-use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use crate::wal::wal_no_is_unfolded;
@@ -79,17 +79,20 @@ impl LiveSet {
         let current = match found {
             RetirementStatus::Initializing { tombstone_at_ms } if now_ms >= tombstone_at_ms => {
                 let created_at_ms = current.manifest().payload().created_at_ms;
-                let update = namespace
+                match namespace
                     .tombstone_initializing_namespace(current, clock)
-                    .await?;
-                if let TombstoneOutcome::Published(_) = update.response {
-                    tracing::info!(
-                        namespace_id = %namespace_id,
-                        created_at_ms,
-                        "published the tombstone of an abandoned namespace creation"
-                    );
+                    .await?
+                {
+                    ManifestPublicationOutcome::Published(tombstone) => {
+                        tracing::info!(
+                            namespace_id = %namespace_id,
+                            created_at_ms,
+                            "published the tombstone of an abandoned namespace creation"
+                        );
+                        tombstone
+                    }
+                    ManifestPublicationOutcome::Lost(winner) => winner,
                 }
-                update.current
             }
             _ => current,
         };

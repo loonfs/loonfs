@@ -4,27 +4,28 @@
 //! `max_input_runs_per_step` complete runs from the current manifest's
 //! descriptors (see [`super::plan`]), rewrites the whole window into one run
 //! with [`super::group_compaction`] whatever the number of rows its runs list,
-//! and publishes the replacement
-//! manifest through [`super::publication`]. A base compaction may apply retention,
+//! and the unit's turn in the writer session's publication lane publishes the
+//! replacement manifest through [`super::publication`]. A base compaction may apply retention,
 //! and a delta compaction drops only superseded layouts. The namespace's
 //! [`MetadataRunPolicy`](crate::segment::MetadataRunPolicy) sets which runs a
 //! group compacts, and when: a tier of similar-size runs once it has
 //! `min_compaction_runs` runs, and a group's newest runs once it has
 //! `max_delta_runs` delta runs.
 
-use super::group_compaction::run_metadata_compaction;
+use super::group_compaction::{run_metadata_compaction, GroupCompactionReport};
 use super::plan::{plan_compaction, select_family_group, MetadataCompactionSpec};
-use super::publication::{input_segment_keys, CompactionPublication};
-use crate::commit::publication_lane::PublicationLane;
+use super::publication::input_segment_keys;
 use crate::commit::publish_view::WriterPosition;
 use crate::engine::{NamespaceEngine, Writable};
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::held::Held;
 use crate::phase::Phase;
 use crate::segment::runs::{runs_newest_first, MetadataFamilyGroup};
+use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{MetadataSkippedWork, NamespaceId};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -58,8 +59,7 @@ pub enum CompactionUnitOutcome {
     },
     /// The caller cancelled the unit before it published.
     Cancelled,
-    /// The unit's inputs changed, its time bound passed, or every publication
-    /// attempt lost.
+    /// The unit's inputs changed or its time bound passed.
     Abandoned,
 }
 
@@ -77,31 +77,54 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 }
 
+/// How the writes of a compaction unit before its turn in the session's
+/// publication lane ended (see
+/// [`NamespaceEngine::write_metadata_compaction_unit`]).
+#[derive(Debug)]
+pub enum CompactionWriteOutcome {
+    /// The unit ended without output to publish: nothing was due, or the
+    /// unit was cancelled or abandoned while it wrote.
+    Ended(CompactionUnitOutcome),
+    /// The unit wrote its output segments.
+    Written(CompactionWrites),
+}
+
+/// The output segments that a compaction unit wrote from the runs of a
+/// writer position's manifest, which the unit's publication lists in its
+/// turn (see [`NamespaceStore::publish_compaction_in_turn`](crate::NamespaceStore::publish_compaction_in_turn)).
+#[derive(Debug)]
+pub struct CompactionWrites {
+    /// The namespace whose runs the unit compacted.
+    pub(crate) namespace_id: NamespaceId,
+    pub(crate) spec: MetadataCompactionSpec,
+    /// The segments of the input runs, which the manifest that the unit
+    /// publishes over must still list.
+    pub(crate) input_keys: BTreeSet<String>,
+    pub(crate) report: GroupCompactionReport,
+    /// Started before the unit planned, for the unit's time bound.
+    pub(crate) compaction: OperationClock,
+}
+
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Runs one metadata compaction unit of a writer session.
+    /// Plans one metadata compaction unit of a writer session from the
+    /// manifest of `position`, the session's position, and writes its output
+    /// segments, before the unit takes its turn in the session's publication
+    /// lane.
     ///
-    /// The unit plans from the manifest of `position`, the session's
-    /// position, so only a writer session compacts (see
-    /// [`NamespaceCommitEngine::load_position`](crate::publish::NamespaceCommitEngine::load_position)).
     /// A position whose manifest is missing from the store and at or below
-    /// the manifest boundary returns `head_moved`, and so does a unit that a
-    /// manifest that won its put abandons, and the session plans again from
-    /// a new position (see `ManifestUpdate::published_or_unchanged`). A
-    /// cancelled unit, or one past its budget, returns its outcome. The unit
-    /// reads its input runs without the cache. The walk that builds a base
-    /// compaction's kept inode filter reads through the cache. The unit
-    /// compacts the whole window that the namespace's run policy selects,
-    /// whatever the number of rows its runs list, and the compaction checks
-    /// `cancellation` between blocks. The unit then publishes as one item of
-    /// `lane`, the session's publication lane, which it keeps only for its
-    /// publication: it builds on the newer of the manifest it planned from
-    /// and the newest manifest that the session published (see
-    /// [`LaneGuard::basis_over`](crate::publish::LaneGuard::basis_over)), so
-    /// it never puts at the number of the session's own fold, and records
-    /// the manifest it published before it drops the lane. Finalization
-    /// retries a lost put over the manifest that won while the unit's input
-    /// segments are unchanged. The unit's time bound starts at the start of
-    /// the call (see `METADATA_COMPACTION_BUDGET_MS`).
+    /// the manifest boundary returns `head_moved`, and a missing input
+    /// segment of a manifest that a newer manifest replaced returns
+    /// `manifest_replaced` (see
+    /// [`SegmentKeeper::load_error`](crate::segment::SegmentKeeper::load_error)),
+    /// as a fold's writes do. Either way the session drops its position and
+    /// loads it again under its writer epoch, which returns `writer_fenced`
+    /// when another writer claimed the namespace. The unit reads its input runs
+    /// without the cache. The walk that builds a base compaction's kept inode
+    /// filter reads through the cache. The unit compacts the whole window
+    /// that the namespace's run policy selects, whatever the number of rows
+    /// its runs list, and the compaction checks `cancellation` between
+    /// blocks. The unit's time bound starts at the start of the call (see
+    /// `METADATA_COMPACTION_BUDGET_MS`).
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
@@ -109,12 +132,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         skip_all,
         fields(phase = Phase::MetadataCompactionStep.as_str(), key_class = "manifest")
     )]
-    pub async fn compact_metadata_unit_from(
+    pub async fn write_metadata_compaction_unit(
         &self,
         position: &WriterPosition,
-        lane: &PublicationLane,
         cancellation: &MaintenanceCancellation,
-    ) -> Result<CompactionUnitOutcome> {
+    ) -> Result<CompactionWriteOutcome> {
         let compaction = self.namespace.start_clock();
         let basis = self.namespace.load_publication_basis(position).await?;
         let current = basis.manifest();
@@ -129,10 +151,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let segments = self.namespace.current_segments(current).segments;
         let Some(spec) = plan_compaction(payload, &segments.scan_runs, self.namespace.run_policy)
         else {
-            return Ok(CompactionUnitOutcome::NotNeeded);
+            return Ok(CompactionWriteOutcome::Ended(
+                CompactionUnitOutcome::NotNeeded,
+            ));
         };
         // What the unit is about to read, recorded before it reads anything.
-        // Finalization compares the manifest against this, so the run it
+        // The publication compares the manifest against this, so the run it
         // publishes stands in for exactly the segments it compacted.
         let input_keys = input_segment_keys(&segments.scan_runs, &spec)
             .expect("a plan should list runs of the manifest it was made from");
@@ -154,51 +178,25 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             cancellation,
         )
         .await;
-        let ran = match ran {
-            // A collection can delete the input segments of a basis that a
-            // newer manifest replaced while the unit reads them, and the
-            // unit's read then returns `ManifestReplaced`. The unit is
-            // abandoned, as it is when its put finds the basis replaced.
-            Err(CoreError::ManifestReplaced { .. }) => {
-                let outcome = CompactionUnitOutcome::Abandoned;
-                log_unit_outcome(&self.namespace.namespace_id, &spec, &outcome);
-                return Ok(outcome);
+        let stopped = match ran {
+            Ok(Ok(report)) => {
+                return Ok(CompactionWriteOutcome::Written(CompactionWrites {
+                    namespace_id: self.namespace.namespace_id.clone(),
+                    spec,
+                    input_keys,
+                    report,
+                    compaction,
+                }))
             }
-            ran => ran?,
+            Ok(Err(stopped)) => stopped,
+            Err(error) => return Err(error),
         };
-        let outcome = match ran {
-            Ok(compacted) => {
-                drop(segments);
-                let lane = lane.lock().await;
-                let epoch = lane.epoch(&self.namespace);
-                let outcome = self
-                    .namespace
-                    .finalize_metadata_compaction(
-                        lane.basis_over(basis),
-                        &spec,
-                        &input_keys,
-                        compacted,
-                        cancellation,
-                        &CompactionPublication {
-                            compaction,
-                            publication: self.namespace.start_clock(),
-                            epoch: &epoch,
-                        },
-                    )
-                    .await?;
-                if let CompactionUnitOutcome::Published { manifest, .. } = &outcome {
-                    lane.record(manifest);
-                }
-                outcome
-            }
-            Err(stopped) => stopped,
-        };
-        log_unit_outcome(&self.namespace.namespace_id, &spec, &outcome);
-        Ok(outcome)
+        log_unit_outcome(&self.namespace.namespace_id, &spec, &stopped);
+        Ok(CompactionWriteOutcome::Ended(stopped))
     }
 }
 
-fn log_unit_outcome(
+pub(super) fn log_unit_outcome(
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
     outcome: &CompactionUnitOutcome,

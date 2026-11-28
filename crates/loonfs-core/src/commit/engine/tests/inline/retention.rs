@@ -30,10 +30,11 @@ fn replace(bytes: &'static [u8]) -> CommitCandidate {
 
 async fn compact_and_check_pair(
     store: &RecordingStore<LocalFsStore>,
-    namespace_id: &NamespaceId,
+    engine: &mut RecordingEngine,
     commit_id: &CommitId,
     seq: CommitSeq,
 ) {
+    let namespace_id = &engine.namespace.namespace_id.clone();
     let mut fixture = crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
@@ -44,7 +45,7 @@ async fn compact_and_check_pair(
     for _ in 0..32 {
         let outcome = fixture
             .engine()
-            .compact_from_current()
+            .compact_in_session(engine)
             .await
             .expect("compact a family group");
         let namespace = crate::test_support::namespace_store(store, namespace_id);
@@ -90,9 +91,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
                 expires_at_ms: Some(u64::MAX),
                 deleted_at_ms: None,
             },
-            crate::test_support::folded_manifest(&namespace)
-                .await
-                .expect("fold the WAL tail"),
+            engine.fold().await.expect("fold the WAL tail").current,
             &context.clock(),
         )
         .await
@@ -108,7 +107,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     );
     compact_and_check_pair(
         &store,
-        &namespace_id,
+        &mut engine,
         &original.commit_id,
         original.committed_seq,
     )
@@ -145,7 +144,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     );
     compact_and_check_pair(
         &store,
-        &namespace_id,
+        &mut engine,
         &original.commit_id,
         original.committed_seq,
     )

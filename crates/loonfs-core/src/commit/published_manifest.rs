@@ -6,6 +6,7 @@
 use super::engine::WriterSessionStatus;
 use super::publication_lane::PublicationLane;
 use super::publish_view::WriterPosition;
+use crate::error::CoreError;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::writer_epoch::AcquiredWriter;
@@ -28,9 +29,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 /// [`SessionEpoch::send_put`](super::session_epoch::SessionEpoch::send_put)).
 ///
 /// The engine's position still changes only on the engine's turn: the
-/// session's runtime brings the three copies of the position (the engine's,
-/// the lane's, and the one that reads start from) up to this manifest at
-/// once when no task has the engine, and at the engine's release otherwise,
+/// session's runtime brings the two copies of the position (the engine's and
+/// the one that reads start from) up to this manifest at once when no task
+/// has the engine, and at the engine's release otherwise,
 /// and every read of a copy follows it too (see [`Self::follow`]). So a unit
 /// that planned from an older manifest doesn't undo a publication when it
 /// puts its position back, a read never starts from a manifest below the
@@ -84,7 +85,7 @@ impl PublishedManifest {
 
     /// Records `published` (see [`PublishedLock::record`]). Only an item of
     /// the session's publication lane records a manifest (see
-    /// [`LaneGuard::record`](super::publication_lane::LaneGuard::record)).
+    /// [`LaneTurn::record`](super::publication_lane::LaneTurn::record)).
     pub(crate) fn record(&self, published: &Held<LoadedManifest>) {
         self.lock().record(published);
     }
@@ -102,6 +103,28 @@ impl PublishedManifest {
     /// manifest (see [`PublishedLock::follow`]).
     pub fn follow(&self, position: &WriterPosition) -> FollowOutcome {
         self.lock().follow(position)
+    }
+
+    /// Records that the session was fenced, or found its namespace deleted
+    /// or missing, when `error` says so. Every caller passes an error from a
+    /// read or a put of the session's own namespace, so an error about
+    /// another namespace, such as a merge's fork, is never recorded. A fence
+    /// stays recorded, and a namespace that's gone doesn't replace it. The
+    /// commit queue and the publication lane both record through this one
+    /// rule.
+    pub(crate) fn record_session_error(&self, error: &CoreError) {
+        let mut session = self.lock();
+        match error {
+            CoreError::WriterFenced(fence) => {
+                session.set(WriterSessionStatus::Fenced(fence.clone()));
+            }
+            CoreError::NamespaceDeleted { .. } | CoreError::NamespaceNotFound { .. }
+                if !matches!(*session, WriterSessionStatus::Fenced(_)) =>
+            {
+                session.set(WriterSessionStatus::NamespaceGone);
+            }
+            _ => {}
+        }
     }
 
     /// Settles a put of the session at its end: a put whose outcome isn't
@@ -227,14 +250,7 @@ impl PublishedLock<'_> {
 /// [`Self::get`] or [`Self::take`], which follow the recorded manifest.
 /// Every store follows too, and so does [`Self::follow_stored`], which the
 /// session's runtime runs after each publication, so the stored position
-/// doesn't keep the part of the tail that a publication folded. That
-/// follow, which the runtime runs at each release of the engine, also
-/// leaves a copy of the stored position in the session's publication lane,
-/// and each drop removes the copy. The lane's
-/// publications build on the copy (see
-/// [`LaneGuard::turn`](super::publication_lane::LaneGuard::turn)), so they
-/// don't wait for a unit that has the engine, and a unit's own changes to
-/// its position don't copy the tail that the lane's copy shares.
+/// doesn't keep the part of the tail that a publication folded.
 #[derive(Debug)]
 pub(crate) struct KeptPosition {
     position: Option<WriterPosition>,
@@ -277,10 +293,10 @@ impl KeptPosition {
     }
 
     /// Brings the stored position up to the manifest that `published`, this
-    /// position's locked [`PublishedManifest`], records, stores it, leaves a
-    /// copy of it in the session's publication lane, and returns the
-    /// positions that it replaced. A session without its writer epoch, such
-    /// as a fenced one, keeps neither (see [`PublishedLock::follow`]).
+    /// position's locked [`PublishedManifest`], records, stores it, and
+    /// returns the position that it replaced. A session without its writer
+    /// epoch, such as a fenced one, keeps none (see
+    /// [`PublishedLock::follow`]).
     pub(crate) fn follow_stored(&mut self, published: &PublishedLock<'_>) -> ReplacedPositions {
         assert!(
             published.is_lock_of(self.lane.published_manifest()),
@@ -295,10 +311,7 @@ impl KeptPosition {
             Some(FollowOutcome::Moved(moved)) => self.position.replace(*moved),
             Some(FollowOutcome::Dropped) => self.position.take(),
         };
-        ReplacedPositions {
-            _engine: engine,
-            _lane: self.lane.keep(self.position.clone()),
-        }
+        ReplacedPositions { _engine: engine }
     }
 
     /// Returns the position as it's stored, without following the recorded
@@ -308,10 +321,9 @@ impl KeptPosition {
         self.position.as_ref()
     }
 
-    /// Drops the position and the lane's copy of it.
+    /// Drops the position.
     pub(crate) fn clear(&mut self) {
         self.position = None;
-        drop(self.lane.keep(None));
     }
 
     /// Returns `position` brought up to the recorded manifest, or `None` when
@@ -326,18 +338,16 @@ impl KeptPosition {
     }
 }
 
-/// The positions that a follow of the stored position replaced (see
-/// [`KeptPosition::follow_stored`]): the engine's, and the copy in the
-/// session's publication lane.
+/// The engine's position that a follow of the stored position replaced
+/// (see [`KeptPosition::follow_stored`]).
 ///
 /// The caller drops this once it has unlocked the session's published
-/// manifest, because either position can be the last owner of a large WAL
+/// manifest, because the position can be the last owner of a large WAL
 /// tail.
 #[derive(Debug)]
 #[must_use = "drop the replaced positions once the published manifest is unlocked"]
 pub struct ReplacedPositions {
     _engine: Option<WriterPosition>,
-    _lane: Option<WriterPosition>,
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use super::{FoldWhen, NamespaceFold, NamespacePublisher};
 use crate::maintenance::MetadataCompactionOutcome;
 use crate::{CoreError, Error, MaintenanceCancellation, MetadataMaintenanceResponse, Result};
 use loonfs_core::control::{Held, LoadedManifest};
-use loonfs_core::publish::WriterPosition;
+use loonfs_core::publish::{LaneGuard, LaneTurn, WriterPosition};
 use loonfs_core::{ExtensionBasis, ExtensionPublication, FloorObjectReport, PublicationReport};
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{CommitSeq, ExtensionName, RetentionWindow, SetRetentionWindowResponse};
@@ -132,10 +132,10 @@ impl AdmittedMaintenance<'_> {
 
     /// Sets the namespace's retention window (see
     /// [`NamespaceStore::set_retention_window_from`](loonfs_core::NamespaceStore::set_retention_window_from))
-    /// as one item of the session's publication lane (see
-    /// [`NamespacePublisher::publish_from`]). The change puts its manifest
+    /// as a publication of the session's lane (see
+    /// [`NamespacePublisher::publish_in_lane`]). The change puts its manifest
     /// without the engine, so no commit waits for it, and a change that the
-    /// position's manifest already has is confirmed first. A session without
+    /// session's newest published manifest already has is confirmed first. A session without
     /// a position first reads the newest manifest, with a read permit, and
     /// returns the unchanged window without a claim when that manifest
     /// already has it. The caller brings the session's positions up to the
@@ -164,8 +164,8 @@ impl AdmittedMaintenance<'_> {
         }
         let lane = publisher.lane.lock().await;
         publisher
-            .publish_from(
-                || publisher.lane_turn(&lane),
+            .publish_in_lane(
+                &lane,
                 |turn| {
                     let namespace = &namespace;
                     async move {
@@ -199,16 +199,14 @@ impl AdmittedMaintenance<'_> {
             return newest.await;
         }
         publisher.confirmed_position().await?;
-        publisher
-            .publish_from(|| publisher.writer_position(), from_position, |_| false)
-            .await
+        publisher.run_from_position(from_position).await
     }
 
     /// Publishes an extension's change (see
     /// [`NamespaceStore::publish_extension_from`](loonfs_core::NamespaceStore::publish_extension_from))
-    /// as one item of the session's publication lane, the way
+    /// as a publication of the session's lane, the way
     /// [`Self::set_retention_window`] publishes a window change. A change
-    /// that the position's manifest refuses is confirmed first. A basis of
+    /// that the session's newest published manifest refuses is confirmed first. A basis of
     /// another namespace returns `invalid_request` before anything is
     /// claimed (see [`ExtensionBasis::ensure_for`]).
     pub(crate) async fn publish_extension(
@@ -222,8 +220,8 @@ impl AdmittedMaintenance<'_> {
         let namespace = publisher.namespace_store();
         let lane = publisher.lane.lock().await;
         publisher
-            .publish_from(
-                || publisher.lane_turn(&lane),
+            .publish_in_lane(
+                &lane,
                 |turn| {
                     let namespace = &namespace;
                     let entry = entry.clone();
@@ -247,87 +245,96 @@ impl NamespacePublisher {
             .namespace_store(&self.namespace_id)
     }
 
-    /// Runs `publish`, a publication of this session beside its commits,
-    /// from what `start` returns, and runs it once more from a new start
-    /// when the first turns out to be behind. The fold, the window change
-    /// and the extension's entry run here as one item of the session's
-    /// publication lane: `start` takes the turn (see [`Self::lane_turn`]),
-    /// and the caller keeps the lane for both runs and the confirmation
-    /// between them. The compaction unit runs here from the session's
-    /// position (see [`Self::writer_position`]), and takes the lane only for
-    /// its put. The snapshot and the deletion don't run here: a snapshot
-    /// publishes no manifest of its own, and the deletion folds and puts its
-    /// tombstone in one turn of the lane through its own loop.
+    /// Runs `run`, the writes of a fold or a compaction unit before its put,
+    /// or a load of what a result without a put starts from, from the
+    /// session's position (see [`Self::writer_position`]), and runs it once
+    /// more from a newly loaded position when the first position turns out
+    /// to be behind. The writes then take the session's publication lane for
+    /// their put. The loads of [`AdmittedMaintenance::load_confirmed`] run
+    /// here too.
     ///
-    /// The start is behind when `publish` returns `head_moved`: its
-    /// manifest is gone from the store, or a manifest that won the
-    /// publication's put ended it without a put (see
-    /// [`NamespaceStore::load_publication_basis`](loonfs_core::NamespaceStore::load_publication_basis)).
-    /// Within one process only another writer's manifest can win the put,
-    /// because the session's own manifest publications take their turns in
-    /// its lane. The session then drops the position (see
-    /// [`Self::drop_position`]), so `start` loads it again with the writer's
-    /// load, which returns `writer_fenced` when another writer claimed the
-    /// namespace. The drop and the load are two turns of the engine, which
-    /// is harmless: the drop clears every copy of the position, and a unit
-    /// that has the engine in between finds no position and loads one from
-    /// the store too. When `unconfirmed` selects the result, a result without
-    /// a put that the publication computed from the start (such as a window
-    /// that the position's manifest already has), the session confirms the
-    /// position first (see [`Self::confirmed_position`]), because a session
-    /// that another process displaced doesn't learn of it until it puts, and
-    /// runs `publish` once more from the position that the check moved, or
-    /// from the writer's load when the check dropped it. So a result without
-    /// a put is never computed from a manifest that the session didn't
-    /// publish. A put that loses to another writer's claim still builds again
-    /// on the claim for now, as [Basis, collision, and boundary
-    /// checks](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#basis-collision-and-boundary-checks-for-every-manifest-publication)
-    /// describes. The second run's start was just confirmed or loaded, so
-    /// its result needs no check. When the second run finds its start
-    /// behind too, the session loads its position once more and returns that
-    /// load's error, such as `writer_fenced`, or `head_moved` when the
-    /// session is still the writer.
-    pub(super) async fn publish_from<S, T, StartFut, Fut>(
+    /// The position is behind when `run` returns `head_moved`, because the
+    /// position's manifest is missing from the store and at or below the
+    /// manifest boundary (see
+    /// [`NamespaceStore::load_publication_basis`](loonfs_core::NamespaceStore::load_publication_basis)),
+    /// or `manifest_replaced`, because a segment of that manifest is missing
+    /// and a newer manifest replaced it (see `SegmentKeeper::load_error` in
+    /// core). A collection deletes a manifest or its segments only after a
+    /// newer manifest replaced it, and only another writer's claim publishes
+    /// after the session's newest published manifest. So the session drops
+    /// the position (see [`Self::drop_position`]) and loads it again from the
+    /// store under its writer epoch, and that load returns `writer_fenced`
+    /// when another writer claimed the namespace. When the second run finds
+    /// its position behind too, the session loads its position once more and
+    /// returns that load's error, such as `writer_fenced`, or the second
+    /// run's error when the session is still the writer.
+    pub(super) async fn run_from_position<T, Fut>(
         &self,
-        mut start: impl FnMut() -> StartFut,
-        mut publish: impl FnMut(S) -> Fut,
-        unconfirmed: impl Fn(&T) -> bool,
+        mut run: impl FnMut(WriterPosition) -> Fut,
     ) -> Result<T>
     where
-        S: AsRef<WriterPosition>,
-        StartFut: Future<Output = Result<S>>,
         Fut: Future<Output = loonfs_core::Result<T>>,
     {
-        let first = start().await?;
-        let manifest_no = first.as_ref().read_basis().basis().manifest_no();
-        let next = match publish(first).await {
-            Err(CoreError::HeadMoved(_)) => {
+        let next = match run(self.writer_position().await?).await {
+            Err(CoreError::HeadMoved(_) | CoreError::ManifestReplaced { .. }) => {
                 self.drop_position().await;
-                start().await?
+                self.writer_position().await?
             }
-            Ok(result) if unconfirmed(&result) => match self.confirmed_position().await? {
-                Some(checked) if checked.read_basis().basis().manifest_no() == manifest_no => {
-                    return Ok(result);
-                }
-                // The check moved the position, or dropped it, and `start`
-                // returns what the check left or loads the position again.
-                _ => start().await?,
-            },
             settled => return settled.map_err(Error::from),
         };
-        match publish(next).await {
-            // Behind again: when another writer claimed meanwhile, the
-            // writer's load returns `writer_fenced`. When it finds the
-            // session still the writer, the session lost twice to manifests
-            // that it published, such as puts of its own whose outcome was
-            // unknown, and `head_moved` stands.
-            Err(CoreError::HeadMoved(message)) => {
+        match run(next).await {
+            Err(behind @ (CoreError::HeadMoved(_) | CoreError::ManifestReplaced { .. })) => {
                 self.drop_position().await;
-                start().await?;
-                Err(CoreError::HeadMoved(message).into())
+                self.writer_position().await?;
+                Err(behind.into())
             }
             settled => settled.map_err(Error::from),
         }
+    }
+
+    /// Runs `publish`, a publication of the session's lane, which the
+    /// caller keeps as `lane`, in its turn (see [`Self::lane_turn`]), and
+    /// confirms a result without a put before the session returns it.
+    ///
+    /// When `unconfirmed` selects the result, a result without a put that
+    /// the publication computed from the session's newest published manifest
+    /// (such as a window that the manifest already has), the session
+    /// confirms its position first (see [`Self::confirmed_position`]),
+    /// because a session that another process displaced doesn't learn that
+    /// it was displaced until its next put. When the check moved the
+    /// position or dropped it, the session loads its position again with the
+    /// lane that the caller keeps (see `NamespaceCommitEngine::load_position_in_lane`):
+    /// from the store under its writer epoch, which returns `writer_fenced`
+    /// when another writer claimed the namespace, or after a claim when the
+    /// session lost its epoch meanwhile. It then runs `publish` once more in a
+    /// new turn, whose result needs no check. So a result without a put is
+    /// never computed from a manifest that another writer replaced.
+    pub(super) async fn publish_in_lane<'g, T, Fut>(
+        &self,
+        lane: &'g LaneGuard<'_>,
+        mut publish: impl FnMut(LaneTurn<'g>) -> Fut,
+        unconfirmed: impl Fn(&T) -> bool,
+    ) -> Result<T>
+    where
+        Fut: Future<Output = loonfs_core::Result<T>>,
+    {
+        let turn = self.lane_turn(lane).await?;
+        let manifest_no = turn.basis().manifest_no();
+        let result = publish(turn).await?;
+        if !unconfirmed(&result) {
+            return Ok(result);
+        }
+        match self.confirmed_position().await? {
+            Some(checked) if checked.read_basis().basis().manifest_no() == manifest_no => {
+                return Ok(result);
+            }
+            _ => {
+                drop(self.unfenced_session()?);
+                let mut engine = self.lock_engine().await;
+                engine.load_position_in_lane(lane).await?;
+            }
+        }
+        Ok(publish(self.lane_turn(lane).await?).await?)
     }
 
     /// Returns the session's position for a result that the session returns
