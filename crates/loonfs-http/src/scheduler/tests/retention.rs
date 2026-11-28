@@ -715,3 +715,249 @@ async fn a_sweeps_advance_puts_its_floor_object_as_the_namespaces_writer() {
     server.wait_for_open_sessions(2).await;
     drop(held);
 }
+
+/// A namespace whose WAL tail has a floor object that no manifest records,
+/// left by an advance that put the floor object and then failed its fold.
+struct UnrecordedFloor {
+    directory: tempfile::TempDir,
+    config: TestConfig,
+    namespace_id: NamespaceId,
+    /// The floor that the floor object records.
+    floor_seq: CommitSeq,
+    /// The number of the namespace's current manifest, which records a
+    /// lower floor.
+    manifest_no: loonfs_types::ManifestNo,
+}
+
+/// Builds an [`UnrecordedFloor`]: a server commits and folds an old file,
+/// and a later server's sweep claims the namespace, puts a floor object
+/// past the file and fails the fold after it.
+async fn unrecorded_floor(name: &str) -> UnrecordedFloor {
+    let directory = tempdir().expect("tempdir");
+    let config = retention_config(Some(WINDOW_MS));
+    let namespace_id = namespace_id(name);
+    let seeding = SchedulerServer::start(local_store(directory.path()), &config, START_MS).await;
+    seeding
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create the namespace");
+    let floor_seq = seeding.commit(&namespace_id, "/old.txt").await;
+    seeding
+        .maintenance
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .fold_wal()
+        .await
+        .expect("fold the history");
+    let folded = seeding
+        .diagnostics(&namespace_id)
+        .await
+        .current_manifest_no
+        .expect("an active namespace's manifest");
+    seeding.runtime.shutdown().await.expect("shutdown");
+
+    // The advance's session claims at the next manifest number, and its fold
+    // after the floor object puts the number after that one, which fails.
+    let fold_no = loonfs_types::ManifestNo(folded.0 + 2);
+    let failing = Arc::new(FailStore::new(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        KeyPredicate::exact(loonfs_objectstore::keys::metadata_manifest_object(
+            &namespace_id,
+            &fold_no,
+        )),
+        OperationSelector::PutCreateIfAbsent,
+        InjectedError::PermissionDenied("the fold's put fails".to_owned()),
+    ));
+    failing.fail_next(1);
+    let advancing =
+        SchedulerServer::start(failing.clone(), &config, START_MS + 2 * WINDOW_MS).await;
+    advancing.scheduler.run_sweep().await;
+    assert_eq!(
+        failing.remaining(),
+        0,
+        "the fold after the floor object failed"
+    );
+    let unrecorded = advancing.diagnostics(&namespace_id).await;
+    assert_eq!(
+        unrecorded.retention_floor_seq, floor_seq,
+        "the floor object is put"
+    );
+    let manifest_no = loonfs_types::ManifestNo(folded.0 + 1);
+    assert_eq!(
+        unrecorded.current_manifest_no,
+        Some(manifest_no),
+        "no fold records it"
+    );
+    let due = advancing
+        .maintenance
+        .maintenance()
+        .due_maintenance(&namespace_id)
+        .await
+        .expect("the due check");
+    assert!(
+        due.fold,
+        "a floor that no manifest records makes a fold due"
+    );
+    advancing.runtime.shutdown().await.expect("shutdown");
+    UnrecordedFloor {
+        directory,
+        config,
+        namespace_id,
+        floor_seq,
+        manifest_no,
+    }
+}
+
+impl UnrecordedFloor {
+    /// Starts a server on the namespace's store, with no session for the
+    /// namespace.
+    async fn server(&self) -> SchedulerServer {
+        SchedulerServer::start(
+            local_store(self.directory.path()),
+            &self.config,
+            START_MS + 2 * WINDOW_MS,
+        )
+        .await
+    }
+
+    /// Returns the number of the namespace's WAL objects in the store.
+    fn wal_objects(&self) -> usize {
+        let wal = self
+            .directory
+            .path()
+            .join(loonfs_objectstore::keys::wal_prefix(&self.namespace_id));
+        std::fs::read_dir(wal).map_or(0, Iterator::count)
+    }
+
+    /// Returns the namespace's current manifest.
+    async fn manifest(&self, server: &SchedulerServer) -> loonfs_core::control::LoadedManifest {
+        loonfs_core::test_support::namespace_store(
+            server.runtime.object_store(),
+            &self.namespace_id,
+        )
+        .load_current_manifest()
+        .await
+        .expect("the current manifest")
+    }
+}
+
+/// Checks that a floor object that no manifest records, left by an advance
+/// that put the floor object and then failed its fold, makes a fold due, so
+/// that one sweep of a server without a session for the namespace folds it
+/// and the manifest records the floor.
+#[tokio::test]
+async fn a_floor_object_that_no_manifest_records_is_folded_by_the_next_sweep() {
+    let unrecorded = unrecorded_floor("unrecorded-floor").await;
+    let sweeping = unrecorded.server().await;
+    assert!(sweeping.scheduler.run_sweep().await.complete);
+    assert_eq!(
+        unrecorded
+            .manifest(&sweeping)
+            .await
+            .payload()
+            .retention_floor_seq,
+        unrecorded.floor_seq,
+        "the sweep's fold records the floor"
+    );
+}
+
+/// Checks that an advance whose target an earlier floor object already
+/// reached writes no floor object, and that it folds the tail, which claims
+/// the namespace, so that a manifest records the floor. The fold's manifest
+/// covers the claim's fence after the earlier floor object, and nothing
+/// after it.
+#[tokio::test]
+async fn an_advance_whose_target_a_floor_object_reached_writes_none_and_folds() {
+    let unrecorded = unrecorded_floor("reached-floor").await;
+    let server = unrecorded.server().await;
+    let before = unrecorded.manifest(&server).await;
+    let wal_objects = unrecorded.wal_objects();
+    let advanced = server
+        .maintenance
+        .open_namespace(&unrecorded.namespace_id)
+        .expect("open namespace")
+        .advance_retention_floor_with_options(&loonfs::AdvanceRetentionFloorOptions {
+            target: loonfs::RetentionTarget::Seq(unrecorded.floor_seq),
+        })
+        .await
+        .expect("the advance");
+    assert_eq!(advanced.retention_floor_seq, unrecorded.floor_seq);
+    let after = unrecorded.manifest(&server).await;
+    assert_eq!(after.payload().retention_floor_seq, unrecorded.floor_seq);
+    assert_eq!(
+        after.payload().writer_epoch.0,
+        before.payload().writer_epoch.0 + 1,
+        "the fold claims the namespace"
+    );
+    assert_eq!(
+        unrecorded.wal_objects(),
+        wal_objects + 1,
+        "the claim puts its fence, and the advance writes no floor object"
+    );
+    assert!(after.manifest().manifest_no > unrecorded.manifest_no);
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks which WAL tails a snapshot of a session without a position folds,
+/// which claims the namespace: a tail with a floor object that raises the
+/// floor above the manifest's and no commit is folded, so the snapshot's
+/// manifest records the floor, and a tail of only fences isn't, so the
+/// snapshot is taken at the current manifest and claims nothing.
+#[tokio::test]
+async fn a_snapshot_folds_a_tail_whose_floor_object_raises_the_floor_and_not_one_of_fences() {
+    let unrecorded = unrecorded_floor("snapshot-floor").await;
+    let server = unrecorded.server().await;
+    let before = unrecorded.manifest(&server).await;
+    server
+        .maintenance
+        .open_namespace(&unrecorded.namespace_id)
+        .expect("open namespace")
+        .create_snapshot()
+        .await
+        .expect("a snapshot that folds");
+    let folded = unrecorded.manifest(&server).await;
+    assert_eq!(
+        folded.payload().retention_floor_seq,
+        unrecorded.floor_seq,
+        "the snapshot folds the floor object"
+    );
+    assert_eq!(
+        folded.payload().writer_epoch.0,
+        before.payload().writer_epoch.0 + 1,
+        "the fold claims the namespace"
+    );
+    server.runtime.shutdown().await.expect("shutdown");
+
+    // A window change of another server claims the namespace and leaves its
+    // fence, which no manifest folds, as the only object of the tail.
+    let claiming = unrecorded.server().await;
+    claiming
+        .maintenance
+        .open_namespace(&unrecorded.namespace_id)
+        .expect("open namespace")
+        .set_retention_window(Some(window(2 * WINDOW_MS)))
+        .await
+        .expect("the window change claims");
+    claiming.runtime.shutdown().await.expect("shutdown");
+    let fenced = unrecorded.server().await;
+    let before = unrecorded.manifest(&fenced).await;
+    assert_eq!(
+        before.payload().folded_wal_no,
+        folded.payload().folded_wal_no,
+        "the window change folds nothing, so its claim's fence stays in the tail"
+    );
+    fenced
+        .maintenance
+        .open_namespace(&unrecorded.namespace_id)
+        .expect("open namespace")
+        .create_snapshot()
+        .await
+        .expect("a snapshot at the current manifest");
+    assert_eq!(
+        unrecorded.manifest(&fenced).await.manifest().manifest_no,
+        before.manifest().manifest_no,
+        "a tail of only fences is empty, so the snapshot neither folds nor claims"
+    );
+    fenced.runtime.shutdown().await.expect("shutdown");
+}

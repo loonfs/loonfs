@@ -283,19 +283,20 @@ impl LoonFs<Writable> {
     }
 
     /// Waits until this runtime's writer session for `namespace_id`, if
-    /// another writer has fenced it, has finished its work, so that the next
-    /// [`Self::open_namespace`] starts a new session instead of failing with
-    /// that session's `writer_fenced`. Returns at once when the runtime has
-    /// no fenced session for the namespace.
+    /// another writer has fenced it or a close is ending it, has finished its
+    /// work, so that the next [`Self::open_namespace`] starts a new session
+    /// instead of failing with that session's `writer_fenced` or
+    /// `writer_session_closed`. Returns at once when the runtime has no such
+    /// session for the namespace.
     ///
     /// A host that sends a fenced request once more in a new session waits
-    /// here first. The fenced session's compaction is already cancelled, so
-    /// the wait ends once the commits that the session admitted and a
+    /// here first. The session's stop is already set, so the wait ends once
+    /// the commits and the maintenance that the session admitted and a
     /// running fold end.
-    pub async fn wait_for_fenced_session(&self, namespace_id: &NamespaceId) {
+    pub async fn wait_for_ended_session(&self, namespace_id: &NamespaceId) {
         tracing::Instrument::instrument(
-            self.mode.publisher.wait_for_fenced_session(namespace_id),
-            operation_span!(self.core, "wait_for_fenced_session", namespace_id),
+            self.mode.publisher.wait_for_ended_session(namespace_id),
+            operation_span!(self.core, "wait_for_ended_session", namespace_id),
         )
         .await;
     }
@@ -561,8 +562,12 @@ impl LoonFs<Writable> {
                 match outcome {
                     ForkOutcome::Created(created) => return Ok(created),
                     ForkOutcome::SourceTailTooOld => {
-                        let source = self.mode.publisher.open_session(source_namespace_id)?;
-                        source.fold(FoldWhen::Always).await?;
+                        let source = self
+                            .mode
+                            .publisher
+                            .open_session_once_ended(source_namespace_id)
+                            .await?;
+                        source.admit()?.fold(FoldWhen::Always).await?;
                     }
                 }
             }

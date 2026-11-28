@@ -2089,7 +2089,7 @@ async fn a_unit_whose_replaced_basis_lost_an_input_segment_is_abandoned() {
         .engine()
         .compact_metadata_unit_from(
             &position,
-            &crate::compaction::MetadataCompactionCancellation::default(),
+            &crate::compaction::MaintenanceCancellation::default(),
         )
         .await;
         if replaced {

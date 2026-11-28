@@ -590,7 +590,7 @@ async fn a_fenced_merge_reports_the_request_that_its_first_plan_resolved() {
     hosts
         .state
         .runtime
-        .wait_for_fenced_session(&hosts.main)
+        .wait_for_ended_session(&hosts.main)
         .await;
     let reopened = open().await.expect("reopen");
     let commit = reopened

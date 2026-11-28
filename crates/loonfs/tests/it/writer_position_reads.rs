@@ -939,18 +939,25 @@ async fn a_fold_from_a_collected_position_after_a_claim_returns_writer_fenced() 
 /// Checks that a retention advance from a position whose manifest a
 /// collection deleted, after a rival's claim, checks the position first, as
 /// a strong read does, and that the check finds the manifest at or below the
-/// manifest boundary and drops the position. The advance then plans from the
-/// newest manifest, where nothing moves, and a strong read after it doesn't
-/// start from the deleted manifest.
+/// manifest boundary and drops the position. The session then loads its
+/// position again with the writer's load, as a fold does (see
+/// [`a_fold_from_a_collected_position_after_a_claim_returns_writer_fenced`]),
+/// which finds the rival's claim and returns `writer_fenced`, so the advance
+/// doesn't return a result computed from the rival's manifest. A strong
+/// read after it doesn't start from the deleted manifest.
 #[tokio::test]
-async fn a_retention_advance_from_a_collected_position_drops_the_position() {
+async fn a_retention_advance_from_a_collected_position_after_a_claim_returns_writer_fenced() {
     let name = "retention-collected";
     let (fixture, position) = collected_position(name).await;
     let newest = newest_manifest(&fixture).await;
     fixture.recording.reset();
-    let advanced = fixture.namespace.advance_retention_floor().await;
+    let error = fixture
+        .namespace
+        .advance_retention_floor()
+        .await
+        .expect_err("the rival's claim fences the session");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
     let operations = fixture.recording.take();
-    advanced.expect("the advance plans from the newest manifest");
     assert_eq!(
         loonfs_test_support::stores::request_lines(&operations),
         collected_position_check(&fixture.namespace_id, position, newest)
@@ -966,6 +973,33 @@ async fn a_retention_advance_from_a_collected_position_drops_the_position() {
         !uses_manifest(&operations, &fixture.namespace_id, position),
         "{operations:?}"
     );
+}
+
+/// Checks that a retention window change from a position whose manifest a
+/// collection deleted, after a rival's claim, returns `writer_fenced`
+/// instead of publishing over the rival's manifests: the change finds the
+/// position's manifest gone at or below the boundary, and the session loads
+/// its position again with the writer's load, which finds the rival's
+/// claim. The window stays the rival's.
+#[tokio::test]
+async fn a_window_change_from_a_collected_position_after_a_claim_returns_writer_fenced() {
+    let name = "window-collected";
+    let (fixture, _) = collected_position(name).await;
+    let error = fixture
+        .namespace
+        .set_retention_window(None)
+        .await
+        .expect_err("the rival's claim fences the session");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+    let store: SharedObjectStore = fixture.recording.clone();
+    let window = loonfs_core::test_support::namespace_store(store, &fixture.namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("the current manifest")
+        .payload()
+        .retention_window_ms
+        .map(std::num::NonZeroU64::get);
+    assert_eq!(window, Some(3 * loonfs::GC_GRACE_WINDOW_MS));
 }
 
 /// Checks that a fold from a position whose manifest is missing while the
@@ -1271,38 +1305,37 @@ enum History {
 const ADMINISTRATOR: &str = "prn_root";
 
 /// Checks that a retention advance from a writer position whose manifest a
-/// collection deleted plans from the newest manifest, whether or not the
-/// runtime's segment cache still has the deleted manifest. Every commit is
-/// younger than the grace window, so the floor stays at 0.
+/// collection deleted after a rival's claim returns `writer_fenced`, whether
+/// or not the runtime's segment cache still has the deleted manifest, and
+/// sends no request for that manifest.
 ///
 /// The advance first checks the position as a strong read does. The check
 /// finds the position's manifest at or below the manifest boundary and drops
-/// the position, so in both cases the advance finds the newest manifest by
-/// discovery and plans from it, and no request reads the deleted manifest.
+/// the position, so in both cases the session loads its position again with
+/// the writer's load, which finds the rival's claim by discovery, as the
+/// sweep's fold and the snapshot do (see
+/// [`a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_are_fenced`]).
 #[tokio::test]
-async fn a_retention_advance_from_a_position_on_a_collected_manifest_succeeds() {
+async fn a_retention_advance_from_a_position_on_a_collected_manifest_is_fenced() {
     for cached in [false, true] {
         let name = format!("collected-advance-{}", if cached { "hit" } else { "miss" });
         let (fixture, position, _) =
             position_on_a_collected_manifest(&name, cached, History::Files).await;
         let newest = newest_manifest(&fixture).await;
         fixture.recording.reset();
-        let advanced = fixture.namespace.advance_retention_floor().await;
+        let error = fixture
+            .namespace
+            .advance_retention_floor()
+            .await
+            .expect_err("the rival's claim fences the session");
         assert_eq!(
-            advanced
-                .unwrap_or_else(|error| panic!("cached={cached}: {error:?}"))
-                .retention_floor_seq,
-            loonfs::CommitSeq(0),
-            "cached={cached}"
+            error.code(),
+            ErrorCode::WriterFenced,
+            "cached={cached}: {error:?}"
         );
-        let expected = [
-            collected_position_check(&fixture.namespace_id, position, newest),
-            vec![format!("get {} MetadataSegment", fixture.namespace_id); 4],
-        ]
-        .concat();
         assert_eq!(
             loonfs_test_support::stores::request_lines(&fixture.recording.take()),
-            expected,
+            collected_position_check(&fixture.namespace_id, position, newest),
             "cached={cached}"
         );
     }
@@ -1392,12 +1425,15 @@ async fn a_fold_that_finds_a_segment_of_the_current_manifest_missing_is_corrupt(
 
 /// Checks that the sweep's fold, which a writer runtime's host runs once a
 /// fold is due (here at a one-object threshold), and a user snapshot,
-/// which folds first, succeed from the state of
-/// [`a_fold_of_an_append_from_a_position_on_a_collected_manifest_succeeds`].
-/// The sweep's fold finds that a newer manifest already folds the tail and
-/// returns `AlreadyCurrent`.
+/// which folds first, return `writer_fenced` from the state of
+/// [`a_fenced_writer_on_a_collected_manifest_commits_and_folds_in_a_new_session`],
+/// where a rival claimed the namespace. Each fold builds on the position's
+/// manifest, which the segment cache still has, and loses its put to a
+/// manifest above the position, so the session drops the position and the
+/// writer's load finds the rival's claim, instead of answering from the
+/// rival's manifest.
 #[tokio::test]
-async fn a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_succeed() {
+async fn a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_are_fenced() {
     for snapshot in [false, true] {
         let name = if snapshot {
             "collected-append-snapshot"
@@ -1406,22 +1442,19 @@ async fn a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_succeed(
         };
         let (fixture, _, _) =
             position_on_a_collected_manifest(name, true, History::AppendInTail).await;
-        if snapshot {
-            let created = fixture.namespace.create_snapshot().await;
-            created.unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+        let error = if snapshot {
+            fixture.namespace.create_snapshot().await.map(|_| ())
         } else {
-            let swept = fixture
+            fixture
                 .namespace
                 .maintain_metadata_with_options(&loonfs::MaintainMetadataOptions {
                     max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 })
-                .await;
-            let swept = swept.unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
-            assert_eq!(
-                swept.wal_fold.map(|fold| fold.outcome),
-                Some(FoldWalOutcome::AlreadyCurrent)
-            );
+                .await
+                .map(|_| ())
         }
+        .expect_err("the rival's claim fences the session");
+        assert_eq!(error.code(), ErrorCode::WriterFenced, "{name}: {error:?}");
     }
 }
 
@@ -1584,16 +1617,17 @@ async fn a_rebase_from_a_position_on_a_collected_manifest_succeeds() {
 
 /// Checks that a retention advance from a writer position whose manifest is
 /// at or below the manifest boundary, still in the store, and missing
-/// segments that a collection deleted plans from the newest manifest when
-/// the runtime's segment cache doesn't have the manifest.
+/// segments that a collection deleted, after a rival's claim, returns
+/// `writer_fenced` when the runtime's segment cache doesn't have the
+/// manifest.
 ///
 /// The fixture's collection deletes the manifest, and the test puts the
 /// manifest back by hand. The advance first checks the position as a strong
 /// read does. The check finds the manifest at or below the manifest boundary
 /// and drops the position, so the advance doesn't read the stored manifest,
-/// and it plans from the newest manifest that discovery finds.
+/// and the writer's load that follows finds the rival's claim by discovery.
 #[tokio::test]
-async fn a_retention_advance_from_a_stored_position_manifest_below_the_boundary_succeeds() {
+async fn a_retention_advance_from_a_stored_position_manifest_below_the_boundary_is_fenced() {
     use loonfs_objectstore::ObjectStore;
     let name = "stored-below-boundary";
     let (fixture, position, manifest_bytes) =
@@ -1609,17 +1643,15 @@ async fn a_retention_advance_from_a_stored_position_manifest_below_the_boundary_
         .await
         .expect("put the position's manifest back");
     fixture.recording.reset();
-    let advanced = fixture.namespace.advance_retention_floor().await;
-    let advanced = advanced.expect("the advance plans from the newest manifest");
-    assert_eq!(advanced.retention_floor_seq, loonfs::CommitSeq(0));
-    let expected = [
-        collected_position_check(&fixture.namespace_id, position, newest),
-        vec![format!("get {} MetadataSegment", fixture.namespace_id); 4],
-    ]
-    .concat();
+    let error = fixture
+        .namespace
+        .advance_retention_floor()
+        .await
+        .expect_err("the rival's claim fences the session");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
     assert_eq!(
         loonfs_test_support::stores::request_lines(&fixture.recording.take()),
-        expected
+        collected_position_check(&fixture.namespace_id, position, newest)
     );
 }
 

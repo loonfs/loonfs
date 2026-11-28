@@ -922,7 +922,7 @@ impl<S: ObjectStore> NamespaceWriterEngine<S> {
             .await?;
         self.compact_metadata_unit_from(
             &position,
-            &crate::compaction::MetadataCompactionCancellation::default(),
+            &crate::compaction::MaintenanceCancellation::default(),
         )
         .await
     }

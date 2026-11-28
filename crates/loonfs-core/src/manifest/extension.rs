@@ -5,7 +5,7 @@ use super::publish::ManifestChange;
 use super::published::PublicationReport;
 use super::validate::validate_manifest;
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
@@ -14,7 +14,7 @@ use crate::time::OperationClock;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{ExtensionEntry, NamespaceManifestPayload};
-use loonfs_types::ExtensionName;
+use loonfs_types::{ExtensionName, NamespaceId};
 
 /// The manifest that an extension's change builds on, and the clock of the
 /// publication that ends the change.
@@ -43,6 +43,21 @@ impl ExtensionBasis {
     /// Returns how long ago the clock of this basis's publication started.
     pub fn elapsed_ms(&self) -> u64 {
         self.clock.elapsed_ms()
+    }
+
+    /// Checks that this basis is a manifest of `namespace_id`, the namespace
+    /// that the change is published in, or returns
+    /// `invalid_extension_basis`, which a caller returns before it claims
+    /// anything.
+    pub fn ensure_for(&self, namespace_id: &NamespaceId) -> Result<()> {
+        let basis_namespace_id = &self.manifest().namespace_id;
+        if basis_namespace_id == namespace_id {
+            return Ok(());
+        }
+        Err(CoreError::InvalidExtensionBasis {
+            namespace_id: namespace_id.clone(),
+            basis_namespace_id: basis_namespace_id.clone(),
+        })
     }
 }
 
@@ -76,6 +91,22 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
+    /// Loads the manifest of `position`, a writer session's position, as the
+    /// basis of an extension's change that the session publishes, and starts
+    /// the clock of the change's publication. Returns `head_moved` when the
+    /// manifest is missing from the store and at or below the manifest
+    /// boundary (see [`Self::load_publication_basis`]).
+    pub async fn load_position_extension_basis(
+        &self,
+        position: &WriterPosition,
+    ) -> Result<ExtensionBasis> {
+        let clock = self.start_clock();
+        let basis = self.load_publication_basis(position).await?;
+        Ok(ExtensionBasis { basis, clock })
+    }
+}
+
+impl<S: ObjectStore> NamespaceStore<S> {
     /// Publishes a change to the entry of extension `name` as the writer
     /// session whose position is `position`, in the manifest after the
     /// position's manifest.
@@ -84,16 +115,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// loaded its entry from, and the manifest lists `entry` as the
     /// extension's entry, with every other field from the manifest that the
     /// change is published over. The publication builds on the position's
-    /// manifest, or on the newest manifest when the position's manifest is
-    /// missing from the store and at or below the manifest boundary, as every
-    /// publication of a writer session does. It copies the epochs of its
-    /// predecessor. When that manifest's entry of `name` isn't `basis`'s
-    /// (both can be absent), the session's own disable or a newer change
-    /// replaced the entry the change started from, so the call publishes
-    /// nothing and returns [`ExtensionPublication::Superseded`] (format spec,
-    /// "Extensions"). After a lost put, the change is built again over the
-    /// manifest that won under the same rule; a fold, a compaction, or a
-    /// window change copies the entry and leaves the change valid. The put
+    /// manifest, and returns `head_moved` when that manifest is missing from
+    /// the store and at or below the manifest boundary, as every publication
+    /// of a writer session does (see [`Self::load_publication_basis`]). It
+    /// copies the epochs of its predecessor. When the position's manifest's
+    /// entry of `name` isn't `basis`'s (both can be absent), the session's
+    /// own disable or a newer change replaced the entry the change started
+    /// from, so the call publishes nothing and returns
+    /// [`ExtensionPublication::Superseded`] (format spec, "Extensions").
+    /// After a lost put, the change is built again over the manifest that
+    /// won under the same rule. A fold, a compaction, or a window change
+    /// copies the entry and leaves the change valid, and a manifest that won
+    /// with another entry returns `head_moved` instead of `Superseded` (see
+    /// `ManifestUpdate::published_or_unchanged`). The put
     /// doesn't wait for the session's commits, and the session records the
     /// published manifest as it records a fold's (see
     /// [`NamespaceCommitEngine::published_manifest`](crate::publish::NamespaceCommitEngine::published_manifest)).
@@ -111,11 +145,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
         entry: ExtensionEntry,
     ) -> Result<PublicationReport<ExtensionPublication>> {
         let built_on = basis.find_entry(name);
-        let position_basis = self.load_position_basis(position).await?;
+        let position_basis = self.load_publication_basis(position).await?;
+        let position_manifest_no = position_basis.manifest_no();
         let mut first_built_on = None;
         let update = self
             .update_live_manifest(
-                position_basis,
+                Some(position_basis),
                 &basis.clock,
                 |payload: NamespaceManifestPayload| {
                     first_built_on.get_or_insert(payload.manifest_no);
@@ -123,7 +158,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     async move { Ok(change) }
                 },
             )
-            .await?;
+            .await?
+            .published_or_unchanged(position_manifest_no)?;
         if !update.published {
             return Ok(PublicationReport {
                 response: ExtensionPublication::Superseded,

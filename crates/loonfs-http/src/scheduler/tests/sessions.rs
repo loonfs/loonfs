@@ -796,11 +796,14 @@ async fn session_steps_close_a_fenced_session_and_the_session_of_a_deleted_names
     server.runtime.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a session whose namespace another runtime deleted closes when
-/// its index step finds the namespace deleted, though its position shows no
-/// metadata work, so the metadata step doesn't see the deletion.
+/// Checks that a session whose namespace another runtime deleted closes
+/// after its index step finds the deleting runtime's claim, though its
+/// position shows no metadata work, so the metadata step doesn't see the
+/// deletion. The index step returns `writer_fenced`, as a commit of the
+/// session would, and not `namespace_deleted`, because the deletion claimed
+/// a higher writer epoch before it published the tombstone.
 #[tokio::test]
-async fn a_session_closes_when_its_index_step_finds_the_namespace_deleted() {
+async fn a_session_closes_after_its_index_step_finds_another_runtimes_deletion() {
     let directory = tempdir().expect("tempdir");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let config = scheduler_config(Some(GrepWorkerConfig::default()));
@@ -833,11 +836,17 @@ async fn a_session_closes_when_its_index_step_finds_the_namespace_deleted() {
     server
         .run_steps_after(config.scheduler.maintenance_interval_ms.get())
         .await;
+    // The index step loads grep's entry from the session's position, whose
+    // check finds the deletion, and the writer's load then finds the
+    // deleting runtime's claim, so the step is fenced.
+    assert_eq!(server.call_failures(MaintenanceCall::GrepIndex), 1);
+    server
+        .run_steps_after(config.scheduler.maintenance_interval_ms.get())
+        .await;
     assert!(
         held_ids(namespaces).is_empty(),
-        "the session of a deleted namespace closes"
+        "the fenced session of a deleted namespace closes"
     );
-    assert_eq!(server.call_failures(MaintenanceCall::GrepIndex), 0);
     other.shutdown().await.expect("shutdown other");
     server.runtime.shutdown().await.expect("shutdown");
 }
@@ -1122,5 +1131,64 @@ async fn a_scheduler_that_sweeps_nothing_closes_idle_and_ended_sessions_without_
         store.take().is_empty(),
         "a sweep without maintenance lists nothing"
     );
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a sweep's handle on a held session that the table closes
+/// while the sweep runs can't publish or claim: its metadata call returns
+/// `writer_session_closed`, and the session that the next open starts is
+/// the namespace's only publisher, which the old handle doesn't fence.
+#[tokio::test]
+async fn a_sweeps_handle_on_a_session_that_the_table_closed_publishes_nothing() {
+    let directory = tempdir().expect("tempdir");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let config = scheduler_config(None);
+    let server = SchedulerServer::start(store, &config, 0).await;
+    let namespaces = &server.scheduler.inner.namespaces;
+    let namespace_id = namespace_id("closed-mid-sweep");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create");
+    namespaces
+        .open(&namespace_id)
+        .await
+        .expect("open")
+        .put_file("/a", b"a", &test_actor())
+        .await
+        .expect("publish");
+    // The handle that the sweep takes for a held namespace's steps.
+    let sweeps_handle =
+        crate::scheduler::lock(&namespaces.entry(&namespace_id).expect("the held namespace"))
+            .handle
+            .clone();
+    namespaces
+        .close(&namespace_id)
+        .await
+        .expect("the table closes the session")
+        .expect("a held session");
+    let error = sweeps_handle
+        .maintain_metadata_while_due(&loonfs::MaintenanceCancellation::new())
+        .await
+        .expect_err("the closed session's handle");
+    assert_eq!(error.code(), loonfs::ErrorCode::WriterSessionClosed);
+
+    let reopened = namespaces.open(&namespace_id).await.expect("a new session");
+    reopened
+        .put_file("/b", b"b", &test_actor())
+        .await
+        .expect("the new session commits");
+    let error = sweeps_handle
+        .fold_wal()
+        .await
+        .expect_err("the old handle stays closed");
+    assert_eq!(error.code(), loonfs::ErrorCode::WriterSessionClosed);
+    reopened
+        .put_file("/c", b"c", &test_actor())
+        .await
+        .expect("nothing fenced the new session");
+    drop(reopened);
+    drop(sweeps_handle);
     server.runtime.shutdown().await.expect("shutdown");
 }

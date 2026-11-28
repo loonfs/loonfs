@@ -26,9 +26,11 @@ pub enum GrepPublishOutcome {
     Published,
     /// The steps changed nothing since the last publication.
     NothingPending,
-    /// Another process changed grep's entry after the manifest that the
-    /// change built on, so the change wasn't published, and its segments are
-    /// left to the collector.
+    /// The writer session's position, confirmed as the newest manifest,
+    /// lists another grep entry than the one the change built on, such as
+    /// after the session's own disable, so the change wasn't published, and
+    /// its segments are left to the collector. When another writer changed
+    /// the entry, the publication returns `writer_fenced` instead.
     Superseded,
 }
 
@@ -212,8 +214,10 @@ fn invalid_entry(basis: &ExtensionBasis, error: GrepEntryError) -> GrepError {
 /// the change loaded the manifest it builds on, and [`Self::publish`]
 /// publishes what's pending. When another manifest follows that manifest
 /// first with the same grep entry, the change is published over it. When
-/// another process changed the entry, nothing is published, the step
-/// returns `Superseded`, and the next step plans from the current manifest.
+/// the session's position lists another entry, nothing is published, the
+/// step returns `Superseded`, and the next step plans from the position's
+/// manifest. When another writer claimed the namespace, the publication
+/// returns `writer_fenced`.
 /// A run that's dropped before it publishes leaves its segments to the
 /// collector.
 pub struct GrepSteps<'w, S> {
@@ -271,28 +275,30 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
         self.pending.as_ref()?.entry.as_ref().map(GrepEntry::status)
     }
 
-    /// Returns the pending change, which starts from the current manifest
-    /// when nothing is pending.
+    /// Returns the pending change, which starts from the manifest of the
+    /// writer session's position when nothing is pending.
     pub(super) async fn pending(&mut self) -> Result<&mut PendingEntry> {
         self.pending_from(PendingEntry::new).await
     }
 
-    /// Returns a disable's pending change, which starts from the current
-    /// manifest when nothing is pending, and replaces that manifest's grep
-    /// entry when the entry is invalid (see [`PendingEntry::for_disable`]).
+    /// Returns a disable's pending change, which starts from the manifest of
+    /// the writer session's position when nothing is pending, and replaces
+    /// that manifest's grep entry when the entry is invalid (see
+    /// [`PendingEntry::for_disable`]).
     pub(super) async fn pending_for_disable(&mut self) -> Result<&mut PendingEntry> {
         self.pending_from(PendingEntry::for_disable).await
     }
 
     /// Returns the pending change, and when nothing is pending, starts one
-    /// with `start` from the current manifest, which the read-only handle
-    /// loads, so the load opens no writer session.
+    /// with `start` from the manifest of the writer session's position (see
+    /// [`Namespace::load_extension_basis`]), the manifest that the change's
+    /// publication builds on.
     async fn pending_from(
         &mut self,
         start: fn(ExtensionBasis) -> Result<PendingEntry>,
     ) -> Result<&mut PendingEntry> {
         if self.pending.is_none() {
-            let basis = self.worker.load_basis(&self.namespace_id).await?;
+            let basis = self.namespace.load_extension_basis().await?;
             self.pending = Some(start(basis)?);
         }
         Ok(self
@@ -320,8 +326,8 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
     /// last publication.
     ///
     /// After a publication, the next step starts from the published manifest.
-    /// After another process changed the entry, or after an error, the next
-    /// step loads the current manifest. A change that's published or
+    /// After a superseded change, or after an error, the next step loads the
+    /// manifest of the session's position. A change that's published or
     /// superseded is recorded in
     /// [`GrepWorker::publication_stats`].
     pub async fn publish(&mut self) -> Result<GrepPublishOutcome> {

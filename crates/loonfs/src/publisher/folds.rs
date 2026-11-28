@@ -2,7 +2,7 @@
 //! that keep a namespace's folds apart from each other and from its snapshots, and
 //! its compaction units apart.
 
-use super::registry::{NamespaceChange, NamespaceSession};
+use super::registry::NamespaceChange;
 use super::worker::elapsed_ms_from;
 use super::{NamespacePublisher, PublisherRegistry};
 use crate::runtime_core::RuntimeCore;
@@ -14,7 +14,7 @@ use loonfs_core::control::{
 use loonfs_core::limits::{fold_at_inline_bytes, FOLD_AT_WAL_BYTES, MAX_CONTENTION_ATTEMPTS};
 use loonfs_core::publish::{WalTailReport, WriterPosition};
 use loonfs_core::time::OperationClock;
-use loonfs_core::{FoldedWalTail, Phase};
+use loonfs_core::{FoldedWalTail, MaintenanceCancellation, Phase};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::{Mutex as AsyncMutex, RwLock, RwLockReadGuard};
@@ -78,7 +78,7 @@ impl NamespaceTurns {
     }
 }
 
-/// Which WAL tails [`NamespaceSession::fold`] folds.
+/// Which WAL tails [`NamespacePublisher::fold`] folds.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum FoldWhen {
     /// Any tail. A tail that's already folded is reported as
@@ -106,7 +106,20 @@ pub(crate) struct WalTailState {
     inline_bytes: usize,
     /// The earliest `committed_at_ms` of the tail's commits, or `None` for a
     /// tail without a commit.
-    pub(super) oldest_commit_at_ms: Option<u64>,
+    oldest_commit_at_ms: Option<u64>,
+    /// Whether a floor object in the tail raised the view's floor above the
+    /// manifest's, so that no manifest records the view's floor yet.
+    raises_retention_floor: bool,
+}
+
+impl WalTailState {
+    /// Whether the tail has a commit or a floor object that raises the
+    /// view's floor, which a fold publishes. A tail of only fences, or of
+    /// floor objects that the manifest's floor already covers, changes
+    /// nothing that a manifest records, so it counts as empty.
+    fn has_change(&self) -> bool {
+        self.oldest_commit_at_ms.is_some() || self.raises_retention_floor
+    }
 }
 
 impl From<&WriterPosition> for WalTailState {
@@ -116,6 +129,7 @@ impl From<&WriterPosition> for WalTailState {
             wal_bytes: position.wal_tail_bytes(),
             inline_bytes: position.wal_tail_inline_bytes(),
             oldest_commit_at_ms: position.wal_tail_oldest_commit_at_ms(),
+            raises_retention_floor: position.read_basis().head().raises_retention_floor(),
         }
     }
 }
@@ -127,6 +141,7 @@ impl From<&WalTailReport> for WalTailState {
             wal_bytes: report.wal_bytes,
             inline_bytes: report.inline_bytes,
             oldest_commit_at_ms: report.oldest_commit_at_ms,
+            raises_retention_floor: report.raises_retention_floor,
         }
     }
 }
@@ -139,6 +154,7 @@ impl From<&NamespaceReadAnchor> for WalTailState {
             wal_bytes: anchor.wal_tail_bytes(),
             inline_bytes: anchor.wal_tail_inline_bytes(),
             oldest_commit_at_ms: status.wal_tail_oldest_commit_at_ms,
+            raises_retention_floor: anchor.read_state().raises_retention_floor(),
         }
     }
 }
@@ -146,7 +162,8 @@ impl From<&NamespaceReadAnchor> for WalTailState {
 /// When a fold of a WAL tail is due.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FoldDue {
-    /// The tail has reached a fold threshold or the fold age.
+    /// The tail has reached a fold threshold or the fold age, or a floor
+    /// object in it raised the view's floor above the manifest's.
     Now,
     /// The tail's oldest commit reaches the fold age at `due_at_ms`, on the
     /// wall clock.
@@ -158,8 +175,10 @@ pub(crate) enum FoldDue {
 /// Returns when a fold of `tail` is due at `now_ms`, on the runtime's wall
 /// clock: once the tail reaches `max_wal_tail_objects` WAL objects,
 /// `FOLD_AT_WAL_BYTES`, or the inline fold trigger of the runtime's inline
-/// tail limit (see `fold_at_inline_bytes`), or once its oldest commit is the
-/// runtime's fold age old.
+/// tail limit (see `fold_at_inline_bytes`), once its oldest commit is the
+/// runtime's fold age old, or at once when a floor object in it raised the
+/// view's floor above the manifest's, such as after a retention advance
+/// whose fold failed, because no manifest records that floor yet.
 ///
 /// The writer session's check after each publication and every maintenance
 /// check use this one rule, with their own object threshold.
@@ -169,7 +188,8 @@ pub(crate) fn fold_due(
     tail: &WalTailState,
     now_ms: u64,
 ) -> FoldDue {
-    let reached_size = tail.objects >= max_wal_tail_objects
+    let due_now = tail.raises_retention_floor
+        || tail.objects >= max_wal_tail_objects
         || tail.wal_bytes >= FOLD_AT_WAL_BYTES
         || tail.inline_bytes
             >= fold_at_inline_bytes(core.config().inline_content.inline_content_tail_limit_bytes);
@@ -177,14 +197,14 @@ pub(crate) fn fold_due(
         .oldest_commit_at_ms
         .map(|committed_at_ms| committed_at_ms.saturating_add(core.config().fold_age_ms.get()));
     match due_at_ms {
-        _ if reached_size => FoldDue::Now,
+        _ if due_now => FoldDue::Now,
         Some(due_at_ms) if now_ms >= due_at_ms => FoldDue::Now,
         Some(due_at_ms) => FoldDue::At { due_at_ms },
         None => FoldDue::OnGrowth,
     }
 }
 
-/// What one [`NamespaceSession::fold`] call did.
+/// What one [`NamespacePublisher::fold`] call did.
 pub(crate) enum NamespaceFold {
     /// No fold was due.
     NotDue {
@@ -211,27 +231,6 @@ impl NamespaceFold {
     }
 }
 
-impl NamespaceSession {
-    /// Folds the WAL tail of this session's namespace when `when` finds a
-    /// fold due, as [`NamespacePublisher::fold`] describes.
-    pub(crate) async fn fold(&self, when: FoldWhen) -> Result<NamespaceFold> {
-        self.publisher.fold(when).await
-    }
-
-    /// Takes a snapshot of this session's namespace at the manifest that
-    /// covers its tail, as [`NamespacePublisher::snapshot_after_fold`]
-    /// describes.
-    pub(crate) async fn snapshot_after_fold<T, SnapshotFuture>(
-        &self,
-        create: impl FnMut(Held<LoadedManifest>) -> SnapshotFuture,
-    ) -> Result<T>
-    where
-        SnapshotFuture: Future<Output = loonfs_core::Result<T>>,
-    {
-        self.publisher.snapshot_after_fold(create).await
-    }
-}
-
 impl NamespacePublisher {
     /// Folds the WAL tail of this session's namespace when `when` finds a
     /// fold due.
@@ -251,14 +250,20 @@ impl NamespacePublisher {
     /// position, the check loads the tail from the store under the fold lock,
     /// and claims nothing. A fold that is due starts from the session's
     /// position, so a session without its writer epoch claims it first (see
-    /// [`Self::writer_position`]).
+    /// [`Self::publish_from_position`]). A check that loads the tail takes a
+    /// read permit, which it releases before the fold waits for its fold
+    /// permit.
     ///
     /// The fold waits for a fold permit, and it records the manifest that
     /// covers the tail, whether it published that manifest or found it
     /// current (see [`PublisherRegistry::record_manifest_published`]). A
     /// fold that publishes then wakes the commits that wait at the write
     /// stop.
-    pub(super) async fn fold(&self, when: FoldWhen) -> Result<NamespaceFold> {
+    pub(super) async fn fold(
+        &self,
+        when: FoldWhen,
+        stop: &MaintenanceCancellation,
+    ) -> Result<NamespaceFold> {
         drop(self.unfenced_session()?);
         let turns = &self.turns;
         let arrival = turns.started();
@@ -267,15 +272,16 @@ impl NamespacePublisher {
                 return Ok(not_due);
             }
         }
-        let _turn = turns
-            .fold
-            .write()
-            .instrument(phase_span!(
-                self.context.runtime_core,
-                Phase::WaitForFoldLock,
-                self.namespace_id
-            ))
-            .await;
+        let _turn = self
+            .unless_stopped(
+                stop,
+                turns.fold.write().instrument(phase_span!(
+                    self.context.runtime_core,
+                    Phase::WaitForFoldLock,
+                    self.namespace_id
+                )),
+            )
+            .await?;
         if let FoldWhen::Always = when {
             if let Some(folded) = turns.folded_after(arrival) {
                 return Ok(NamespaceFold::Folded(Box::new(folded)));
@@ -288,31 +294,51 @@ impl NamespacePublisher {
             // A session without a position reads the tail first, so a fold
             // of a tail with no WAL object publishes nothing and claims
             // nothing.
-            let core = &self.context.runtime_core;
-            let anchor = core
-                .namespace_store(&self.namespace_id)
-                .load_live_read_anchor(core.observation())
-                .await?;
+            let anchor = self.load_tail_anchor().await?;
             if let Some(current) = FoldedWalTail::current_when_no_wal_object(&anchor) {
                 self.registry()?
                     .record_manifest_published(&self.namespace_id, &current.current);
                 return Ok(NamespaceFold::Folded(Box::new(current)));
             }
         }
-        self.fold_under_turn()
+        self.fold_under_turn(stop)
             .await
             .map(|folded| NamespaceFold::Folded(Box::new(folded)))
     }
 
+    /// Waits for `wait`, a lock or a permit that a fold waits for, or returns
+    /// the session's refusal of new work (see [`Self::stopped_refusal`]) once
+    /// `stop` is set, so that a host's fold that hasn't started doesn't keep
+    /// the session's close or the runtime's drain waiting. `stop` is the
+    /// session's stop, or a token that is never set for the session's own
+    /// fold.
+    async fn unless_stopped<T>(
+        &self,
+        stop: &MaintenanceCancellation,
+        wait: impl Future<Output = T>,
+    ) -> Result<T> {
+        tokio::select! {
+            biased;
+            () = stop.cancelled() => Err(self.stopped_refusal()),
+            value = wait => Ok(value),
+        }
+    }
+
     /// Folds the tail from the session's position, with the fold lock that
     /// the caller has.
-    async fn fold_under_turn(&self) -> Result<FoldedWalTail> {
+    async fn fold_under_turn(&self, stop: &MaintenanceCancellation) -> Result<FoldedWalTail> {
         let core = &self.context.runtime_core;
         let namespace_id = &self.namespace_id;
-        let _permit = core
-            .fold_permit()
-            .instrument(phase_span!(core, Phase::WaitForFoldPermit, namespace_id))
-            .await;
+        let _permit = self
+            .unless_stopped(
+                stop,
+                core.fold_permit().instrument(phase_span!(
+                    core,
+                    Phase::WaitForFoldPermit,
+                    namespace_id
+                )),
+            )
+            .await?;
         let round = self.turns.start_round();
         let started_at_ms = core.timer().monotonic_now_ms();
         let fold_span = phase_span!(
@@ -323,25 +349,18 @@ impl NamespacePublisher {
         );
         // Commits that the session published while the fold waited for its
         // permit are in the position now, so the fold folds them too.
-        let result = async {
-            let input = self.writer_position().await?;
-            let namespace = core.namespace_store(namespace_id);
-            let clock = OperationClock::start(core.now_ms(), Arc::clone(core.timer()));
-            match namespace.fold_wal_tail_from(&input, &clock).await {
-                // The position's manifest is gone, so the fold runs once more
-                // from the position that the writer's load finds.
-                Err(CoreError::HeadMoved(_)) => {
-                    let input = self.reload_writer_position().await?;
-                    namespace
-                        .fold_wal_tail_from(&input, &clock)
-                        .await
-                        .map_err(Error::from)
-                }
-                folded => folded.map_err(Error::from),
-            }
-        }
-        .instrument(fold_span.clone())
-        .await;
+        let namespace = core.namespace_store(namespace_id);
+        let clock = OperationClock::start(core.now_ms(), Arc::clone(core.timer()));
+        let result = self
+            .publish_from_position(
+                |input| {
+                    let (namespace, clock) = (&namespace, &clock);
+                    async move { namespace.fold_wal_tail_from(&input, clock).await }
+                },
+                |_| false,
+            )
+            .instrument(fold_span.clone())
+            .await;
         if let Ok(folded) = &result {
             fold_span.record("outcome", tracing::field::debug(folded.response.outcome));
         }
@@ -370,11 +389,14 @@ impl NamespacePublisher {
     /// verifying a snapshot").
     ///
     /// The manifest that covers the tail is a fold's when the session has a
-    /// position, or when the head has a commit above its manifest's head, so
-    /// a snapshot of a namespace with a commit in its tail folds, and a
+    /// position, or when the tail has a commit or a floor object that raises
+    /// the view's floor above its manifest's, the tail that a fold publishes
+    /// (see `WalTailState::has_change`), so such a snapshot folds, and a
     /// session without its writer epoch claims it first. A tail of only
     /// fences counts as empty. Otherwise the snapshot is taken at the current
     /// manifest that the head was read from, and the call claims nothing.
+    /// The check of the tail takes a read permit, which it releases before
+    /// the fold waits for its fold permit.
     /// Each attempt uses a fold that took its input after the attempt
     /// arrived, and folds only when no such fold has completed (see
     /// [`Self::fold`]). The attempt keeps the namespace's fold lock in shared
@@ -389,6 +411,7 @@ impl NamespacePublisher {
     pub(super) async fn snapshot_after_fold<T, SnapshotFuture>(
         &self,
         mut create: impl FnMut(Held<LoadedManifest>) -> SnapshotFuture,
+        stop: &MaintenanceCancellation,
     ) -> Result<T>
     where
         SnapshotFuture: Future<Output = loonfs_core::Result<T>>,
@@ -396,7 +419,7 @@ impl NamespacePublisher {
         let mut attempts = 1;
         loop {
             let arrival = self.turns.started();
-            let (basis, turn) = self.snapshot_basis(arrival).await?;
+            let (basis, turn) = self.snapshot_basis(arrival, stop).await?;
             let created = create(basis).await.map_err(Error::from);
             drop(turn);
             let created = self
@@ -420,6 +443,7 @@ impl NamespacePublisher {
     async fn snapshot_basis(
         &self,
         arrival: u64,
+        stop: &MaintenanceCancellation,
     ) -> Result<(Held<LoadedManifest>, RwLockReadGuard<'_, ()>)> {
         let turns = &self.turns;
         let shared = turns.fold.read().await;
@@ -432,24 +456,18 @@ impl NamespacePublisher {
         // waiter's exclusive lock would wait for that snapshot, and the waiters
         // would take their snapshots one at a time.
         {
-            let exclusive = turns.fold.write().await;
+            let exclusive = self.unless_stopped(stop, turns.fold.write()).await?;
             if turns.folded_after(arrival).is_none() {
                 drop(self.unfenced_session()?);
                 if self.current_position().is_none() {
-                    let core = &self.context.runtime_core;
-                    let anchor = core
-                        .namespace_store(&self.namespace_id)
-                        .load_live_read_anchor(core.observation())
-                        .await?;
-                    let no_commit_in_tail =
-                        WalTailState::from(&anchor).oldest_commit_at_ms.is_none();
-                    if no_commit_in_tail {
+                    let anchor = self.load_tail_anchor().await?;
+                    if !WalTailState::from(&anchor).has_change() {
                         let basis = anchor.held().clone();
                         drop(exclusive);
                         return Ok((basis, turns.fold.read().await));
                     }
                 }
-                self.fold_under_turn().await?;
+                self.fold_under_turn(stop).await?;
             }
             drop(exclusive);
         }
@@ -478,10 +496,7 @@ impl NamespacePublisher {
         let (tail, observed) = match self.current_position() {
             Some(position) => (WalTailState::from(&position), None),
             None => {
-                let anchor = core
-                    .namespace_store(&self.namespace_id)
-                    .load_live_read_anchor(core.observation())
-                    .await?;
+                let anchor = self.load_tail_anchor().await?;
                 (WalTailState::from(&anchor), Some(anchor.held().clone()))
             }
         };
@@ -500,6 +515,19 @@ impl NamespacePublisher {
                 .map(|due_at_ms| monotonic_now_ms.saturating_add(due_at_ms.saturating_sub(now_ms))),
             observed,
         }))
+    }
+
+    /// Loads the namespace's current manifest and WAL tail for a check of
+    /// whether a fold is due by a session without a position, with a read
+    /// permit from the runtime's execution budget, which the check releases
+    /// before a fold waits for its fold permit.
+    async fn load_tail_anchor(&self) -> Result<NamespaceReadAnchor> {
+        let core = &self.context.runtime_core;
+        let _permit = core.read_permit().await;
+        Ok(core
+            .namespace_store(&self.namespace_id)
+            .load_live_read_anchor(core.observation())
+            .await?)
     }
 
     /// Returns the registry that this session belongs to, or
@@ -533,7 +561,7 @@ impl NamespacePublisher {
     /// the store and at or below the manifest boundary. The writer's load
     /// claims the writer epoch first when the session has none, and it
     /// returns `writer_fenced` when another writer claimed the namespace.
-    async fn reload_writer_position(&self) -> Result<WriterPosition> {
+    pub(super) async fn reload_writer_position(&self) -> Result<WriterPosition> {
         drop(self.unfenced_session()?);
         let mut engine = self.lock_engine().await;
         engine.invalidate_projection();

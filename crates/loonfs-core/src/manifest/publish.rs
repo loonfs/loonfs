@@ -84,6 +84,25 @@ impl<T> ManifestUpdate<T> {
             response: self.response,
         }
     }
+
+    /// Returns this update of a writer session's publication that built on
+    /// manifest `built_on`, the manifest of the session's position, or
+    /// `head_moved` when the update published nothing and ended on a later
+    /// manifest, which won a put of the update. The session then doesn't
+    /// return a result computed from that manifest: it drops the position and
+    /// loads it again with the writer's load, which returns `writer_fenced`
+    /// when the manifest is another writer's (see
+    /// [`NamespaceStore::load_publication_basis`]).
+    pub(crate) fn published_or_unchanged(self, built_on: ManifestNo) -> Result<Self> {
+        if self.published || self.current.manifest_no() == built_on {
+            return Ok(self);
+        }
+        Err(CoreError::HeadMoved(format!(
+            "manifest `{}` won a put of a publication from the writer position's manifest \
+             `{built_on}`, and the publication ended without a put",
+            self.current.manifest_no()
+        )))
+    }
 }
 
 /// A namespace that a create or a fork found at its ID.

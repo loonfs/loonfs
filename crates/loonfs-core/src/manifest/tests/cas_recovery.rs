@@ -540,7 +540,7 @@ async fn a_fold_whose_manifest_put_succeeds_without_an_answer_reports_published(
 }
 
 #[tokio::test]
-async fn a_snapshot_losing_manifest_publication_keeps_the_winner() {
+async fn a_snapshot_whose_fold_loses_to_another_fold_reports_its_position_behind() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
@@ -567,19 +567,24 @@ async fn a_snapshot_losing_manifest_publication_keeps_the_winner() {
         snapshot
     };
     let (losing, winning) = futures::join!(losing, winning);
-    let losing = losing.expect("losing publication still keeps the winner");
+    // The winner's manifest ends the losing fold without a put, so the losing
+    // snapshot doesn't take its record at a manifest that it didn't publish.
+    assert_matches!(losing, Err(CoreError::HeadMoved(_)));
     let winning = winning.expect("winner");
-    let losing = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&losing.snapshot_id)
-        .await
-        .expect("record")
-        .expect("present");
     let winning = crate::test_support::namespace_store(&store, &namespace_id)
         .load_snapshot_record(&winning.snapshot_id)
         .await
         .expect("record")
         .expect("present");
-    assert_eq!(losing.state.manifest(), winning.state.manifest());
+    assert_eq!(
+        winning.state.manifest().manifest_no,
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
+            .await
+            .expect("current")
+            .payload()
+            .manifest_no
+    );
     let statistics = crate::test_support::namespace_store(&store, &namespace_id)
         .load_statistics()
         .await
@@ -792,17 +797,12 @@ async fn a_successor_that_copies_its_predecessor_gets_its_own_publication_id() {
     );
 }
 
-/// Checks that a fold whose manifest put loses its response, and that then
-/// finds another process's fold at its number, ends on that fold's manifest
-/// with the check of the position it folded from, not with the start of its
-/// own clock.
-///
-/// A third manifest was published before the fold's clock started, so no
-/// check at that start could have found the other fold the newest. A writer
-/// position that took the start of the clock would let an eventual read
-/// skip the check that finds the third manifest.
+/// Checks that a fold whose put loses its response, and whose number another
+/// process's fold took, doesn't return a result from that fold, or from the
+/// manifest above it, but reports its position behind, so the session loads
+/// its position again with the writer's load.
 #[tokio::test]
-async fn a_fold_that_finds_another_fold_after_a_lost_put_keeps_its_position_check() {
+async fn a_fold_that_finds_another_fold_after_a_lost_put_reports_its_position_behind() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let context = test_context();
@@ -833,7 +833,7 @@ async fn a_fold_that_finds_another_fold_after_a_lost_put_keeps_its_position_chec
             },
             None,
             None,
-            position_checked.clone(),
+            position_checked,
         )
         .await
         .expect("position")
@@ -878,17 +878,7 @@ async fn a_fold_that_finds_another_fold_after_a_lost_put_keeps_its_position_chec
                 Arc::new(crate::time::StdMonotonicTimer::default()),
             ),
         )
-        .await
-        .expect("fold");
+        .await;
     assert_eq!(store.remaining(), 0, "the fold's put lost its response");
-    assert_eq!(
-        folded.response.outcome,
-        crate::FoldWalOutcome::AlreadyCurrent
-    );
-    assert_eq!(folded.current.manifest_no(), other_fold);
-    assert_eq!(
-        folded.current.checked(),
-        &position_checked,
-        "the found fold keeps the check of the position's manifest"
-    );
+    assert!(matches!(folded, Err(CoreError::HeadMoved(_))));
 }

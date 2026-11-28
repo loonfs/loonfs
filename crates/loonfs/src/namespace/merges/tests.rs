@@ -1291,6 +1291,67 @@ async fn a_merge_folds_a_fork_whose_tail_has_a_commit_older_than_the_max_age() {
     assert_eq!(family.fresh_read(&family.main, "/c.txt").await, b"c");
 }
 
+/// Checks that a merge that folds its fork takes the fork's snapshot when
+/// another process claimed the fork and replaced the fold's manifest before
+/// the snapshot was verified.
+///
+/// The fork's tail has a commit older than [`MAX_TAIL_COMMIT_AGE_MS`], so the
+/// merge folds the fork as the fork's writer session in this runtime. The
+/// store blocks the snapshot record's write until a second runtime on the
+/// same store has claimed the fork and published an extension's entry on
+/// it. The verification then finds the newer manifests, and the next
+/// attempt finds the fork's tail empty but for the claim's fence, so it
+/// takes the snapshot at the newest manifest without a fold or a claim.
+#[tokio::test]
+async fn a_merge_snapshots_its_fork_after_another_process_replaced_the_folds_manifest() {
+    use loonfs_test_support::stores::{BlockingStore, OperationSelector};
+    let directory = tempfile::tempdir().expect("tempdir");
+    let fork_id = namespace_id("main-fork");
+    let blocking = Arc::new(BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::snapshot_prefix(&fork_id)),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    let store: crate::SharedObjectStore = blocking.clone();
+    let clock = Arc::new(ManualClock::at_system_time());
+    let family = family_on(directory, store.clone(), Some(clock.clone())).await;
+    let other = LoonFs::builder_with_store(store, crate::Context::Service)
+        .writer_id(writer_id("other-process"))
+        .build()
+        .await
+        .expect("the other process's runtime");
+    let replace = async {
+        blocking.wait_until_blocked().await;
+        let fork = other.open_namespace(&fork_id).expect("open the fork");
+        let basis = fork
+            .load_extension_basis()
+            .await
+            .expect("the other process loads the fork's basis");
+        let name = loonfs_types::ExtensionName::parse("grep").expect("extension name");
+        let entry = loonfs_types::format::manifest::ExtensionEntry::new(
+            1,
+            Vec::new(),
+            serde_json::Map::new(),
+        );
+        let published = fork
+            .publish_extension(&basis, &name, entry)
+            .await
+            .expect("publish the extension's entry");
+        assert_matches!(
+            published,
+            crate::engine::ExtensionPublication::Published { .. }
+        );
+        blocking.release();
+    };
+    clock.advance_ms(MAX_TAIL_COMMIT_AGE_MS + 1);
+    blocking.block_next();
+    let merger = actor();
+    let (merged, ()) = tokio::join!(family.main.merge_fork(&fork_id, &merger), replace);
+    merged.expect("the merge");
+    assert_eq!(family.fresh_read(&family.main, "/b.txt").await, b"b");
+    other.shutdown().await.expect("shutdown the other process");
+}
+
 /// Checks that `main`'s fold keeps a file within the extent cap across fork,
 /// append, and merge cycles. `main` folds a 4 KiB file, and in each cycle a
 /// new fork appends 1 KiB, `main` merges it, appends 64 bytes, and folds. The

@@ -129,11 +129,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// `retention_window_ms`, or cleared when it's `None`, and nothing else
     /// changed (format spec, "Advancing the retention floor").
     ///
-    /// The publication builds on the position's manifest, or on the newest
-    /// manifest when the position's manifest is missing from the store and
-    /// at or below the manifest boundary. If the manifest that the change is
-    /// published over already has the requested window, the call publishes
-    /// nothing. The report includes the manifest that records the change,
+    /// The publication builds on the position's manifest, and returns
+    /// `head_moved` when that manifest is missing from the store and at or
+    /// below the manifest boundary (see [`Self::load_publication_basis`]). If
+    /// the position's manifest already has the requested window, the call
+    /// publishes nothing, and when a manifest that won its put has the
+    /// window, the call returns `head_moved` instead of reporting the change
+    /// done (see `ManifestUpdate::published_or_unchanged`). The report includes the manifest that records the change,
     /// which the session records as its newest published manifest, as it
     /// records a fold's (see
     /// [`NamespaceCommitEngine::published_manifest`](crate::publish::NamespaceCommitEngine::published_manifest)).
@@ -148,10 +150,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<PublicationReport<SetRetentionWindowResponse>> {
         let retention_window_ms = retention_window_ms.map(NonZeroU64::from);
         let clock = self.start_clock();
-        let basis = self.load_position_basis(position).await?;
+        let basis = self.load_publication_basis(position).await?;
+        let built_on = basis.manifest_no();
         let update = self
             .update_live_manifest(
-                basis,
+                Some(basis),
                 &clock,
                 |mut payload: NamespaceManifestPayload| async move {
                     if payload.retention_window_ms == retention_window_ms {
@@ -161,7 +164,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     Ok(ManifestChange::Next(Box::new(payload), ()))
                 },
             )
-            .await?;
+            .await?
+            .published_or_unchanged(built_on)?;
         Ok(update.into_report().map(|()| SetRetentionWindowResponse {
             namespace_id: self.namespace_id.clone(),
             retention_window_ms: retention_window_ms.map(NonZeroU64::get),

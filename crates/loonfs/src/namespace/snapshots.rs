@@ -124,6 +124,7 @@ impl Namespace<Writable> {
                 let administrator = self.administrator().await?;
                 let administrator = &administrator;
                 self.session()
+                    .admit()?
                     .snapshot_after_fold(|basis| {
                         let engine = self.engine();
                         async move {

@@ -96,7 +96,7 @@ pub struct HttpHandles {
     pub runtime: LoonFs<Writable>,
     /// The writer sessions that every write request opens its namespace's
     /// writable handle through. They're sessions of [`Self::runtime`], whose
-    /// [`LoonFs::wait_for_fenced_session`] the HTTP API waits on before it
+    /// [`LoonFs::wait_for_ended_session`] the HTTP API waits on before it
     /// sends a fenced request again. Deleting a namespace drops its session,
     /// and enabling or disabling its grep index marks the session for the
     /// host's maintenance. A host usually passes a [`Namespaces`] table.
@@ -250,7 +250,7 @@ impl HttpState {
         };
         match first {
             Err(error) if error.code() == ErrorCode::WriterFenced => {
-                self.runtime.wait_for_fenced_session(namespace_id).await;
+                self.runtime.wait_for_ended_session(namespace_id).await;
                 request(self.open_writer(namespace_id, context).await?).await
             }
             settled => settled,

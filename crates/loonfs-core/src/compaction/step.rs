@@ -83,9 +83,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// position, so only a writer session compacts (see
     /// [`NamespaceCommitEngine::load_position`](crate::publish::NamespaceCommitEngine::load_position)).
     /// A position whose manifest is missing from the store and at or below
-    /// the manifest boundary returns `head_moved`, and the session plans
-    /// again from a new position. The unit reads its input runs without the
-    /// cache. The walk that builds a base
+    /// the manifest boundary returns `head_moved`, and so does a unit that a
+    /// manifest that won its put abandons, and the session plans again from
+    /// a new position (see `ManifestUpdate::published_or_unchanged`). A
+    /// cancelled unit, or one past its budget, returns its outcome. The unit
+    /// reads its input runs without the cache. The walk that builds a base
     /// compaction's kept inode filter reads through the cache. The unit
     /// compacts the whole window that the namespace's run policy selects,
     /// whatever the number of rows its runs list, and the compaction checks
@@ -105,16 +107,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn compact_metadata_unit_from(
         &self,
         position: &WriterPosition,
-        cancellation: &MetadataCompactionCancellation,
+        cancellation: &MaintenanceCancellation,
     ) -> Result<CompactionUnitOutcome> {
         let compaction = self.namespace.start_clock();
-        let Some(basis) = self.namespace.load_position_basis(position).await? else {
-            return Err(CoreError::HeadMoved(format!(
-                "manifest `{}` of the writer position is missing and at or below the manifest \
-                 boundary",
-                position.read_basis().basis.manifest().manifest_no
-            )));
-        };
+        let basis = self.namespace.load_publication_basis(position).await?;
         let current = basis.manifest();
         let payload = current.payload();
         ensure_namespace_live(&payload.namespace_id, payload.status)?;
@@ -169,7 +165,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 drop(segments);
                 self.namespace
                     .finalize_metadata_compaction(
-                        Some(basis),
+                        basis,
                         &spec,
                         &input_keys,
                         compacted,
@@ -234,8 +230,20 @@ fn log_unit_outcome(
     }
 }
 
+/// A token that stops the maintenance that takes it.
+///
+/// It stops a compaction unit at its next block, and it ends the waits of a
+/// unit, a fold or a snapshot for a lock or a permit. A host's call has one,
+/// and so does a writer session, whose stop the session's close, its fence
+/// and the runtime's shutdown set. Clones share one state.
 #[derive(Debug, Clone, Default)]
-pub struct MetadataCompactionCancellation(Arc<Cancellation>);
+pub struct MaintenanceCancellation {
+    /// The state that [`Self::cancel`] sets.
+    own: Arc<Cancellation>,
+    /// The states of the tokens that this token joins (see [`Self::joined`]),
+    /// any of which cancels this token too.
+    joined: Vec<Arc<Cancellation>>,
+}
 
 #[derive(Debug, Default)]
 struct Cancellation {
@@ -247,16 +255,38 @@ struct Cancellation {
     woken: Notify,
 }
 
-impl MetadataCompactionCancellation {
+impl MaintenanceCancellation {
+    /// Creates an uncancelled token.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cancels the token.
     pub fn cancel(&self) {
-        self.0.cancelled.store(true, Ordering::SeqCst);
-        self.0.woken.notify_waiters();
+        self.own.cancelled.store(true, Ordering::SeqCst);
+        self.own.woken.notify_waiters();
+    }
+
+    /// Returns a token that is cancelled once this token or `other` is, such
+    /// as the token of a unit that a host runs through a writer session,
+    /// which stops for the host's cancellation and for the session's stop.
+    /// Cancelling the returned token cancels neither of the two.
+    pub fn joined(&self, other: &Self) -> Self {
+        Self {
+            own: Arc::default(),
+            joined: [self, other]
+                .into_iter()
+                .flat_map(|token| std::iter::once(&token.own).chain(&token.joined))
+                .cloned()
+                .collect(),
+        }
     }
 
     /// Whether the token has been set. What a unit reads between block
     /// fetches, and what a caller about to start work reads first.
     pub fn is_cancelled(&self) -> bool {
-        self.0.cancelled.load(Ordering::SeqCst)
+        self.states()
+            .any(|state| state.cancelled.load(Ordering::SeqCst))
     }
 
     /// Resolves once the token is set, and stays pending while it is not.
@@ -264,15 +294,24 @@ impl MetadataCompactionCancellation {
     /// For a caller waiting on something else (such as a permit or a queue)
     /// that has to stop waiting when the unit is cancelled.
     pub async fn cancelled(&self) {
-        let woken = self.0.woken.notified();
-        tokio::pin!(woken);
-        // Registered before the flag is read, which is what closes the race
+        let mut woken: Vec<_> = self
+            .states()
+            .map(|state| Box::pin(state.woken.notified()))
+            .collect();
+        // Registered before the flags are read, which is what closes the race
         // with a `cancel` arriving between the read and the await: the notify
         // then wakes this waiter rather than passing it by.
-        woken.as_mut().enable();
+        for woken in &mut woken {
+            woken.as_mut().enable();
+        }
         if self.is_cancelled() {
             return;
         }
-        woken.await;
+        futures::future::select_all(woken).await;
+    }
+
+    /// Returns this token's own state and the states that it joins.
+    fn states(&self) -> impl Iterator<Item = &Cancellation> {
+        std::iter::once(&*self.own).chain(self.joined.iter().map(|state| &**state))
     }
 }

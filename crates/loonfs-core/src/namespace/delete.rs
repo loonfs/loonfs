@@ -82,11 +82,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 if current.payload().folded_wal_no < head.wal_no {
                     clock.ensure_metadata_publication_budget(&self.namespace_id)?;
                     let mut held = held;
-                    let folded = self.fold_wal_tail_from(&held, clock).await?;
+                    let moved = match self.fold_wal_tail_from(&held, clock).await {
+                        Ok(folded) => held.move_to(&folded.current).then_some(held),
+                        // The position is behind: its manifest is gone, or a
+                        // manifest that won the fold's put ended the fold
+                        // without a put. The next attempt drops it and loads
+                        // the writer's anchor, which returns `writer_fenced`
+                        // when another writer claimed the namespace.
+                        Err(CoreError::HeadMoved(_)) => None,
+                        Err(error) => return Err(error),
+                    };
                     *position
                         .lock()
-                        .expect("the deletion's position lock should not be poisoned") =
-                        held.move_to(&folded.current).then_some(held);
+                        .expect("the deletion's position lock should not be poisoned") = moved;
                     return Ok(ManifestChange::Again);
                 }
                 let payload = current.payload().tombstone(clock.request_at_ms());

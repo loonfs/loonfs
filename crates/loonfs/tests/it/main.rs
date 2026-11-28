@@ -40,6 +40,7 @@ mod inline_retry;
 mod inode_reads;
 mod invalidation;
 mod maintenance;
+mod maintenance_admission;
 mod merge_collection;
 mod merge_reads;
 mod metrics_instruments;

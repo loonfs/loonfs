@@ -150,9 +150,8 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
         blocked.release();
     };
     let (lost, ()) = tokio::join!(loser, winner);
-    assert_eq!(
-        lost.expect("losing fold").response.outcome,
-        FoldWalOutcome::AlreadyCurrent
-    );
+    // The winner's manifest ends the losing fold without a put, so the losing
+    // fold reports its position behind.
+    assert!(matches!(lost, Err(CoreError::HeadMoved(_))));
     assert_files_readable(&store, namespace_id, "competing-gc", &values).await;
 }

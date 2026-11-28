@@ -420,7 +420,19 @@ async fn shutting_down_one_runtime_leaves_the_budget_usable() {
         },
     )
     .await;
-    let waiting = leaving.start_fold(&leaving_namespace);
+    let waiting = {
+        let runtime = leaving.runtime.clone();
+        let namespace_id = leaving_namespace.clone();
+        tokio::spawn(async move {
+            let error = runtime
+                .open_namespace(&namespace_id)
+                .expect("open namespace")
+                .fold_wal()
+                .await
+                .expect_err("the shutdown ends the fold's wait for its permit");
+            assert_eq!(error.code(), crate::ErrorCode::ShuttingDown);
+        })
+    };
     wait_for_stats(
         &budget,
         ExecutionBudgetStats {

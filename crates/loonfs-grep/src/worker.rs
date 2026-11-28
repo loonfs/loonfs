@@ -163,7 +163,10 @@ pub enum GrepReorganizeOutcome {
 /// [`Namespace`](loonfs::Namespace) that its caller passes to
 /// [`Self::enable`], [`Self::disable`] and [`Self::steps`], so the entry is
 /// published as the namespace's writer session, which claims the namespace
-/// first when it has no writer epoch. It reads namespace state, grep's entry
+/// first when it has no writer epoch. A run of steps loads the manifest
+/// that its change builds on from the session's position, so the change and
+/// its publication start from the same manifest. The worker reads namespace
+/// state otherwise, grep's entry for [`Self::entry`] and [`Self::index_due`]
 /// included, through a read-only `LoonFs`, so a read of the index opens no
 /// writer session. Scheduling is external to this type. A build or reorganize step that finds work waits for a permit
 /// of the worker's [`GrepStepBudget`] before it reads file content or index
@@ -243,9 +246,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         GrepSteps::new(self, namespace, publish_interval_ms)
     }
 
-    /// Loads grep's entry from the namespace's current manifest through the
-    /// read-only handle, as the basis that a change starts from.
-    pub(super) async fn load_basis(&self, namespace_id: &NamespaceId) -> Result<ExtensionBasis> {
+    /// Loads the namespace's current manifest through the read-only handle,
+    /// for a read of grep's entry that opens no writer session. A run of
+    /// steps loads the basis of its change from the writer session's
+    /// position instead (see [`GrepSteps`]).
+    async fn load_basis(&self, namespace_id: &NamespaceId) -> Result<ExtensionBasis> {
         Ok(self
             .reader
             .namespace(namespace_id)

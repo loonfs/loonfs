@@ -640,3 +640,90 @@ async fn a_second_read_at_a_snapshot_captures_after_the_first_read_ends() {
     );
     fixture.runtime.shutdown().await.expect("shutdown");
 }
+
+/// Checks that a snapshot and an explicit fold from a session without a
+/// position, whose check of the tail reads the WAL, take a read permit for
+/// that check and release it before they wait for a fold permit. While the
+/// test has the runtime's only read permit and every fold permit, the call
+/// waits for the read permit and reads no WAL object. Once the test releases
+/// the read permit, the call reads the tail and waits for a fold permit
+/// without a read permit. It completes once the test releases the fold
+/// permits.
+#[tokio::test]
+async fn a_cold_fold_reads_the_wal_with_a_read_permit_and_releases_it_before_its_fold_permit() {
+    for snapshot in [true, false] {
+        let fixture = Fixture::with_cache(
+            KeyPredicate::content_blob(),
+            crate::MetadataCache::builder()
+                .max_head_bytes(0)
+                .max_wal_tail_bytes(0)
+                .build(),
+        )
+        .await;
+        let namespace_id = fixture.namespace.id().clone();
+        fixture
+            .runtime
+            .core
+            .forget_namespace_view(&namespace_id)
+            .await;
+        let budget = fixture.runtime.execution_budget();
+        let read = budget.read_permit().await;
+        let mut folds = Vec::new();
+        for _ in 0..crate::execution_budget::DEFAULT_MAX_CONCURRENT_FOLDS.get() {
+            folds.push(budget.fold_permit().await);
+        }
+        fixture.store.inner().reset();
+        let wal = loonfs_objectstore::keys::wal_prefix(&namespace_id);
+        let reads_the_wal = || {
+            fixture
+                .store
+                .inner()
+                .snapshot()
+                .iter()
+                .any(|operation| operation.key().starts_with(&wal))
+        };
+        let call = tokio::spawn({
+            let namespace = fixture.namespace.clone();
+            async move {
+                if snapshot {
+                    namespace.create_snapshot().await.map(drop)
+                } else {
+                    namespace.fold_wal().await.map(drop)
+                }
+            }
+        });
+        finish(async {
+            while budget.stats().reads_waiting == 0
+                && budget.stats().folds_waiting == 0
+                && !reads_the_wal()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            !reads_the_wal(),
+            "snapshot={snapshot}: no WAL object is read before a read permit"
+        );
+        assert_eq!(budget.stats().reads_waiting, 1, "snapshot={snapshot}");
+        drop(read);
+        finish(async {
+            while budget.stats().folds_waiting == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(reads_the_wal(), "snapshot={snapshot}: the tail is read");
+        assert_eq!(
+            budget.stats().reads_running,
+            0,
+            "snapshot={snapshot}: the read permit is released before the wait for a fold permit"
+        );
+        drop(folds);
+        finish(call)
+            .await
+            .expect("join the call")
+            .unwrap_or_else(|error| panic!("snapshot={snapshot}: {error:?}"));
+        fixture.runtime.shutdown().await.expect("shutdown");
+    }
+}

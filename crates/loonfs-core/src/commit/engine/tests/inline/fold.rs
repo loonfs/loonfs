@@ -432,10 +432,9 @@ async fn competing_engines_write_their_own_objects_and_publish_one_manifest() {
         result
     };
     let (first_result, second_result) = tokio::join!(first_fold, second_fold);
-    assert_eq!(
-        first_result.expect("first fold").response.outcome,
-        FoldWalOutcome::AlreadyCurrent
-    );
+    // The second fold's manifest ends the first fold without a put, so the
+    // first fold reports its position behind.
+    assert!(matches!(first_result, Err(CoreError::HeadMoved(_))));
     assert_eq!(
         second_result.expect("second fold").response.outcome,
         FoldWalOutcome::Published

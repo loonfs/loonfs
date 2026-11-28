@@ -142,7 +142,7 @@ impl NamespacePublisher {
         if self.context.writer.upgrade().is_none() {
             return;
         }
-        let result = Box::pin(self.compact_namespace(None, &self.compaction_cancellation)).await;
+        let result = Box::pin(self.compact_namespace(None, &self.stop)).await;
         if let Err(error) = result {
             phase_event!(
                 self.context.runtime_core,
@@ -169,7 +169,12 @@ impl NamespacePublisher {
                 .session_fold_at_wal_objects()
                 .get(),
         };
-        match self.fold(when).await {
+        // The session's own fold isn't stopped by its close: the commits
+        // that the close drains can wait at the write stop for it.
+        match self
+            .fold(when, &loonfs_core::MaintenanceCancellation::default())
+            .await
+        {
             Ok(NamespaceFold::Folded(folded)) => {
                 let published = folded.response.outcome == FoldWalOutcome::Published;
                 if published {

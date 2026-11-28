@@ -1018,10 +1018,16 @@ async fn grep_error_unreadable_entries_and_segments_are_index_corrupt_and_core_r
     harness.server.abort();
 }
 
-/// Checks that an enable whose publication another process's enable beat
-/// returns `store_contention`, and that core reads still work.
+/// Checks that an enable whose manifest put another writer's enable beat
+/// succeeds with the other writer's index, instead of returning
+/// `grep_publication_conflict`, and that core reads still work. The server's
+/// session has claimed the namespace with a commit, so the put that loses is
+/// the enable's own. The put finds the other writer's manifests above the
+/// session's position and returns `writer_fenced`, and the server sends the
+/// enable once more in a new session, which reads the other writer's entry
+/// and publishes nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grep_error_publication_conflict_is_store_contention_and_core_reads_survive() {
+async fn an_enable_that_meets_another_writers_enable_succeeds() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("grep-error-conflict");
     let gate = Arc::new(BlockingStore::new(
@@ -1048,8 +1054,13 @@ async fn grep_error_publication_conflict_is_store_contention_and_core_reads_surv
     let rival_store =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("rival store")) as SharedObjectStore;
     let rival = grep_worker(&rival_store, "grep-error-rival").await;
-    gate.block_next();
     let client = &harness.client;
+    let claim = NamespacePath::parse(namespace_id.as_str(), "/claim.txt").expect("claim target");
+    client
+        .put_file(&claim, b"claim")
+        .await
+        .expect("the server's session claims the namespace with a commit");
+    gate.block_next();
     let (result, ()) = futures::join!(client.enable_grep_index(&namespace_id), async {
         gate.wait_until_blocked().await;
         assert!(matches!(
@@ -1061,15 +1072,20 @@ async fn grep_error_publication_conflict_is_store_contention_and_core_reads_surv
         ));
         gate.release();
     });
-    assert_grep_api_error_and_core_read(
-        client,
-        &namespace_id,
-        result,
-        503,
-        ErrorCode::StoreContention,
-        "grep index publication",
-    )
-    .await;
+    let enabled = result.expect("the enable finds the other writer's index");
+    assert!(
+        matches!(
+            enabled.status,
+            loonfs_types::GrepIndexStatus::Backfilling { .. }
+        ),
+        "{enabled:?}"
+    );
+    let core = NamespacePath::parse(namespace_id.as_str(), "/core.txt").expect("core target");
+    let bytes = client
+        .read_file(&core)
+        .await
+        .expect("a lost enable must not affect core reads");
+    assert_eq!(bytes, b"core remains readable");
     harness.server.abort();
 }
 

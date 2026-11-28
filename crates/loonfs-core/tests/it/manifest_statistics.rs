@@ -18,8 +18,12 @@ use loonfs_types::{
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
+/// Checks that a fold of a cached or a replayed tail counts each commit's
+/// activity once, that a repeated fold from the stale position reports the
+/// position behind, that a fresh engine's fold finds the activity covered,
+/// and that reading the activity uses only manifests.
 #[tokio::test]
-async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifests() {
+async fn a_folds_activity_counts_each_commit_once_and_reads_use_only_manifests() {
     for cached in [false, true] {
         let dir = tempdir().expect("tempdir");
         let store = RecordingStore::new(
@@ -146,8 +150,10 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         assert_eq!(folded.activity, expected);
         assert_eq!(folded.manifest.head_seq, CommitSeq(4));
         assert_eq!(folded.inode_record_count, 5); // Root, two directories, two files.
-                                                  // A stale cached fold and a fresh engine both see already-covered activity.
-        namespace_store(&store, &ns)
+
+        // A stale position's fold reports the position behind instead of
+        // folding again, and a fresh engine finds the activity covered.
+        let repeated = namespace_store(&store, &ns)
             .fold_wal_tail_from(
                 &input,
                 &loonfs_core::time::OperationClock::start(
@@ -155,8 +161,11 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
                     std::sync::Arc::new(StdMonotonicTimer::default()),
                 ),
             )
-            .await
-            .expect("repeat fold");
+            .await;
+        assert!(matches!(
+            repeated,
+            Err(loonfs_core::CoreError::HeadMoved(_))
+        ));
         namespace_engine(&store, &ns, &context)
             .fold_in_new_session()
             .await

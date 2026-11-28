@@ -771,7 +771,7 @@ async fn writer_after_own_compaction<'a>(
     .engine()
     .compact_metadata_unit_from(
         &before,
-        &crate::compaction::MetadataCompactionCancellation::default(),
+        &crate::compaction::MaintenanceCancellation::default(),
     )
     .await
     .expect("own compaction");
@@ -1228,8 +1228,9 @@ pub(super) async fn advance_in_session<S: ObjectStore>(
 /// Checks that a fold through a commit engine without a writer epoch claims
 /// the epoch and then folds the claim's fence, that a fold through an engine
 /// with a position folds from it with this request sequence and moves the
-/// position onto the fold's manifest, that a failed fold drops the position,
-/// and that a fenced session's fold sends no request.
+/// position, the one the engine stores included, onto the fold's manifest,
+/// that a failed fold drops the position, and that a fenced session's fold
+/// sends no request.
 #[tokio::test]
 async fn a_commit_engine_fold_claims_first_and_then_folds_from_its_position() {
     use loonfs_test_support::stores::{FailStore, InjectedError};
@@ -1313,6 +1314,17 @@ async fn a_commit_engine_fold_claims_first_and_then_folds_from_its_position() {
         &folded.current.manifest().manifest()
     );
     assert_eq!(position.wal_tail_objects(), 0);
+    // The stored position follows the fold's manifest too, so the engine
+    // keeps no part of the folded tail in memory.
+    let stored = engine
+        .stored_position()
+        .expect("the stored position after the fold");
+    assert_eq!(
+        stored.read_basis().basis.manifest(),
+        &folded.current.manifest().manifest()
+    );
+    assert_eq!(stored.wal_tail_objects(), 0);
+    assert!(stored.tail.chunks().is_empty());
 
     // A fold whose manifest put fails drops the position and keeps the epoch.
     publish_one(&mut engine, &writer, "beta").await;

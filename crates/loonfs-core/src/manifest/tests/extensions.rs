@@ -10,6 +10,7 @@ use crate::DeleteNamespaceOptions;
 use loonfs_types::format::manifest::{ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef};
 use loonfs_types::format::segment_blocks::BlockHandle;
 use loonfs_types::{ExtensionName, IndexSegmentId};
+use std::assert_matches;
 
 fn grep() -> ExtensionName {
     ExtensionName::parse("grep").expect("extension name")
@@ -371,10 +372,10 @@ async fn an_extension_publication_that_loses_to_the_sessions_copy_of_its_entry_i
 }
 
 /// Checks that an extension's publication whose position's manifest a
-/// collection deleted builds on the newest manifest, and that its first put
-/// there isn't reported as rebuilt.
+/// collection deleted returns `head_moved` and publishes nothing, instead of
+/// building on the newest manifest, which could be another writer's claim.
 #[tokio::test]
-async fn an_extension_publication_over_a_collected_position_manifest_is_not_rebuilt() {
+async fn an_extension_publication_over_a_collected_position_manifest_reports_the_position_behind() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("extension-collected").expect("namespace");
@@ -417,25 +418,12 @@ async fn an_extension_publication_over_a_collected_position_manifest_is_not_rebu
 
     let published = crate::test_support::namespace_store(&store, &namespace_id)
         .publish_extension_from(&position, &basis, &grep(), entry_after(&basis, "next"))
-        .await
-        .expect("publish");
-    assert!(
-        matches!(
-            published.response,
-            ExtensionPublication::Published { rebuilt: false, .. }
-        ),
-        "the first put wins"
-    );
+        .await;
+    assert_matches!(published, Err(CoreError::HeadMoved(_)));
     assert_eq!(
-        current_manifest(&store, &namespace_id)
-            .await
-            .payload()
-            .manifest_no,
-        newest
-            .payload()
-            .manifest_no
-            .successor()
-            .expect("next manifest number")
+        current_manifest(&store, &namespace_id).await.manifest(),
+        newest.manifest(),
+        "the publication puts nothing"
     );
 }
 
@@ -457,9 +445,10 @@ async fn an_extension_publication_whose_entry_the_session_replaced_publishes_not
     OwnCopy::Fold.publish(&store, &namespace_id).await;
     let engine = fixture.engine();
     let stale = engine.load_extension_basis().await.expect("basis");
-    let position = session_position(&store, &namespace_id).await;
     let won = publish_entry(&fixture, "won").await;
     let winner = current_manifest(&store, &namespace_id).await;
+    // The session's position follows its own publication of `won`.
+    let position = session_position(&store, &namespace_id).await;
 
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let lost = namespace

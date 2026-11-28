@@ -16,7 +16,7 @@ pub(super) use crate::compaction::plan::MetadataCompactionSpec;
 pub(super) use crate::compaction::publication::{input_segment_keys, CompactionPublication};
 pub(super) use crate::compaction::retention::retention_clusters;
 pub(super) use crate::compaction::run_iterator::locality_of;
-pub(super) use crate::compaction::step::MetadataCompactionCancellation;
+pub(super) use crate::compaction::step::MaintenanceCancellation;
 pub(super) use crate::compaction::CompactionUnitOutcome;
 pub(super) use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 pub(super) use crate::metadata::{MetadataState, MetadataStateBuilder};
@@ -325,7 +325,7 @@ pub(super) async fn run_planned_compaction<S: ObjectStore + ?Sized>(
         namespace_id,
         policy,
         spec,
-        &MetadataCompactionCancellation::default(),
+        &MaintenanceCancellation::default(),
     )
     .await
 }
@@ -336,7 +336,7 @@ pub(super) async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     policy: MetadataRunPolicy,
     spec: &MetadataCompactionSpec,
-    cancellation: &MetadataCompactionCancellation,
+    cancellation: &MaintenanceCancellation,
 ) -> CompactionUnitOutcome {
     let current = crate::test_support::namespace_store(store, namespace_id)
         .load_current_manifest()
@@ -362,9 +362,14 @@ pub(super) async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
     };
     drop(segments);
     let timer = crate::test_support::std_timer();
-    crate::test_support::namespace_store(store, namespace_id)
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    let basis = namespace
+        .load_current_basis(crate::test_support::observed_now())
+        .await
+        .expect("load the current manifest");
+    namespace
         .finalize_metadata_compaction(
-            None,
+            basis,
             spec,
             &input_keys,
             compacted,

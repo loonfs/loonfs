@@ -12,14 +12,9 @@ use crate::{
 use futures::future::BoxFuture;
 use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::WriterPosition;
-use loonfs_core::{
-    Administrator, ExtensionBasis, ExtensionPublication, FloorObjectReport, Phase,
-    PublicationReport,
-};
-use loonfs_types::format::manifest::ExtensionEntry;
+use loonfs_core::{Administrator, Phase, PublicationReport};
 use loonfs_types::Commit;
 use loonfs_types::{CommitSeq, NamespaceId};
-use loonfs_types::{ExtensionName, RetentionWindow, SetRetentionWindowResponse};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -183,64 +178,6 @@ impl NamespaceSession {
         self.publisher.submit_delete(options, administrator).await
     }
 
-    /// Submits an advance of the retention floor to `target`, planned from
-    /// `planned`, to this session's queue, which orders the advance like a
-    /// deletion: commits admitted before it publish first, and commits
-    /// admitted after it are validated against the new floor. A session that
-    /// admits no more work or is fenced returns its error.
-    pub(crate) async fn submit_retention_advance(
-        &self,
-        planned: LoadedManifest,
-        target: CommitSeq,
-    ) -> Result<FloorObjectReport> {
-        self.publisher
-            .submit_retention_advance(planned, target)
-            .await
-    }
-
-    /// Sets the namespace's retention window as this session (see
-    /// [`NamespaceStore::set_retention_window_from`](loonfs_core::NamespaceStore::set_retention_window_from)).
-    ///
-    /// The change publishes as the session's fold and compaction units do:
-    /// it starts from the session's position, which claims the writer epoch
-    /// first when the session has none (see
-    /// [`NamespacePublisher::writer_position`]), and puts its manifest without
-    /// the engine, so no commit waits for it. The caller records the manifest
-    /// that the report includes, through
-    /// [`PublisherRegistry::finish_publication`].
-    pub(crate) async fn set_retention_window(
-        &self,
-        retention_window_ms: Option<RetentionWindow>,
-    ) -> Result<PublicationReport<SetRetentionWindowResponse>> {
-        let position = self.publisher.writer_position().await?;
-        self.publisher
-            .context
-            .runtime_core
-            .namespace_store(&self.publisher.namespace_id)
-            .set_retention_window_from(&position, retention_window_ms)
-            .await
-            .map_err(Error::from)
-    }
-
-    /// Publishes an extension's change as this session (see
-    /// [`NamespaceStore::publish_extension_from`](loonfs_core::NamespaceStore::publish_extension_from)),
-    /// the way [`Self::set_retention_window`] publishes a window change.
-    pub(crate) async fn publish_extension(
-        &self,
-        basis: &ExtensionBasis,
-        name: &ExtensionName,
-        entry: ExtensionEntry,
-    ) -> Result<PublicationReport<ExtensionPublication>> {
-        let position = self.publisher.writer_position().await?;
-        self.publisher
-            .context
-            .runtime_core
-            .namespace_store(&self.publisher.namespace_id)
-            .publish_extension_from(&position, basis, name, entry)
-            .await
-            .map_err(Error::from)
-    }
-
     pub(crate) fn state(&self) -> NamespaceSessionStatus {
         self.publisher.session_status()
     }
@@ -267,7 +204,7 @@ impl NamespaceSession {
     pub(crate) async fn close(&self) -> std::result::Result<CloseNamespaceReport, CoreError> {
         let publisher = &self.publisher;
         let drained_commits = publisher.close_session()?;
-        publisher.compaction_cancellation.cancel();
+        publisher.stop.cancel();
         publisher.end_session_work().await;
         Ok(CloseNamespaceReport {
             drained_commits,
@@ -283,6 +220,7 @@ impl NamespacePublisher {
     async fn end_session_work(&self) {
         self.forget_if_ended();
         self.wait_for_worker().await;
+        self.wait_for_maintenance().await;
         if let Err(error) = self.wait_for_fold().await {
             phase_event!(
                 self.context.runtime_core,
@@ -453,21 +391,42 @@ impl PublisherRegistry {
         Ok(session)
     }
 
-    /// Waits until the namespace's session in this runtime, if it's fenced,
-    /// has finished its work and left the table, so that the next
-    /// [`Self::open_session`] starts a new session instead of returning the
-    /// fence. A session that isn't fenced is left alone.
+    /// Waits until the namespace's session in this runtime, if it admits no
+    /// more work because it's fenced or closed, has finished its work and
+    /// left the table, so that the next [`Self::open_session`] starts a new
+    /// session instead of returning the session's `writer_fenced` or
+    /// `writer_session_closed`. A session that admits work is left alone.
     ///
-    /// The fence cancelled the session's compaction (see
-    /// [`NamespacePublisher::release_engine`]), and a fenced session admits
-    /// and starts nothing more, so the wait ends once the commits it admitted
-    /// and a running fold end.
-    pub(crate) async fn wait_for_fenced_session(&self, namespace_id: &NamespaceId) {
+    /// A fence and a close cancel the session's compaction (see
+    /// [`NamespacePublisher::release_engine`]), and such a session admits and
+    /// starts nothing more, so the wait ends once the commits and the
+    /// maintenance that it admitted and a running fold end.
+    pub(crate) async fn wait_for_ended_session(&self, namespace_id: &NamespaceId) {
         let Some(publisher) = self.live_publisher(namespace_id) else {
             return;
         };
-        if publisher.session_is_fenced() {
+        if publisher.session_is_fenced() || publisher.session_closed() {
             publisher.end_session_work().await;
+        }
+    }
+
+    /// Opens the namespace's session as [`Self::open_session`] does, for an
+    /// operation on another namespace than the caller's, such as a fork's
+    /// fold of its source. When this runtime's session for the namespace is
+    /// fenced or closed and still ending, the call waits for it to end (see
+    /// [`Self::wait_for_ended_session`]) and opens a new session, as the
+    /// server's retry does for a request's own namespace. An open that still
+    /// fails returns its error, which identifies the namespace.
+    pub(crate) async fn open_session_once_ended(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> std::result::Result<Arc<NamespaceSession>, CoreError> {
+        match self.open_session(namespace_id) {
+            Err(CoreError::WriterFenced(_) | CoreError::WriterSessionClosed { .. }) => {
+                self.wait_for_ended_session(namespace_id).await;
+                self.open_session(namespace_id)
+            }
+            opened => opened,
         }
     }
 
@@ -635,6 +594,7 @@ impl PublisherRegistry {
             .collect();
         for publisher in &publishers {
             publisher.wait_for_worker().await;
+            publisher.wait_for_maintenance().await;
         }
         let mut task_error = None;
         for publisher in &publishers {

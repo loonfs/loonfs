@@ -374,3 +374,60 @@ async fn a_session_compaction_unit_puts_on_its_basis_with_no_request_first() {
     );
     fixture.shut_down().await;
 }
+
+/// Checks what a publication returns when its position is behind on both of
+/// its runs: `writer_fenced` when another writer claimed the namespace after
+/// the session loaded its position again, which the server sends once more
+/// in a new session, and `head_moved` when the session is still the writer,
+/// so it lost to its own publications twice.
+#[tokio::test]
+async fn a_publication_behind_on_both_runs_returns_what_the_writers_load_finds() {
+    for claimed in [true, false] {
+        let fixture = Fixture::new(|builder| builder).await;
+        let publisher = fixture.namespace.session().publisher.clone();
+        let rival = crate::LoonFs::builder_with_store(
+            fixture.store.clone() as SharedStore,
+            crate::Context::Service,
+        )
+        .writer_id(loonfs_test_support::ids::writer_id("rival"))
+        .build()
+        .await
+        .expect("the rival's runtime");
+        let runs = std::sync::atomic::AtomicUsize::new(0);
+        let (rival_ref, runs_ref, namespace_id) = (&rival, &runs, &fixture.namespace_id);
+        let published: crate::Result<()> = publisher
+            .publish_from_position(
+                move |_position| {
+                    let run = runs_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async move {
+                        if claimed && run == 1 {
+                            rival_ref
+                                .open_namespace(namespace_id)
+                                .expect("open on the rival")
+                                .create_directory("/rival", &loonfs_test_support::test_actor())
+                                .await
+                                .expect("the rival claims with a commit");
+                        }
+                        Err(CoreError::HeadMoved("behind".to_owned()))
+                    }
+                },
+                |_| false,
+            )
+            .await;
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let error = published.expect_err("both runs are behind");
+        let expected = if claimed {
+            crate::ErrorCode::WriterFenced
+        } else {
+            crate::ErrorCode::StoreContention
+        };
+        assert_eq!(error.code(), expected, "claimed={claimed}: {error:?}");
+        assert_matches!(
+            (claimed, &error),
+            (true, Error::Core(CoreError::WriterFenced(_)))
+                | (false, Error::Core(CoreError::HeadMoved(_)))
+        );
+        rival.shutdown().await.expect("shutdown the rival");
+        fixture.writer.shutdown().await.expect("shutdown");
+    }
+}

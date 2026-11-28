@@ -303,6 +303,31 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .await?;
         Ok(decoded.map(|decoded| position.basis().decoded(decoded.manifest)))
     }
+
+    /// Returns the manifest of a writer session's position as the basis that
+    /// one of the session's publications builds on (see
+    /// [`Self::load_position_basis`]), or `head_moved` when the manifest is
+    /// missing from the store and at or below the manifest boundary. The
+    /// session then drops the position and loads it again with the writer's
+    /// load, which returns `writer_fenced` when another writer claimed the
+    /// namespace, instead of building on the newest manifest it finds.
+    pub async fn load_publication_basis(
+        &self,
+        position: &WriterPosition,
+    ) -> crate::error::Result<Held<LoadedManifest>> {
+        self.load_position_basis(position)
+            .await?
+            .ok_or_else(|| position_manifest_gone(position))
+    }
+}
+
+/// Returns the `head_moved` error of a publication whose writer position's
+/// manifest is missing from the store and at or below the manifest boundary.
+pub(crate) fn position_manifest_gone(position: &WriterPosition) -> CoreError {
+    CoreError::HeadMoved(format!(
+        "manifest `{}` of the writer position is missing and at or below the manifest boundary",
+        position.read_basis().basis.manifest_no()
+    ))
 }
 
 /// Returns the segments of `manifest`, a current manifest in `store`, for a

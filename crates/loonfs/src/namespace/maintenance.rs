@@ -10,19 +10,17 @@
 use crate::maintenance::{
     MaintainMetadataReport, MetadataCompactionReport, MetadataMaintenanceReport,
 };
+use crate::publisher::AdmittedMaintenance;
 use crate::publisher::{FoldWhen, NamespaceFold};
 use crate::trace::{self, operation_span};
 use crate::{
     AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Error, FoldWalResponse,
     MaintainMetadataOptions, MaintenanceCancellation, MetadataMaintenanceOutcome,
-    MetadataMaintenanceResponse, Namespace, Result, RetentionWindow, SetRetentionWindowResponse,
-    Writable,
+    MetadataMaintenanceResponse, Namespace, ReadOnly, Result, RetentionWindow,
+    SetRetentionWindowResponse, Writable,
 };
 use loonfs_core::control::LoadedManifest;
-use loonfs_core::{
-    ExtensionBasis, ExtensionPublication, FloorObjectReport, MetadataCompactionCancellation,
-    RetentionPlan,
-};
+use loonfs_core::{ExtensionBasis, ExtensionPublication, FloorObjectReport, RetentionPlan};
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{CommitSeq, ExtensionName};
 
@@ -58,13 +56,13 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "maintain_metadata", self.namespace_id),
             async {
-                let (wal_fold, observed) = match self.fold_when_due(options).await? {
+                let admitted = self.session().admit()?;
+                let (wal_fold, observed) = match fold_when_due(&admitted, options).await? {
                     NamespaceFold::NotDue { observed, .. } => (None, observed),
                     NamespaceFold::Folded(folded) => (Some(folded.response), None),
                 };
-                let compaction = self
-                    .session()
-                    .compact_once(observed, &MetadataCompactionCancellation::default())
+                let compaction = admitted
+                    .compact_once(observed, &MaintenanceCancellation::default())
                     .await?;
                 tracing::debug!(
                     ?wal_fold,
@@ -79,15 +77,6 @@ impl Namespace<Writable> {
             },
         )
         .await
-    }
-
-    /// Folds the namespace's WAL tail when a fold is due under `options`,
-    /// through the namespace's one fold path.
-    async fn fold_when_due(&self, options: &MaintainMetadataOptions) -> Result<NamespaceFold> {
-        let when = FoldWhen::Due {
-            max_wal_tail_objects: options.max_wal_tail_objects.get(),
-        };
-        self.session().fold(when).await
     }
 
     /// Runs [`Self::maintain_metadata_while_due_with_options`] with the
@@ -118,8 +107,15 @@ impl Namespace<Writable> {
     /// that won, so only an abandoned unit counts as a lost race. Setting
     /// `cancellation` ends a wait for a lock or a permit and drops a fold in
     /// progress at once, and a running compaction unit stops at its next
-    /// block. A close or a delete of the session stops the call before its
-    /// next unit. A dropped call leaves what a crash would: unreferenced
+    /// block. A close, a fence or the runtime's shutdown sets the session's
+    /// stop, which ends the same waits and stops a running unit at its next
+    /// block, but lets a fold that has its fold permit run to its end, and
+    /// the call then returns the session's refusal: `writer_fenced`,
+    /// `writer_session_closed` or `shutting_down`. The close and the
+    /// runtime's drain wait for the call to end. A unit whose put loses to a
+    /// manifest that ends it without a put drops the session's position and
+    /// loads it again, so a session that another writer displaced returns
+    /// `writer_fenced`. A dropped call leaves what a crash would: unreferenced
     /// segments, or a manifest the runtime learns of the way it learns of
     /// another process's. Fails with the first error. Keeps no state between
     /// calls.
@@ -127,9 +123,16 @@ impl Namespace<Writable> {
     /// The response reports the compaction units the call published, and an
     /// outcome. The outcome is [`MetadataMaintenanceOutcome::CaughtUp`] when
     /// nothing is due now and nothing can become due without a new commit
-    /// under `options`, based on the state this call read. It is
+    /// under `options`, based on the state this call read. A result that
+    /// nothing is due is computed from the session's position and isn't
+    /// confirmed against the store, so a held session with nothing due costs
+    /// no request. A session that another writer displaced therefore returns
+    /// that result until its next put, its next result that is confirmed (a
+    /// window change, an index change or a retention advance), or its close,
+    /// and the server closes an idle session after
+    /// `idle_session_close_after_ms`. It is
     /// [`MetadataMaintenanceOutcome::Due`] at a work limit, after lost races,
-    /// on fencing or cancellation, when a compaction unit does not finish,
+    /// on cancellation, when a compaction unit does not finish,
     /// or while a tail waits for the fold age. When the wait for the fold
     /// age is the only work left, the report says when the fold comes due.
     pub async fn maintain_metadata_while_due_with_options(
@@ -137,8 +140,11 @@ impl Namespace<Writable> {
         cancellation: &MaintenanceCancellation,
         options: &MaintainMetadataOptions,
     ) -> Result<MetadataMaintenanceReport> {
-        let cancellation = cancellation.metadata_compaction();
         let maintained = async {
+            let admitted = self.session().admit()?;
+            // Only the host's token drops a fold in progress. The session's
+            // stop ends the fold's waits, and a fold that has its permit runs
+            // to its end (see `AdmittedMaintenance::fold`).
             let fold = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
@@ -152,7 +158,7 @@ impl Namespace<Writable> {
                         next_due_at_ms: None,
                     });
                 }
-                fold = self.fold_when_due(options) => fold?,
+                fold = fold_when_due(&admitted, options) => fold?,
             };
             let (fold_due_at_ms, observed) = match fold {
                 NamespaceFold::NotDue {
@@ -161,10 +167,7 @@ impl Namespace<Writable> {
                 } => (fold_due_at_ms, observed),
                 NamespaceFold::Folded(_) => (None, None),
             };
-            let mut response = self
-                .session()
-                .compact_namespace(observed, cancellation)
-                .await?;
+            let mut response = admitted.compact_namespace(observed, cancellation).await?;
             let next_due_at_ms =
                 fold_due_at_ms.filter(|_| response.outcome == MetadataMaintenanceOutcome::CaughtUp);
             if fold_due_at_ms.is_some() {
@@ -207,7 +210,8 @@ impl Namespace<Writable> {
             async {
                 let compaction = self
                     .session()
-                    .compact_once(None, cancellation.metadata_compaction())
+                    .admit()?
+                    .compact_once(None, cancellation)
                     .await?;
                 Ok(MetadataCompactionReport {
                     namespace_id: self.namespace_id.clone(),
@@ -235,7 +239,7 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "fold_wal", self.namespace_id),
             async {
-                let folded = self.session().fold(FoldWhen::Always).await?;
+                let folded = self.session().admit()?.fold(FoldWhen::Always).await?;
                 Ok(folded.folded().expect("a fold of any tail runs").response)
             },
         )
@@ -267,10 +271,14 @@ impl Namespace<Writable> {
     /// When the session has a position, the call first checks it as a strong
     /// read does (one HEAD of the position manifest's successor and one read
     /// of the manifest boundary). The check moves the position onto a newer
-    /// manifest of the same writer epoch, and drops the position when
-    /// another writer has claimed the namespace. The call then plans the
-    /// floor from the position when one is left, and otherwise from the
-    /// current manifest's floor and head, and claims nothing to plan.
+    /// manifest of the same writer epoch, and when another writer has claimed
+    /// the namespace, the session's load of its position returns
+    /// `writer_fenced`. The call then plans the floor from the position.
+    /// Without a position, it plans from the current manifest's floor and
+    /// head, and claims nothing to plan. When that plan moves the floor, the
+    /// call reads the WAL tail above the manifest, and a floor that floor
+    /// objects in the tail already raised to the planned floor or above it
+    /// writes no floor object.
     ///
     /// A floor that moves is recorded in a floor object, one item of the
     /// session's queue, after the commits admitted before it, and the
@@ -291,13 +299,15 @@ impl Namespace<Writable> {
     /// `store_contention`. A missing segment of the current manifest returns
     /// `namespace_corrupt`.
     ///
-    /// When no manifest records the floor of the view after the advance,
-    /// including after an earlier advance whose fold failed, the call then
-    /// folds the namespace as this session, so the fold's manifest records
-    /// the floor. The response's floor is the floor of the view after the
-    /// advance, or, when the plan leaves the floor where it is, the floor
-    /// that the call planned from (without a writer position, the current
-    /// manifest's floor).
+    /// When no manifest records the floor of the view after a plan that
+    /// moves the floor, including when an earlier advance's floor object
+    /// already raised it and that advance's fold failed, the call then folds
+    /// the namespace as this session, which claims the writer epoch first
+    /// when the session has none, so the fold's manifest records the floor.
+    /// The response's floor is the floor of the view after the advance, or,
+    /// when the plan leaves the floor where it is, the floor that the call
+    /// planned from (without a writer position, the current manifest's
+    /// floor).
     pub async fn advance_retention_floor_with_options(
         &self,
         options: &AdvanceRetentionFloorOptions,
@@ -305,12 +315,15 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "advance_retention_floor", self.namespace_id),
             async {
+                let admitted = self.session().admit()?;
                 let report = self
                     .core
-                    .run_again_after_replaced_manifest(|| self.publish_retention_floor(options))
+                    .run_again_after_replaced_manifest(|| {
+                        self.publish_retention_floor(&admitted, options)
+                    })
                     .await?;
                 if report.retention_floor_seq > report.manifest_retention_floor_seq {
-                    self.session().fold(FoldWhen::Always).await?;
+                    admitted.fold(FoldWhen::Always).await?;
                 }
                 Ok(AdvanceRetentionResponse {
                     namespace_id: self.namespace_id.clone(),
@@ -334,51 +347,74 @@ impl Namespace<Writable> {
     /// current manifest stays `namespace_corrupt`.
     async fn publish_retention_floor(
         &self,
+        admitted: &AdmittedMaintenance<'_>,
         options: &AdvanceRetentionFloorOptions,
     ) -> Result<FloorObjectReport> {
         let store = self.core.namespace_store(&self.namespace_id);
-        let (planned, retention_floor_seq) = self.load_retention_view().await?;
+        let view = self.load_retention_view(admitted).await?;
         let plan = store
-            .plan_retention_floor(&planned, retention_floor_seq, options.target)
+            .plan_retention_floor(view.manifest(), view.retention_floor_seq(), options.target)
             .await?;
-        match plan {
-            RetentionPlan::Stays(retention_floor_seq) => Ok(FloorObjectReport {
-                retention_floor_seq,
-                manifest_retention_floor_seq: planned.retention_floor_seq(),
-            }),
-            RetentionPlan::Moves(target) => {
-                self.session()
-                    .submit_retention_advance(planned, target)
-                    .await
+        let target = match plan {
+            RetentionPlan::Stays(retention_floor_seq) => {
+                return Ok(FloorObjectReport {
+                    retention_floor_seq,
+                    manifest_retention_floor_seq: view.manifest().retention_floor_seq(),
+                })
+            }
+            RetentionPlan::Moves(target) => target,
+        };
+        if let RetentionView::Manifest(_) = view {
+            // Floor objects in the tail may already have raised the floor,
+            // such as an earlier advance's whose fold failed. Comparing
+            // before the queue's load keeps a session without its writer
+            // epoch from claiming for a floor object that writes nothing.
+            let _permit = self.core.read_permit().await;
+            let anchor = store.load_live_read_anchor(self.core.observation()).await?;
+            if anchor.retention_floor_seq() >= target {
+                return Ok(FloorObjectReport {
+                    retention_floor_seq: anchor.retention_floor_seq(),
+                    manifest_retention_floor_seq: anchor.current_manifest().retention_floor_seq(),
+                });
             }
         }
+        admitted
+            .submit_retention_advance(view.into_manifest(), target)
+            .await
     }
 
-    /// Returns the manifest and the retention floor that a retention advance
-    /// plans from. Those are the session's position after a strong read's
-    /// check of it (see
-    /// [`RuntimeCore::checked_writer_position`](crate::runtime_core::RuntimeCore::checked_writer_position)),
-    /// or the current manifest of a live namespace and its floor when no
-    /// position is left after the check or the position's manifest is missing
-    /// from the store and at or below the manifest boundary.
-    async fn load_retention_view(&self) -> Result<(LoadedManifest, CommitSeq)> {
+    /// Returns the view that a retention advance plans from: the session's
+    /// position after the check that confirms it (see
+    /// [`AdmittedMaintenance::load_confirmed`]), or the current manifest of
+    /// a live namespace, read without its WAL tail, for a session without a
+    /// position.
+    async fn load_retention_view(
+        &self,
+        admitted: &AdmittedMaintenance<'_>,
+    ) -> Result<RetentionView> {
         let store = self.core.namespace_store(&self.namespace_id);
-        if let Some(position) = self
-            .core
-            .checked_writer_position(&self.namespace_id, None)
-            .await?
-        {
-            match store.load_position_basis(&position).await? {
-                Some(basis) => return Ok((basis.into_manifest(), position.retention_floor_seq())),
-                None => self.core.forget_namespace_view(&self.namespace_id).await,
-            }
-        }
-        let current = store
-            .load_live_basis(self.core.observation())
-            .await?
-            .into_manifest();
-        let retention_floor_seq = current.retention_floor_seq();
-        Ok((current, retention_floor_seq))
+        let newest = async {
+            let current = store
+                .load_live_basis(self.core.observation())
+                .await?
+                .into_manifest();
+            Ok(RetentionView::Manifest(current))
+        };
+        admitted
+            .load_confirmed(
+                |position| {
+                    let store = &store;
+                    async move {
+                        let basis = store.load_publication_basis(&position).await?;
+                        Ok(RetentionView::Position {
+                            manifest: basis.into_manifest(),
+                            retention_floor_seq: position.retention_floor_seq(),
+                        })
+                    }
+                },
+                newest,
+            )
+            .await
     }
 
     /// Publishes a change to the entry of extension `name` in the manifest
@@ -386,14 +422,16 @@ impl Namespace<Writable> {
     /// when it has none.
     ///
     /// The publication lists `entry` as the extension's entry and changes
-    /// nothing else. When another manifest follows `basis` first with the
-    /// same entry of `name`, such as a fold or a compaction, the change is
-    /// published over that manifest. When that manifest's entry differs, the
-    /// call publishes nothing and returns
-    /// [`ExtensionPublication::Superseded`], and the extension plans its next
-    /// change from the current manifest. After a publication, this runtime's
-    /// next read of the namespace starts from the published manifest or a
-    /// newer one. See
+    /// nothing else. When another manifest follows the position's first with
+    /// the same entry of `name`, such as the session's own fold, the change
+    /// is published over that manifest. When the position's manifest has
+    /// another entry, the call checks that the manifest is still the newest,
+    /// publishes nothing and returns [`ExtensionPublication::Superseded`].
+    /// When a manifest that another writer published is in the way, the
+    /// call returns `writer_fenced`. A `basis` loaded from another namespace
+    /// returns `invalid_request` before anything is claimed. After a
+    /// publication, this runtime's next read of the namespace starts from
+    /// the published manifest or a newer one. See
     /// [Extensions](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#124-extensions).
     pub async fn publish_extension(
         &self,
@@ -404,7 +442,10 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "publish_extension", self.namespace_id),
             async {
-                let result = self.session().publish_extension(basis, name, entry).await;
+                let result = match self.session().admit() {
+                    Ok(admitted) => admitted.publish_extension(basis, name, entry).await,
+                    Err(error) => Err(error.into()),
+                };
                 self.mode
                     .publisher
                     .finish_publication(&self.namespace_id, result)
@@ -415,14 +456,21 @@ impl Namespace<Writable> {
     }
 
     /// Sets the namespace's retention window as this session, which claims
-    /// the writer epoch first when it has none.
+    /// the writer epoch first when it has none and the window changes.
     ///
     /// `None` clears the window, and a host doesn't advance the floor of a
     /// namespace without a window on a schedule.
     ///
     /// The call publishes a manifest over the session's position that
-    /// changes nothing else, and if the namespace already has the window, it
-    /// publishes nothing. See [Advancing the retention
+    /// changes nothing else. If the position's manifest already has the
+    /// window, it publishes nothing, after it checks that the manifest is
+    /// still the newest, as a strong read does, and a session that another
+    /// writer displaced returns `writer_fenced`. A session without a
+    /// position first reads the newest manifest, and when that manifest
+    /// already has the window, it returns the window without a claim or a
+    /// put. A session that is fenced, closed or shutting down returns its
+    /// error before it sends anything.
+    /// See [Advancing the retention
     /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor).
     pub async fn set_retention_window(
         &self,
@@ -431,10 +479,10 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "set_retention_window", self.namespace_id),
             async {
-                let result = self
-                    .session()
-                    .set_retention_window(retention_window_ms)
-                    .await;
+                let result = match self.session().admit() {
+                    Ok(admitted) => admitted.set_retention_window(retention_window_ms).await,
+                    Err(error) => Err(error.into()),
+                };
                 self.mode
                     .publisher
                     .finish_publication(&self.namespace_id, result)
@@ -445,28 +493,119 @@ impl Namespace<Writable> {
     }
 }
 
-impl<M: crate::Mode> Namespace<M> {
-    /// Loads the namespace's current manifest as the basis of an extension's
-    /// change, and starts the clock of the change's publication. The load is
-    /// a read, so it claims nothing, and a read-only handle loads it too.
+impl Namespace<Writable> {
+    /// Loads the manifest of this session's position as the basis of an
+    /// extension's change, and starts the clock of the change's publication.
     ///
     /// The extension plans its change from the basis's entry, writes its
     /// segments, and then publishes the change with
-    /// [`Namespace::publish_extension`] on a writable handle. Returns `namespace_deleted` for a deleted
-    /// namespace.
+    /// [`Self::publish_extension`], which builds on the same position, so the
+    /// change and its publication start from the same manifest. The extension
+    /// can return a result from the basis without a put, such as a refusal,
+    /// so the load checks the position as a strong read does first, and a
+    /// session that another writer displaced returns `writer_fenced`. A
+    /// session without a position loads the newest manifest with a read, as
+    /// a read-only handle does, and claims nothing: the publication claims
+    /// the writer epoch first when there is something to publish. Returns
+    /// `namespace_deleted` for a deleted namespace.
     pub async fn load_extension_basis(&self) -> Result<ExtensionBasis> {
         trace::in_operation(
             operation_span!(self.core, "load_extension_basis", self.namespace_id),
             async {
-                let _permit = self.core.read_permit().await;
-                loonfs_core::NamespaceReaderEngine::reader(
-                    self.core.namespace_store(&self.namespace_id),
-                )
-                .load_extension_basis()
-                .await
-                .map_err(Error::from)
+                let store = self.core.namespace_store(&self.namespace_id);
+                self.session()
+                    .admit()?
+                    .load_confirmed(
+                        |position| {
+                            let store = &store;
+                            async move { store.load_position_extension_basis(&position).await }
+                        },
+                        self.load_newest_extension_basis(),
+                    )
+                    .await
             },
         )
         .await
+    }
+}
+
+impl Namespace<ReadOnly> {
+    /// Loads the namespace's current manifest as the basis of an extension's
+    /// change that a read plans, and starts the clock of the change's
+    /// publication. The load is a read, so it claims nothing.
+    ///
+    /// A change that a writer session publishes loads its basis from the
+    /// session's position instead when the session has one (see
+    /// [`Namespace::<Writable>::load_extension_basis`](Namespace::load_extension_basis)).
+    /// Returns `namespace_deleted` for a deleted namespace.
+    pub async fn load_extension_basis(&self) -> Result<ExtensionBasis> {
+        trace::in_operation(
+            operation_span!(self.core, "load_extension_basis", self.namespace_id),
+            self.load_newest_extension_basis(),
+        )
+        .await
+    }
+}
+
+impl<M: crate::Mode> Namespace<M> {
+    /// Loads the namespace's current manifest as an extension's basis with a
+    /// read permit, which claims nothing.
+    async fn load_newest_extension_basis(&self) -> Result<ExtensionBasis> {
+        let _permit = self.core.read_permit().await;
+        loonfs_core::NamespaceReaderEngine::reader(self.core.namespace_store(&self.namespace_id))
+            .load_extension_basis()
+            .await
+            .map_err(Error::from)
+    }
+}
+
+/// Folds the namespace's WAL tail when a fold is due under `options`,
+/// through the namespace's one fold path, as `admitted` maintenance.
+async fn fold_when_due(
+    admitted: &AdmittedMaintenance<'_>,
+    options: &MaintainMetadataOptions,
+) -> Result<NamespaceFold> {
+    let when = FoldWhen::Due {
+        max_wal_tail_objects: options.max_wal_tail_objects.get(),
+    };
+    admitted.fold(when).await
+}
+
+/// The view that a retention advance plans from.
+enum RetentionView {
+    /// The session's confirmed position: its manifest and the floor of its
+    /// view, which floor objects in its WAL tail may have raised.
+    Position {
+        manifest: LoadedManifest,
+        retention_floor_seq: CommitSeq,
+    },
+    /// The current manifest, read without its WAL tail by a session without
+    /// a position.
+    Manifest(LoadedManifest),
+}
+
+impl RetentionView {
+    fn manifest(&self) -> &LoadedManifest {
+        match self {
+            Self::Position { manifest, .. } | Self::Manifest(manifest) => manifest,
+        }
+    }
+
+    fn into_manifest(self) -> LoadedManifest {
+        match self {
+            Self::Position { manifest, .. } | Self::Manifest(manifest) => manifest,
+        }
+    }
+
+    /// Returns the floor that the advance plans from: the position's, or
+    /// the manifest's.
+    fn retention_floor_seq(&self) -> CommitSeq {
+        match self {
+            Self::Position {
+                retention_floor_seq,
+                ..
+            } => *retention_floor_seq,
+            Self::Manifest(manifest) => manifest.retention_floor_seq(),
+        }
     }
 }

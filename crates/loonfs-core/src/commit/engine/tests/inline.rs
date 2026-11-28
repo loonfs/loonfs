@@ -529,6 +529,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
     assert_eq!(reloaded.tail, advanced.tail);
     assert_no_writes(&store);
     let folded_wal_no = advanced.read_basis().head.wal_no;
+    let mut published = None;
     for (index, input) in [advanced, reloaded].into_iter().enumerate() {
         store.reset();
         let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
@@ -536,10 +537,11 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
                 &input,
                 &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
             )
-            .await
-            .expect("fold inline content");
+            .await;
         if index == 0 {
+            let folded = folded.expect("fold inline content");
             assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
+            published = Some(folded.response.manifest_no);
             fold::assert_content_before_metadata(&store, values.len());
             for value in &values {
                 let key = folded_key(&store, value.content_ref()).await;
@@ -553,10 +555,11 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
                 );
             }
         } else {
-            assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
             // A fold of a held tail builds on the held manifest without a
             // request, so it writes the tail's objects again and loses its
-            // put to the first fold.
+            // put to the first fold, whose manifest ends it without a put,
+            // so the fold reports its position behind.
+            assert!(matches!(folded, Err(CoreError::HeadMoved(_))));
             assert_eq!(store.counts().compare_and_swaps, 0);
         }
         let manifest = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
@@ -565,8 +568,8 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             .expect("manifest");
         assert_eq!(manifest.payload().folded_wal_no, folded_wal_no);
         assert_eq!(
-            manifest.manifest().manifest_no,
-            folded.response.manifest_no,
+            Some(manifest.manifest().manifest_no),
+            published,
             "only the first fold publishes a manifest"
         );
         assert_eq!(

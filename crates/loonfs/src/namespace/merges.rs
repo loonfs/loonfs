@@ -461,8 +461,9 @@ impl Namespace<Writable> {
         fork_id: &NamespaceId,
         expires_at_ms: Option<u64>,
     ) -> Result<PinnedRead> {
-        let fork = self.mode.publisher.open_session(fork_id)?;
+        let fork = self.mode.publisher.open_session_once_ended(fork_id).await?;
         let (created, verified) = fork
+            .admit()?
             .snapshot_after_fold(|manifest| {
                 let engine = self
                     .core

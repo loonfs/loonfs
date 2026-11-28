@@ -24,6 +24,7 @@ mod admission;
 mod compaction;
 mod delete_barrier;
 mod folds;
+mod maintenance;
 pub(crate) mod metrics;
 mod queue;
 mod registry;
@@ -44,8 +45,9 @@ use loonfs_core::publish::{
     NamespaceCommitEngine, WriterSessionStatus, WriterSessionStatusGuard, WriterSessionStatusView,
 };
 use loonfs_core::time::Observation;
-use loonfs_core::MetadataCompactionCancellation;
+use loonfs_core::MaintenanceCancellation;
 use loonfs_types::{CommitId, CommitSeq, NamespaceId, WriterId};
+pub(crate) use maintenance::AdmittedMaintenance;
 use queue::{InFlightRequest, WorkItem};
 use registry::RegistryShared;
 pub use registry::{CloseNamespaceReport, NamespaceSessionStatus};
@@ -108,9 +110,11 @@ struct NamespacePublisher {
     /// back would cycle the whole structure into a leak. A publisher whose
     /// registry is gone keeps serving, with an unowned worker.
     shared: Weak<RegistryShared>,
-    /// Set once the session stops admitting work or is fenced. A session
-    /// never compacts again after that.
-    compaction_cancellation: MetadataCompactionCancellation,
+    /// The session's stop, set once the session stops admitting work or is
+    /// fenced. A session never compacts again after that, and a host's fold,
+    /// unit or snapshot that waits for a lock or a permit stops waiting.
+    stop: MaintenanceCancellation,
+
     /// Set by the first release of the engine after the engine found the
     /// session fenced, so the session records its displacement once.
     displacement_recorded: Arc<AtomicBool>,
@@ -196,6 +200,11 @@ struct NamespacePublisherState {
     fold: Option<SessionTask>,
     /// One metadata compaction at a time, started when a fold publishes.
     compaction: Option<SessionTask>,
+    /// The number of maintenance calls that hosts run on the session now
+    /// (see [`maintenance::AdmittedMaintenance`]), which the session's close
+    /// and the runtime's drain wait to reach zero. It's at most the number
+    /// of the session's handles' calls in flight.
+    maintenance: watch::Sender<usize>,
     next_task_id: u64,
     /// The last reserved WAL put. `None` is an idle namespace: nothing was
     /// queued when its last batch settled, so the next request publishes
@@ -225,7 +234,8 @@ impl NamespacePublisherState {
             .compaction
             .as_ref()
             .is_some_and(SessionTask::is_running);
-        over && !worker_running && !fold_running && !compaction_running
+        let maintenance_running = *self.maintenance.borrow() > 0;
+        over && !worker_running && !fold_running && !compaction_running && !maintenance_running
     }
 }
 
@@ -254,6 +264,7 @@ impl NamespacePublisher {
                 worker: None,
                 fold: None,
                 compaction: None,
+                maintenance: watch::Sender::new(0),
                 next_task_id: 0,
                 last_publish: None,
                 last_published_seq: None,
@@ -263,7 +274,7 @@ impl NamespacePublisher {
             read_position,
             session,
             shared: Arc::downgrade(shared),
-            compaction_cancellation: MetadataCompactionCancellation::default(),
+            stop: MaintenanceCancellation::default(),
             displacement_recorded: Arc::new(AtomicBool::new(false)),
             fold_published: watch::Sender::new(()),
             turns,
@@ -281,7 +292,7 @@ impl NamespacePublisher {
         if matches!(state.admission, PublisherAdmissionStatus::Open) {
             state.admission = PublisherAdmissionStatus::Closed;
         }
-        self.compaction_cancellation.cancel();
+        self.stop.cancel();
     }
 
     /// Closes admission for every handle that shares this session and
@@ -431,7 +442,7 @@ impl NamespacePublisher {
         mut engine: tokio::sync::MutexGuard<'_, NamespaceCommitEngine<SharedObjectStore>>,
     ) {
         if self.session_is_fenced() && !self.displacement_recorded.swap(true, Ordering::SeqCst) {
-            self.compaction_cancellation.cancel();
+            self.stop.cancel();
             self.context
                 .runtime_core
                 .instruments()

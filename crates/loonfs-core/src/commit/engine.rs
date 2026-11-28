@@ -52,6 +52,10 @@ pub struct WalTailReport {
     /// records, or `None` when the tail has no commit, such as a tail of
     /// fences alone.
     pub oldest_commit_at_ms: Option<u64>,
+    /// Whether a floor object in the tail raised the view's floor above the
+    /// manifest's (see
+    /// [`NamespaceReadState::raises_retention_floor`](crate::control::NamespaceReadState::raises_retention_floor)).
+    pub raises_retention_floor: bool,
     /// Where the attempt found the tail.
     pub source: TailSource,
 }
@@ -418,9 +422,11 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// covers the tail as the session's newest published manifest, as every
     /// publication does (see [`Self::published_manifest`]), so the position
     /// moves onto it and later commits plan against it, and a failed fold
-    /// drops the position. A fold whose manifest put loses to another
-    /// process's claim still builds again on that claim through the
-    /// publication loop of [`NamespaceStore::fold_wal_tail_from`].
+    /// drops the position. The stored position follows the manifest at once,
+    /// so the engine keeps no part of the tail that the fold covered. A fold
+    /// whose manifest put loses to another process's claim still builds
+    /// again on that claim through the publication loop of
+    /// [`NamespaceStore::fold_wal_tail_from`].
     pub async fn fold(&mut self) -> Result<FoldedWalTail> {
         let held = self.load_position().await?;
         let clock = self.namespace.start_clock();
@@ -429,7 +435,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             self.position.record_session_error(error);
             self.position.invalidate_projection();
         })?;
-        self.position.current.published().record(&folded.current);
+        drop(self.position.current.record_published(&folded.current));
         Ok(folded)
     }
 
@@ -521,11 +527,11 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// has no epoch, see [`Self::load_position`]), publish from it without the
     /// engine, and record the manifest.
     fn record_publication<T>(
-        &self,
+        &mut self,
         report: crate::manifest::published::PublicationReport<T>,
     ) -> crate::manifest::published::PublicationReport<T> {
         if let Some(manifest) = &report.published {
-            self.published_manifest().record(manifest);
+            drop(self.position.current.record_published(manifest));
         }
         report
     }
@@ -549,7 +555,9 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
 
     /// Publishes an extension's change as this session (see
     /// [`Self::record_publication`] and
-    /// [`NamespaceStore::publish_extension_from`]).
+    /// [`NamespaceStore::publish_extension_from`]). A basis of another
+    /// namespace returns `invalid_request` before the session claims
+    /// anything (see [`ExtensionBasis::ensure_for`](crate::manifest::extension::ExtensionBasis::ensure_for)).
     pub async fn publish_extension(
         &mut self,
         basis: &crate::manifest::extension::ExtensionBasis,
@@ -560,6 +568,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             crate::manifest::extension::ExtensionPublication,
         >,
     > {
+        basis.ensure_for(&self.namespace.namespace_id)?;
         let position = self.load_position().await?;
         let report = self
             .namespace
@@ -711,6 +720,7 @@ impl PositionState {
                 wal_bytes: update.wal_tail_bytes,
                 inline_bytes: update.wal_tail_inline_bytes,
                 oldest_commit_at_ms: update.wal_tail_oldest_commit_at_ms,
+                raises_retention_floor: update.raises_retention_floor,
                 source: if wal_tail_discovered {
                     TailSource::Store
                 } else {
@@ -851,6 +861,7 @@ struct TailProjectionUpdate {
     wal_tail_bytes: usize,
     wal_tail_inline_bytes: usize,
     wal_tail_oldest_commit_at_ms: Option<u64>,
+    raises_retention_floor: bool,
 }
 
 impl TailProjectionUpdate {
@@ -860,6 +871,7 @@ impl TailProjectionUpdate {
             wal_tail_bytes: position.wal_tail_bytes(),
             wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
             wal_tail_oldest_commit_at_ms: position.wal_tail_oldest_commit_at_ms(),
+            raises_retention_floor: position.read_basis().head().raises_retention_floor(),
         }
     }
 }

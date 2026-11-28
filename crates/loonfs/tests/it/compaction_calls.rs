@@ -3,7 +3,9 @@
 //! folds and commits never wait for that compaction, and how two calls'
 //! compaction units take turns.
 
-use loonfs::{ActorId, LoonFs, MaintenanceCancellation, Namespace, RuntimeConfig, Writable};
+use loonfs::{
+    ActorId, ErrorCode, LoonFs, MaintenanceCancellation, Namespace, RuntimeConfig, Writable,
+};
 use loonfs_test_support::clock::bounded;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -91,14 +93,16 @@ impl Backlog {
     }
 }
 
-/// Checks that a close of a session returns while a host's metadata call is
-/// in a compaction unit of the session's namespace, and that the call stops
-/// after that unit. The call is parked at its first metadata segment read,
-/// and a fold of the session then starts the session's own compaction,
-/// which waits for the namespace's compaction lock until the close cancels
-/// it.
+/// Checks that a close of a session waits for a host's metadata call that is
+/// in a compaction unit of the session's namespace, and that the close's
+/// stop ends the call's unit, so the unit publishes nothing over a session
+/// that the close ended, and the call returns `writer_session_closed`, the
+/// session's refusal, instead of a report. The call is parked at its first
+/// metadata segment read, and a fold of the session then starts the
+/// session's own compaction, which waits for the namespace's compaction lock
+/// until the close cancels it.
 #[tokio::test]
-async fn a_close_returns_during_a_hosts_compaction_and_stops_it_after_its_unit() {
+async fn a_close_waits_for_a_hosts_compaction_and_cancels_its_unit() {
     let backlog = backlog("closing").await;
     backlog.store.block_next();
     let cancellation = MaintenanceCancellation::new();
@@ -113,16 +117,64 @@ async fn a_close_returns_during_a_hosts_compaction_and_stops_it_after_its_unit()
         () = backlog.store.wait_until_blocked() => {}
     }
     backlog.publish_over_the_fold_trigger().await;
-    bounded(Duration::from_secs(10), backlog.held.clone().close())
-        .await
-        .expect("the close doesn't wait for the call's unit")
-        .expect("close");
-    backlog.store.release();
-    let maintained = call.await.expect("the call");
-    assert_eq!(
-        maintained.response.compaction_units, 1,
-        "the close stops the call after its unit in progress"
+    let close = backlog.held.clone().close();
+    tokio::pin!(close);
+    assert!(
+        bounded(Duration::from_millis(200), &mut close)
+            .await
+            .is_err(),
+        "the close waits for the call's unit"
     );
+    backlog.store.release();
+    let (closed, maintained) = tokio::join!(close, call);
+    closed.expect("close");
+    let error = maintained.expect_err("the close stops the call's unit before its publication");
+    assert_eq!(error.code(), ErrorCode::WriterSessionClosed, "{error:?}");
+    backlog.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a host's metadata call whose session another writer fenced
+/// while the call's unit ran returns `writer_fenced`, the session's
+/// refusal, which a server sends once more in a new session, instead of a
+/// report whose outcome is `due`. The call is parked at its first metadata
+/// segment read while a rival runtime claims the namespace and a commit of
+/// the session finds the rival's claim, which sets the session's stop.
+#[tokio::test]
+async fn a_hosts_call_whose_session_is_fenced_during_its_unit_returns_writer_fenced() {
+    let backlog = backlog("fenced-call").await;
+    backlog.store.block_next();
+    let cancellation = MaintenanceCancellation::new();
+    let handle = backlog
+        .runtime
+        .open_namespace(backlog.held.id())
+        .expect("open namespace");
+    let call = handle.maintain_metadata_while_due(&cancellation);
+    tokio::pin!(call);
+    tokio::select! {
+        _ = &mut call => panic!("the call finished without reading a segment"),
+        () = backlog.store.wait_until_blocked() => {}
+    }
+    let rival = LoonFs::builder_with_store(backlog.store.clone(), loonfs::Context::Service)
+        .writer_id(writer_id("fenced-call-rival"))
+        .build()
+        .await
+        .expect("the rival's runtime");
+    rival
+        .open_namespace(backlog.held.id())
+        .expect("open on the rival")
+        .put_file("/rival", b"rival", &backlog.actor)
+        .await
+        .expect("the rival claims with a commit");
+    let error = backlog
+        .held
+        .put_file("/fenced", b"fenced", &backlog.actor)
+        .await
+        .expect_err("the rival's claim fences the session");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+    backlog.store.release();
+    let error = call.await.expect_err("the fence stops the call's unit");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+    rival.shutdown().await.expect("shutdown the rival");
     backlog.runtime.shutdown().await.expect("shutdown");
 }
 

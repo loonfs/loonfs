@@ -1075,10 +1075,75 @@ async fn a_read_after_an_extension_publication_starts_from_the_sessions_position
     );
 }
 
-/// Checks that a compaction unit whose put loses to a manifest of the
-/// session's epoch publishes its output over that manifest, and that the
-/// metadata loop counts only abandoned units as lost races and stops after
-/// three.
+/// Checks that a compaction unit whose put loses to the session's own fold,
+/// which put its manifest at the same number while the unit's put was in
+/// flight, publishes its output over the fold's manifest. The store parks
+/// the unit's manifest put until the session has committed and folded.
+#[tokio::test]
+async fn a_unit_whose_put_loses_to_the_sessions_fold_publishes_over_it() {
+    use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector};
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace = namespace_id("losing-to-a-fold");
+    let store = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+            &namespace,
+        )),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create the namespace");
+    let session = writer.open_namespace(&namespace).expect("open namespace");
+    for index in 0..loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() + 2 {
+        write_and_fold(&writer, &writer, &namespace, &format!("/file-{index}")).await;
+    }
+    let before = current_manifest_payload(store.as_ref(), &namespace)
+        .await
+        .manifest_no;
+    store.block_next();
+    let cancellation = crate::MaintenanceCancellation::new();
+    let (outcome, folded) = tokio::join!(session.compact_metadata(&cancellation), async {
+        store.wait_until_blocked().await;
+        session
+            .put_file("/during", b"during", &loonfs_test_support::test_actor())
+            .await
+            .expect("a commit while the unit's put waits");
+        let folded = session.fold_wal().await.expect("the session's fold");
+        store.release();
+        folded
+    });
+    assert_eq!(
+        folded.manifest_no.0,
+        before.0 + 1,
+        "the fold took the number"
+    );
+    let outcome = outcome.expect("a lost put is retried, not an error");
+    let MetadataCompactionOutcome::Published { manifest_no, .. } = outcome.compaction else {
+        panic!("a unit that loses one put publishes, got {outcome:?}");
+    };
+    assert_eq!(
+        manifest_no.0,
+        before.0 + 2,
+        "the unit publishes over the fold's manifest"
+    );
+    let current = current_manifest_payload(store.as_ref(), &namespace).await;
+    assert_eq!(
+        current.head_seq, folded.manifest_head_seq,
+        "the fold's commit stays"
+    );
+    drop(session);
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that the metadata loop counts only abandoned units as lost races
+/// and stops after three.
 ///
 /// The test support's same-epoch publisher puts a copy of the newest
 /// manifest at the next number before each selected manifest put (see
@@ -1090,7 +1155,7 @@ async fn a_read_after_an_extension_publication_starts_from_the_sessions_position
 /// and the limit is there so that such a store can't make the loop run
 /// without end.
 #[tokio::test]
-async fn a_unit_retries_over_a_lost_put_and_the_loop_stops_after_three_abandoned_units() {
+async fn the_loop_stops_after_three_abandoned_units() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace = namespace_id("losing-loop");
     let rival: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -1116,24 +1181,12 @@ async fn a_unit_retries_over_a_lost_put_and_the_loop_stops_after_three_abandoned
         write_and_fold(&writer, &writer, &namespace, &format!("/file-{index}")).await;
     }
     let session = writer.open_namespace(&namespace).expect("open namespace");
-    // One race: the unit's put loses, and the next attempt publishes over
-    // the manifest that won.
-    let before = current_manifest_payload(store.as_ref(), &namespace)
+    // The session claims the namespace first, so the puts that lose below are
+    // the units'.
+    session
+        .put_file("/claim", b"claim", &loonfs_test_support::test_actor())
         .await
-        .manifest_no;
-    store.arm_for(1);
-    let outcome = session
-        .compact_metadata(&crate::MaintenanceCancellation::new())
-        .await
-        .expect("a lost put is retried, not an error");
-    let MetadataCompactionOutcome::Published { manifest_no, .. } = outcome.compaction else {
-        panic!("a unit that loses one put publishes, got {outcome:?}");
-    };
-    assert_eq!(store.published(), 1);
-    assert!(
-        manifest_no.0 > before.0 + 1,
-        "the unit publishes over the manifest that won, {manifest_no} after {before}"
-    );
+        .expect("the session claims");
 
     // Every put loses: each unit abandons after its attempts run out, and
     // the loop stops after three abandoned units in a row.
@@ -1149,7 +1202,7 @@ async fn a_unit_retries_over_a_lost_put_and_the_loop_stops_after_three_abandoned
     );
     assert_eq!(
         store.published(),
-        1 + 3 * loonfs_core::limits::MAX_CONTENTION_ATTEMPTS,
+        3 * loonfs_core::limits::MAX_CONTENTION_ATTEMPTS,
         "the loop stops after three abandoned units"
     );
     store.arm_for(0);

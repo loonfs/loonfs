@@ -1396,20 +1396,20 @@ enum Grep {
 /// check of whether an index build is due, which finds the newest manifest
 /// (3). An enabled index was published by a session that claimed the
 /// namespace, and the claim's fence stays in the WAL tail with no commit, so
-/// no fold is due for it. That changes three calls. The runtime cached the
-/// head of the claim's manifest, so the due check finds the newest manifest
-/// (3) and checks it with a HEAD of the next manifest number and a read of
-/// the boundary (2), where an idle namespace's check reads the WAL number
-/// after the manifest instead, for 5. The grep check reads grep's entry and
-/// the change feed from that cached head with the same check (2). The pool's
-/// collection reads the member's roots from a discovery of the head, which
-/// reads every WAL object above the manifest, the fence among them, to find
-/// the tip (12). The total is the same 27 requests, with one listing fewer.
-/// The docs quote these numbers.
+/// no fold is due for it. That changes three calls. The enable's session
+/// recorded the enable's manifest as its own publication, so the head that
+/// the runtime cached is the newest manifest, and the due check and the
+/// grep check's two reads (of grep's entry and of the change feed) each
+/// check that cached head with a HEAD of the next manifest number and a read
+/// of the boundary (2 each), where an idle namespace's due check finds the
+/// newest manifest instead. The pool's collection reads the member's roots
+/// from a discovery of the head, which reads every WAL object above the
+/// manifest, the fence among them, to find the tip (12). The total is 26
+/// requests, with two listings fewer. The docs quote these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize); 3] = [
     (Grep::NotMaintained, 24, 12),
     (Grep::Maintained, 27, 13),
-    (Grep::Enabled, 27, 12),
+    (Grep::Enabled, 26, 11),
 ];
 
 #[tokio::test(start_paused = true)]

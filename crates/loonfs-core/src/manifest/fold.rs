@@ -6,6 +6,7 @@ use crate::commit::publish_view::WriterPosition;
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
+use crate::manifest::load::position_manifest_gone;
 use crate::metadata::MetadataView;
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
@@ -129,7 +130,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// every fold is a writer session's. A position whose manifest is
     /// missing from the store and at or below the manifest boundary returns
     /// `head_moved`, so the session drops the position and its next fold
-    /// loads the tail with the writer's load (see `load_held_manifest`). The
+    /// loads the tail with the writer's load (see `load_held_manifest`), and
+    /// so does a fold that ends without a put on a manifest that won its put
+    /// (see `ManifestUpdate::published_or_unchanged`). The
     /// publication's first attempt starts from the position's manifest, and
     /// each later attempt starts from the manifest that the attempt before
     /// it found (see `update_manifest`).
@@ -148,12 +151,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         position: &WriterPosition,
         clock: &OperationClock,
     ) -> Result<FoldedWalTail> {
-        let manifest_no = position.read_basis().basis.manifest().manifest_no;
         let Some(projection) = self.load_position_projection(position.clone()).await? else {
-            return Err(CoreError::HeadMoved(format!(
-                "manifest `{manifest_no}` of the writer position is missing and at or below the \
-                 manifest boundary"
-            )));
+            return Err(position_manifest_gone(position));
         };
         let basis = projection
             .basis
@@ -182,7 +181,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 async move { fold.lock().await.attempt(current).await }
             })
             .await;
-        let update = match folded {
+        let built_on = position.read_basis().basis.manifest_no();
+        let update = match folded.and_then(|update| update.published_or_unchanged(built_on)) {
             Ok(update) => update,
             // Every attempt lost its put to another publication or found its
             // manifest replaced. The fold reports a lost race, so a runtime

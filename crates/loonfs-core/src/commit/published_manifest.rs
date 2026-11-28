@@ -196,6 +196,22 @@ impl KeptPosition {
         }
     }
 
+    /// Records `published`, a manifest that the session published without a
+    /// runtime around the engine (see [`PublishedLock::record`]), and brings
+    /// the stored position up to it, as the runtime's release of the engine
+    /// does. Returns the position that the follow replaced, which the caller
+    /// drops.
+    #[must_use = "drop the replaced position once the published manifest is unlocked"]
+    pub(crate) fn record_published(
+        &mut self,
+        published: &Held<LoadedManifest>,
+    ) -> Option<WriterPosition> {
+        let manifest = self.published.clone();
+        let mut recorded = manifest.lock();
+        recorded.record(published);
+        self.follow_stored(&recorded)
+    }
+
     /// Returns the position as it's stored, without following the recorded
     /// manifest, for a test of what the engine keeps in memory.
     #[cfg(any(test, feature = "test-support"))]

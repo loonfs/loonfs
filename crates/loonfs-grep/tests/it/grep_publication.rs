@@ -4,13 +4,14 @@
 //! unknown outcome keeps what the put may list.
 
 use crate::common::{
-    control, fold_wal_and_advance_retention, page_request, writable_namespace, GrepHost,
+    control, fold_wal_and_advance_retention, page_request, writable_namespace, writer_session,
+    GrepHost,
 };
-use loonfs::{LoonFs, SharedObjectStore, Writable};
+use loonfs::{LoonFs, NamespaceSessionStatus, SharedObjectStore, Writable};
 use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepEnableOutcome, GrepError, GrepPublicationStats,
-    GrepPublishOutcome,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome, GrepError,
+    GrepPublicationStats, GrepPublishOutcome,
 };
 use loonfs_objectstore::keys::metadata_manifest_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -197,10 +198,12 @@ async fn a_restart_and_its_finished_backfill_publish_together() {
 }
 
 /// Checks that an enable whose publication loses its put to another
-/// process's enable returns `Superseded`, and that the other enable is
-/// published.
+/// writer's enable returns `writer_fenced`, which the server sends once
+/// more in a new session, instead of `Superseded`, and that the other enable
+/// is published. The session has its writer epoch before the enable, so the
+/// put that loses is the enable's own.
 #[tokio::test]
-async fn an_enable_that_loses_to_another_enable_is_superseded() {
+async fn an_enable_that_loses_to_another_writers_enable_is_fenced() {
     let directory = tempfile::tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("lost-enable");
@@ -213,6 +216,10 @@ async fn an_enable_that_loses_to_another_enable_is_superseded() {
     let gated: SharedObjectStore = gate.clone();
     let host = GrepHost::new(&gated).await;
     let rival = GrepHost::new(&base).await;
+    let held = writer_session(&gated, &namespace_id);
+    held.put_file("/claim", b"claim", &loonfs_test_support::test_actor())
+        .await
+        .expect("the session claims the namespace with a commit");
 
     gate.block_next();
     let (lost, ()) = tokio::join!(host.enable_of(&namespace_id), async {
@@ -223,12 +230,97 @@ async fn an_enable_that_loses_to_another_enable_is_superseded() {
         );
         gate.release();
     });
-    assert_matches!(lost, Ok(GrepEnableOutcome::Superseded));
+    let error = lost.expect_err("the rival's claim fences the host's session");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+    drop(held);
     assert_matches!(
         host.worker.lifecycle(&namespace_id).await,
         Ok(GrepIndexStatus::Backfilling { .. }),
         "the rival's enable is published"
     );
+}
+
+/// Checks that a run of steps on server A, after another server claimed the
+/// namespace and published another grep entry with a backfill to build, ends
+/// fenced before it builds
+/// anything: A's first step loads its basis from A's position, the check of
+/// that position finds the other server's manifests, and the writer's load
+/// returns `writer_fenced`. The step writes no segment, A's session is
+/// fenced, and an enable on it returns `writer_fenced`, which the server
+/// sends once more in a new session, instead of `grep_publication_conflict`.
+#[tokio::test]
+async fn a_run_of_steps_that_another_writer_displaced_ends_fenced() {
+    let directory = tempfile::tempdir().expect("directory");
+    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = namespace_id("displaced-steps");
+    let _writer = seed(&base, &namespace_id, &["/a", "/b"]).await;
+    let host = GrepHost::new(&base).await;
+    let held = writer_session(&base, &namespace_id);
+    assert_matches!(
+        host.worker.enable(&held).await,
+        Ok(GrepEnableOutcome::Enabled { .. })
+    );
+
+    let rival_store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let rival = GrepHost::new(&rival_store).await;
+    assert_matches!(
+        rival.disable_of(&namespace_id).await,
+        Ok(GrepDisableOutcome::Disabled),
+        "server B claims the namespace"
+    );
+    assert_matches!(
+        rival.enable_of(&namespace_id).await,
+        Ok(GrepEnableOutcome::Enabled { .. }),
+        "server B publishes another entry, whose backfill has work to build"
+    );
+    let segments = directory
+        .path()
+        .join(loonfs_objectstore::keys::extension_segment_prefix(
+            &namespace_id,
+            &loonfs_grep::entry::grep_extension_name(),
+        ));
+    let before = file_count(&segments);
+    let manifest = control::metadata_manifest(&base, &namespace_id).await;
+
+    let mut steps = host.worker.steps(&held, u64::MAX);
+    let error = steps
+        .step(one_file_steps())
+        .await
+        .expect_err("A's step finds B's manifests above its position");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+    assert_eq!(held.session_status(), NamespaceSessionStatus::Fenced);
+    assert_eq!(file_count(&segments), before, "the step writes no segment");
+    assert_eq!(
+        control::metadata_manifest(&base, &namespace_id)
+            .await
+            .payload(),
+        manifest.payload()
+    );
+    let error = host
+        .worker
+        .enable(&held)
+        .await
+        .expect_err("an enable on the fenced session");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+}
+
+/// Returns the number of files under `directory`, or 0 when it doesn't
+/// exist.
+fn file_count(directory: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return 0;
+    };
+    entries
+        .map(|entry| {
+            let entry = entry.expect("a directory entry");
+            if entry.file_type().expect("a file type").is_dir() {
+                file_count(&entry.path())
+            } else {
+                1
+            }
+        })
+        .sum()
 }
 
 /// Checks that an enable whose put has an unknown outcome returns
@@ -246,11 +338,19 @@ async fn an_enable_whose_put_has_an_unknown_outcome_fails() {
         OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("lost enable request".to_owned()),
     );
+    let failing = Arc::new(failing);
+    let shared: SharedObjectStore = failing.clone();
+    let host = GrepHost::new(&shared).await;
+    // The session claims the namespace first, so the put that fails is the
+    // enable's own.
+    let held = writer_session(&shared, &namespace_id);
+    held.put_file("/claim", b"claim", &loonfs_test_support::test_actor())
+        .await
+        .expect("the session claims the namespace with a commit");
     failing.fail_next(1);
-    let failing: SharedObjectStore = Arc::new(failing);
-    let host = GrepHost::new(&failing).await;
 
     let outcome = host.enable_of(&namespace_id).await;
+    drop(held);
 
     assert_matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown);
     assert_matches!(host.worker.entry(&namespace_id).await, Ok(None));
@@ -303,6 +403,14 @@ async fn a_step_that_loses_its_put_to_the_sessions_copy_of_its_entry_is_publishe
         }
     );
     assert_matches!(rebuilt, Ok(GrepBuildOutcome::Indexed { .. }));
+    assert_matches!(
+        host.worker.lifecycle(&namespace_id).await,
+        Ok(GrepIndexStatus::Backfilling {
+            cursor_inode_id: Some(_),
+            ..
+        }),
+        "the rebuilt manifest has the step's progress"
+    );
     let current = control::metadata_manifest(&base, &namespace_id).await;
     assert_eq!(
         current.payload().manifest_no,
@@ -400,45 +508,81 @@ async fn a_step_that_loses_its_put_to_the_sessions_disable_publishes_nothing() {
     assert_eq!(found.matches.len(), 2);
 }
 
-/// Checks that an enable and a disable whose put is written but whose
-/// response is lost read the manifest back and return `Enabled` and
-/// `Disabled`.
+/// Checks that an enable and a disable whose put loses its response read
+/// the number back: they return `Enabled` and `Disabled` when the put was
+/// written, and `writer_fenced` when another writer claimed the namespace
+/// and published at that number first, which the server sends once more in
+/// a new session.
 #[tokio::test]
-async fn an_enable_or_disable_whose_put_loses_its_response_reads_back_its_manifest() {
-    let directory = tempfile::tempdir().expect("directory");
-    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let namespace_id = namespace_id("lost-response");
-    let writer = seed(&base, &namespace_id, &["/a"]).await;
-    writer.shutdown().await.expect("shutdown");
-    let failing = Arc::new(
-        FailStore::new(
+async fn an_enable_or_disable_whose_put_loses_its_response_reads_back_whose_manifest_it_is() {
+    for rival in [false, true] {
+        let directory = tempfile::tempdir().expect("directory");
+        let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+        let namespace_id = namespace_id("lost-response");
+        let writer = seed(&base, &namespace_id, &["/a"]).await;
+        writer.shutdown().await.expect("shutdown");
+        let manifests = KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id));
+        let failing = FailStore::new(
             base.clone(),
-            KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+            manifests.clone(),
             OperationSelector::PutCreateIfAbsent,
             InjectedError::Transport("lost response".to_owned()),
-        )
-        .apply_then_fail(),
-    );
-    let store: SharedObjectStore = failing.clone();
-    let host = GrepHost::new(&store).await;
-    // The host's session claims the namespace with a commit first, so the
-    // injected failures hit the grep publications' puts.
-    host.writer
-        .open_namespace(&namespace_id)
-        .expect("open the session")
-        .put_file("/claim", b"claim", &loonfs_test_support::test_actor())
-        .await
-        .expect("the session claims");
+        );
+        // Without a rival, the put is written and its response is lost. With
+        // one, the put waits while the rival publishes, and then fails before
+        // it reaches the store.
+        let failing = if rival {
+            failing
+        } else {
+            failing.apply_then_fail()
+        };
+        let gate = Arc::new(BlockingStore::new(
+            failing,
+            manifests,
+            OperationSelector::PutCreateIfAbsent,
+        ));
+        let gated: SharedObjectStore = gate.clone();
+        let host = GrepHost::new(&gated).await;
+        let rival_store: SharedObjectStore =
+            Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+        let other = GrepHost::new(&rival_store).await;
+        // The host's session claims the namespace first, so the injected
+        // failures hit the grep publications' puts.
+        let held = writer_session(&gated, &namespace_id);
+        held.put_file("/claim", b"claim", &loonfs_test_support::test_actor())
+            .await
+            .expect("the session claims the namespace with a commit");
+        let arm = || {
+            gate.inner().fail_next(1);
+            if rival {
+                gate.block_next();
+            }
+        };
 
-    failing.fail_next(1);
-    assert_matches!(
-        host.enable_of(&namespace_id).await,
-        Ok(GrepEnableOutcome::Enabled { .. })
-    );
-    failing.fail_next(1);
-    assert_matches!(
-        host.disable_of(&namespace_id).await,
-        Ok(loonfs_grep::GrepDisableOutcome::Disabled)
-    );
-    assert_eq!(failing.remaining(), 0);
+        arm();
+        let (enabled, ()) = tokio::join!(host.enable_of(&namespace_id), async {
+            if rival {
+                gate.wait_until_blocked().await;
+                assert_matches!(
+                    other.enable_of(&namespace_id).await,
+                    Ok(GrepEnableOutcome::Enabled { .. })
+                );
+                gate.release();
+            }
+        });
+        if rival {
+            let error = enabled.expect_err("the rival's claim fences the session");
+            assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+            assert_eq!(gate.inner().remaining(), 0);
+            continue;
+        }
+        assert_matches!(enabled, Ok(GrepEnableOutcome::Enabled { .. }));
+        arm();
+        assert_matches!(
+            host.disable_of(&namespace_id).await,
+            Ok(GrepDisableOutcome::Disabled)
+        );
+        assert_eq!(gate.inner().remaining(), 0);
+        drop(held);
+    }
 }

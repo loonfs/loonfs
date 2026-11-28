@@ -26,6 +26,7 @@ mod reports;
 #[cfg(test)]
 mod tests;
 
+pub use loonfs_core::MaintenanceCancellation;
 pub use reports::{
     MaintainMetadataReport, MetadataCompactionOutcome, MetadataCompactionReport,
     MetadataMaintenanceReport,
@@ -323,38 +324,5 @@ impl DueMaintenance {
     /// Returns whether any maintenance is due.
     pub fn any(&self) -> bool {
         self.fold || self.compaction || self.retention_advance
-    }
-}
-
-/// Stops a maintenance call that takes it, such as
-/// [`Namespace::maintain_metadata_while_due`](crate::Namespace::maintain_metadata_while_due)
-/// or [`Namespace::compact_metadata`](crate::Namespace::compact_metadata).
-/// Clones share one state.
-#[derive(Debug, Clone, Default)]
-pub struct MaintenanceCancellation(loonfs_core::MetadataCompactionCancellation);
-
-impl MaintenanceCancellation {
-    /// Creates an uncancelled token.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Cancels the token.
-    pub fn cancel(&self) {
-        self.0.cancel();
-    }
-
-    /// Returns whether the token was cancelled.
-    pub fn is_cancelled(&self) -> bool {
-        self.0.is_cancelled()
-    }
-
-    /// Waits until the token is cancelled.
-    pub async fn cancelled(&self) {
-        self.0.cancelled().await;
-    }
-
-    pub(crate) fn metadata_compaction(&self) -> &loonfs_core::MetadataCompactionCancellation {
-        &self.0
     }
 }

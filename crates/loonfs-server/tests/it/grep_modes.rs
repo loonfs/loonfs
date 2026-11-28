@@ -601,6 +601,63 @@ async fn a_server_that_serves_no_queries_keeps_the_index_built() {
         .expect("settle the server writer");
 }
 
+/// Checks that a server with a `[grep]` table and `sweep_store = false`
+/// sweeps nothing, serves the index routes, and builds the index of a
+/// namespace whose session it keeps: the enable claims the namespace as its
+/// writer, and the session steps build the index up to the head.
+#[tokio::test]
+async fn a_server_that_doesnt_sweep_builds_the_index_of_its_own_sessions() {
+    let temp_dir = tempdir().expect("store tempdir");
+    let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "no-sweep").await;
+    writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .put_file(
+            "/note.txt",
+            b"unswept needle\n",
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("write file");
+    let mut config = test_config(temp_dir.path(), Some(true));
+    config.sweep_store = false;
+    let (router, server) = app(
+        config.validate().expect("validate the test config"),
+        AppConfig::default(),
+    )
+    .await
+    .expect("build app");
+    assert!(maintains_grep_index(&server));
+    let report = server.scheduler.run_sweep().await;
+    assert_eq!(
+        (report.namespaces, report.complete),
+        (0, false),
+        "a server that doesn't sweep lists nothing"
+    );
+
+    assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
+    assert_matches!(
+        index_status(&router, &namespace_id).await.status,
+        loonfs_types::GrepIndexStatus::Backfilling { .. }
+    );
+    server.run_due_steps().await;
+    assert_eq!(watermark(&store, &namespace_id).await, CommitSeq(1));
+    assert_eq!(
+        grep(&router, &namespace_id, "unswept needle")
+            .await
+            .matches
+            .len(),
+        1
+    );
+    server
+        .http
+        .runtime
+        .shutdown()
+        .await
+        .expect("settle the server writer");
+    writer.shutdown().await.expect("settle the seed writer");
+}
+
 async fn seed_namespace(
     root: &Path,
     name: &str,
