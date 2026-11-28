@@ -466,7 +466,7 @@ async fn a_merge_over_the_wal_object_bound_fails_with_merge_too_large_and_writes
         writer.writer_id.clone(),
     );
     let directory = engine
-        .publish_batch(vec![create_dir("directory", "directory")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("directory", "directory")], &writer.clock())
         .await
         .results
         .pop()
@@ -500,7 +500,7 @@ async fn a_merge_over_the_wal_object_bound_fails_with_merge_too_large_and_writes
     let before = wal_object_count(&store, &namespace_id).await;
 
     let error = engine
-        .publish_batch(vec![updates(count)], &writer.clock())
+        .publish_batch_alone(vec![updates(count)], &writer.clock())
         .await
         .results
         .pop()

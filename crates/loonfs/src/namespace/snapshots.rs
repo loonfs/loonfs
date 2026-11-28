@@ -107,8 +107,11 @@ impl Namespace<Writable> {
     /// the session's own, and it starts from the session's position. A tail
     /// of only fences counts as empty. Otherwise the snapshot's record is
     /// written on the current manifest and verified, and the call claims
-    /// nothing. A verification that finds the manifest replaced tries again,
-    /// up to `MAX_CONTENTION_ATTEMPTS` attempts in all, and then returns
+    /// nothing. Either way the record's put and its verification are one
+    /// publication of the session's lane, so no publication of the session
+    /// replaces the snapshot's manifest before the verification. A
+    /// verification that finds the manifest replaced tries again, up to
+    /// `MAX_CONTENTION_ATTEMPTS` attempts in all, and then returns
     /// `store_contention` (format spec, "Creating and verifying a
     /// snapshot").
     pub async fn create_snapshot_with_options(

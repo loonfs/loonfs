@@ -2,26 +2,31 @@
 //! published, and [`KeptPosition`], the commit engine's position, which
 //! follows that manifest each time the engine reads or takes it.
 
+use super::engine::WriterSessionStatus;
+use super::publication_lane::PublicationLane;
 use super::publish_view::WriterPosition;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// The newest manifest that the runtime of one writer session published for
-/// the session's namespace, or found current, shared by the session's commit
-/// engine and the runtime.
+/// The newest manifest that one writer session published for the session's
+/// namespace, shared by the session's commit engine and the runtime.
 ///
-/// A fold or a maintenance call records its manifest here as soon as its put
-/// and its boundary read succeed, without waiting for a publication unit
-/// that has the engine. The engine's position still changes only on the
-/// engine's turn: the session's runtime brings both copies of the position
-/// (the engine's and the one that reads start from) up to this manifest at
-/// once when no task has the engine, and at the engine's release otherwise,
-/// and every read of either copy follows it too (see [`Self::follow`]). So
-/// a unit that planned from an older manifest doesn't undo a publication
-/// when it puts its position back, and a read never starts from a manifest
-/// below the session's own newest one. A manifest at or below the recorded
-/// one never replaces it.
+/// A publication of the session's lane records its own manifest here as
+/// soon as its put and its boundary read succeed, before the lane takes the
+/// next publication, without waiting for a publication unit that has the
+/// engine, and a claim records its manifest here too. Both keep the lane
+/// while they record, and nothing else records a manifest here: a load of the
+/// session's position never moves it, so it never lists a manifest that
+/// isn't this session's (see [`PublicationLane`]). The engine's position
+/// still changes only on the engine's turn: the session's runtime brings
+/// the three copies of the position (the engine's, the lane's, and the one
+/// that reads start from) up to this manifest at once when no task has the
+/// engine, and at the engine's release otherwise, and every read of a copy
+/// follows it too (see [`Self::follow`]). So a unit that planned from an
+/// older manifest doesn't undo a publication when it puts its position
+/// back, and a read never starts from a manifest below the session's own
+/// newest one. A manifest at or below the recorded one never replaces it.
 #[derive(Debug, Clone, Default)]
 pub struct PublishedManifest(Arc<Mutex<Option<Held<LoadedManifest>>>>);
 
@@ -49,11 +54,11 @@ impl PublishedManifest {
         PublishedLock {
             published: self,
             // A critical section under this lock records a manifest, follows
-            // positions and stores them, checks that a lock is its own
-            // cell's, and unlocks the engine. It calls no code outside these
-            // types, so a panic under it is a bug, and so is a poisoned lock.
-            // Dropping a replaced position and handing a dropped one's tail
-            // to the read cache happen after the unlock.
+            // positions and stores them, reads the session's status, checks
+            // that a lock is its own cell's, and unlocks the engine. It calls
+            // no code outside these types, so a panic under it is a bug, and
+            // so is a poisoned lock. Dropping a replaced position and handing
+            // a dropped one's tail to the read cache happen after the unlock.
             recorded: self
                 .0
                 .lock()
@@ -61,9 +66,17 @@ impl PublishedManifest {
         }
     }
 
-    /// Records `published` (see [`PublishedLock::record`]).
-    pub fn record(&self, published: &Held<LoadedManifest>) {
+    /// Records `published` (see [`PublishedLock::record`]). Only an item of
+    /// the session's publication lane and a claim record a manifest (see
+    /// [`LaneGuard::record`](super::publication_lane::LaneGuard::record)).
+    pub(crate) fn record(&self, published: &Held<LoadedManifest>) {
         self.lock().record(published);
+    }
+
+    /// Returns the recorded manifest, or `None` before the session recorded
+    /// one.
+    pub(crate) fn recorded(&self) -> Option<Held<LoadedManifest>> {
+        self.lock().recorded.clone()
     }
 
     /// Returns where `position` goes once it's brought up to the recorded
@@ -90,7 +103,7 @@ impl PublishedLock<'_> {
     /// or found current. A manifest above the recorded one replaces it, and
     /// the recorded one otherwise takes `published`'s check (see
     /// [`Held::merge`]).
-    pub fn record(&mut self, published: &Held<LoadedManifest>) {
+    pub(crate) fn record(&mut self, published: &Held<LoadedManifest>) {
         match self.recorded.as_mut() {
             Some(recorded) if recorded.manifest_no() >= published.manifest_no() => {
                 recorded.merge(published);
@@ -136,17 +149,28 @@ impl PublishedLock<'_> {
 /// [`Self::get`] or [`Self::take`], which follow the recorded manifest.
 /// Every store follows too, and so does [`Self::follow_stored`], which the
 /// session's runtime runs after each publication, so the stored position
-/// doesn't keep the part of the tail that a publication folded.
-#[derive(Debug, Default)]
+/// doesn't keep the part of the tail that a publication folded. That
+/// follow, which the runtime runs at each release of the engine, also
+/// leaves a copy of the stored position in the session's publication lane,
+/// unless the session is fenced, and each drop removes the copy. The lane's
+/// publications build on the copy (see
+/// [`LaneGuard::turn`](super::publication_lane::LaneGuard::turn)), so they
+/// don't wait for a unit that has the engine, and a unit's own changes to
+/// its position don't copy the tail that the lane's copy shares.
+#[derive(Debug)]
 pub(crate) struct KeptPosition {
     position: Option<WriterPosition>,
-    published: PublishedManifest,
+    lane: PublicationLane,
 }
 
 impl KeptPosition {
-    /// Returns the newest manifest that the session's runtime published.
-    pub(crate) fn published(&self) -> &PublishedManifest {
-        &self.published
+    /// Returns no position, which follows the newest manifest that `lane`,
+    /// the session's publication lane, records.
+    pub(crate) fn new(lane: PublicationLane) -> Self {
+        Self {
+            position: None,
+            lane,
+        }
     }
 
     /// Returns a copy of the position brought up to the recorded manifest,
@@ -175,41 +199,39 @@ impl KeptPosition {
     }
 
     /// Brings the stored position up to the manifest that `published`, this
-    /// position's locked [`PublishedManifest`], records, stores it, and
-    /// returns the position that it replaced, or `None` when the position
-    /// stays. The caller drops the replaced position once it has unlocked
-    /// `published`, because the replaced position can be the last owner of a
-    /// large WAL tail.
-    #[must_use = "drop the replaced position once the published manifest is unlocked"]
+    /// position's locked [`PublishedManifest`], records, stores it, leaves a
+    /// copy of it in the session's publication lane, and returns the
+    /// positions that it replaced.
+    ///
+    /// The lane stores no copy when `session` is fenced, because a fenced
+    /// session publishes nothing more, and its position would stay on a head
+    /// that the new writer has moved past.
     pub(crate) fn follow_stored(
         &mut self,
         published: &PublishedLock<'_>,
-    ) -> Option<WriterPosition> {
+        session: &WriterSessionStatus,
+    ) -> ReplacedPositions {
         assert!(
-            published.is_lock_of(&self.published),
+            published.is_lock_of(self.lane.published_manifest()),
             "a position follows its own session's published manifest"
         );
-        match published.follow(self.position.as_ref()?) {
-            FollowOutcome::Unchanged => None,
-            FollowOutcome::Moved(moved) => self.position.replace(*moved),
-            FollowOutcome::Dropped => self.position.take(),
+        let engine = match self
+            .position
+            .as_ref()
+            .map(|position| published.follow(position))
+        {
+            None | Some(FollowOutcome::Unchanged) => None,
+            Some(FollowOutcome::Moved(moved)) => self.position.replace(*moved),
+            Some(FollowOutcome::Dropped) => self.position.take(),
+        };
+        let copy = match session {
+            WriterSessionStatus::Fenced(_) => None,
+            _ => self.position.clone(),
+        };
+        ReplacedPositions {
+            _engine: engine,
+            _lane: self.lane.keep(copy),
         }
-    }
-
-    /// Records `published`, a manifest that the session published without a
-    /// runtime around the engine (see [`PublishedLock::record`]), and brings
-    /// the stored position up to it, as the runtime's release of the engine
-    /// does. Returns the position that the follow replaced, which the caller
-    /// drops.
-    #[must_use = "drop the replaced position once the published manifest is unlocked"]
-    pub(crate) fn record_published(
-        &mut self,
-        published: &Held<LoadedManifest>,
-    ) -> Option<WriterPosition> {
-        let manifest = self.published.clone();
-        let mut recorded = manifest.lock();
-        recorded.record(published);
-        self.follow_stored(&recorded)
     }
 
     /// Returns the position as it's stored, without following the recorded
@@ -219,21 +241,36 @@ impl KeptPosition {
         self.position.as_ref()
     }
 
-    /// Drops the position.
+    /// Drops the position and the lane's copy of it.
     pub(crate) fn clear(&mut self) {
         self.position = None;
+        drop(self.lane.keep(None));
     }
 
     /// Returns `position` brought up to the recorded manifest, or `None` when
     /// it can't move there. The published manifest is locked only for the
     /// follow, and `position` is dropped after the unlock.
     fn followed(&self, position: WriterPosition) -> Option<WriterPosition> {
-        match self.published.follow(&position) {
+        match self.lane.published_manifest().follow(&position) {
             FollowOutcome::Unchanged => Some(position),
             FollowOutcome::Moved(moved) => Some(*moved),
             FollowOutcome::Dropped => None,
         }
     }
+}
+
+/// The positions that a follow of the stored position replaced (see
+/// [`KeptPosition::follow_stored`]): the engine's, and the copy in the
+/// session's publication lane.
+///
+/// The caller drops this once it has unlocked the session's published
+/// manifest, because either position can be the last owner of a large WAL
+/// tail.
+#[derive(Debug)]
+#[must_use = "drop the replaced positions once the published manifest is unlocked"]
+pub struct ReplacedPositions {
+    _engine: Option<WriterPosition>,
+    _lane: Option<WriterPosition>,
 }
 
 #[cfg(test)]

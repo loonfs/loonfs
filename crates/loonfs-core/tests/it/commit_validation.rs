@@ -178,7 +178,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     );
     store.reset();
     let responses = publisher
-        .publish_batch(
+        .publish_batch_alone(
             vec![CommitCandidate::prepared(
                 CommitIntent::single(
                     commit_id("put-admitted-content"),
@@ -216,7 +216,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     store.reset();
     store.inner().reset();
     let rejected = publisher
-        .publish_batch(
+        .publish_batch_alone(
             vec![CommitCandidate::prepared(
                 CommitIntent::single(
                     commit_id("forged-content-size"),

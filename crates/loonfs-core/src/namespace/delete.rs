@@ -1,5 +1,6 @@
 //! Namespace deletion status published as successive manifests.
 
+use crate::commit::publication_lane::LaneGuard;
 use crate::commit::publish_view::{load_writer_position, WriterPosition};
 use crate::commit::session_epoch::SessionEpoch;
 use crate::error::{CoreError, Result};
@@ -27,6 +28,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// manifest by [`WriterPosition::move_to`], and the deletion drops the
     /// position when the position can't move.
     ///
+    /// The caller keeps `lane`, the session's publication lane, for the
+    /// whole deletion, so the fold and the tombstone are items of the lane.
     /// The tombstone's put is sent through `epoch` (see
     /// [`SessionEpoch::send_put`]).
     pub(crate) async fn delete_namespace(
@@ -34,6 +37,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         options: DeleteNamespaceOptions,
         epoch: SessionEpoch<'_>,
         position: Option<WriterPosition>,
+        lane: &LaneGuard<'_>,
         clock: &OperationClock,
     ) -> Result<PublicationReport<DeleteNamespaceResponse>> {
         let basis = match &position {
@@ -82,7 +86,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 if current.payload().folded_wal_no < head.wal_no {
                     clock.ensure_metadata_publication_budget(&self.namespace_id)?;
                     let mut held = held;
-                    let moved = match self.fold_wal_tail_from(&held, clock).await {
+                    let folded = self
+                        .fold_wal_tail_from(lane.turn_from(held.clone()), clock)
+                        .await;
+                    let moved = match folded {
                         Ok(folded) => held.move_to(&folded.current).then_some(held),
                         // The position is behind: its manifest is gone, or a
                         // manifest that won the fold's put ended the fold

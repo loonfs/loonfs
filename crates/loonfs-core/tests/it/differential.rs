@@ -1213,7 +1213,7 @@ async fn planned_appends_match_the_model() {
             Vec::new()
         };
         engine
-            .publish_batch(
+            .publish_batch_alone(
                 [CommitCandidate::with_inline_content(
                     request,
                     Vec::new(),
@@ -1322,7 +1322,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         };
         let candidate = crate::common::prepared_candidate(&store, &namespace_id, request).await;
         engine
-            .publish_batch([candidate], &context.clock())
+            .publish_batch_alone([candidate], &context.clock())
             .await
             .results
             .pop()

@@ -189,15 +189,18 @@ impl NamespacePublisher {
     ///
     /// The unit waits for the lock before it plans, so two units of the
     /// namespace in this runtime never plan from the same manifest, and no
-    /// commit or fold waits for a unit. Under the lock,
+    /// commit waits for a unit, and a fold waits for one only while the
+    /// unit publishes: the unit's publication is an item of the session's
+    /// publication lane, so it takes its turn with the session's folds and
+    /// other publications. Under the lock,
     /// [`Self::find_outcome_before_unit`] checks whether a unit is due, on
     /// `observed`, a manifest loaded after anything this call published,
     /// when it's given. The unit waits for a compaction permit from the
     /// runtime's execution budget, and `cancellation` ends either wait or
-    /// stops the compaction at its next block. The unit then plans and
-    /// publishes from the session's position (see
-    /// [`Self::publish_from_position`]), so a session without its writer
-    /// epoch claims it first.
+    /// stops the compaction at its next block. The unit then plans from the
+    /// session's position outside the lane, and publishes in it (see
+    /// [`Self::publish_from`] and [`Self::writer_position`]), so a session without its
+    /// writer epoch claims it first.
     pub(super) async fn compact_once(
         &self,
         observed: Option<Held<LoadedManifest>>,
@@ -232,12 +235,13 @@ impl NamespacePublisher {
         let started_at_ms = core.timer().monotonic_now_ms();
         let engine = self.compaction_engine();
         let outcome = self
-            .publish_from_position(
+            .publish_from(
+                || self.writer_position(),
                 |position| {
                     let engine = &engine;
                     async move {
                         engine
-                            .compact_metadata_unit_from(&position, cancellation)
+                            .compact_metadata_unit_from(&position, &self.lane, cancellation)
                             .await
                     }
                 },

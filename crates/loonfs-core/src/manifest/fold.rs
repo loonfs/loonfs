@@ -2,6 +2,7 @@
 
 use super::publish::ManifestChange;
 use super::published::same_head;
+use crate::commit::publication_lane::LaneTurn;
 use crate::commit::publish_view::WriterPosition;
 use crate::error::CoreError;
 use crate::error::Result;
@@ -117,17 +118,18 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .expect("layout lock should not be poisoned"))
     }
 
-    /// Folds the WAL tail from `position`, a writer session's position, and
-    /// publishes the next manifest.
+    /// Folds the WAL tail from the position of `turn`, an item's turn in a
+    /// writer session's publication lane, and publishes the next manifest.
     ///
     /// The manifest copies the writer epoch from its predecessor, and its
     /// retention floor is the higher of its predecessor's floor and the
     /// floors of the floor objects that the fold covers (format spec,
     /// "Publishing a manifest"). A tail of floor objects and no commits is
     /// folded too, into a manifest with no new run. The position is the
-    /// session's, whatever its age, and only a writer session has one (see
-    /// [`NamespaceCommitEngine`](crate::publish::NamespaceCommitEngine)), so
-    /// every fold is a writer session's. A position whose manifest is
+    /// session's, whatever its age, and only an item of a writer session's
+    /// lane has a turn (see
+    /// [`PublicationLane`](crate::publish::PublicationLane)), so every fold
+    /// is an item of a writer session's lane. A position whose manifest is
     /// missing from the store and at or below the manifest boundary returns
     /// `head_moved`, so the session drops the position and its next fold
     /// loads the tail with the writer's load (see `load_held_manifest`), and
@@ -145,8 +147,25 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// that manifest, the next attempt rebuilds against the newest manifest
     /// the same way (see [`SegmentKeeper::load_error`](crate::segment::SegmentKeeper::load_error)). A missing
     /// segment of the current manifest returns `namespace_corrupt`. A
-    /// namespace tombstone stops the fold.
+    /// namespace tombstone stops the fold. A fold that ends records the
+    /// manifest that covers the tail, whether it published that manifest or
+    /// found it current, as the session's newest published manifest, before
+    /// the item drops the lane.
     pub async fn fold_wal_tail_from(
+        &self,
+        turn: LaneTurn<'_>,
+        clock: &OperationClock,
+    ) -> Result<FoldedWalTail> {
+        let folded = self
+            .fold_wal_tail_from_position(turn.position(), clock)
+            .await?;
+        turn.record(&folded.current);
+        Ok(folded)
+    }
+
+    /// Folds the WAL tail from `position`, as [`Self::fold_wal_tail_from`]
+    /// describes, without recording the manifest.
+    async fn fold_wal_tail_from_position(
         &self,
         position: &WriterPosition,
         clock: &OperationClock,

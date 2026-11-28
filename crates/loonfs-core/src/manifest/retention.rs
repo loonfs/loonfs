@@ -4,7 +4,7 @@
 
 use super::publish::ManifestChange;
 use super::published::PublicationReport;
-use crate::commit::publish_view::WriterPosition;
+use crate::commit::publication_lane::LaneTurn;
 use crate::error::Result;
 use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::metadata::manifest_index::commits_after_page;
@@ -124,8 +124,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
-    /// Publishes the manifest after the manifest of `position`, a writer
-    /// session's position, with the retention window set to
+    /// Publishes the manifest after the manifest of the position of `turn`,
+    /// an item's turn in a writer session's publication lane, with the
+    /// retention window set to
     /// `retention_window_ms`, or cleared when it's `None`, and nothing else
     /// changed (format spec, "Advancing the retention floor").
     ///
@@ -135,22 +136,23 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// the position's manifest already has the requested window, the call
     /// publishes nothing, and when a manifest that won its put has the
     /// window, the call returns `head_moved` instead of reporting the change
-    /// done (see `ManifestUpdate::published_or_unchanged`). The report includes the manifest that records the change,
-    /// which the session records as its newest published manifest, as it
-    /// records a fold's (see
+    /// done (see `ManifestUpdate::published_or_unchanged`). The report
+    /// includes the manifest that records the change, which the call records
+    /// as the session's newest published manifest, as a fold does (see
     /// [`NamespaceCommitEngine::published_manifest`](crate::publish::NamespaceCommitEngine::published_manifest)).
     ///
-    /// Only a writer session's position can call this, so the change is
-    /// published only while the session has its epoch, and the put doesn't
-    /// wait for the session's commits.
+    /// Only an item of the session's publication lane can call this, so the
+    /// change is published only while the session has its epoch, it takes
+    /// its turn with the session's other manifest publications, and the put
+    /// doesn't wait for the session's commits.
     pub async fn set_retention_window_from(
         &self,
-        position: &WriterPosition,
+        turn: LaneTurn<'_>,
         retention_window_ms: Option<RetentionWindow>,
     ) -> Result<PublicationReport<SetRetentionWindowResponse>> {
         let retention_window_ms = retention_window_ms.map(NonZeroU64::from);
         let clock = self.start_clock();
-        let basis = self.load_publication_basis(position).await?;
+        let basis = self.load_publication_basis(turn.position()).await?;
         let built_on = basis.manifest_no();
         let update = self
             .update_live_manifest(
@@ -166,6 +168,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
             )
             .await?
             .published_or_unchanged(built_on)?;
+        if update.published {
+            turn.record(&update.current);
+        }
         Ok(update.into_report().map(|()| SetRetentionWindowResponse {
             namespace_id: self.namespace_id.clone(),
             retention_window_ms: retention_window_ms.map(NonZeroU64::get),

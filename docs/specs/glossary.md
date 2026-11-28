@@ -337,6 +337,10 @@ A service-proxied content read fetching a single byte range via an HTTP `Range` 
 
 A process's active right to write a namespace's WAL and publish its manifests, identified by a monotonic writer epoch. Every commit, fold, compaction result, extension entry, retention window change, and retention floor advance of an active namespace is published by the namespace's writer session, and a process that needs to publish one claims the namespace first. Because epoch takeover through object storage takes around 200 ms, most deployments share one long-lived writer session per namespace inside a server. See [Writer ownership](format.md#61-writer-ownership).
 
+### Publication lane
+
+The second serial queue of a [writer session](#writer-session), beside the queue that sends its WAL puts, through which every manifest publication of the session other than a claim goes: a fold, a compaction result, an extension entry, a retention window change, a deletion's manifests, and a snapshot's record put with its verification. The lane sends one manifest put at a time, and each publication builds on the manifest that the one before it published, so two publications of one session never put at the same manifest number, and a commit's WAL put doesn't wait for a manifest put. A claim keeps the lane and the queue of WAL puts while it runs, so it waits for the publication in flight. See [Publishing a manifest](format.md#72-publishing-a-manifest).
+
 ### Writer epoch
 
 A monotonic counter in the manifest incremented each time a new writer session claims a namespace. Once the new session writes its fence, older epochs cannot commit. A [floor object](#floor-object) has the writer session's own epoch.

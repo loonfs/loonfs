@@ -45,7 +45,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
         namespace_store(store, namespace_id),
         context.writer_id.clone(),
     )
-    .publish_batch(
+    .publish_batch_alone(
         vec![CommitCandidate::prepared(
             CommitIntent::single(
                 loonfs_types::CommitId::generate(),

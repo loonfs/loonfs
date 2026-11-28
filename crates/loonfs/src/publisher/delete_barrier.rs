@@ -73,8 +73,11 @@ impl NamespacePublisher {
     /// publications govern its tombstone swap too.
     ///
     /// The deletion folds the tail before its tombstone, with the
-    /// namespace's fold lock in exclusive mode, so it waits for any other
-    /// fold of the namespace instead of folding the same tail.
+    /// namespace's fold lock, so it waits for any other fold of the
+    /// namespace instead of folding the same tail. It then keeps the
+    /// session's publication lane and the engine, in that order, for its
+    /// fold and its tombstone, so both manifests are items of the lane and no
+    /// commit is written between them.
     pub(super) async fn delete_through_engine(
         &self,
         administrator: &Administrator,
@@ -84,11 +87,12 @@ impl NamespacePublisher {
         let Some(_writer) = self.context.writer.upgrade() else {
             return Err(CoreError::ShuttingDown.into());
         };
-        let _turn = self.turns.fold.write().await;
+        let _turn = self.turns.fold.lock().await;
         let _permit = self.context.runtime_core.fold_permit().await;
+        let lane = self.lane.lock().await;
         let mut engine = self.lock_engine().await;
         let result = engine
-            .delete_namespace(administrator, options)
+            .delete_namespace(&lane, administrator, options)
             .await
             .map_err(Error::from);
         // What follows a deletion depends on the namespace being deleted, not

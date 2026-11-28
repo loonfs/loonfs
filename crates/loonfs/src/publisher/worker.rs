@@ -261,11 +261,14 @@ impl NamespacePublisher {
         candidates: &[CommitCandidate],
         clock: &OperationClock,
     ) -> Vec<std::result::Result<Commit, CoreError>> {
-        let mut engine = self.lock_engine().await;
+        let (mut engine, start) = match self.lock_engine_for_unit().await {
+            Ok(unit) => unit,
+            Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
+        };
         // Boxing erases the engine's deeply nested publish future. Without
         // it, callers awaiting a put or commit (CLI, server, embedding
         // crates) exceed rustc's type-recursion depth.
-        let publish = Box::pin(engine.publish_batch(candidates, clock)).await;
+        let publish = Box::pin(engine.publish_batch(start, candidates, clock)).await;
         let fold_start = self.record_publication(&publish);
         drop(engine);
         // A WAL put whose outcome the session didn't learn may have

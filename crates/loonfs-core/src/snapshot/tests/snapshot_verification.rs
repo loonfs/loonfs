@@ -289,6 +289,7 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
                         writer,
                     ),
                     None,
+                    &crate::publish::PublicationLane::new().lock().await,
                     &context.clock(),
                 )
                 .await

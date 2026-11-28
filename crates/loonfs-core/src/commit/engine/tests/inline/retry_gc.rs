@@ -25,10 +25,11 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     let mut engine = NamespaceCommitEngine {
         namespace: crate::test_support::namespace_store(&failed, &namespace_id),
         writer_id: engine.writer_id,
+        lane: engine.lane.clone(),
         position: engine.position,
     };
     let error = engine
-        .publish_batch(
+        .publish_batch_alone(
             [candidate("lost-ack", vec![original.clone()])],
             &context.clock(),
         )
@@ -101,8 +102,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         context.writer_id.clone(),
     );
     restarted
-        .position
-        .session_writer_epoch(&restarted.namespace, &context.writer_id)
+        .load_position_alone()
         .await
         .expect("new writer fence");
     store.reset();

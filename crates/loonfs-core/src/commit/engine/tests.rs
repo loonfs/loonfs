@@ -195,7 +195,7 @@ async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
         writer_a.writer_id.clone(),
     );
     engine_a
-        .publish_batch(vec![create_dir("from-a-first", "alpha")], &writer_a.clock())
+        .publish_batch_alone(vec![create_dir("from-a-first", "alpha")], &writer_a.clock())
         .await
         .results[0]
         .as_ref()
@@ -207,7 +207,7 @@ async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
     let publish_a = tokio::spawn(async move {
         let mut engine = engine_a;
         let result = engine
-            .publish_batch(
+            .publish_batch_alone(
                 vec![create_dir("from-a-second", "gamma")],
                 &writer_a.clock(),
             )
@@ -225,7 +225,7 @@ async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
         writer_b.writer_id.clone(),
     );
     engine_b
-        .publish_batch(vec![create_dir("from-b-first", "beta")], &writer_b.clock())
+        .publish_batch_alone(vec![create_dir("from-b-first", "beta")], &writer_b.clock())
         .await
         .results[0]
         .as_ref()
@@ -266,13 +266,13 @@ async fn a_commit_that_cannot_check_its_manifest_returns_the_load_error() {
         writer.writer_id.clone(),
     );
     engine
-        .publish_batch(vec![create_dir("first", "alpha")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("first", "alpha")], &writer.clock())
         .await
         .results
         .remove(0)
         .expect("first commit");
     let folded = crate::test_support::namespace_store(&failing, &namespace_id)
-        .fold_wal_tail_from(
+        .fold_wal_tail_in_new_lane(
             &engine.writer_position().expect("a writer position"),
             &writer.clock(),
         )
@@ -296,7 +296,7 @@ async fn a_commit_that_cannot_check_its_manifest_returns_the_load_error() {
     let error = engine
         // A directory named as the folded one, so the commit reads that
         // name's rows from the position's segments.
-        .publish_batch(vec![create_dir("second", "alpha")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("second", "alpha")], &writer.clock())
         .await
         .results
         .remove(0)
@@ -330,7 +330,7 @@ async fn a_stored_manifest_below_the_sessions_writer_epoch_is_corrupt() {
             writer.writer_id.clone(),
         );
         engine
-            .publish_batch(vec![create_dir("first", "alpha")], &writer.clock())
+            .publish_batch_alone(vec![create_dir("first", "alpha")], &writer.clock())
             .await
             .results
             .remove(0)
@@ -365,18 +365,18 @@ async fn a_stored_manifest_below_the_sessions_writer_epoch_is_corrupt() {
         engine.invalidate_projection();
         let error = match entry {
             "retention advance" => engine
-                .publish_floor_object(&current, CommitSeq(1), &writer.clock())
+                .publish_floor_object_alone(&current, CommitSeq(1), &writer.clock())
                 .await
                 .expect_err("the advance finds the lower epoch"),
             "deletion" => engine
-                .delete_namespace(
+                .delete_namespace_alone(
                     &crate::test_support::administrator_of(&store, &namespace_id),
                     Default::default(),
                 )
                 .await
                 .expect_err("the deletion finds the lower epoch"),
             _ => engine
-                .publish_batch(vec![create_dir("second", "beta")], &writer.clock())
+                .publish_batch_alone(vec![create_dir("second", "beta")], &writer.clock())
                 .await
                 .results
                 .remove(0)
@@ -416,7 +416,7 @@ async fn a_fenced_session_stays_fenced_and_leaves_the_head_alone() {
         writer_a.writer_id.clone(),
     );
     engine_a
-        .publish_batch(vec![create_dir("from-a-first", "alpha")], &writer_a.clock())
+        .publish_batch_alone(vec![create_dir("from-a-first", "alpha")], &writer_a.clock())
         .await
         .results
         .remove(0)
@@ -428,7 +428,7 @@ async fn a_fenced_session_stays_fenced_and_leaves_the_head_alone() {
         writer_b.writer_id.clone(),
     );
     engine_b
-        .publish_batch(vec![create_dir("from-b-first", "beta")], &writer_b.clock())
+        .publish_batch_alone(vec![create_dir("from-b-first", "beta")], &writer_b.clock())
         .await
         .results
         .remove(0)
@@ -436,7 +436,7 @@ async fn a_fenced_session_stays_fenced_and_leaves_the_head_alone() {
 
     for expected in [ErrorCode::StoreContention, ErrorCode::WriterFenced] {
         let result = engine_a
-            .publish_batch(
+            .publish_batch_alone(
                 vec![create_dir("from-a-second", "gamma")],
                 &writer_a.clock(),
             )
@@ -456,7 +456,7 @@ async fn a_fenced_session_stays_fenced_and_leaves_the_head_alone() {
         .writer_epoch;
 
     let still_fenced = engine_a
-        .publish_batch(vec![create_dir("from-a-third", "delta")], &writer_a.clock())
+        .publish_batch_alone(vec![create_dir("from-a-third", "delta")], &writer_a.clock())
         .await;
     let error = still_fenced.results[0]
         .as_ref()
@@ -532,7 +532,7 @@ async fn publish_one<S: ObjectStore>(
 ) -> NamespaceCommitEnginePublishOutcome {
     let deadline = OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer));
     let published = engine
-        .publish_batch(vec![create_dir(name, name)], &deadline)
+        .publish_batch_alone(vec![create_dir(name, name)], &deadline)
         .await;
     published.results[0].as_ref().expect(name);
     published
@@ -623,7 +623,7 @@ async fn a_quiet_writer_collides_with_a_takeover_fence_and_is_fenced() {
     store.reset();
     let deadline = OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer));
     let collided = engine
-        .publish_batch(vec![create_dir("beta", "beta")], &deadline)
+        .publish_batch_alone(vec![create_dir("beta", "beta")], &deadline)
         .await;
     assert_matches!(
         collided.results.as_slice(),
@@ -637,7 +637,7 @@ async fn a_quiet_writer_collides_with_a_takeover_fence_and_is_fenced() {
         "{operations:?}"
     );
     let retried = engine
-        .publish_batch(vec![create_dir("beta", "beta")], &deadline)
+        .publish_batch_alone(vec![create_dir("beta", "beta")], &deadline)
         .await;
     assert_eq!(
         retried.results[0]
@@ -676,7 +676,7 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
     store.inner().block_next();
     let deadline = OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer));
     let (published, rival) = futures::join!(
-        engine.publish_batch(vec![create_dir("beta", "beta")], &deadline),
+        engine.publish_batch_alone(vec![create_dir("beta", "beta")], &deadline),
         async {
             store.inner().wait_until_blocked().await;
             let rival = crate::test_support::namespace_store(store.inner().inner(), &namespace_id)
@@ -701,7 +701,7 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
     );
 
     let retried = engine
-        .publish_batch(vec![create_dir("beta", "beta")], &deadline)
+        .publish_batch_alone(vec![create_dir("beta", "beta")], &deadline)
         .await;
     let [Err(CoreError::WriterFenced(fence))] = retried.results.as_slice() else {
         panic!("displaced writer: {:?}", retried.results);
@@ -752,7 +752,7 @@ async fn writer_after_own_compaction<'a>(
         publish_one(&mut engine, &writer, name).await;
         let input = engine.writer_position().expect("retained tail");
         let folded = crate::test_support::namespace_store(store, namespace_id)
-            .fold_wal_tail_from(&input, &OperationClock::start(0, timer.clone()))
+            .fold_wal_tail_in_new_lane(&input, &OperationClock::start(0, timer.clone()))
             .await
             .expect("own fold");
         engine.move_position_onto(folded.current);
@@ -771,6 +771,7 @@ async fn writer_after_own_compaction<'a>(
     .engine()
     .compact_metadata_unit_from(
         &before,
+        &crate::publish::PublicationLane::new(),
         &crate::compaction::MaintenanceCancellation::default(),
     )
     .await
@@ -927,7 +928,7 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     let input = engine.writer_position().expect("a position");
     let folded = engine
         .namespace
-        .fold_wal_tail_from(&input, &OperationClock::start(0, timer.clone()))
+        .fold_wal_tail_in_new_lane(&input, &OperationClock::start(0, timer.clone()))
         .await
         .expect("fold");
     let published = folded.published().expect("the fold publishes a manifest");
@@ -999,7 +1000,7 @@ async fn a_manifest_published_over_the_sessions_own_fold_moves_the_position() {
     // commits gamma on the manifest that the fold replaced.
     let folded = engine
         .namespace
-        .fold_wal_tail_from(&input, &OperationClock::start(0, timer.clone()))
+        .fold_wal_tail_in_new_lane(&input, &OperationClock::start(0, timer.clone()))
         .await
         .expect("fold");
     assert_eq!(folded.response.outcome, crate::FoldWalOutcome::Published);
@@ -1106,7 +1107,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
         crate::test_support::namespace_store(&store, &namespace_id),
         writer.writer_id.clone(),
     );
-    seed.publish_batch(vec![create_dir("seed-commit", "docs")], &writer.clock())
+    seed.publish_batch_alone(vec![create_dir("seed-commit", "docs")], &writer.clock())
         .await
         .results
         .remove(0)
@@ -1136,7 +1137,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
     );
     store.reset();
     uncached
-        .publish_batch(
+        .publish_batch_alone(
             vec![create_dir("uncached-a", "docs/alpha")],
             &writer.clock(),
         )
@@ -1150,7 +1151,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
     );
     store.reset();
     uncached
-        .publish_batch(vec![create_dir("uncached-b", "docs/beta")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("uncached-b", "docs/beta")], &writer.clock())
         .await
         .results
         .remove(0)
@@ -1170,7 +1171,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
     );
     store.reset();
     cached
-        .publish_batch(vec![create_dir("cached-a", "docs/gamma")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("cached-a", "docs/gamma")], &writer.clock())
         .await
         .results
         .remove(0)
@@ -1181,7 +1182,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
     );
     store.reset();
     cached
-        .publish_batch(vec![create_dir("cached-b", "docs/delta")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("cached-b", "docs/delta")], &writer.clock())
         .await
         .results
         .remove(0)
@@ -1208,13 +1209,13 @@ pub(super) async fn advance_in_session<S: ObjectStore>(
         .await
         .expect("load the planned manifest");
     let report = engine
-        .publish_floor_object(&planned, target, &clock)
+        .publish_floor_object_alone(&planned, target, &clock)
         .await
         .expect("create the floor object");
     assert_eq!(report.retention_floor_seq, target, "the floor moves");
     let folded = engine
         .namespace
-        .fold_wal_tail_from(
+        .fold_wal_tail_in_new_lane(
             &engine.writer_position().expect("a writer position"),
             &clock,
         )
@@ -1338,6 +1339,7 @@ async fn a_commit_engine_fold_claims_first_and_then_folds_from_its_position() {
     let mut failing_engine = NamespaceCommitEngine {
         namespace: crate::test_support::namespace_store(&failing, &namespace_id),
         writer_id: engine.writer_id.clone(),
+        lane: engine.lane.clone(),
         position: engine.position,
     };
     failing_engine
@@ -1356,6 +1358,7 @@ async fn a_commit_engine_fold_claims_first_and_then_folds_from_its_position() {
     let mut engine = NamespaceCommitEngine {
         namespace: crate::test_support::namespace_store(Arc::clone(&store), &namespace_id),
         writer_id: failing_engine.writer_id,
+        lane: failing_engine.lane.clone(),
         position: failing_engine.position,
     };
     let mut rival = NamespaceCommitEngine::new(
@@ -1364,7 +1367,7 @@ async fn a_commit_engine_fold_claims_first_and_then_folds_from_its_position() {
     );
     publish_one(&mut rival, &writer, "gamma").await;
     let fenced = engine
-        .publish_batch(vec![create_dir("delta", "delta")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("delta", "delta")], &writer.clock())
         .await;
     assert_matches!(fenced.results[0], Err(CoreError::WriterFenced(_)));
     store.reset();

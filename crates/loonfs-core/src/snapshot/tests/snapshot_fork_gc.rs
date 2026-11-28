@@ -354,6 +354,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
                         writer,
                     ),
                     None,
+                    &crate::publish::PublicationLane::new().lock().await,
                     &fixture.context.clock(),
                 )
                 .await

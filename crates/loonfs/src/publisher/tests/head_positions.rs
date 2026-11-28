@@ -514,12 +514,11 @@ async fn the_release_after_a_fold_brings_both_stored_positions_up_to_it() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a publication that confirms the session's current manifest
-/// moves the publication's check onto the position that reads start from, so a
-/// read with a freshness limit that the position's own check is past sends
-/// no request.
+/// Checks that a publication of the session's lane moves the publication's
+/// check onto the position that reads start from, so a read with a freshness
+/// limit that the position's own check is past sends no request.
 #[tokio::test]
-async fn a_publication_that_confirms_the_manifest_saves_the_next_reads_check() {
+async fn a_publication_of_the_lane_saves_the_next_reads_check() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -549,24 +548,28 @@ async fn a_publication_that_confirms_the_manifest_saves_the_next_reads_check() {
     .expect("one namespace");
     let namespace_id = namespace.id().clone();
     clock.advance_ms(1_000);
-    let confirmed = writer
-        .core
-        .namespace_store(&namespace_id)
-        .load_live_basis(writer.core.observation())
+    let published = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .set_retention_window(Some(
+            crate::RetentionWindow::new(2 * crate::GC_GRACE_WINDOW_MS)
+                .expect("a window longer than the grace window"),
+        ))
         .await
-        .expect("a check of the current manifest");
+        .expect("change the window");
     assert_eq!(
-        Some(confirmed.manifest_no()),
+        published.retention_window_ms,
+        Some(2 * crate::GC_GRACE_WINDOW_MS)
+    );
+    let current = current_manifest_no(recording.as_ref(), &namespace_id).await;
+    assert_eq!(
+        Some(current),
         writer
             .core
             .writer_position(&namespace_id)
             .map(|position| position.read_basis().basis().manifest_no()),
-        "the publication confirms the position's manifest"
+        "the position moves onto the publication's manifest"
     );
-    writer
-        .mode
-        .publisher
-        .record_manifest_published(&namespace_id, &confirmed);
 
     recording.reset();
     namespace.stat("/").await.expect("stat the root");

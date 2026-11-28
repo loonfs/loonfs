@@ -4,6 +4,7 @@
 use super::publish::ManifestChange;
 use super::published::PublicationReport;
 use super::validate::validate_manifest;
+use crate::commit::publication_lane::LaneTurn;
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::LoadedManifest;
@@ -107,9 +108,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Publishes a change to the entry of extension `name` as the writer
-    /// session whose position is `position`, in the manifest after the
-    /// position's manifest.
+    /// Publishes a change to the entry of extension `name` as one item of a
+    /// writer session's publication lane, whose turn is `turn`, in the
+    /// manifest after the manifest of the turn's position.
     ///
     /// The change is planned from `basis`, the manifest that the extension
     /// loaded its entry from, and the manifest lists `entry` as the
@@ -124,12 +125,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// from, so the call publishes nothing and returns
     /// [`ExtensionPublication::Superseded`] (format spec, "Extensions").
     /// After a lost put, the change is built again over the manifest that
-    /// won under the same rule. A fold, a compaction, or a window change
-    /// copies the entry and leaves the change valid, and a manifest that won
-    /// with another entry returns `head_moved` instead of `Superseded` (see
-    /// `ManifestUpdate::published_or_unchanged`). The put
-    /// doesn't wait for the session's commits, and the session records the
-    /// published manifest as it records a fold's (see
+    /// won under the same rule. A fold, a compaction, or a window change of
+    /// another process copies the entry and leaves the change valid, and a
+    /// manifest that won with another entry returns `head_moved` instead of
+    /// `Superseded` (see `ManifestUpdate::published_or_unchanged`). The put
+    /// doesn't wait for the session's commits, and the call records the
+    /// published manifest as the session's newest published manifest, as a
+    /// fold does (see
     /// [`NamespaceCommitEngine::published_manifest`](crate::publish::NamespaceCommitEngine::published_manifest)).
     /// The report includes the manifest that the call published.
     ///
@@ -139,13 +141,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// a segment twice.
     pub async fn publish_extension_from(
         &self,
-        position: &WriterPosition,
+        turn: LaneTurn<'_>,
         basis: &ExtensionBasis,
         name: &ExtensionName,
         entry: ExtensionEntry,
     ) -> Result<PublicationReport<ExtensionPublication>> {
         let built_on = basis.find_entry(name);
-        let position_basis = self.load_publication_basis(position).await?;
+        let position_basis = self.load_publication_basis(turn.position()).await?;
         let position_manifest_no = position_basis.manifest_no();
         let mut first_built_on = None;
         let update = self
@@ -167,6 +169,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             });
         }
         let published = update.current.clone();
+        turn.record(&published);
         let first_built_on =
             first_built_on.expect("a published change should be built on a manifest");
         let rebuilt = first_built_on.successor().ok() != Some(published.manifest_no());

@@ -254,7 +254,7 @@ async fn submit_operation_for_test<S: ObjectStore + ?Sized>(
         crate::test_support::namespace_store(store, namespace_id),
         context.writer_id.clone(),
     )
-    .publish_batch(
+    .publish_batch_alone(
         vec![CommitCandidate::prepared(
             CommitIntent::single(
                 CommitId::parse(commit_id).expect("commit id"),
@@ -311,7 +311,7 @@ async fn refused_restore_deleted<S: ObjectStore + ?Sized>(
         crate::test_support::namespace_store(store, namespace_id),
         context.writer_id.clone(),
     )
-    .publish_batch(
+    .publish_batch_alone(
         vec![CommitCandidate::new(CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),

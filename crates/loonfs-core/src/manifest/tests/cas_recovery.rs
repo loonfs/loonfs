@@ -264,7 +264,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                 },
             );
             engine
-                .publish_batch(
+                .publish_batch_alone(
                     vec![crate::commit::engine::CommitCandidate::new(
                         crate::path::write::CommitIntent {
                             commit_id: loonfs_types::CommitId::generate(),
@@ -831,8 +831,7 @@ async fn a_fold_that_finds_another_fold_after_a_lost_put_reports_its_position_be
                 writer_id: context.writer_id.clone(),
                 writer_epoch: head.writer_epoch,
             },
-            None,
-            None,
+            crate::commit::publish_view::ViewStart::Load,
             position_checked,
         )
         .await
@@ -871,7 +870,7 @@ async fn a_fold_that_finds_another_fold_after_a_lost_put_reports_its_position_be
     );
     store.fail_next(1);
     let folded = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail_from(
+        .fold_wal_tail_in_new_lane(
             &position,
             &crate::time::OperationClock::start(
                 0,

@@ -76,7 +76,7 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
         let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
         for _ in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
             let (indices, attempted): (Vec<_>, Vec<_>) = pending.into_iter().unzip();
-            let observed = engine.publish_batch(&attempted, &clock).await.results;
+            let observed = engine.publish_batch_alone(&attempted, &clock).await.results;
             pending =
                 settle_publish_attempt(&mut results, indices.into_iter().zip(attempted), observed);
             if pending.is_empty() {
@@ -299,7 +299,7 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
                 },
             );
             let mut results = engine
-                .publish_batch(
+                .publish_batch_alone(
                     vec![CommitCandidate::new(request)],
                     &self.namespace.start_clock(),
                 )
@@ -415,7 +415,7 @@ impl<S: ObjectStore + Clone> crate::engine::NamespaceEngine<S, crate::engine::Wr
             }
             crate::manifest::RetentionPlan::Moves(floor) => {
                 session
-                    .publish_floor_object(planned, floor, &self.namespace.start_clock())
+                    .publish_floor_object_alone(planned, floor, &self.namespace.start_clock())
                     .await?
             }
         };

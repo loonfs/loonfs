@@ -655,6 +655,38 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 }
 
+/// The publications of a test that publishes from a position outside the
+/// position's session, as another process or another session would: each is
+/// the one item of a new publication lane.
+impl<S: ObjectStore> NamespaceStore<S> {
+    /// Folds the WAL tail from `position` (see
+    /// [`NamespaceStore::fold_wal_tail_from`]).
+    pub async fn fold_wal_tail_in_new_lane(
+        &self,
+        position: &crate::commit::publish_view::WriterPosition,
+        clock: &crate::time::OperationClock,
+    ) -> crate::Result<crate::FoldedWalTail> {
+        let lane = crate::publish::PublicationLane::new();
+        let guard = lane.lock().await;
+        Box::pin(self.fold_wal_tail_from(guard.turn_from(position.clone()), clock)).await
+    }
+
+    /// Publishes an extension's change from `position` (see
+    /// [`NamespaceStore::publish_extension_from`]).
+    pub async fn publish_extension_in_new_lane(
+        &self,
+        position: &crate::commit::publish_view::WriterPosition,
+        basis: &crate::ExtensionBasis,
+        name: &loonfs_types::ExtensionName,
+        entry: loonfs_types::format::manifest::ExtensionEntry,
+    ) -> crate::Result<crate::PublicationReport<crate::ExtensionPublication>> {
+        let lane = crate::publish::PublicationLane::new();
+        let guard = lane.lock().await;
+        self.publish_extension_from(guard.turn_from(position.clone()), basis, name, entry)
+            .await
+    }
+}
+
 /// Folds the WAL tail of `namespace`, a fork's source, and returns no writer
 /// position for the fork.
 ///
@@ -914,14 +946,11 @@ impl<S: ObjectStore> NamespaceWriterEngine<S> {
     where
         S: Clone,
     {
-        let position = self
-            .namespace
-            .fixture_writer_session()
-            .await?
-            .load_position()
-            .await?;
+        let mut session = self.namespace.fixture_writer_session().await?;
+        let position = session.load_position_alone().await?;
         self.compact_metadata_unit_from(
             &position,
+            &session.publication_lane(),
             &crate::compaction::MaintenanceCancellation::default(),
         )
         .await

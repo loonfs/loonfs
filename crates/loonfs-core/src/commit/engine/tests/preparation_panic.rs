@@ -107,7 +107,7 @@ async fn publish_one(
     candidate: CommitCandidate,
 ) -> Result<Commit> {
     engine
-        .publish_batch([candidate], &context.clock())
+        .publish_batch_alone([candidate], &context.clock())
         .await
         .results
         .pop()
@@ -153,7 +153,7 @@ async fn a_panic_in_one_commits_preparation_fails_only_that_commit() {
         .seq;
     store.arm();
     let results = engine
-        .publish_batch(
+        .publish_batch_alone(
             [
                 create_dir("before", "before"),
                 panicking(),

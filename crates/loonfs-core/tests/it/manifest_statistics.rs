@@ -96,13 +96,13 @@ async fn a_folds_activity_counts_each_commit_once_and_reads_use_only_manifests()
             );
             let candidate = prepared_candidate(&store, &ns, request).await;
             let first = engine
-                .publish_batch(vec![candidate.clone()], &context.clock())
+                .publish_batch_alone(vec![candidate.clone()], &context.clock())
                 .await
                 .results
                 .remove(0)
                 .expect("commit");
             let retry = engine
-                .publish_batch(vec![candidate], &context.clock())
+                .publish_batch_alone(vec![candidate], &context.clock())
                 .await
                 .results
                 .remove(0)
@@ -124,12 +124,12 @@ async fn a_folds_activity_counts_each_commit_once_and_reads_use_only_manifests()
             // A new session claims the namespace and loads the tail from the
             // store.
             NamespaceCommitEngine::new(namespace_store(&store, &ns), context.writer_id.clone())
-                .load_position()
+                .load_position_alone()
                 .await
                 .expect("a new session's position")
         };
         namespace_store(&store, &ns)
-            .fold_wal_tail_from(
+            .fold_wal_tail_in_new_lane(
                 &input,
                 &loonfs_core::time::OperationClock::start(
                     0,
@@ -154,7 +154,7 @@ async fn a_folds_activity_counts_each_commit_once_and_reads_use_only_manifests()
         // A stale position's fold reports the position behind instead of
         // folding again, and a fresh engine finds the activity covered.
         let repeated = namespace_store(&store, &ns)
-            .fold_wal_tail_from(
+            .fold_wal_tail_in_new_lane(
                 &input,
                 &loonfs_core::time::OperationClock::start(
                     0,

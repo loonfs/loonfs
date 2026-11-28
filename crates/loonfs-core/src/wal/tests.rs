@@ -231,21 +231,23 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
         crate::test_support::namespace_store(&store, &namespace_id),
         setup.writer_id.clone(),
     )
-    .load_position()
+    .load_position_alone()
     .await
     .expect("first fence");
     store.block_next();
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let clock = namespace.start_clock();
-    let (folded, acquired) =
-        futures::join!(namespace.fold_wal_tail_from(&position, &clock), async {
+    let (folded, acquired) = futures::join!(
+        namespace.fold_wal_tail_in_new_lane(&position, &clock),
+        async {
             store.wait_until_blocked().await;
             let acquired = crate::test_support::namespace_store(store.inner(), &namespace_id)
                 .acquire_writer_epoch(&setup.writer_id)
                 .await;
             store.release();
             acquired
-        });
+        }
+    );
     acquired.expect("second fence");
     folded.expect("fold retries");
     let current = crate::test_support::namespace_store(&store, &namespace_id)
@@ -315,7 +317,7 @@ pub(crate) async fn publish<S: ObjectStore>(
     name: &str,
 ) -> crate::error::Result<loonfs_types::Commit> {
     engine
-        .publish_batch(vec![directory(name)], &context(1_000).clock())
+        .publish_batch_alone(vec![directory(name)], &context(1_000).clock())
         .await
         .results
         .remove(0)
@@ -835,7 +837,7 @@ async fn a_writer_resuming_after_a_collection_collides_with_the_kept_fence() {
         context_a.writer_id.clone(),
     );
     writer_a
-        .publish_batch(
+        .publish_batch_alone(
             [directory("before-sleep")],
             &OperationClock::start(context_a.now_ms, timer_a.clone()),
         )
@@ -846,7 +848,7 @@ async fn a_writer_resuming_after_a_collection_collides_with_the_kept_fence() {
     blocked.block_next();
     let batch = OperationClock::start(context_a.now_ms, timer_a.clone());
     let (mut resumed, ()) = futures::join!(
-        writer_a.publish_batch([directory("after-sleep")], &batch),
+        writer_a.publish_batch_alone([directory("after-sleep")], &batch),
         async {
             blocked.wait_until_blocked().await;
             let mut writer_b = NamespaceCommitEngine::new(
@@ -857,7 +859,7 @@ async fn a_writer_resuming_after_a_collection_collides_with_the_kept_fence() {
                 context_b.writer_id.clone(),
             );
             writer_b
-                .publish_batch(
+                .publish_batch_alone(
                     [directory("takeover")],
                     &OperationClock::start(context_b.now_ms, timer_b.clone()),
                 )
@@ -984,7 +986,7 @@ async fn acquire_over_an_emptied_number(
             setup.writer_id.clone(),
         );
         older
-            .publish_batch([directory("before")], &setup.clock())
+            .publish_batch_alone([directory("before")], &setup.clock())
             .await
             .results
             .remove(0)
@@ -1005,7 +1007,7 @@ async fn acquire_over_an_emptied_number(
             blocked.wait_until_blocked().await;
             for name in ["during-one", "during-two"] {
                 older
-                    .publish_batch([directory(name)], &setup.clock())
+                    .publish_batch_alone([directory(name)], &setup.clock())
                     .await
                     .results
                     .remove(0)
@@ -1120,7 +1122,7 @@ async fn a_fence_above_a_newer_manifests_folded_wal_no_is_live() {
         setup.writer_id.clone(),
     );
     older
-        .publish_batch([directory("before")], &setup.clock())
+        .publish_batch_alone([directory("before")], &setup.clock())
         .await
         .results
         .remove(0)

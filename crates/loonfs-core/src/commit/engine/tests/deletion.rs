@@ -46,7 +46,7 @@ async fn deletion_budget_includes_writer_acquisition() {
     );
     store.block_next();
     let administrator = crate::test_support::administrator_of(&store, &namespace_id);
-    let delete = publisher.delete_namespace(&administrator, Default::default());
+    let delete = publisher.delete_namespace_alone(&administrator, Default::default());
     let delay = async {
         store.wait_until_blocked().await;
         clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
@@ -83,7 +83,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
         context.writer_id.clone(),
     );
     stale
-        .publish_batch(
+        .publish_batch_alone(
             [CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("before-delete").expect("commit"),
                 loonfs_test_support::test_actor(),
@@ -103,7 +103,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
         crate::test_support::namespace_store(&store, &namespace_id),
         context.writer_id.clone(),
     )
-    .delete_namespace(
+    .delete_namespace_alone(
         &crate::test_support::administrator_of(&store, &namespace_id),
         Default::default(),
     )
@@ -121,7 +121,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
     for attempt in 0..3 {
         store.reset();
         let error = stale
-            .publish_batch([candidate.clone()], &context.clock())
+            .publish_batch_alone([candidate.clone()], &context.clock())
             .await
             .results
             .remove(0)
@@ -182,7 +182,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         vec![value],
     );
     engine
-        .publish_batch(
+        .publish_batch_alone(
             [candidate],
             &OperationClock::start(context.now_ms, clock.clone()),
         )
@@ -191,11 +191,9 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         .pop()
         .expect("result")
         .expect("publish inline content");
-    let acquired_writer = engine
-        .position
-        .session_writer_epoch(&engine.namespace, &context.writer_id)
-        .await
-        .expect("acquired writer");
+    let Ok(Some(UnitStart::Kept(acquired_writer))) = engine.kept_start() else {
+        panic!("the session has its writer epoch after its commit");
+    };
     for expected_head_seq in [CommitSeq(0), CommitSeq(1)] {
         let deadline = OperationClock::start(context.now_ms, clock.clone());
         if expected_head_seq == CommitSeq(1) {
@@ -212,6 +210,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
                     acquired_writer.clone(),
                 ),
                 None,
+                &crate::publish::PublicationLane::new().lock().await,
                 &deadline,
             )
             .await
@@ -309,7 +308,7 @@ async fn a_tombstone_put_whose_outcome_the_deletion_learns_leaves_the_session_it
             context.writer_id.clone(),
         );
         let administrator = crate::test_support::administrator_of(&store, &namespace_id);
-        let deleted = engine.delete_namespace(&administrator, Default::default());
+        let deleted = engine.delete_namespace_alone(&administrator, Default::default());
         let (deleted, ()) = tokio::join!(deleted, async {
             if !rival {
                 return;
@@ -328,6 +327,7 @@ async fn a_tombstone_put_whose_outcome_the_deletion_learns_leaves_the_session_it
                         },
                     ),
                     None,
+                    &crate::publish::PublicationLane::new().lock().await,
                     &other.namespace.start_clock(),
                 )
                 .await
@@ -439,7 +439,7 @@ impl UnknownTombstone {
 
         store.fail_next(1);
         let deleted = engine
-            .delete_namespace(
+            .delete_namespace_alone(
                 &crate::test_support::administrator_of(Arc::clone(&store), &namespace_id),
                 Default::default(),
             )
@@ -505,7 +505,7 @@ async fn a_late_tombstone_put_never_ends_the_namespace_below_an_acknowledged_com
     let late_put = unknown.apply_the_put_in_flight().await;
     let delta = unknown
         .engine
-        .publish_batch([create_dir("delta", "delta")], &writer.clock())
+        .publish_batch_alone([create_dir("delta", "delta")], &writer.clock())
         .await
         .results
         .remove(0);
@@ -574,7 +574,7 @@ async fn a_commit_after_a_late_tombstone_is_written_returns_namespace_deleted() 
         .expect("the late tombstone put is written");
     let gamma = unknown
         .engine
-        .publish_batch([create_dir("gamma", "gamma")], &writer.clock())
+        .publish_batch_alone([create_dir("gamma", "gamma")], &writer.clock())
         .await
         .results
         .remove(0);
@@ -599,7 +599,7 @@ async fn a_retried_deletion_after_an_unknown_tombstone_put_claims_and_deletes() 
         crate::test_support::administrator_of(Arc::clone(&unknown.store), &unknown.namespace_id);
     let deleted = unknown
         .engine
-        .delete_namespace(&administrator, Default::default())
+        .delete_namespace_alone(&administrator, Default::default())
         .await
         .expect("the retried deletion");
     assert_eq!(deleted.head_seq, CommitSeq(1));

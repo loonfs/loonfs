@@ -70,7 +70,7 @@ async fn fixture_with_an_earlier_fold(name: &str) -> (Fixture, Rival) {
         .writer_position()
         .expect("the writer's position");
     let folded = namespace
-        .fold_wal_tail_from(&position, &namespace.start_clock())
+        .fold_wal_tail_in_new_lane(&position, &namespace.start_clock())
         .await
         .expect("fold WAL 1 to 3")
         .response;
@@ -221,6 +221,7 @@ impl RivalBeforeChecks {
                             acquired,
                         ),
                         None,
+                        &crate::publish::PublicationLane::new().lock().await,
                         &namespace.start_clock(),
                     )
                     .await

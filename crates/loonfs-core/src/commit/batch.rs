@@ -426,7 +426,11 @@ mod tests {
             .expect("acquire writer");
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         let view = namespace
-            .load_publish_metadata_view(acquired, None, None, crate::test_support::observed_now())
+            .load_publish_metadata_view(
+                acquired,
+                crate::commit::publish_view::ViewStart::Load,
+                crate::test_support::observed_now(),
+            )
             .await
             .expect("publish view");
         let candidates = [("expired", 1_001), ("valid", 2_000)].map(|(name, expires_at_ms)| {
@@ -503,8 +507,7 @@ mod tests {
         let mut view = namespace
             .load_publish_metadata_view(
                 acquired_writer,
-                None,
-                None,
+                crate::commit::publish_view::ViewStart::Load,
                 crate::test_support::observed_now(),
             )
             .await

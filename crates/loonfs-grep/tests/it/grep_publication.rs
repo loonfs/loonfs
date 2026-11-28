@@ -1,7 +1,7 @@
 //! Grep's publications in the namespace manifest: the steps of one interval
-//! publish once, a lost put is published over a manifest that copied grep's
-//! entry and publishes nothing over another change of the entry, and an
-//! unknown outcome keeps what the put may list.
+//! publish once, a step takes its turn in the session's publication lane and
+//! publishes nothing over another change of the entry, and an unknown
+//! outcome keeps what the put may list.
 
 use crate::common::{
     control, fold_wal_and_advance_retention, page_request, writable_namespace, writer_session,
@@ -13,7 +13,7 @@ use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome, GrepError,
     GrepPublicationStats, GrepPublishOutcome,
 };
-use loonfs_objectstore::keys::metadata_manifest_prefix;
+use loonfs_objectstore::keys::{extensions_prefix, metadata_manifest_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
@@ -356,11 +356,12 @@ async fn an_enable_whose_put_has_an_unknown_outcome_fails() {
     assert_matches!(host.worker.entry(&namespace_id).await, Ok(None));
 }
 
-/// Checks that a step whose publication loses its put to the session's own
-/// retention window change, a manifest that copied grep's entry, is
-/// published over that manifest with the winner's other fields.
+/// Checks that a step's publication and the session's own retention window
+/// change take their turns in the session's publication lane: the window
+/// change waits while the step's put is in flight, then publishes over the
+/// step's manifest, and neither is built again over the other.
 #[tokio::test]
-async fn a_step_that_loses_its_put_to_the_sessions_copy_of_its_entry_is_published_over_it() {
+async fn a_step_and_the_sessions_window_change_take_their_turns_in_the_lane() {
     let directory = tempfile::tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("rebuilt-step");
@@ -381,8 +382,9 @@ async fn a_step_that_loses_its_put_to_the_sessions_copy_of_its_entry_is_publishe
     host.worker.enable(&session).await.expect("enable");
     let window_ms = 2 * loonfs::GC_GRACE_WINDOW_MS;
 
+    let enabled = manifest_no(&base, &namespace_id).await;
     gate.block_next();
-    let (rebuilt, winner) = tokio::join!(
+    let (indexed, ()) = tokio::join!(
         async {
             host.worker
                 .steps(&session, 0)
@@ -391,44 +393,50 @@ async fn a_step_that_loses_its_put_to_the_sessions_copy_of_its_entry_is_publishe
         },
         async {
             gate.wait_until_blocked().await;
-            session
-                .set_retention_window(Some(
-                    loonfs::RetentionWindow::new(window_ms).expect("a long enough window"),
-                ))
-                .await
-                .expect("the session changes the window");
-            let winner = manifest_no(&base, &namespace_id).await;
+            let window =
+                Some(loonfs::RetentionWindow::new(window_ms).expect("a long enough window"));
+            let mut change = std::pin::pin!(session.set_retention_window(window));
+            assert_matches!(
+                loonfs_test_support::clock::bounded(
+                    std::time::Duration::from_millis(200),
+                    change.as_mut()
+                )
+                .await,
+                Err(_),
+                "the window change waits for the step's put"
+            );
             gate.release();
-            winner
+            change.await.expect("the session changes the window");
         }
     );
-    assert_matches!(rebuilt, Ok(GrepBuildOutcome::Indexed { .. }));
+    assert_matches!(indexed, Ok(GrepBuildOutcome::Indexed { .. }));
     assert_matches!(
         host.worker.lifecycle(&namespace_id).await,
         Ok(GrepIndexStatus::Backfilling {
             cursor_inode_id: Some(_),
             ..
         }),
-        "the rebuilt manifest has the step's progress"
+        "the window change's manifest has the step's progress"
     );
     let current = control::metadata_manifest(&base, &namespace_id).await;
+    let step = enabled.successor().expect("the step's manifest");
     assert_eq!(
         current.payload().manifest_no,
-        winner.successor().expect("next")
+        step.successor().expect("the window change's manifest")
     );
     assert_eq!(
         current.payload().retention_window_ms,
         std::num::NonZeroU64::new(window_ms),
-        "grep's publications copy the winner's other fields"
+        "the window change is published over the step's manifest"
     );
     assert_eq!(
         host.worker.publication_stats(),
         GrepPublicationStats {
-            published: 1,
-            rebuilt: 1,
+            published: 2,
+            rebuilt: 0,
             superseded: 0,
         },
-        "the enable published at its first put, and the step's change was rebuilt"
+        "the enable and the step published at their first puts"
     );
     host.enable_grep_index(&namespace_id)
         .await
@@ -440,19 +448,20 @@ async fn a_step_that_loses_its_put_to_the_sessions_copy_of_its_entry_is_publishe
     assert_eq!(found.matches.len(), 2);
 }
 
-/// Checks that a step whose publication loses its put to the session's own
-/// disable publishes nothing and returns `Superseded`, and that the next
-/// enable builds from the manifest that won.
+/// Checks that a step whose turn in the session's publication lane comes
+/// after the session's own disable, published while the step wrote its
+/// segments, publishes nothing and returns `Superseded`, and that the next
+/// enable builds from the disable's manifest.
 #[tokio::test]
-async fn a_step_that_loses_its_put_to_the_sessions_disable_publishes_nothing() {
+async fn a_step_whose_turn_comes_after_the_sessions_disable_publishes_nothing() {
     let directory = tempfile::tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("lost-step");
     let _writer = seed(&base, &namespace_id, &["/a", "/b"]).await;
     let gate = Arc::new(BlockingStore::new(
         base.clone(),
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-        OperationSelector::PutCreateIfAbsent,
+        KeyPredicate::prefix(extensions_prefix(&namespace_id)),
+        OperationSelector::Put,
     ));
     let gated: SharedObjectStore = gate.clone();
     let host = GrepHost::new(&gated).await;

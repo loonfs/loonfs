@@ -184,7 +184,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     let (_directory, store, mut publisher, writer) = setup().await;
     let value = inline(Bytes::from_static(b"owned bytes"));
     let result = publisher
-        .publish_batch([candidate("owned", vec![value.clone()])], &writer.clock())
+        .publish_batch_alone([candidate("owned", vec![value.clone()])], &writer.clock())
         .await;
     assert!(result.results[0].is_ok());
     let state = publisher.read_position().expect("published state");
@@ -248,7 +248,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     drop((tail, context));
     let later = inline(Bytes::from_static(b"later"));
     let published = publisher
-        .publish_batch([candidate("later", vec![later])], &writer.clock())
+        .publish_batch_alone([candidate("later", vec![later])], &writer.clock())
         .await;
     assert!(published.results[0].is_ok());
     let later = publisher.read_position().expect("later state");
@@ -266,7 +266,7 @@ async fn a_publish_shares_every_earlier_chunk_with_a_tail_a_reader_holds() {
     for name in ["first", "second"] {
         let value = inline(Bytes::from_static(b"bytes"));
         let published = publisher
-            .publish_batch([candidate(name, vec![value])], &writer.clock())
+            .publish_batch_alone([candidate(name, vec![value])], &writer.clock())
             .await;
         assert!(published.results[0].is_ok());
         tails.push(publisher.read_position().expect("published state").tail);

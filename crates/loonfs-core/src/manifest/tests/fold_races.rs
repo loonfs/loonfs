@@ -34,7 +34,7 @@ impl Rival {
             }
             Self::Fold(input) => {
                 let folded = crate::test_support::namespace_store(store, namespace_id)
-                    .fold_wal_tail_from(input, &deadline())
+                    .fold_wal_tail_in_new_lane(input, &deadline())
                     .await
                     .expect("rival fold");
                 assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
@@ -116,7 +116,7 @@ impl Writer {
             values,
         );
         self.engine
-            .publish_batch([candidate], &self.context.clock())
+            .publish_batch_alone([candidate], &self.context.clock())
             .await
             .results
             .pop()
@@ -154,14 +154,17 @@ impl Writer {
         }
         let deadline = deadline();
         let namespace = crate::test_support::namespace_store(&*store, &self.namespace_id);
-        let (folded, ()) = futures::join!(namespace.fold_wal_tail_from(&input, &deadline), async {
-            for (gate, rival) in gates.iter().zip(rivals) {
-                gate.wait_until_blocked().await;
-                rival.publish(&other, &self.namespace_id).await;
-                self.store.reset();
-                gate.release();
+        let (folded, ()) = futures::join!(
+            namespace.fold_wal_tail_in_new_lane(&input, &deadline),
+            async {
+                for (gate, rival) in gates.iter().zip(rivals) {
+                    gate.wait_until_blocked().await;
+                    rival.publish(&other, &self.namespace_id).await;
+                    self.store.reset();
+                    gate.release();
+                }
             }
-        });
+        );
         if let Ok(folded) = &folded {
             self.engine.move_position_onto(folded.current.clone());
         }
@@ -342,7 +345,7 @@ async fn a_fold_from_a_fresh_position_puts_on_its_basis_with_no_request_first() 
     .expect("the session's manifest");
     writer.store.reset();
     let folded = namespace
-        .fold_wal_tail_from(&input, &deadline())
+        .fold_wal_tail_in_new_lane(&input, &deadline())
         .await
         .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
@@ -483,7 +486,7 @@ async fn a_fold_whose_put_lands_at_an_emptied_number_publishes_on_the_newest_man
     .expect("collect");
     assert_eq!(report.deleted.manifests, 1);
     let folded = namespace
-        .fold_wal_tail_from(&held, &deadline())
+        .fold_wal_tail_in_new_lane(&held, &deadline())
         .await
         .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
@@ -611,7 +614,7 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
     let fold_deadline = deadline();
     let namespace = crate::test_support::namespace_store(&gate, &writer.namespace_id);
     let (folded, ()) = futures::join!(
-        namespace.fold_wal_tail_from(&input, &fold_deadline),
+        namespace.fold_wal_tail_in_new_lane(&input, &fold_deadline),
         async {
             gate.wait_until_blocked().await;
             crate::test_support::namespace_store(&other, &writer.namespace_id)
@@ -642,7 +645,7 @@ async fn a_fold_that_loses_to_a_writer_claim_folds_the_new_writers_log() {
     assert!(writer.engine.read_position().is_none());
     let results = writer
         .engine
-        .publish_batch(
+        .publish_batch_alone(
             [CommitCandidate::new(CommitIntent {
                 commit_id: CommitId::parse("after").expect("commit id"),
                 actor_id: loonfs_test_support::test_actor(),
@@ -686,7 +689,7 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
         let input = writer.engine.writer_position().expect("tail");
         let before = input.read_basis().basis.clone();
         let folded = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
-            .fold_wal_tail_from(&input, &deadline())
+            .fold_wal_tail_in_new_lane(&input, &deadline())
             .await
             .expect("fold");
         let current = if (epoch_after, wal_after) == (0, 0) {
@@ -746,7 +749,9 @@ async fn a_fold_covered_past_its_start_reports_its_position_behind() {
         .publish(&writer.other_process(), &writer.namespace_id)
         .await;
     let namespace = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id);
-    let folded = namespace.fold_wal_tail_from(&input, &deadline()).await;
+    let folded = namespace
+        .fold_wal_tail_in_new_lane(&input, &deadline())
+        .await;
     assert!(matches!(folded, Err(CoreError::HeadMoved(_))));
     let covering = namespace
         .load_live_basis(crate::test_support::observed_now())

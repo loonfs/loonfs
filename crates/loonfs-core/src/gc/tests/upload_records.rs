@@ -22,7 +22,7 @@ async fn commit_upload<S: ObjectStore>(
         crate::test_support::namespace_store(store, namespace_id),
         context(2_000).writer_id.clone(),
     )
-    .publish_batch(
+    .publish_batch_alone(
         vec![CommitCandidate::prepared(
             CommitIntent::single(
                 loonfs_types::CommitId::generate(),
