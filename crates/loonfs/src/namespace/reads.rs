@@ -101,9 +101,9 @@ impl<M: crate::Mode> Namespace<M> {
     /// reads through them. A read through a view returns `ManifestReplaced`
     /// when a newer manifest replaced the view's manifest and a collection
     /// removed that manifest's segments. Each time `read` returns that error,
-    /// this method drops the runtime's view of the namespace whose manifest
-    /// was replaced and runs `read` again, so the next run's views load that
-    /// namespace's head from the store, up to `MAX_CONTENTION_ATTEMPTS` runs
+    /// this method drops the runtime's cached head of the namespace whose
+    /// manifest was replaced and runs `read` again, so the next run's views
+    /// load that namespace's head from the store, up to `MAX_CONTENTION_ATTEMPTS` runs
     /// in all. An ordinary read of the namespace runs again the same way. If
     /// every run returns `ManifestReplaced`, this method returns
     /// `store_contention`.

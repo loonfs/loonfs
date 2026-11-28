@@ -395,9 +395,11 @@ impl Namespace<Writable> {
     /// snapshots' manifests refer to. The snapshot expires with the plan's
     /// content proofs, and garbage collection of the fork deletes its record
     /// the grace window after it expires. When a newer manifest replaced the
-    /// one that the read found, the call drops this runtime's view of the
-    /// fork, so the next read loads the fork's head from the store, and takes
-    /// the snapshot again, up to `MAX_CONTENTION_ATTEMPTS` snapshots in all.
+    /// one that the read found, the call drops this runtime's cached head of
+    /// the fork and reads the fork again as a `strong` read, which checks a
+    /// writer position of the fork in this runtime and reads from the store
+    /// when that position's manifest was replaced, and takes the snapshot
+    /// again, up to `MAX_CONTENTION_ATTEMPTS` snapshots in all.
     ///
     /// When the fork's tail has a commit older than
     /// [`MAX_TAIL_COMMIT_AGE_MS`](loonfs_core::limits::MAX_TAIL_COMMIT_AGE_MS),
@@ -413,10 +415,11 @@ impl Namespace<Writable> {
             .core
             .writer_engine(&self.mode.writer.writer_id, fork_id);
         let mut attempts = 1;
+        let mut confirmation = HeadConfirmation::View;
         loop {
             let (fork, folds) = self
                 .core
-                .read(fork_id, HeadConfirmation::View, |fork| async move {
+                .read(fork_id, confirmation, |fork| async move {
                     let folds = fork
                         .engine
                         .tail_exceeds_max_commit_age(&fork.context, prepared_at_ms)
@@ -433,7 +436,8 @@ impl Namespace<Writable> {
             {
                 Err(CoreError::HeadMoved(_)) if attempts < MAX_CONTENTION_ATTEMPTS => {
                     attempts += 1;
-                    self.core.forget_namespace_view(fork_id).await;
+                    confirmation = HeadConfirmation::from(crate::Consistency::Strong);
+                    self.core.invalidate_namespace_read_cache(fork_id);
                 }
                 created => {
                     created?;

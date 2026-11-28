@@ -1,5 +1,5 @@
-//! The table of live writer sessions, and the changes that mutations outside
-//! the publisher make to a namespace.
+//! The table of live writer sessions, and the cached heads that mutations
+//! outside the sessions leave out of date.
 
 use super::admission::{AdmissionPermit, PublicationAdmission};
 use super::{lock_state, NamespacePublisher, NamespaceTurns, PublisherContext};
@@ -10,11 +10,10 @@ use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, Result, WriterState,
 };
 use futures::future::BoxFuture;
-use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::WriterPosition;
-use loonfs_core::{Administrator, Phase, PublicationReport};
+use loonfs_core::{Administrator, Phase};
 use loonfs_types::Commit;
-use loonfs_types::{CommitSeq, NamespaceId};
+use loonfs_types::{CommitSeq, ManifestNo, NamespaceId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -273,22 +272,15 @@ impl HeadPositions for RegistryShared {
             .map(|live| Arc::clone(&live.publisher.read_position))
     }
 
-    fn drop_position<'a>(&'a self, namespace_id: &'a NamespaceId) -> BoxFuture<'a, ()> {
-        Box::pin(async move {
-            if let Some(publisher) = self.live_publisher(namespace_id) {
-                publisher.drop_position().await;
-            }
-        })
-    }
-
-    fn move_position<'a>(
+    fn settle_replaced_position<'a>(
         &'a self,
         namespace_id: &'a NamespaceId,
-        newest: Held<LoadedManifest>,
-    ) -> BoxFuture<'a, ()> {
+        replaced: ManifestNo,
+    ) -> BoxFuture<'a, std::result::Result<(), CoreError>> {
         Box::pin(async move {
-            if let Some(publisher) = self.live_publisher(namespace_id) {
-                publisher.move_position(newest).await;
+            match self.live_publisher(namespace_id) {
+                Some(publisher) => publisher.settle_replaced_position(replaced).await,
+                None => Ok(()),
             }
         })
     }
@@ -430,86 +422,43 @@ impl PublisherRegistry {
         }
     }
 
-    /// Tells the namespace's publisher how a mutation outside the publisher
-    /// changed the namespace, and drops this runtime's view of the namespace
-    /// (see [`RuntimeCore::forget_namespace_view`]) when the mutation may
-    /// have changed the namespace in ways this runtime hasn't recorded.
-    pub(crate) async fn invalidate_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        change: NamespaceChange,
-    ) {
-        match change {
-            NamespaceChange::Published(published) => {
-                self.record_manifest_published(namespace_id, &published);
-            }
-            NamespaceChange::Unchanged => {}
-            NamespaceChange::Unknown => {
-                self.shared
-                    .context
-                    .runtime_core
-                    .forget_namespace_view(namespace_id)
-                    .await;
-            }
-        }
-    }
-
-    /// Runs [`Self::invalidate_namespace`] after a mutation's result when
-    /// [`should_invalidate_after_result`] selects it. `change` describes a successful result. A failed result
-    /// may have changed the namespace in ways this runtime hasn't recorded.
-    pub(crate) async fn finish_namespace_mutation<T>(
+    /// Returns `result`, the result of a mutation outside the namespace's
+    /// writer session, such as a create, a fork or a change to a snapshot,
+    /// after it drops the namespace's cached head when the result shows that
+    /// the cached head may be out of date: a stale basis (see
+    /// [`CoreError::is_stale_basis`]) or a fence that another writer's change
+    /// caused. The position of the namespace's writer session stays, because
+    /// only the session's own queues change it.
+    pub(crate) fn finish_namespace_mutation<T>(
         &self,
         namespace_id: &NamespaceId,
         result: Result<T>,
-        change: impl FnOnce(&T) -> NamespaceChange,
     ) -> Result<T> {
-        if should_invalidate_after_result(&result) {
-            let change = result.as_ref().map_or(NamespaceChange::Unknown, change);
-            self.invalidate_namespace(namespace_id, change).await;
+        if let Err(Error::Core(error)) = &result {
+            if error.is_stale_basis() || matches!(error.failure(), CoreError::WriterFenced(_)) {
+                self.shared
+                    .context
+                    .runtime_core
+                    .invalidate_namespace_read_cache(namespace_id);
+            }
         }
         result
     }
 
-    /// Runs [`Self::finish_namespace_mutation`] after a maintenance call
-    /// whose report says which manifest it published, and returns the
-    /// report's response.
-    pub(crate) async fn finish_publication<T>(
-        &self,
-        namespace_id: &NamespaceId,
-        result: Result<PublicationReport<T>>,
-    ) -> Result<T> {
-        self.finish_namespace_mutation(namespace_id, result, NamespaceChange::of_report)
-            .await
-            .map(|report| report.response)
-    }
-
-    /// Finishes the record of `published`, a manifest that an item of the
-    /// lane of the namespace's writer session in this runtime published or
-    /// found current, and recorded as the session's newest published
-    /// manifest before it dropped the lane, without waiting for the
-    /// session's engine. The session's positions move onto the recorded
-    /// manifest from then on, or are dropped when they can't move there (see
-    /// [`PublishedManifest::follow`](loonfs_core::publish::PublishedManifest::follow)),
-    /// and the runtime drops the namespace's cached head unless the cached
-    /// head is already against `published` or a later manifest (see
-    /// [`HeadAndWalTailCache::confirm_or_drop_head`](loonfs_core::cache::HeadAndWalTailCache::confirm_or_drop_head)).
-    pub(crate) fn record_manifest_published(
-        &self,
-        namespace_id: &NamespaceId,
-        published: &Held<LoadedManifest>,
-    ) {
-        // The session's positions follow the manifest first, so a session
-        // that closes between the two steps hands the cached head a position
-        // on `published`, which the confirmation keeps, and not a position on
-        // an older manifest, which nothing would drop.
+    /// Drops the position of the namespace's writer session and the
+    /// namespace's cached head, so the session's next unit and the runtime's
+    /// next read load the namespace from the store, for a test of what a
+    /// session does without a position. Only the session's own queues drop
+    /// its position in a runtime.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn drop_session_view(&self, namespace_id: &NamespaceId) {
         if let Some(publisher) = self.live_publisher(namespace_id) {
-            publisher.follow_published();
+            publisher.lock_engine().await.invalidate_projection();
         }
         self.shared
             .context
             .runtime_core
-            .head_and_wal_tail_cache()
-            .confirm_or_drop_head(namespace_id, published);
+            .invalidate_namespace_read_cache(namespace_id);
     }
 
     pub(super) fn live_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {
@@ -619,49 +568,5 @@ impl PublisherRegistry {
             return Err(error);
         }
         Ok(())
-    }
-}
-
-/// Whether a mutation with `result` may have changed the namespace in ways
-/// this runtime hasn't recorded: a success, a stale basis (see
-/// [`CoreError::is_stale_basis`]), or a fence that another writer's change
-/// caused.
-fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
-    match result {
-        Ok(_) => true,
-        Err(Error::Core(error)) => {
-            error.is_stale_basis() || matches!(error.failure(), CoreError::WriterFenced(_))
-        }
-        Err(_) => false,
-    }
-}
-
-/// How a mutation outside the publisher, such as a maintenance call, changed
-/// a namespace, as the namespace's publisher needs to record it.
-#[derive(Debug, Clone)]
-pub(crate) enum NamespaceChange {
-    /// The mutation published this manifest, which the runtime records (see
-    /// [`PublisherRegistry::record_manifest_published`]).
-    Published(Box<Held<LoadedManifest>>),
-    /// The mutation published no manifest for the runtime to record, such as
-    /// a garbage collection, a change to a snapshot, or a create (which
-    /// installs the new namespace's cached head in core). The publisher keeps
-    /// its position, and the cached head stays confirmed.
-    Unchanged,
-    /// The mutation may have changed the namespace in ways this runtime
-    /// hasn't recorded, such as failing on a stale basis. The publisher
-    /// drops its position, and the runtime drops its cached head.
-    Unknown,
-}
-
-impl NamespaceChange {
-    /// Returns the change that a maintenance call's report describes.
-    fn of_report<T>(report: &PublicationReport<T>) -> Self {
-        report
-            .published
-            .clone()
-            .map_or(Self::Unchanged, |published| {
-                Self::Published(Box::new(published))
-            })
     }
 }

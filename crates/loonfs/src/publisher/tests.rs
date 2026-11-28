@@ -1767,10 +1767,18 @@ async fn pending_deletes_with_different_preconditions_settle_separately() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
-    let shared = store.clone() as SharedStore;
-    let runtime = test_runtime(shared.clone());
-    create_namespace(&runtime, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &runtime);
+    // The stale delete's refusal is computed from the session's position, so
+    // the session's check has to find the session in its runtime, which a
+    // standalone publisher isn't registered in.
+    let writer = test_writer(store.clone() as SharedStore).await;
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let publisher = namespace.session().publisher.clone();
 
     recv_commit(
         admit_commit(
@@ -3746,58 +3754,62 @@ async fn garbage_collection_leaves_the_writer_tail() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a drop of the writer's position that arrives during a publish
-/// waits for the publish to release the engine, that reads keep the position
-/// until then, and that the drop then removes the position, so the next
-/// publish reads its tail from the store.
+/// Checks that a mutation outside the namespace's writer session, such as a
+/// create, a fork or a change to a snapshot, whose result is a stale basis or
+/// a fence drops the namespace's cached head, so the next read loads the
+/// namespace from the store, and that another error keeps the cached head.
 #[tokio::test]
-async fn a_drop_during_a_publish_applies_when_the_publish_releases_the_engine() {
+async fn a_mutation_that_finds_a_stale_basis_or_a_fence_drops_the_cached_head() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer = test_writer_with_cache(
-        store.clone() as SharedStore,
-        MetadataCache::default(),
-        recorder.clone(),
-    )
-    .await;
-    let namespaces = publish_once_into_each(&writer, std::slice::from_ref(&namespace_id)).await;
-    let replays = counter(&recorder, "loonfs.publisher.tail_replays");
-    let commit = |name| {
-        namespaces[0].commit_candidate(CommitCandidate::new(create_directory_request(name, name)))
-    };
-
-    store.block_next();
-    let (during, ()) = futures::join!(commit("during"), async {
-        store.wait_until_blocked().await;
-        let mut drop = std::pin::pin!(writer
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let writer = test_writer(store).await;
+    let fence = CoreError::WriterFenced(crate::WriterFence {
+        fenced_epoch: loonfs_types::WriterEpoch(1),
+        active_epoch: loonfs_types::WriterEpoch(2),
+        active_writer: loonfs_types::format::control::WriterBlock {
+            writer_id: loonfs_test_support::ids::writer_id("writer-b"),
+            acquired_at_ms: 2_000,
+        },
+    });
+    let cases = [
+        (
+            "stale-basis",
+            CoreError::HeadMoved("a newer manifest".to_owned()),
+            true,
+        ),
+        ("fence", fence, true),
+        (
+            "other",
+            CoreError::PathNotFound("/missing".to_owned()),
+            false,
+        ),
+    ];
+    for (name, error, dropped) in cases {
+        let namespace_id = NamespaceId::parse(name).expect("valid namespace id");
+        writer
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+            .await
+            .expect("create namespace");
+        let reader = writer.read_only().namespace(&namespace_id);
+        reader.stat("/").await.expect("stat the root");
+        let cached = || {
+            writer
+                .core
+                .head_and_wal_tail_cache()
+                .get_head(&namespace_id)
+                .is_some()
+        };
+        assert!(cached(), "{name}: the read caches the head");
+        let code = error.code();
+        let finished: crate::Result<()> = writer
             .mode
             .publisher
-            .invalidate_namespace(&namespace_id, NamespaceChange::Unknown));
-        assert!(
-            futures::poll!(drop.as_mut()).is_pending(),
-            "the drop waits for the publish"
-        );
-        assert!(
-            writer.core.writer_position(&namespace_id).is_some(),
-            "reads keep the position while the publish runs"
-        );
-        store.release();
-        drop.await;
-    });
-    during.expect("the publish succeeds");
-    assert!(
-        writer.core.writer_position(&namespace_id).is_none(),
-        "the drop applied once the publish released the engine"
-    );
-    commit("after").await.expect("publish after the drop");
-
-    assert_eq!(
-        counter(&recorder, "loonfs.publisher.tail_replays"),
-        replays + 1,
-        "the drop was applied once the publish released the engine"
-    );
+            .finish_namespace_mutation(&namespace_id, Err(error.into()));
+        assert_eq!(finished.expect_err("the mutation's error").code(), code);
+        assert_eq!(cached(), !dropped, "{name}");
+        reader.stat("/").await.expect("the next read");
+        assert!(cached(), "{name}: the next read loads the head");
+    }
     writer.shutdown().await.expect("shutdown");
 }
 

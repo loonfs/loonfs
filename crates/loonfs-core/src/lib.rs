@@ -208,6 +208,7 @@ pub mod publish {
     pub use crate::commit::published_manifest::{
         FollowOutcome, PublishedLock, PublishedManifest, ReplacedPositions,
     };
+    pub use crate::commit::unit_report::{UnitBasis, UnitReport};
     pub use crate::commit::CommitFingerprint;
     pub use crate::namespace::writer_epoch::AcquiredWriter;
     pub use crate::path::write::{CommitIntent, FilesystemOperation};

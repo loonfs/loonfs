@@ -7,7 +7,7 @@
 //! skips these while its head was confirmed less than the runtime's maximum
 //! staleness ago.
 
-use super::RuntimeCore;
+use super::{CheckedPosition, RuntimeCore};
 use crate::metrics::ReadHeadSource;
 use crate::pinned_read::PinnedRead;
 use crate::trace::phase_span;
@@ -196,11 +196,19 @@ impl RuntimeCore {
             .checked_writer_position(namespace_id, position_staleness_ms)
             .await?
         {
-            Some(position) => (
+            CheckedPosition::Confirmed(position) => (
                 build(position.basis(), Some(Arc::clone(position.tail()))),
                 ReadHeadSource::Position,
             ),
-            None => {
+            checked => {
+                // While the session has a position that its check didn't
+                // confirm, the cached head can be older than commits that the
+                // session acknowledged, so the read loads it as a `strong`
+                // read does.
+                let max_staleness_ms = match checked {
+                    CheckedPosition::Unconfirmed => None,
+                    _ => max_staleness_ms,
+                };
                 let (head, source) = match self.eventual_head(namespace_id, max_staleness_ms) {
                     Some(head) => (head, ReadHeadSource::Eventual),
                     None => {
@@ -372,11 +380,8 @@ impl RuntimeCore {
     /// from a writer position loads the namespace by discovery, whatever its
     /// consistency (see
     /// [`HeadAndWalTailCache::invalidate_head`](loonfs_core::cache::HeadAndWalTailCache::invalidate_head)).
-    /// A caller that finds this runtime's view of the namespace out of date
-    /// calls [`Self::forget_namespace_view`] instead, which also drops the
-    /// position of the namespace's writer session. A release of the
-    /// session's engine and a deletion call this method directly, because
-    /// the engine has already dropped its own position by then.
+    /// The position of the namespace's writer session stays, because only
+    /// the session's own queues change it.
     ///
     /// Cached WAL-tail projections stay. A tail is keyed by namespace,
     /// manifest number, and head sequence, and that key identifies one

@@ -2,9 +2,8 @@
 //! that a fold serves, and the locks that keep a namespace's folds apart and
 //! its compaction units apart.
 
-use super::registry::NamespaceChange;
 use super::worker::elapsed_ms_from;
-use super::{NamespacePublisher, PublisherRegistry};
+use super::NamespacePublisher;
 use crate::runtime_core::RuntimeCore;
 use crate::trace::phase_span;
 use crate::{CoreError, Error, FoldWalOutcome, Result};
@@ -292,11 +291,14 @@ impl NamespacePublisher {
             // A session without a position reads the tail first, so a fold
             // of a tail with no WAL object publishes nothing and claims
             // nothing. The manifest that the read found may be another
-            // writer's, so it isn't the session's newest published manifest.
+            // writer's, so it isn't the session's newest published manifest,
+            // and only the namespace's cached head takes its check.
             let anchor = self.load_tail_anchor().await?;
             if let Some(current) = FoldedWalTail::current_when_no_wal_object(&anchor) {
-                self.registry()?
-                    .record_manifest_published(&self.namespace_id, &current.current);
+                self.context
+                    .runtime_core
+                    .head_and_wal_tail_cache()
+                    .confirm_or_drop_head(&self.namespace_id, &current.current);
                 return Ok(NamespaceFold::Folded(Box::new(current)));
             }
         }
@@ -375,7 +377,7 @@ impl NamespacePublisher {
                 FoldWriteOutcome::AlreadyFolded(folded) => return Ok(folded),
                 FoldWriteOutcome::Written(writes) => writes,
             };
-            let lane = self.lane.lock().await;
+            let lane = self.lock_lane().await;
             let turn = self.lane_turn(&lane).await?;
             Ok(namespace.publish_fold_in_turn(turn, writes, &clock).await?)
         }
@@ -390,11 +392,7 @@ impl NamespacePublisher {
                 started_at_ms,
                 core.timer().monotonic_now_ms(),
             ));
-        let registry = self.registry()?;
-        let folded = registry
-            .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unchanged)
-            .await?;
-        registry.record_manifest_published(namespace_id, &folded.current);
+        let folded = result?;
         self.turns.record(round, &folded);
         if folded.response.outcome == FoldWalOutcome::Published {
             self.fold_published.send_replace(());
@@ -428,11 +426,11 @@ impl NamespacePublisher {
     /// [`LaneGuard::basis_over`](loonfs_core::publish::LaneGuard::basis_over)).
     /// So no publication of the session replaces the snapshot's manifest
     /// before the snapshot is verified, and snapshots take their turns in the
-    /// lane. Another process can still replace the
-    /// manifest. Each attempt's result goes through
-    /// [`PublisherRegistry::finish_namespace_mutation`], so an attempt that
-    /// finds its manifest replaced drops the session's position and the
-    /// cached head, and the next attempt reads the newest manifest.
+    /// lane. Another process can still replace the manifest. An attempt that
+    /// finds its manifest replaced drops the namespace's cached head, and the
+    /// session settles its position (see [`Self::settle_replaced_position`]),
+    /// which returns `writer_fenced` when another writer claimed the
+    /// namespace, so the next attempt reads the newest manifest.
     pub(super) async fn snapshot_after_fold<T, SnapshotFuture>(
         &self,
         mut create: impl FnMut(Held<LoadedManifest>) -> SnapshotFuture,
@@ -445,19 +443,18 @@ impl NamespacePublisher {
         loop {
             let arrival = self.turns.started();
             let basis = self.snapshot_basis(arrival, stop).await?;
-            let lane = self.unless_stopped(stop, self.lane.lock()).await?;
+            let lane = self.unless_stopped(stop, self.lock_lane()).await?;
             let basis = lane.basis_over(basis);
+            let replaced = basis.manifest_no();
             let created = create(basis).await.map_err(Error::from);
             drop(lane);
-            let created = self
-                .registry()?
-                .finish_namespace_mutation(&self.namespace_id, created, |_| {
-                    NamespaceChange::Unchanged
-                })
-                .await;
             match created {
                 Err(Error::Core(CoreError::HeadMoved(_))) if attempts < MAX_CONTENTION_ATTEMPTS => {
                     attempts += 1;
+                    self.context
+                        .runtime_core
+                        .invalidate_namespace_read_cache(&self.namespace_id);
+                    self.settle_replaced_position(replaced).await?;
                 }
                 created => return created,
             }
@@ -539,13 +536,6 @@ impl NamespacePublisher {
             .namespace_store(&self.namespace_id)
             .load_live_read_anchor(core.observation())
             .await?)
-    }
-
-    /// Returns the registry that this session belongs to, or
-    /// `shutting_down` once the registry is gone.
-    pub(super) fn registry(&self) -> Result<PublisherRegistry> {
-        let shared = self.shared.upgrade().ok_or(CoreError::ShuttingDown)?;
-        Ok(PublisherRegistry { shared })
     }
 
     /// Returns the turn of a publication of the session's lane, which the

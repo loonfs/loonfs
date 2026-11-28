@@ -2,7 +2,6 @@
 
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result as CoreResult, WriterFence};
-use crate::limits::MAX_POSITION_MOVES;
 use crate::manifest::{manifest_base_state, project_manifest_tail};
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
 use crate::namespace::control::{LoadedManifest, NewestManifest};
@@ -295,53 +294,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             return Ok(false);
         };
         self.manifest_exists(next).await
-    }
-
-    /// Returns the newest manifest above `held`, a writer position's basis,
-    /// for the position to move onto, when every manifest above `held` is an
-    /// active manifest of the position's writer epoch, checked at `observed`,
-    /// an observation that the caller read before the HEAD request that found
-    /// a successor of `held`.
-    ///
-    /// Manifest numbers are consecutive, so the walk loads each successor
-    /// until one is missing, and then reads the manifest boundary (see
-    /// [`Self::above_boundary`]). It returns `None` when `held` has no
-    /// successor, when it finds a manifest of another writer epoch (another
-    /// writer's claim) or a tombstone, which settles that the position can't
-    /// move, when it finds more than [`MAX_POSITION_MOVES`] manifests, and
-    /// when the newest manifest is at or below the boundary, because a
-    /// collection may have deleted the manifests after it.
-    pub(crate) async fn same_epoch_manifests_above(
-        &self,
-        held: &Held<ReadBasis>,
-        observed: Observation,
-    ) -> CoreResult<Option<Held<LoadedManifest>>> {
-        let writer_epoch = held.head().writer_epoch;
-        let mut newest = None;
-        let mut moves = 0;
-        let mut manifest_no = held.manifest_no();
-        while moves <= MAX_POSITION_MOVES {
-            let Ok(next) = manifest_no.successor() else {
-                break;
-            };
-            let Some(loaded) = self.load_manifest_by_no(next).await? else {
-                let Some(newest) = newest else {
-                    return Ok(None);
-                };
-                let (above, boundary) = self
-                    .above_boundary(manifest_no, held.boundary().clone())
-                    .await?;
-                return Ok(above.then(|| Held::new(newest, observed, boundary)));
-            };
-            let payload = loaded.payload();
-            if payload.writer_epoch != writer_epoch || payload.status.is_deleted() {
-                break;
-            }
-            newest = Some(loaded);
-            moves += 1;
-            manifest_no = next;
-        }
-        Ok(None)
     }
 }
 

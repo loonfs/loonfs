@@ -269,12 +269,13 @@ impl Namespace<Writable> {
     /// [`RetentionTarget::Window`](crate::RetentionTarget::Window), so a
     /// namespace without a window keeps its whole history.
     ///
-    /// When the session has a position, the call first checks it as a strong
-    /// read does (one HEAD of the position manifest's successor and one read
-    /// of the manifest boundary). The check moves the position onto a newer
-    /// manifest of the same writer epoch, and when another writer has claimed
-    /// the namespace, the session's load of its position returns
-    /// `writer_fenced`. The call then plans the floor from the position.
+    /// When the session has a position, the call plans the floor from the
+    /// position, and then the session's check, the check that a strong read
+    /// makes (one HEAD of the position manifest's successor and one read of
+    /// the manifest boundary), confirms the position. When the check finds a
+    /// newer manifest, the session settles its position and plans once more,
+    /// and when another writer has claimed the namespace, the settle returns
+    /// `writer_fenced`.
     /// Without a position, it plans from the current manifest's floor and
     /// head, and claims nothing to plan. When that plan moves the floor, the
     /// call reads the WAL tail above the manifest, and a floor that floor
@@ -294,8 +295,9 @@ impl Namespace<Writable> {
     /// The manifest that the advance plans from may be replaced, and its
     /// segments collected, after the check that found it. When the advance
     /// finds a segment of the manifest it planned from missing and that
-    /// manifest isn't the current one, the call drops the position and the
-    /// cached head and plans again from the newest manifest, up to
+    /// manifest isn't the current one, the call drops the cached head and
+    /// plans again, a session's position behind such a manifest is loaded
+    /// again from the store, and the call plans from the newest manifest, up to
     /// `MAX_CONTENTION_ATTEMPTS` plans, after which it returns
     /// `store_contention`. A missing segment of the current manifest returns
     /// `namespace_corrupt`.
@@ -425,9 +427,9 @@ impl Namespace<Writable> {
     /// The publication lists `entry` as the extension's entry and changes
     /// nothing else. It is a publication of the session's lane, so it builds
     /// on the session's newest published manifest, such as the session's own
-    /// fold, with one put. When that manifest has another entry, the call checks that the manifest is
-    /// still the newest, publishes nothing and returns
-    /// [`ExtensionPublication::Superseded`]. When a manifest that another
+    /// fold, with one put. When that manifest has another entry, the call
+    /// publishes nothing, and the session's check confirms its position
+    /// before the call returns [`ExtensionPublication::Superseded`]. When a manifest that another
     /// writer published is in the way, the call returns `writer_fenced`. A
     /// `basis` loaded from another namespace returns `invalid_request` before
     /// anything is claimed. After a publication, this runtime's next read of
@@ -442,14 +444,10 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "publish_extension", self.namespace_id),
             async {
-                let result = match self.session().admit() {
+                match self.session().admit() {
                     Ok(admitted) => admitted.publish_extension(basis, name, entry).await,
                     Err(error) => Err(error.into()),
-                };
-                self.mode
-                    .publisher
-                    .finish_publication(&self.namespace_id, result)
-                    .await
+                }
             },
         )
         .await
@@ -463,9 +461,9 @@ impl Namespace<Writable> {
     ///
     /// The call publishes a manifest over the session's position that
     /// changes nothing else. If the position's manifest already has the
-    /// window, it publishes nothing, after it checks that the manifest is
-    /// still the newest, as a strong read does, and a session that another
-    /// writer displaced returns `writer_fenced`. A session without a
+    /// window, it publishes nothing, and the session's check, the check that
+    /// a strong read makes, confirms its position before the call returns, so
+    /// a session that another writer displaced returns `writer_fenced`. A session without a
     /// position first reads the newest manifest, and when that manifest
     /// already has the window, it returns the window without a claim or a
     /// put. A session that is fenced, closed or shutting down returns its
@@ -479,14 +477,10 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "set_retention_window", self.namespace_id),
             async {
-                let result = match self.session().admit() {
+                match self.session().admit() {
                     Ok(admitted) => admitted.set_retention_window(retention_window_ms).await,
                     Err(error) => Err(error.into()),
-                };
-                self.mode
-                    .publisher
-                    .finish_publication(&self.namespace_id, result)
-                    .await
+                }
             },
         )
         .await
@@ -502,8 +496,9 @@ impl Namespace<Writable> {
     /// [`Self::publish_extension`], which builds on the same position, so the
     /// change and its publication start from the same manifest. The extension
     /// can return a result from the basis without a put, such as a refusal,
-    /// so the load checks the position as a strong read does first, and a
-    /// session that another writer displaced returns `writer_fenced`. A
+    /// so the session's check, the check that a strong read makes, confirms
+    /// the position before the load returns, and a session that another
+    /// writer displaced returns `writer_fenced`. A
     /// session without a position loads the newest manifest with a read, as
     /// a read-only handle does, and claims nothing: the publication claims
     /// the writer epoch first when there is something to publish. Returns

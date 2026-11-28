@@ -89,7 +89,7 @@ impl Fixture {
     }
 
     /// Creates the fixture with a cache that keeps no heads or WAL tails, and
-    /// drops the runtime's view of the namespace, so every read in the writer's
+    /// drops the session's position and the cached head, so every read in the writer's
     /// runtime loads the namespace from the store, and a test can park a read
     /// there.
     async fn without_heads_or_wal_tails() -> Self {
@@ -101,11 +101,7 @@ impl Fixture {
                 .build(),
         )
         .await;
-        fixture
-            .runtime
-            .core
-            .forget_namespace_view(fixture.namespace.id())
-            .await;
+        crate::test_support::drop_namespace_view(&fixture.runtime, fixture.namespace.id()).await;
         fixture
     }
 
@@ -661,11 +657,7 @@ async fn a_cold_fold_reads_the_wal_with_a_read_permit_and_releases_it_before_its
         )
         .await;
         let namespace_id = fixture.namespace.id().clone();
-        fixture
-            .runtime
-            .core
-            .forget_namespace_view(&namespace_id)
-            .await;
+        crate::test_support::drop_namespace_view(&fixture.runtime, &namespace_id).await;
         let budget = fixture.runtime.execution_budget();
         let read = budget.read_permit().await;
         let mut folds = Vec::new();

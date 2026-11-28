@@ -195,38 +195,44 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         .writer_position()
         .expect("the session keeps its position after its commit");
     let lane = engine.publication_lane();
-    for expected_head_seq in [CommitSeq(0), CommitSeq(1)] {
-        let deadline = OperationClock::start(context.now_ms, clock.clone());
-        if expected_head_seq == CommitSeq(1) {
-            clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
-        }
-        store.reset();
-        let error = crate::test_support::namespace_store(&store, &namespace_id)
-            .delete_namespace(
-                DeleteNamespaceOptions {
-                    expected_head_seq: Some(expected_head_seq),
-                },
-                position.clone(),
-                &lane.lock().await,
-                &deadline,
-            )
-            .await
-            .expect_err("deletion rejected before folding");
-        if expected_head_seq == CommitSeq(0) {
-            assert_matches!(
-                error,
-                CoreError::StaleHeadPrecondition {
-                    expected: CommitSeq(0),
-                    actual: CommitSeq(1),
-                    ..
-                }
-            );
-        } else {
-            assert_matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. });
-        }
-        assert_eq!(store.counts().puts, 0);
-        assert_eq!(store.counts().compare_and_swaps, 0);
-    }
+    store.reset();
+    let refused = engine
+        .delete_namespace(
+            &lane.lock().await,
+            &crate::test_support::administrator_of(&store, &namespace_id),
+            DeleteNamespaceOptions {
+                expected_head_seq: Some(CommitSeq(0)),
+            },
+        )
+        .await;
+    assert_matches!(
+        refused.value,
+        Err(CoreError::StaleHeadPrecondition {
+            expected: CommitSeq(0),
+            actual: CommitSeq(1),
+            ..
+        })
+    );
+    // The refusal is computed from the session's kept position without a
+    // put, so the session confirms the position before it returns it.
+    assert_eq!(refused.basis, crate::publish::UnitBasis::Session);
+    assert_eq!(
+        engine.writer_position().as_ref(),
+        Some(&position),
+        "the refusal keeps the session's position"
+    );
+    assert_eq!(store.counts().puts, 0);
+    assert_eq!(store.counts().compare_and_swaps, 0);
+    let deadline = OperationClock::start(context.now_ms, clock.clone());
+    clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
+    store.reset();
+    let error = crate::test_support::namespace_store(&store, &namespace_id)
+        .delete_namespace(position, &lane.lock().await, &deadline)
+        .await
+        .expect_err("deletion rejected before folding");
+    assert_matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. });
+    assert_eq!(store.counts().puts, 0);
+    assert_eq!(store.counts().compare_and_swaps, 0);
 }
 
 /// How a deletion's tombstone put ends, in a case whose outcome the

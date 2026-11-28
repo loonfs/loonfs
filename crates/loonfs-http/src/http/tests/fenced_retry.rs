@@ -378,6 +378,58 @@ async fn a_fenced_deletion_is_retried_and_checks_its_expected_head_again() {
     );
 }
 
+/// Checks that a commit whose precondition fails, and a deletion whose
+/// expected head doesn't match, in a held session that another host displaced
+/// and that hasn't put since, are retried in a new session and return the
+/// result computed from the newer writer's state.
+///
+/// The other host deletes `/first` and commits `/winner`, so the held
+/// session's position still has `/first` and the old head. Each refusal from
+/// that position sends no put, so the session's check confirms the position
+/// before the session returns the refusal. The check settles the position,
+/// which finds the other host's claim, so the request returns
+/// `writer_fenced`, which the server retries.
+#[tokio::test]
+async fn a_refusal_from_a_displaced_sessions_position_is_retried_from_the_newer_state() {
+    let (directory, router, state, _) = host("refusing-host").await;
+    let (other_router, _, _) = test_app_with_sessions(
+        test_options(directory.path(), "winning-host"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("other host");
+    let namespace_id = namespace_id("refused-then-retried");
+    create_namespace(&state, &namespace_id).await;
+    create_directory(&router, &namespace_id, "/first").await;
+    let commits = format!("/v0/namespaces/{namespace_id}/commits");
+    let delete = serde_json::json!({
+        "commit_id": "delete-first",
+        "operations": [{"kind": "delete_path", "path": "/first"}],
+    })
+    .to_string();
+    let (status, bytes) = send(&other_router, Method::POST, &commits, delete).await;
+    assert_eq!(status, StatusCode::OK, "{bytes:?}");
+    create_directory(&other_router, &namespace_id, "/winner").await;
+    let winning_epoch = writer_epoch(&state, &namespace_id).await;
+
+    let recreate = serde_json::json!({
+        "commit_id": "recreate-first",
+        "operations": [{"kind": "create_directory", "path": "/first"}],
+    })
+    .to_string();
+    let (status, bytes) = send(&router, Method::POST, &commits, recreate).await;
+    assert_eq!(status, StatusCode::OK, "{bytes:?}");
+    assert_eq!(writer_epoch(&state, &namespace_id).await, winning_epoch + 1);
+
+    // The other host commits again, and this host's session, which put last
+    // under the older epoch, deletes with the other host's head.
+    create_directory(&other_router, &namespace_id, "/again").await;
+    let expected_head_seq = head_seq(&state, &namespace_id).await;
+    let uri = format!("/v0/namespaces/{namespace_id}?expected_head_seq={expected_head_seq}");
+    let (status, bytes) = send(&router, Method::DELETE, &uri, String::new()).await;
+    assert_eq!(status, StatusCode::OK, "{bytes:?}");
+}
+
 /// A host whose store keeps one WAL put waiting, a second host on the same
 /// store, and a namespace with a fork that has two commits, which a merge
 /// plans through.

@@ -77,7 +77,11 @@ impl NamespacePublisher {
     /// namespace instead of folding the same tail. It then keeps the
     /// session's publication lane and the engine, in that order, for its
     /// fold and its tombstone, so both manifests are items of the lane and no
-    /// commit is written between them.
+    /// commit is written between them. A deletion whose expected head doesn't
+    /// match the session's kept position sends no put, so the session's check
+    /// confirms the position before the deletion returns the refusal (see
+    /// [`Self::run_confirmed`]), and a session that another writer displaced
+    /// returns `writer_fenced`.
     pub(super) async fn delete_through_engine(
         &self,
         administrator: &Administrator,
@@ -87,13 +91,15 @@ impl NamespacePublisher {
         let Some(_writer) = self.context.writer.upgrade() else {
             return Err(CoreError::ShuttingDown.into());
         };
-        let _turn = self.turns.fold.lock().await;
-        let _permit = self.context.runtime_core.fold_permit().await;
-        let lane = self.lane.lock().await;
-        let mut engine = self.lock_engine().await;
-        let result = engine
-            .delete_namespace(&lane, administrator, options)
-            .await
+        let result = self
+            .run_confirmed(move || async move {
+                let _turn = self.turns.fold.lock().await;
+                let _permit = self.context.runtime_core.fold_permit().await;
+                let lane = self.lock_lane().await;
+                let mut engine = self.lock_engine().await;
+                Ok::<_, Error>(engine.delete_namespace(&lane, administrator, options).await)
+            })
+            .await?
             .map_err(Error::from);
         // What follows a deletion depends on the namespace being deleted, not
         // on which call deleted it.

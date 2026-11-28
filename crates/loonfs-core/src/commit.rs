@@ -16,6 +16,7 @@ pub(crate) mod publish_view;
 pub(crate) mod published_manifest;
 mod session;
 pub(crate) mod session_epoch;
+pub(crate) mod unit_report;
 mod wal_payload;
 pub(crate) mod wal_size;
 

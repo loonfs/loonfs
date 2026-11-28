@@ -1350,13 +1350,7 @@ async fn a_metadata_step_without_a_current_position_counts_the_wal_bytes_that_it
         .expect("usage");
     assert!(usage.wal_tail_bytes >= FOLD_AT_WAL_BYTES);
     assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS.get());
-    writer
-        .mode
-        .publisher
-        .live_publisher(&namespace)
-        .expect("a live session")
-        .drop_position()
-        .await;
+    writer.mode.publisher.drop_session_view(&namespace).await;
     assert!(writer.mode.publisher.current_position(&namespace).is_none());
     let step = writer
         .open_namespace(&namespace)
@@ -1512,11 +1506,7 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
             .await
             .expect("observe the completed fold");
         assert_eq!(usage.wal_tail_inline_bytes, 0);
-        writer
-            .mode
-            .publisher
-            .invalidate_namespace(&namespace, NamespaceChange::Unknown)
-            .await;
+        writer.mode.publisher.drop_session_view(&namespace).await;
         namespace_writer
             .put_file_with_options(
                 "/during",

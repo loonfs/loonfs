@@ -135,24 +135,18 @@ impl<M: HeldManifestForm> Held<M> {
     /// published after that check began. A check of a later manifest says
     /// nothing about this one, so it changes nothing.
     pub fn merge<N: HeldManifestForm>(&mut self, other: &Held<N>) -> bool {
-        if !self.would_merge(other) {
+        if other.manifest_no() > self.manifest_no() {
             return false;
         }
-        if self.checked.age_at(&other.checked) > 0 {
+        let younger = self.checked.age_at(&other.checked) > 0;
+        if younger {
             self.checked = other.checked.clone();
         }
-        if self.boundary.is_below(&other.boundary) {
+        let higher = self.boundary.is_below(&other.boundary);
+        if higher {
             self.boundary = other.boundary.clone();
         }
-        true
-    }
-
-    /// Returns whether [`Self::merge`] of `other` would change this holder:
-    /// `other`'s manifest is this holder's or an earlier one, and its check
-    /// is younger or its boundary higher. The call copies nothing.
-    pub fn would_merge<N: HeldManifestForm>(&self, other: &Held<N>) -> bool {
-        other.manifest_no() <= self.manifest_no()
-            && (self.checked.age_at(&other.checked) > 0 || self.boundary.is_below(&other.boundary))
+        younger || higher
     }
 
     /// Returns whether a check that began at or after `other`'s confirms this
