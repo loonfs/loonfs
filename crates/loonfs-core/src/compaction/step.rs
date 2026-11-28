@@ -18,7 +18,7 @@ use super::publication::input_segment_keys;
 use crate::commit::publish_view::WriterPosition;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::Result;
-use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::phase::Phase;
 use crate::segment::runs::{runs_newest_first, MetadataFamilyGroup};
@@ -139,7 +139,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let basis = self.namespace.load_publication_basis(position).await?;
         let current = basis.manifest();
         let payload = current.payload();
-        ensure_namespace_live(&payload.namespace_id, payload.status)?;
         // The unit reads its input runs without the cache, and the compaction inserts
         // its output into the cache. The walk that builds the kept inode filter
         // scans one directory at a time. A scan keeps the data blocks it fetches

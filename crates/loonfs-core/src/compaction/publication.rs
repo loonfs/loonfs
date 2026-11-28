@@ -28,7 +28,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// The turn's basis, the session's newest published manifest, must still
     /// list the input runs with the segments that the unit compacted, and
     /// the replacement keeps every run published meanwhile. A basis that
-    /// doesn't, a tombstone, and a unit past its time bound
+    /// doesn't, and a unit past its time bound
     /// (`METADATA_COMPACTION_BUDGET_MS` from the start of the unit) publish
     /// nothing and return `Abandoned`, and a cancelled unit returns
     /// `Cancelled`. Nothing references the output of a unit that publishes
@@ -51,8 +51,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
             CompactionUnitOutcome::Abandoned
         } else if cancellation.is_cancelled() {
             CompactionUnitOutcome::Cancelled
-        } else if !previous.status.is_active()
-            || input_segment_keys(&runs_newest_first(previous), &spec).as_ref() != Some(&input_keys)
+        } else if input_segment_keys(&runs_newest_first(previous), &spec).as_ref()
+            != Some(&input_keys)
         {
             tracing::info!(
                 namespace_id = self.namespace_id.as_str(),

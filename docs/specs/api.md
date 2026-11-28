@@ -952,7 +952,7 @@ Expired snapshots stay in the inventory until GC removes them after `expires_at_
 
 ### Deleting, retaining, and reclaiming
 
-Deleting a namespace causes ordinary operations to return `namespace_deleted` (cached readers follow [Deleting a namespace](format.md#94-deleting-a-namespace)). Space reclamation is asynchronous, has no set completion deadline, and doesn't guarantee physical erasure.
+Deleting a namespace causes ordinary operations to return `namespace_deleted` (cached readers follow [Deleting a namespace](format.md#94-deleting-a-namespace)). The deletion pauses the namespace's commits only while it folds the commits that arrived during its first fold and publishes its tombstone (see [`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns)). Space reclamation is asynchronous, has no set completion deadline, and doesn't guarantee physical erasure.
 
 Reclamation works across four interacting layers:
 
@@ -1325,10 +1325,11 @@ The optional `expected_head_seq` query parameter gates deletion on the current h
 }
 ```
 
-The reference server resolves its write queue in admission order:
+A deletion first folds the namespace's tail while commits continue, and then pauses the namespace's commits (the "pause") only while it folds the commits that arrived meanwhile and publishes the tombstone ([Deleting a namespace](format.md#94-deleting-a-namespace)). Commits around a deletion follow these rules:
 
-- Commits admitted before the delete publish first (a commit whose response was lost isn't retroactively undone by a later delete).
-- Requests admitted after the delete fail with `namespace_deleted`.
+- A commit acknowledged before the pause is covered by the tombstone (a commit whose response was lost isn't undone by a later delete). With `expected_head_seq`, such a commit moves the head, so the deletion returns `stale_head`.
+- A commit that is still waiting to be written at the pause returns `namespace_deleted`, even if it was sent before the deletion. Every later request returns it too.
+- Two deletions at once don't share an outcome. The second waits for the first, and returns `namespace_deleted` if the first succeeds.
 - If the delete fails its precondition, no other request is rejected because of it.
 
 ### 6.4 `GET /filesystem/entry` and `GET /inodes/{inode_id}`

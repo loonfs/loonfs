@@ -1202,6 +1202,12 @@ async fn a_value_confirmed_under_a_newer_epoch_is_computed_again() {
         .await
         .expect("the session's first commit");
     let publisher = namespace.session().publisher.clone();
+    let writer_epoch = publisher
+        .current_position()
+        .expect("the session's position after its first commit")
+        .read_basis()
+        .head()
+        .writer_epoch;
     let runs = std::sync::atomic::AtomicUsize::new(0);
     let (runs, namespace, failing) = (&runs, &namespace, &failing);
     let value: crate::Result<&str> = publisher
@@ -1218,7 +1224,7 @@ async fn a_value_confirmed_under_a_newer_epoch_is_computed_again() {
                 .expect("the commit's retry claims and replays its receipt");
             Ok(UnitReport {
                 value: "first",
-                basis: UnitBasis::Session,
+                basis: UnitBasis::Session { writer_epoch },
             })
         })
         .await;

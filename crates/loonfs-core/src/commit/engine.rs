@@ -117,11 +117,11 @@ pub enum WriterSessionStatus {
     /// `writer_fenced` without accessing the store. Acquiring a new writer epoch
     /// requires an explicit caller action.
     Fenced(WriterFence),
-    /// The session's last read of its namespace for a publish found the
-    /// namespace deleted or missing. A runtime that keeps sessions open reads
-    /// this record to stop keeping the session. The record changes no later
-    /// publish: each one reads the store again, and acquires a writer epoch
-    /// if the namespace exists.
+    /// The session published its namespace's tombstone, or a read or a put
+    /// of the session found the namespace deleted. A tombstone ends a
+    /// namespace, so every later unit of the session returns
+    /// `namespace_deleted` without a request to the store, and a runtime
+    /// that keeps sessions open reads this record to end the session.
     NamespaceGone,
 }
 
@@ -329,14 +329,17 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// [`Self::publish_batch`]. Fenced sessions fail before accessing the store,
     /// and a put that another writer's claim won fences the session. A
     /// session without its writer epoch claims it first, and the deletion
-    /// then starts from the claim's discovery. A deletion first checks the
-    /// request's expected head against the position's head, then folds the
-    /// WAL tail under the namespace's run policy, and then publishes the
-    /// tombstone over the fold's manifest (see
-    /// [`NamespaceStore::delete_namespace`]). A deletion whose expected head
-    /// doesn't match the session's kept position sends no put, so its report
-    /// rests on the session's own state alone ([`UnitBasis::Session`]), and
-    /// the session confirms its position before it returns the refusal.
+    /// then starts from the claim's discovery, so it checks the expected head
+    /// after the claim. A deletion first checks the request's expected head
+    /// against the position's head, then folds what arrived in the WAL tail
+    /// since the deletion's ordinary fold, and then publishes the tombstone
+    /// over the fold's manifest (see [`NamespaceStore::delete_namespace`]).
+    /// Recording the tombstone sets the session's status to
+    /// `NamespaceGone`, so the session has no writer epoch. A deletion whose
+    /// expected head doesn't match the session's kept position sends no put,
+    /// so its report rests on the session's own state alone, under the
+    /// position's writer epoch ([`UnitBasis::Session`]), and the session
+    /// confirms its position before it returns the refusal.
     ///
     /// An initializing namespace has no writer session, so its deletion is a
     /// plain manifest publication of its tombstone (see
@@ -345,9 +348,10 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// namespace with a writer session.
     ///
     /// The caller keeps `lane`, the session's publication lane, and the
-    /// engine for the whole deletion, so both of the deletion's manifests
-    /// are publications of the lane, and no commit is written between the
-    /// fold and the tombstone.
+    /// engine for this whole step, after the deletion's ordinary fold (see
+    /// the runtime's `fold_then_pause`), so the head is exact, both of the
+    /// step's manifests are publications of the lane, and no commit is
+    /// written between the fold and the tombstone.
     ///
     /// `administrator` proves the caller administers the namespace, because
     /// deletion is only for the administrator.
@@ -365,8 +369,16 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             .await
         {
             Ok(DeletionStart::Position(position)) => *position,
-            Ok(DeletionStart::Initializing(deleted)) => return UnitReport::from_store(Ok(deleted)),
-            Err(error) => return UnitReport::from_store(Err(error)),
+            Ok(DeletionStart::Initializing(deleted)) => {
+                self.position
+                    .lock_session()
+                    .set(WriterSessionStatus::NamespaceGone);
+                return UnitReport::from_store(Ok(deleted));
+            }
+            Err(error) => {
+                self.position.record_session_error(&error);
+                return UnitReport::from_store(Err(error));
+            }
         };
         if let Some(expected) = options.expected_head_seq {
             let actual = position.read_basis().head.seq;
@@ -376,7 +388,9 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
                 return UnitReport {
                     value: Err(CoreError::StaleHeadPrecondition { expected, actual }),
                     basis: if kept {
-                        UnitBasis::Session
+                        UnitBasis::Session {
+                            writer_epoch: position.read_basis().head.writer_epoch,
+                        }
                     } else {
                         UnitBasis::Store
                     },
@@ -469,14 +483,19 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// Returns where the session's next unit of the commit queue or of the
     /// publication lane starts when the session has its writer epoch, or
     /// `None` when the session has none, so the unit claims one first (see
-    /// [`Self::claim`]). A fenced session returns `writer_fenced`.
+    /// [`Self::claim`]). A fenced session returns `writer_fenced`, and a
+    /// session whose namespace is gone returns `namespace_deleted`, each
+    /// without a request to the store.
     pub fn kept_start(&self) -> Result<Option<UnitStart>> {
         match &*self.position.lock_session() {
             WriterSessionStatus::Acquired { writer, .. } => {
                 Ok(Some(UnitStart::Kept(writer.clone())))
             }
             WriterSessionStatus::Fenced(fence) => Err(CoreError::WriterFenced(fence.clone())),
-            WriterSessionStatus::Unacquired | WriterSessionStatus::NamespaceGone => Ok(None),
+            WriterSessionStatus::NamespaceGone => Err(CoreError::NamespaceDeleted {
+                namespace_id: self.namespace.namespace_id.clone(),
+            }),
+            WriterSessionStatus::Unacquired => Ok(None),
         }
     }
 
@@ -932,6 +951,7 @@ impl PositionState {
             attempt,
         } = loaded;
         let wal_tail_discovered = publish_view.tail_discovered;
+        let writer_epoch = publish_view.acquired_writer.writer_epoch;
         let epoch = SessionEpoch::new(&self.session, namespace);
         let published = super::batch::publish_namespace_commits_batch_against_publish_view(
             candidates,
@@ -946,7 +966,9 @@ impl PositionState {
         let position = publish_view.into_position();
         let published = drop_replaced_basis(published);
         let basis = match published.effect {
-            PublishViewEffect::Unchanged if !wal_tail_discovered => UnitBasis::Session,
+            PublishViewEffect::Unchanged if !wal_tail_discovered => {
+                UnitBasis::Session { writer_epoch }
+            }
             _ => UnitBasis::Store,
         };
         let update = self.update_publish_tail_projection(

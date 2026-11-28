@@ -4,13 +4,14 @@
 //! which sends its WAL puts, and the publication lane, which sends its
 //! manifest puts. Concurrent commits may share a WAL object and head update.
 //! Duplicate commit IDs join in flight, conflicting reuse is rejected, and
-//! namespace deletion and retention advances are ordered with other
-//! mutations. Every manifest publication of the session other than a claim
-//! (a fold, a compaction unit, an extension entry, a window change, a
-//! deletion's manifests, and a snapshot's record put with its verification)
-//! takes its turn in the lane, and a claim keeps the lane and the commit
-//! queue while it runs. A commit of a session that has its writer epoch never
-//! waits for a manifest put.
+//! retention advances are ordered with other mutations. A namespace
+//! deletion runs in its caller's task, and pauses the commit queue only for
+//! its fold of what arrived and its tombstone. Every manifest publication of
+//! the session other than a claim (a fold, a compaction unit, an extension
+//! entry, a window change, a deletion's manifests, and a snapshot's record
+//! put with its verification) takes its turn in the lane, and a claim keeps
+//! the lane and the commit queue while it runs. A commit of a session that
+//! has its writer epoch never waits for a manifest put.
 //!
 //! A new commit that reaches the write stop waits at the front of the queue
 //! for the session's fold, for at most the publication policy's write-stop
@@ -29,7 +30,7 @@
 
 mod admission;
 mod compaction;
-mod delete_barrier;
+mod deletion;
 mod folds;
 mod maintenance;
 pub(crate) mod metrics;
@@ -38,6 +39,7 @@ mod queue;
 mod registry;
 mod retention_advance;
 mod session_tasks;
+mod two_folds;
 mod worker;
 mod write_stop;
 
@@ -130,14 +132,16 @@ struct NamespacePublisher {
     /// back would cycle the whole structure into a leak. A publisher whose
     /// registry is gone keeps serving, with an unowned worker.
     shared: Weak<RegistryShared>,
-    /// The session's stop, set once the session stops admitting work or is
-    /// fenced. A session never compacts again after that, and a host's fold,
-    /// unit or snapshot that waits for a lock or a permit stops waiting.
+    /// The session's stop, set once the session stops admitting work, is
+    /// fenced, or finds its namespace deleted. A session never compacts again
+    /// after that, and a host's fold, unit or snapshot that waits for a lock
+    /// or a permit stops waiting.
     stop: MaintenanceCancellation,
 
-    /// Set by the first release of the engine after the engine found the
-    /// session fenced, so the session records its displacement once.
-    displacement_recorded: Arc<AtomicBool>,
+    /// Set by the first release of the engine or of the lane after the
+    /// session's status ended it (see [`Self::record_session_end`]), so the
+    /// session records its end once.
+    session_end_recorded: Arc<AtomicBool>,
     /// Signals each fold of this session's namespace that publishes, so a
     /// worker waiting at the write stop wakes once that fold frees room,
     /// even when the fold task goes on to fold again.
@@ -214,10 +218,9 @@ impl Drop for KeptLane<'_> {
     }
 }
 
-/// Admission state for a namespace publisher.
-///
-/// A single enum preserves precedence: after deletion succeeds, the
-/// publisher remains `Deleted` even if registry shutdown closes admission.
+/// Admission state for a namespace publisher. A session whose writer status
+/// ended it (a fence, or a deleted namespace) refuses admission whatever this
+/// state is (see [`NamespacePublisher::admitted_session`]).
 enum PublisherAdmissionStatus {
     Open,
     /// Set by the registry's admission close. Later admissions fail with
@@ -226,22 +229,19 @@ enum PublisherAdmissionStatus {
     /// Set by [`NamespaceSession::close`]. Later admissions fail with
     /// `writer_session_closed`; everything already queued keeps publishing.
     SessionClosed,
-    /// Terminal: set once a delete succeeds. Admissions fail fast from then
-    /// on without touching the store.
-    Deleted,
 }
 
 struct NamespacePublisherState {
     /// Admitted work in admission order. Commits coalesce into the tail
-    /// batch, so a delete queued between them keeps its barrier position.
+    /// batch, so a retention advance queued between them keeps its place.
     queue: VecDeque<WorkItem>,
     in_flight: HashMap<CommitId, InFlightRequest>,
     admission: PublisherAdmissionStatus,
     /// The worker draining `queue`, while one is running. A live entry is
     /// what makes the loop single-flight: a worker installs itself under
     /// the admission lock and releases the slot under the same lock that
-    /// finds the queue empty. That single flight is what makes the delete
-    /// barrier's admission order deterministic.
+    /// finds the queue empty. That single flight is what makes the queue's
+    /// admission order deterministic.
     worker: Option<WorkerHandle>,
     fold: Option<SessionTask>,
     /// One metadata compaction at a time, started when a fold publishes.
@@ -267,14 +267,11 @@ struct NamespacePublisherState {
 
 impl NamespacePublisherState {
     /// Whether the session is over and nothing it admitted can still
-    /// publish. A session is over once no handle refers to it, or once it was
-    /// closed or its namespace deleted.
+    /// publish. A session is over once no handle that the caller counts in
+    /// `held` refers to it, or once it was closed.
     fn has_ended(&self, held: bool) -> bool {
-        let deleted = matches!(self.admission, PublisherAdmissionStatus::Deleted);
-        let over =
-            !held || deleted || matches!(self.admission, PublisherAdmissionStatus::SessionClosed);
-        // A deleted session's worker takes nothing more from its queue.
-        let worker_running = !deleted && self.worker.as_ref().is_some_and(WorkerHandle::is_running);
+        let over = !held || matches!(self.admission, PublisherAdmissionStatus::SessionClosed);
+        let worker_running = self.worker.as_ref().is_some_and(WorkerHandle::is_running);
         let fold_running = self.fold.as_ref().is_some_and(SessionTask::is_running);
         let compaction_running = self
             .compaction
@@ -323,7 +320,7 @@ impl NamespacePublisher {
             session,
             shared: Arc::downgrade(shared),
             stop: MaintenanceCancellation::default(),
-            displacement_recorded: Arc::new(AtomicBool::new(false)),
+            session_end_recorded: Arc::new(AtomicBool::new(false)),
             fold_published: watch::Sender::new(()),
             turns,
         }
@@ -333,8 +330,7 @@ impl NamespacePublisher {
         lock_state(&self.state)
     }
 
-    /// Open becomes closed; a delete that was already published is terminal and
-    /// stays terminal. Either way the session's compaction is cancelled.
+    /// Open becomes closed, and the session's compaction is cancelled.
     pub(super) fn close_admission(&self) {
         let mut state = self.lock_state();
         if matches!(state.admission, PublisherAdmissionStatus::Open) {
@@ -383,9 +379,10 @@ impl NamespacePublisher {
 
     /// Removes this session from the table once it has ended and nothing it
     /// admitted is still running. Dropping the last handle, the worker's
-    /// exit, the fold's exit, a close, and a published delete each call this,
-    /// so whichever of them comes last removes the session. Fenced sessions
-    /// end even while handles still exist.
+    /// exit, the fold's exit, a close, and the end of a maintenance call each
+    /// call this, so whichever of them comes last removes the session. A
+    /// session whose writer status ended it (a fence, or a deleted
+    /// namespace) ends even while handles still exist.
     /// A session the registry has removed never starts a task and never
     /// has queued work. Admission and task starts keep the writer-session
     /// lock through their decision, so fencing prevents both before removal.
@@ -400,7 +397,7 @@ impl NamespacePublisher {
             }
             _ => return,
         };
-        let held = held && !self.session_is_fenced();
+        let held = held && self.live_session().is_ok();
         if !self.lock_state().has_ended(held) {
             return;
         }
@@ -421,26 +418,32 @@ impl NamespacePublisher {
         &self,
         state: &NamespacePublisherState,
     ) -> std::result::Result<WriterSessionStatusGuard<'_>, CoreError> {
-        match state.admission {
-            PublisherAdmissionStatus::Open => self.unfenced_session(),
-            PublisherAdmissionStatus::Closed => Err(CoreError::ShuttingDown),
-            PublisherAdmissionStatus::SessionClosed => Err(CoreError::WriterSessionClosed {
+        // A deleted namespace refuses before a closed admission does, so a
+        // caller learns that the namespace is gone.
+        match (&state.admission, self.live_session()) {
+            (_, Err(deleted @ CoreError::NamespaceDeleted { .. })) => Err(deleted),
+            (PublisherAdmissionStatus::Open, session) => session,
+            (PublisherAdmissionStatus::Closed, _) => Err(CoreError::ShuttingDown),
+            (PublisherAdmissionStatus::SessionClosed, _) => Err(CoreError::WriterSessionClosed {
                 namespace_id: self.namespace_id.clone(),
             }),
-            PublisherAdmissionStatus::Deleted => Err(self.namespace_deleted()),
         }
     }
 
-    /// Keeps fencing from racing with admission or a task start until the
-    /// caller drops the guard.
-    pub(super) fn unfenced_session(
+    /// Returns the session's status, locked so that the status can't end the
+    /// session while the caller decides on admission or a task start, or
+    /// the refusal of a session that its status ended: `writer_fenced` for a
+    /// fenced session, and `namespace_deleted` for a session whose namespace
+    /// is gone.
+    pub(super) fn live_session(
         &self,
     ) -> std::result::Result<WriterSessionStatusGuard<'_>, CoreError> {
         let session = self.session.lock();
-        if let WriterSessionStatus::Fenced(fence) = &*session {
-            return Err(CoreError::WriterFenced(fence.clone()));
+        match &*session {
+            WriterSessionStatus::Fenced(fence) => Err(CoreError::WriterFenced(fence.clone())),
+            WriterSessionStatus::NamespaceGone => Err(self.namespace_deleted()),
+            WriterSessionStatus::Unacquired | WriterSessionStatus::Acquired { .. } => Ok(session),
         }
-        Ok(session)
     }
 
     pub(super) fn session_is_fenced(&self) -> bool {
@@ -496,21 +499,22 @@ impl NamespacePublisher {
     }
 
     /// Finishes a turn of the session's publication lane once the lane is
-    /// released: records the session's displacement when the turn found a
-    /// fence (see [`Self::record_displacement`]), and brings the session's
+    /// released: records the session's end when the turn found a fence or a
+    /// deleted namespace, or published the tombstone (see
+    /// [`Self::record_session_end`]), and brings the session's
     /// positions and the namespace's cached head up to the session's newest
     /// published manifest.
     ///
     /// Every publication of the lane passes here. A publication of the lane
-    /// runs without the engine, so a fence that it finds is recorded here.
-    /// The engine's release records a fence that a unit of the commit queue
-    /// found. The positions follow the newest
+    /// runs without the engine, so a fence or a tombstone that it finds is
+    /// recorded here. The engine's release records one that a unit of the
+    /// commit queue found. The positions follow the newest
     /// published manifest at once when no task has the engine (see
     /// [`Self::follow_published`]), and the cached head stays when it's
     /// against that manifest or a later one and is dropped otherwise (see
     /// [`HeadAndWalTailCache::confirm_or_drop_head`](loonfs_core::cache::HeadAndWalTailCache::confirm_or_drop_head)).
     fn release_lane(&self) {
-        self.record_displacement();
+        self.record_session_end();
         self.follow_published();
         let published = match &*self.session.lock() {
             WriterSessionStatus::Acquired { published, .. } => published.clone(),
@@ -523,15 +527,15 @@ impl NamespacePublisher {
     }
 
     /// Stores the engine's position for reads, and releases the engine. The
-    /// first release after the engine found the session fenced records the
-    /// displacement (see [`Self::record_displacement`]). A publication of the
-    /// lane that finds a fence without the engine records it when it
-    /// releases the lane (see [`Self::release_lane`]).
+    /// first release after the engine found the session fenced or its
+    /// namespace deleted records the session's end (see
+    /// [`Self::record_session_end`]). A publication of the lane records what
+    /// it finds when it releases the lane (see [`Self::release_lane`]).
     pub(super) fn release_engine(
         &self,
         mut engine: tokio::sync::MutexGuard<'_, NamespaceCommitEngine<SharedObjectStore>>,
     ) {
-        self.record_displacement();
+        self.record_session_end();
         // A panic can stop any holder of the engine, in any task, partway
         // through its work, after a put whose outcome the engine hasn't
         // recorded (a commit's WAL put or a deletion's tombstone put).
@@ -568,21 +572,37 @@ impl NamespacePublisher {
         self.read_position.finish_follow(followed);
     }
 
-    /// Records the session's displacement in the
-    /// `loonfs.publisher.displacements` metric and cancels the session's
-    /// compaction, the first time this finds the session fenced.
+    /// Ends the session the first time this finds that its status ended it,
+    /// whichever unit found out: cancels the session's stop, and so its
+    /// compaction, and records a fence in the `loonfs.publisher.displacements`
+    /// metric, or drops the namespace's cached reads for a deleted
+    /// namespace.
     ///
-    /// A fenced session publishes nothing more, and its drain ends once its
-    /// admitted work and a running fold end instead of waiting for a
-    /// compaction whose result it can't publish.
-    fn record_displacement(&self) {
-        if self.session_is_fenced() && !self.displacement_recorded.swap(true, Ordering::SeqCst) {
-            self.stop.cancel();
+    /// A fenced session, and one whose namespace is gone, publishes nothing
+    /// more and refuses new work (see [`Self::live_session`]). Its drain ends
+    /// once its admitted work and a running fold end, instead of waiting for
+    /// a compaction whose result it can't publish, and every unit still
+    /// queued returns the session's refusal at its start without a request
+    /// to the store.
+    fn record_session_end(&self) {
+        let fenced = match self.live_session() {
+            Ok(_) => return,
+            Err(error) => matches!(error, CoreError::WriterFenced(_)),
+        };
+        if self.session_end_recorded.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.stop.cancel();
+        if fenced {
             self.context
                 .runtime_core
                 .instruments()
                 .publisher
                 .displacement();
+        } else {
+            self.context
+                .runtime_core
+                .invalidate_namespace_read_cache(&self.namespace_id);
         }
     }
 
@@ -696,7 +716,7 @@ impl NamespacePublisher {
 /// panic poisoned.
 ///
 /// The publisher contains panics by design: after a publication, fold,
-/// compaction, or delete panics, the worker, the table, the other sessions,
+/// or compaction panics, the worker, the table, the other sessions,
 /// and the drain must keep working. Every critical section under these locks
 /// only updates fields.
 fn lock_state<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

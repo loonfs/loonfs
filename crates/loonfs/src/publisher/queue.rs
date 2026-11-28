@@ -1,34 +1,23 @@
-//! Submission and admission: the candidates, deletes, and retention advances
-//! that enter a namespace's queue, and the work items the worker takes from
-//! it.
+//! Submission and admission: the candidates and retention advances that
+//! enter a namespace's queue, and the work items the worker takes from it.
 
 use super::admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use super::registry::MergeReservation;
 use super::{NamespacePublisher, NamespacePublisherState};
 use crate::publish::CommitCandidate;
 use crate::trace::phase_event;
-use crate::{CommitSeq, CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Result};
+use crate::{CommitSeq, CoreError, Result};
 use loonfs_core::commit::CommitFingerprint;
 use loonfs_core::control::LoadedManifest;
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::publish::WalPublishError;
+use loonfs_core::FloorObjectReport;
 use loonfs_core::Phase;
-use loonfs_core::{Administrator, FloorObjectReport};
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::Commit;
 use loonfs_types::{u64_from_usize, CommitId};
 use std::sync::Arc;
 use tokio::sync::oneshot;
-
-/// A namespace deletion that waits in the queue, with the proof that its
-/// first caller administers the namespace. While the deletion is the last
-/// item in the queue, a later caller with the same options shares it, and
-/// that caller's proof is dropped.
-pub(super) struct PendingDelete {
-    pub(super) options: DeleteNamespaceOptions,
-    pub(super) administrator: Administrator,
-    pub(super) waiters: Vec<AdmittedWaiter<Result<DeleteNamespaceResponse>>>,
-}
 
 /// A retention advance that waits in the queue: the floor it moves to, the
 /// manifest that the floor was planned from, and the callers that wait for
@@ -41,7 +30,6 @@ pub(super) struct PendingRetentionAdvance {
 
 pub(super) enum WorkItem {
     Batch(OpenBatch),
-    Delete(PendingDelete),
     RetentionAdvance(PendingRetentionAdvance),
 }
 
@@ -289,10 +277,9 @@ impl NamespacePublisher {
         };
         match state.queue.back_mut() {
             // Coalesce with the tail batch while its bound stays under the
-            // WAL object limit. A delete at the tail, or a full batch, opens a
-            // batch behind it; work behind a delete publishes only if that
-            // delete fails. A merge opens a batch of its own, and nothing joins
-            // a merge's batch.
+            // WAL object limit. A retention advance at the tail, or a full
+            // batch, opens a batch behind it. A merge opens a batch of its
+            // own, and nothing joins a merge's batch.
             Some(WorkItem::Batch(batch))
                 if !is_merge
                     && !batch.is_merge()
@@ -340,49 +327,6 @@ impl NamespacePublisher {
             queue_depth: queued + 1,
             reason: "new",
         })
-    }
-
-    /// Enqueues the delete as a barrier: requests admitted before it
-    /// publish first, and requests admitted after it fail with
-    /// `namespace_deleted` once it succeeds. If the delete fails (for
-    /// example a stale `expected_head_seq`), later requests publish
-    /// normally, and nothing is rejected for a delete that did not happen.
-    pub(super) async fn submit_delete(
-        &self,
-        options: DeleteNamespaceOptions,
-        administrator: Administrator,
-    ) -> Result<DeleteNamespaceResponse> {
-        let receiver = self.admit_delete(options, administrator)?;
-        receive_delete(receiver).await
-    }
-
-    pub(super) fn admit_delete(
-        &self,
-        options: DeleteNamespaceOptions,
-        administrator: Administrator,
-    ) -> std::result::Result<oneshot::Receiver<Result<DeleteNamespaceResponse>>, CoreError> {
-        let (sender, receiver) = oneshot::channel();
-        {
-            let mut state = self.lock_state();
-            let _session = self.admitted_session(&state)?;
-            let permit = self.context.admission.acquire(&self.namespace_id, 0)?;
-            let sender = AdmittedWaiter::new(sender, &permit);
-            match state.queue.back_mut() {
-                // A delete queued with the same options is the same request:
-                // both callers share its outcome. Different options ask for
-                // different operations and settle separately, in order.
-                Some(WorkItem::Delete(pending)) if pending.options == options => {
-                    pending.waiters.push(sender);
-                }
-                _ => state.queue.push_back(WorkItem::Delete(PendingDelete {
-                    options,
-                    administrator,
-                    waiters: vec![sender],
-                })),
-            }
-            self.spawn_worker_if_idle(&mut state);
-        }
-        Ok(receiver)
     }
 
     /// Enqueues an advance of the retention floor to `target`, planned from
@@ -443,48 +387,6 @@ impl NamespacePublisher {
     }
 }
 
-async fn receive_delete(
-    receiver: oneshot::Receiver<Result<DeleteNamespaceResponse>>,
-) -> Result<DeleteNamespaceResponse> {
-    receiver.await.unwrap_or_else(|_| {
-        Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(
-            "publisher task stopped mid-delete".to_owned(),
-        ))
-        .into())
-    })
-}
-
-/// Waiters a published delete barrier leaves behind, one vector per result
-/// type.
-#[derive(Default)]
-pub(super) struct QueuedWaiters {
-    pub(super) commits: Vec<AdmittedWaiter<Result<Commit>>>,
-    pub(super) deletes: Vec<AdmittedWaiter<Result<DeleteNamespaceResponse>>>,
-    pub(super) retention_advances: Vec<AdmittedWaiter<Result<FloorObjectReport>>>,
-}
-
-/// Empties the queue and hands back every waiter it kept. Called once the
-/// delete barrier is published: nothing queued behind a tombstone may publish.
-pub(super) fn take_queued_waiters(state: &mut NamespacePublisherState) -> QueuedWaiters {
-    let mut waiters = QueuedWaiters::default();
-    for item in std::mem::take(&mut state.queue) {
-        match item {
-            WorkItem::Batch(batch) => {
-                for candidate in batch.candidates {
-                    if let Some(request) = state.in_flight.remove(&candidate.commit_id) {
-                        waiters.commits.extend(request.waiters);
-                    }
-                }
-            }
-            WorkItem::Delete(pending) => waiters.deletes.extend(pending.waiters),
-            WorkItem::RetentionAdvance(pending) => {
-                waiters.retention_advances.extend(pending.waiters);
-            }
-        }
-    }
-    waiters
-}
-
 /// Candidates queued but not yet taken by the worker: the depth admission
 /// bounds and traces.
 pub(super) fn queued_candidates(state: &NamespacePublisherState) -> usize {
@@ -493,7 +395,7 @@ pub(super) fn queued_candidates(state: &NamespacePublisherState) -> usize {
         .iter()
         .map(|item| match item {
             WorkItem::Batch(batch) => batch.candidates.len(),
-            WorkItem::Delete(_) | WorkItem::RetentionAdvance(_) => 0,
+            WorkItem::RetentionAdvance(_) => 0,
         })
         .sum()
 }

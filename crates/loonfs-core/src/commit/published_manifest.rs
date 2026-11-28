@@ -105,20 +105,21 @@ impl PublishedManifest {
         self.lock().follow(position)
     }
 
-    /// Records that the session was fenced, or found its namespace deleted
-    /// or missing, when `error` says so. Every caller passes an error from a
-    /// read or a put of the session's own namespace, so an error about
-    /// another namespace, such as a merge's fork, is never recorded. A fence
-    /// stays recorded, and a namespace that's gone doesn't replace it. The
-    /// commit queue and the publication lane both record through this one
-    /// rule.
+    /// Records that the session was fenced, or found its namespace deleted,
+    /// when `error` says so. Every caller passes an error from a read or a
+    /// put of the session's own namespace, so an error about another
+    /// namespace, such as a merge's fork, is never recorded. A fence stays
+    /// recorded, and a namespace that's gone doesn't replace it. A namespace
+    /// that isn't found records nothing, because it may still be created.
+    /// The commit queue and the publication lane both record through this
+    /// one rule.
     pub(crate) fn record_session_error(&self, error: &CoreError) {
         let mut session = self.lock();
         match error {
             CoreError::WriterFenced(fence) => {
                 session.set(WriterSessionStatus::Fenced(fence.clone()));
             }
-            CoreError::NamespaceDeleted { .. } | CoreError::NamespaceNotFound { .. }
+            CoreError::NamespaceDeleted { .. }
                 if !matches!(*session, WriterSessionStatus::Fenced(_)) =>
             {
                 session.set(WriterSessionStatus::NamespaceGone);
@@ -189,6 +190,12 @@ impl PublishedLock<'_> {
     /// takes `published`'s check (see [`Held::merge`]). A session without
     /// its epoch records nothing, because a known outcome of one put never
     /// restores an epoch that an unknown outcome of another put ended.
+    ///
+    /// A tombstone ends the namespace, so recording one sets the session's
+    /// status to [`WriterSessionStatus::NamespaceGone`]. So no later
+    /// publication of the session builds on the tombstone. Every unit that
+    /// starts later returns `namespace_deleted` without a request to the
+    /// store.
     pub(crate) fn record(&mut self, published: &Held<LoadedManifest>) {
         let WriterSessionStatus::Acquired {
             published: recorded,
@@ -197,6 +204,10 @@ impl PublishedLock<'_> {
         else {
             return;
         };
+        if published.manifest().payload().status.is_deleted() {
+            self.set(WriterSessionStatus::NamespaceGone);
+            return;
+        }
         if recorded.manifest_no() >= published.manifest_no() {
             recorded.merge(published);
         } else {

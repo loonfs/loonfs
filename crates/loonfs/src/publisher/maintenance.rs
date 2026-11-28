@@ -4,18 +4,21 @@
 use super::registry::NamespaceSession;
 use super::{FoldWhen, NamespaceFold, NamespacePublisher};
 use crate::maintenance::MetadataCompactionOutcome;
-use crate::{CoreError, Error, MaintenanceCancellation, MetadataMaintenanceResponse, Result};
+use crate::{
+    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, MaintenanceCancellation,
+    MetadataMaintenanceResponse, Result,
+};
 use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::{UnitBasis, UnitReport, WriterPosition};
-use loonfs_core::{ExtensionBasis, ExtensionPublication, FloorObjectReport};
+use loonfs_core::{Administrator, ExtensionBasis, ExtensionPublication, FloorObjectReport};
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{CommitSeq, ExtensionName, RetentionWindow, SetRetentionWindowResponse};
 use std::future::Future;
 
 /// Maintenance that a host drives through a writer session, such as a fold,
-/// a compaction unit, a window change, an extension's entry, a snapshot or a
-/// retention advance, admitted to the session as a commit is (see
-/// [`NamespaceSession::admit`]).
+/// a compaction unit, a window change, an extension's entry, a snapshot, a
+/// retention advance or a namespace deletion, admitted to the session as a
+/// commit is (see [`NamespaceSession::admit`]).
 ///
 /// Every maintenance call of a writable handle runs its work through one of
 /// these, so none runs for a session that is fenced, closed, or shutting
@@ -116,6 +119,21 @@ impl AdmittedMaintenance<'_> {
         Ok(outcome)
     }
 
+    /// Deletes the namespace, as [`NamespacePublisher::delete_namespace`]
+    /// describes. `administrator` proves the caller administers the
+    /// namespace. The session's stop ends the deletion's waits for the fold
+    /// lock and a fold permit with the session's refusal, and the session's
+    /// close and the runtime's drain wait for a deletion that runs.
+    pub(crate) async fn delete_namespace(
+        &self,
+        administrator: &Administrator,
+        options: DeleteNamespaceOptions,
+    ) -> Result<DeleteNamespaceResponse> {
+        self.publisher()
+            .delete_namespace(administrator, options)
+            .await
+    }
+
     /// Enqueues an advance of the retention floor to `target`, planned from
     /// `planned`, in the session's queue (see
     /// [`NamespacePublisher::submit_retention_advance`]).
@@ -160,10 +178,11 @@ impl AdmittedMaintenance<'_> {
             .run_confirmed(move || async move {
                 let lane = publisher.lock_lane().await;
                 let turn = publisher.lane_turn(&lane).await?;
+                let writer_epoch = turn.writer_epoch();
                 let report = namespace
                     .set_retention_window_from(turn, retention_window_ms)
                     .await?;
-                Ok(UnitReport::from_publication(report))
+                Ok(UnitReport::from_publication(report, writer_epoch))
             })
             .await
     }
@@ -191,9 +210,16 @@ impl AdmittedMaintenance<'_> {
         let from_position = &from_position;
         publisher
             .run_confirmed(move || async move {
+                let (value, writer_epoch) = publisher
+                    .run_from_position(|position| {
+                        let writer_epoch = position.read_basis().head().writer_epoch;
+                        let value = from_position(position);
+                        async move { Ok((value.await?, writer_epoch)) }
+                    })
+                    .await?;
                 Ok(UnitReport {
-                    value: publisher.run_from_position(from_position).await?,
-                    basis: UnitBasis::Session,
+                    value,
+                    basis: UnitBasis::Session { writer_epoch },
                 })
             })
             .await
@@ -221,10 +247,11 @@ impl AdmittedMaintenance<'_> {
                 async move {
                     let lane = publisher.lock_lane().await;
                     let turn = publisher.lane_turn(&lane).await?;
+                    let writer_epoch = turn.writer_epoch();
                     let report = namespace
                         .publish_extension_from(turn, basis, name, entry)
                         .await?;
-                    Ok(UnitReport::from_publication(report))
+                    Ok(UnitReport::from_publication(report, writer_epoch))
                 }
             })
             .await

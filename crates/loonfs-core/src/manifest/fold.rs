@@ -1,6 +1,6 @@
 //! Folds the visible WAL tail and publishes the next manifest number.
 
-use crate::commit::publication_lane::LaneTurn;
+use crate::commit::publication_lane::{LaneGuard, LaneTurn};
 use crate::commit::publish_view::WriterPosition;
 use crate::error::CoreError;
 use crate::error::Result;
@@ -218,6 +218,32 @@ impl<S: ObjectStore> NamespaceStore<S> {
             published,
             FoldWalOutcome::Published,
         ))
+    }
+
+    /// Folds the WAL tail of `position`, a writer session's position, as one
+    /// publication of the session's publication lane, while the caller keeps
+    /// `lane` and the session's commit queue, so commits are paused. It is
+    /// the fold of what arrived of an operation whose last manifest has to
+    /// cover every commit written before it, such as a namespace deletion
+    /// (format spec, "Deleting a namespace").
+    ///
+    /// The operation's ordinary fold ran just before, while commits
+    /// continued, so this fold covers what arrived meanwhile, and publishes
+    /// nothing when nothing arrived. The session's newest published manifest
+    /// then covers the position's tip, which the operation's last manifest
+    /// builds on.
+    pub(crate) async fn fold_while_paused(
+        &self,
+        position: &WriterPosition,
+        lane: &LaneGuard<'_>,
+        clock: &OperationClock,
+    ) -> Result<()> {
+        if let FoldWriteOutcome::Written(writes) = self.write_fold_segments(position, clock).await?
+        {
+            self.publish_fold_in_turn(lane.acquired_turn(), writes, clock)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Returns the manifest and the WAL tail of this namespace's head:

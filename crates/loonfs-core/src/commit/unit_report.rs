@@ -3,6 +3,7 @@
 //! before it returns the value.
 
 use crate::manifest::PublicationReport;
+use loonfs_types::WriterEpoch;
 
 /// What the value of one unit of a writer session rests on: a commit batch,
 /// a deletion, or a publication of the session's lane.
@@ -18,8 +19,13 @@ pub enum UnitBasis {
     /// whose commits were all refused. Another writer may have replaced that
     /// manifest since the session last checked it, so the session confirms
     /// its position before it returns the value (format spec, "Publication
-    /// and group commit").
-    Session,
+    /// and group commit"), and returns it when the confirmed position has
+    /// the writer epoch that the unit computed its value under.
+    Session {
+        /// The writer epoch of the position or the manifest that the unit
+        /// computed its value from.
+        writer_epoch: WriterEpoch,
+    },
 }
 
 /// The value of one unit of a writer session, and what the value rests on.
@@ -38,13 +44,14 @@ impl<T> UnitReport<T> {
         }
     }
 
-    /// Returns the response of a publication of the session's lane, which
-    /// rests on the session's own state alone when it published nothing.
-    pub fn from_publication(report: PublicationReport<T>) -> Self {
+    /// Returns the response of a publication of the session's lane whose
+    /// turn had the writer epoch `writer_epoch`, which rests on the
+    /// session's own state alone when it published nothing.
+    pub fn from_publication(report: PublicationReport<T>, writer_epoch: WriterEpoch) -> Self {
         Self {
             basis: match report.published {
                 Some(_) => UnitBasis::Store,
-                None => UnitBasis::Session,
+                None => UnitBasis::Session { writer_epoch },
             },
             value: report.response,
         }

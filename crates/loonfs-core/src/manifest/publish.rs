@@ -281,14 +281,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             envelope: std::sync::Arc::new(manifest.envelope().clone()),
         };
         if let Some(current) = current {
-            let current_manifest = current.manifest();
-            // A tombstone ends its namespace, so work that raced the deletion
-            // stops here.
-            if current_manifest.payload().status.is_deleted() {
-                return Err(CoreError::NamespaceDeleted {
-                    namespace_id: namespace_id.clone(),
-                });
-            }
             match classify_current(current, &candidate, expected_predecessor) {
                 ManifestKind::Installable => {}
                 ManifestKind::Settled(outcome) => return Ok(outcome),

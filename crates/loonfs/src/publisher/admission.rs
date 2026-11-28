@@ -219,8 +219,8 @@ pub(super) fn estimated_admission_bytes(
     estimated_request_bytes: usize,
 ) -> usize {
     // Include the channel, ID copies, fingerprint and queue bookkeeping.
-    // Deletes include only fixed-size options. Candidate bytes include any
-    // proof or rejection data retained while waiting to publish.
+    // Candidate bytes include any proof or rejection data retained while
+    // waiting to publish.
     estimated_request_bytes
         .saturating_add(512)
         .saturating_add(namespace_id.as_str().len())

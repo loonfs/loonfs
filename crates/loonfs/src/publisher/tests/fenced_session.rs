@@ -266,13 +266,8 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
     let mut queued_commit = Box::pin(old.commit_candidate(CommitCandidate::new(
         create_directory_request("queued", "queued"),
     )));
-    let mut queued_delete = Box::pin(old.session().submit_delete(
-        DeleteNamespaceOptions::default(),
-        super::administrator(&old.session().publisher),
-    ));
     assert!(futures::poll!(queued_commit.as_mut()).is_pending());
-    assert!(futures::poll!(queued_delete.as_mut()).is_pending());
-    assert_eq!(publisher.lock_state().queue.len(), 2);
+    assert_eq!(publisher.lock_state().queue.len(), 1);
     let mut capacity = Box::pin(writer.execution_budget().publication_permit());
     assert!(futures::poll!(capacity.as_mut()).is_pending());
     drop(engine);
@@ -291,7 +286,7 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
         assert_eq!(state.next_task_id, 0);
         assert!(state.fold.is_none());
         assert!(state.compaction.is_none());
-        assert_eq!(state.queue.len(), 2);
+        assert_eq!(state.queue.len(), 1);
     }
     let requests = store.counts();
     let mut shutdown = Box::pin(writer.shutdown());
@@ -301,13 +296,6 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
         queued_commit
             .await
             .expect_err("queued commit is fenced")
-            .to_error_response(),
-        first_error.to_error_response()
-    );
-    assert_eq!(
-        queued_delete
-            .await
-            .expect_err("queued delete is fenced")
             .to_error_response(),
         first_error.to_error_response()
     );

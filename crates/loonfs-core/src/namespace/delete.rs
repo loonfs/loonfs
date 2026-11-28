@@ -3,7 +3,6 @@
 use crate::commit::publication_lane::LaneGuard;
 use crate::commit::publish_view::WriterPosition;
 use crate::error::Result;
-use crate::manifest::fold::FoldWriteOutcome;
 use crate::manifest::publish::ManifestPublicationOutcome;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
@@ -15,15 +14,16 @@ use loonfs_types::DeleteNamespaceResponse;
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Publishes the namespace's tombstone from `position`, a writer
     /// session's position whose head the caller checked against the
-    /// request's expected head, after a fold of the position's WAL tail when
-    /// the position's manifest doesn't include the tail.
+    /// request's expected head, after a fold of what arrived in the
+    /// position's WAL tail since the deletion's ordinary fold (see
+    /// [`Self::fold_while_paused`]).
     ///
     /// The caller keeps `lane`, the publication lane of the session, and the
-    /// session's commit queue for the whole deletion, so the head is exact,
-    /// the fold and the tombstone are publications of the lane, and no
-    /// commit is written between them. Each publication puts once (see
-    /// [`NamespaceStore::publish_manifest_in_turn`]), and the tombstone builds
-    /// on the fold's manifest.
+    /// session's commit queue for this whole step, so the head is exact, the
+    /// fold and the tombstone are publications of the lane, and no commit is
+    /// written between them. The tombstone puts once (see
+    /// [`NamespaceStore::publish_manifest_in_turn`]), builds on the fold's
+    /// manifest, and its `folded_wal_no` is the position's tip.
     pub(crate) async fn delete_namespace(
         &self,
         position: WriterPosition,
@@ -33,12 +33,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // The deletion's whole run is bounded by the publication budget, so
         // a deletion past it writes nothing.
         clock.ensure_metadata_publication_budget(&self.namespace_id)?;
-        if let FoldWriteOutcome::Written(writes) =
-            self.write_fold_segments(&position, clock).await?
-        {
-            self.publish_fold_in_turn(lane.acquired_turn(), writes, clock)
-                .await?;
-        }
+        self.fold_while_paused(&position, lane, clock).await?;
         let turn = lane.acquired_turn();
         let payload = turn
             .basis()
