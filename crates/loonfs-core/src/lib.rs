@@ -22,7 +22,7 @@
 //! };
 //! use loonfs_core::limits::DEFAULT_INLINE_TAIL_LIMIT_BYTES;
 //! use loonfs_core::publish::{
-//!     CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
+//!     CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine, UnitStart,
 //! };
 //! use loonfs_core::time::SystemWallClock;
 //! use loonfs_core::{
@@ -65,18 +65,28 @@
 //!
 //! let clock = namespace.start_clock();
 //! let mut publisher = NamespaceCommitEngine::new(namespace, writer_id);
-//! let _ = publisher.publish_batch(
-//!     vec![CommitCandidate::new(CommitIntent::single(
-//!         CommitId::generate(),
-//!         ActorId::parse("example-service").expect("a static actor ID should parse"),
-//!         None,
-//!         FilesystemOperation::CreateDirectory {
-//!             path: AbsolutePath::parse("/plans").expect("a static absolute path should parse"),
-//!             parents: false,
-//!         },
-//!     ))],
-//!     &clock,
-//! );
+//! let lane = publisher.publication_lane();
+//! let _ = async move {
+//!     // A new session claims its writer epoch first, in its publication lane.
+//!     let claim = publisher.claim(&lane.lock().await).await?;
+//!     let published = publisher
+//!         .publish_batch(
+//!             UnitStart::Claimed(claim),
+//!             vec![CommitCandidate::new(CommitIntent::single(
+//!                 CommitId::generate(),
+//!                 ActorId::parse("example-service").expect("a static actor ID should parse"),
+//!                 None,
+//!                 FilesystemOperation::CreateDirectory {
+//!                     path: AbsolutePath::parse("/plans")
+//!                         .expect("a static absolute path should parse"),
+//!                     parents: false,
+//!                 },
+//!             ))],
+//!             &clock,
+//!         )
+//!         .await;
+//!     Ok::<_, loonfs_core::CoreError>(published)
+//! };
 //! ```
 
 pub(crate) mod authorize;
@@ -189,12 +199,15 @@ pub mod control {
 /// filesystem handlers.
 pub mod publish {
     pub use crate::commit::engine::{
-        CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
-        NamespaceCommitEnginePublishOutcome, TailSource, WalTailReport, WriterSessionStatus,
-        WriterSessionStatusGuard, WriterSessionStatusView,
+        Claim, CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
+        NamespaceCommitEnginePublishOutcome, TailSource, UnitStart, WalTailReport,
+        WriterSessionStatus, WriterSessionStatusGuard, WriterSessionStatusView,
     };
+    pub use crate::commit::publication_lane::{LaneGuard, LaneTurn, PublicationLane};
     pub use crate::commit::publish_view::{PositionCheck, WriterPosition};
-    pub use crate::commit::published_manifest::{FollowOutcome, PublishedLock, PublishedManifest};
+    pub use crate::commit::published_manifest::{
+        FollowOutcome, PublishedLock, PublishedManifest, ReplacedPositions,
+    };
     pub use crate::commit::CommitFingerprint;
     pub use crate::namespace::writer_epoch::AcquiredWriter;
     pub use crate::path::write::{CommitIntent, FilesystemOperation};

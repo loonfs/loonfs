@@ -157,7 +157,7 @@ impl ReadPositionSlot {
     /// engine's own position stays until the engine's release, because every
     /// change to it waits for the engine's turn, and a unit can keep the
     /// engine across its WAL put. That position can't move there either, so
-    /// the release drops it (see `NamespacePublisher::record_published`).
+    /// the release drops it (see `NamespacePublisher::follow_published`).
     pub(crate) fn current(&self) -> Option<Arc<WriterPosition>> {
         let stored = self.lock().clone()?;
         self.apply(&stored, self.published.follow(&stored))

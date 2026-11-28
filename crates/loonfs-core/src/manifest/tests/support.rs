@@ -145,7 +145,7 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
         crate::test_support::namespace_store(store, namespace_id),
         context.writer_id.clone(),
     )
-    .publish_batch(
+    .publish_batch_alone(
         vec![CommitCandidate::prepared(
             CommitIntent::single(
                 CommitId::parse(commit_id).expect("commit id"),

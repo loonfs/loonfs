@@ -43,7 +43,7 @@ async fn an_own_fold_moves_a_position_loaded_again_during_the_fold() {
         .await
         .expect("during");
     let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-        .fold_wal_tail_from(
+        .fold_wal_tail_in_new_lane(
             &input,
             &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
         )
@@ -101,7 +101,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
         let input = engine.writer_position().expect("fold input");
         let during = directory("/during");
         engine
-            .publish_batch(
+            .publish_batch_alone(
                 [during.clone()],
                 &OperationClock::start(context.now_ms, timer.clone()),
             )
@@ -112,7 +112,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             .expect("during fold");
         engine.invalidate_projection();
         let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-            .fold_wal_tail_from(&input, &OperationClock::start(0, timer.clone()))
+            .fold_wal_tail_in_new_lane(&input, &OperationClock::start(0, timer.clone()))
             .await
             .expect("fold");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
@@ -126,7 +126,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             directory("/during/child")
         };
         engine
-            .publish_batch(
+            .publish_batch_alone(
                 [candidate],
                 &OperationClock::start(context.now_ms, timer.clone()),
             )
@@ -216,7 +216,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
     let input = engine.writer_position().expect("fold input");
     engine.invalidate_projection();
     let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-        .fold_wal_tail_from(
+        .fold_wal_tail_in_new_lane(
             &input,
             &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
         )
@@ -291,7 +291,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     store.reset();
     assert!(matches!(
         crate::test_support::namespace_store(&failing, &engine.namespace.namespace_id)
-            .fold_wal_tail_from(
+            .fold_wal_tail_in_new_lane(
                 &input,
                 &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default()))
             )
@@ -327,7 +327,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     let timer = Arc::new(ManualClock::stepping(20 * 60 * 1000));
     assert!(matches!(
         crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-            .fold_wal_tail_from(
+            .fold_wal_tail_in_new_lane(
                 &input,
                 &crate::time::OperationClock::start(0, timer.clone())
             )
@@ -347,7 +347,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     );
     store.reset();
     let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-        .fold_wal_tail_from(
+        .fold_wal_tail_in_new_lane(
             &input,
             &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
         )
@@ -419,11 +419,11 @@ async fn competing_engines_write_their_own_objects_and_publish_one_manifest() {
     let first_timer = Arc::new(StdMonotonicTimer::default());
     let deadline = crate::time::OperationClock::start(0, first_timer);
     let namespace = crate::test_support::namespace_store(&blocked, &first.namespace.namespace_id);
-    let first_fold = namespace.fold_wal_tail_from(&first_input, &deadline);
+    let first_fold = namespace.fold_wal_tail_in_new_lane(&first_input, &deadline);
     let second_fold = async {
         blocked.wait_until_blocked().await;
         let result = crate::test_support::namespace_store(&store, &second.namespace.namespace_id)
-            .fold_wal_tail_from(
+            .fold_wal_tail_in_new_lane(
                 &second_input,
                 &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
             )
@@ -500,6 +500,7 @@ async fn an_occupied_span_key_is_corruption_and_stops_manifest_publication() {
     let mut session = NamespaceCommitEngine {
         namespace: crate::test_support::namespace_store(&occupied, &engine.namespace.namespace_id),
         writer_id: engine.writer_id.clone(),
+        lane: engine.lane.clone(),
         position: engine.position,
     };
     let error = session
@@ -562,6 +563,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
     let mut session = NamespaceCommitEngine {
         namespace: crate::test_support::namespace_store(&failing, &engine.namespace.namespace_id),
         writer_id: engine.writer_id.clone(),
+        lane: engine.lane.clone(),
         position: engine.position,
     };
     let error = session
@@ -640,7 +642,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         segment_cache: Arc::clone(&engine.namespace.segment_cache),
         ..crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
     }
-    .fold_wal_tail_from(
+    .fold_wal_tail_in_new_lane(
         &input,
         &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
     )
@@ -819,7 +821,7 @@ async fn new_commits_wait_at_the_inline_tail_limit_until_a_fold() {
         "{refused}"
     );
     let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-        .fold_wal_tail_from(
+        .fold_wal_tail_in_new_lane(
             &engine.writer_position().expect("a writer position"),
             &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
         )

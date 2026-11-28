@@ -34,7 +34,7 @@ async fn publish<S: ObjectStore>(
     candidate: CommitCandidate,
 ) -> Result<Commit> {
     engine
-        .publish_batch([candidate], &context("writer").clock())
+        .publish_batch_alone([candidate], &context("writer").clock())
         .await
         .results
         .pop()
@@ -119,7 +119,7 @@ async fn a_sessions_floor_object_orders_its_restores_around_the_floor() {
         .expect("the planned manifest");
 
     let report = engine
-        .publish_floor_object(&planned, expired_seq, &context("writer").clock())
+        .publish_floor_object_alone(&planned, expired_seq, &context("writer").clock())
         .await
         .expect("create the floor object");
     let after = engine.writer_position().expect("the position moves");
@@ -146,7 +146,7 @@ async fn a_sessions_floor_object_orders_its_restores_around_the_floor() {
     assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
     let folded = engine
         .namespace
-        .fold_wal_tail_from(
+        .fold_wal_tail_in_new_lane(
             &engine.writer_position().expect("a writer position"),
             &context("writer").clock(),
         )
@@ -191,7 +191,7 @@ async fn a_sessions_floor_object_has_no_check_after_its_put() {
         .expect("the planned manifest");
     store.reset();
     engine
-        .publish_floor_object(&planned, deletion_seq, &context("writer").clock())
+        .publish_floor_object_alone(&planned, deletion_seq, &context("writer").clock())
         .await
         .expect("create the floor object");
     let operations = store.take();
@@ -239,7 +239,7 @@ async fn an_advance_puts_its_floor_object_at_the_sessions_tip_or_returns_writer_
         .expect("head")
         .writer_epoch;
     let report = claiming
-        .publish_floor_object(&planned, first_seq, &context("writer").clock())
+        .publish_floor_object_alone(&planned, first_seq, &context("writer").clock())
         .await
         .expect("the claiming session's floor object");
     assert_eq!(report.retention_floor_seq, first_seq);
@@ -292,7 +292,7 @@ async fn an_advance_puts_its_floor_object_at_the_sessions_tip_or_returns_writer_
     // collides with the claim's fence, and the writer's load after the
     // collision finds the higher epoch.
     let fenced = engine
-        .publish_floor_object(&planned, second_seq, &context("writer").clock())
+        .publish_floor_object_alone(&planned, second_seq, &context("writer").clock())
         .await
         .expect_err("a displaced session's advance");
     assert_matches!(fenced, CoreError::WriterFenced(_));

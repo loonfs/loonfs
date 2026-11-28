@@ -3,12 +3,15 @@
 //! one result per candidate.
 
 use super::batch::{PublishBatchReport, PublishViewEffect};
-use super::publish_view::WriterPosition;
-use super::published_manifest::{KeptPosition, PublishedLock, PublishedManifest};
+use super::publication_lane::{LaneGuard, LaneTurn, PublicationLane};
+use super::publish_view::{ViewStart, WriterPosition};
+use super::published_manifest::{
+    KeptPosition, PublishedLock, PublishedManifest, ReplacedPositions,
+};
 use super::session_epoch::SessionEpoch;
 use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
-use crate::manifest::{FloorObjectReport, FoldedWalTail};
+use crate::manifest::FloorObjectReport;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::held::Held;
@@ -147,6 +150,10 @@ pub struct NamespaceCommitEngine<S> {
     namespace: NamespaceStore<S>,
     /// The writer that the session acquires its epoch for.
     writer_id: WriterId,
+    /// The session's publication lane, through which every manifest
+    /// publication of the session goes, with the newest manifest that the
+    /// session published, which `position` follows.
+    lane: PublicationLane,
     position: PositionState,
 }
 
@@ -158,7 +165,6 @@ struct PositionState {
     /// engine reads only brought up to the newest manifest that the
     /// session's runtime published.
     current: KeptPosition,
-    acquired_anchor: Option<WriterAnchor>,
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionStatus`]. The engine creates the status, and no other
     /// engine can reach it.
@@ -171,14 +177,15 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// the store, and the session acquires its writer epoch on its first
     /// publish.
     pub fn new(namespace: NamespaceStore<S>, writer_id: WriterId) -> Self {
+        let lane = PublicationLane::new();
         Self {
             namespace,
             writer_id,
             position: PositionState {
-                current: KeptPosition::default(),
-                acquired_anchor: None,
+                current: KeptPosition::new(lane.clone()),
                 session: Arc::default(),
             },
+            lane,
         }
     }
 
@@ -201,23 +208,37 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         WriterSessionStatusView(Arc::clone(&self.position.session))
     }
 
-    /// Returns the newest manifest that the session's runtime published,
-    /// where the runtime records each fold and maintenance call without
-    /// locking the engine. The engine brings its position up to it each
-    /// time it reads the position (see [`PublishedManifest::follow`]).
+    /// Returns the session's publication lane, through which the session's
+    /// runtime publishes every manifest of the session (see
+    /// [`PublicationLane`]).
+    pub fn publication_lane(&self) -> PublicationLane {
+        self.lane.clone()
+    }
+
+    /// Returns the newest manifest that the session published, which each
+    /// item of the session's publication lane records without locking the
+    /// engine. The engine brings its position up to it each time it reads
+    /// the position (see [`PublishedManifest::follow`]).
     pub fn published_manifest(&self) -> PublishedManifest {
-        self.position.current.published().clone()
+        self.lane.published_manifest().clone()
     }
 
     /// Brings the position up to the manifest that `published`, this
-    /// engine's locked [`Self::published_manifest`], records, and stores it,
-    /// so the engine doesn't keep the part of the tail that a publication
-    /// folded. The session's runtime calls this after each publication, and
-    /// when it releases the engine. Returns the position that the call
-    /// replaced, which the caller drops once it has unlocked `published`.
-    #[must_use = "drop the replaced position once the published manifest is unlocked"]
-    pub fn follow_published(&mut self, published: &PublishedLock<'_>) -> Option<WriterPosition> {
-        self.position.current.follow_stored(published)
+    /// engine's locked [`Self::published_manifest`], records, and stores it
+    /// with its copy in the session's publication lane, so neither keeps the
+    /// part of the tail that a publication folded. A fenced session leaves
+    /// no copy in the lane. The session's runtime calls this after each
+    /// publication, and when it releases the engine. Returns the positions
+    /// that the call replaced, which the caller drops once it has unlocked
+    /// `published`.
+    pub fn follow_published(&mut self, published: &PublishedLock<'_>) -> ReplacedPositions {
+        let PositionState { current, session } = &mut self.position;
+        current.follow_stored(
+            published,
+            &session
+                .lock()
+                .expect("writer session state lock should not be poisoned"),
+        )
     }
 
     /// Drops the position and its tail, so the next unit reads the tail from
@@ -309,11 +330,12 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// Deletion publishes a new manifest with the same writer-session checks as
     /// [`Self::publish_batch`]. Fenced sessions fail before accessing the store,
     /// and a takeover detected during manifest publication permanently fences the
-    /// session. A deletion first folds the WAL tail under the namespace's run
-    /// policy. Both publications build on the position's manifest. The
-    /// tombstone's put releases the session's epoch, as a commit's WAL put
-    /// does, so after an unknown outcome the session's next publication
-    /// claims a new epoch and writes a fence.
+    /// session. A session without its writer epoch claims it first, and the
+    /// deletion then starts from the claim's discovery. A deletion first folds
+    /// the WAL tail under the namespace's run policy. Both publications build
+    /// on the position's manifest. The tombstone's put releases the session's
+    /// epoch, as a commit's WAL put does, so after an unknown outcome the
+    /// session's next publication claims a new epoch and writes a fence.
     ///
     /// An initializing namespace has no writer session, so its deletion is a
     /// plain manifest publication of its tombstone (see
@@ -321,21 +343,23 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// with the status `active` wins that publication, the call deletes the
     /// namespace with a writer session.
     ///
+    /// The caller keeps `lane`, the session's publication lane, and the
+    /// engine for the whole deletion, so both of the deletion's manifests
+    /// are publications of the lane, and no commit is written between the
+    /// fold and the tombstone.
+    ///
     /// `administrator` proves the caller administers the namespace, because
     /// deletion is only for the administrator.
     pub async fn delete_namespace(
         &mut self,
+        lane: &LaneGuard<'_>,
         administrator: &Administrator,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
         administrator.assert_for(&self.namespace.namespace_id);
         let clock = self.namespace.start_clock();
-        let acquired_writer = match self
-            .position
-            .session_writer_epoch(&self.namespace, &self.writer_id)
-            .await
-        {
-            Ok(acquired_writer) => acquired_writer,
+        let (acquired_writer, position) = match self.deletion_writer(lane).await {
+            Ok(acquired) => acquired,
             Err(error @ CoreError::NamespaceNotFound { .. }) => {
                 let NewestManifest::Manifest(current) =
                     self.namespace.find_newest_manifest(clock.origin()).await?
@@ -365,11 +389,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
                             namespace_id: self.namespace.namespace_id.clone(),
                         })
                     }
-                    TombstoneOutcome::Active => {
-                        self.position
-                            .session_writer_epoch(&self.namespace, &self.writer_id)
-                            .await?
-                    }
+                    TombstoneOutcome::Active => self.deletion_writer(lane).await?,
                 }
             }
             Err(error) => return Err(error),
@@ -379,7 +399,8 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             .delete_namespace(
                 options,
                 SessionEpoch::new(&self.position.session, acquired_writer),
-                self.writer_position(),
+                position,
+                lane,
                 &clock,
             )
             .await;
@@ -389,24 +410,106 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             .inspect_err(|error| self.position.record_session_error(error))
     }
 
-    /// Returns this session's position, loaded as a commit loads its view: a
-    /// session without its writer epoch claims it first, and the position is
-    /// the claim's discovery, the engine's position once the store shows that
-    /// it's still current, or the writer's load. The engine keeps the
-    /// position, and a failed load drops it.
+    /// Returns the writer epoch and the position that a deletion starts
+    /// from: the session's, or, for a session without its epoch, the claim's
+    /// and the position of the claim's discovery.
+    async fn deletion_writer(
+        &mut self,
+        lane: &LaneGuard<'_>,
+    ) -> Result<(AcquiredWriter, Option<WriterPosition>)> {
+        let writer = match self.unit_start(lane).await? {
+            UnitStart::Kept(writer) => writer,
+            UnitStart::Claimed(claim) => {
+                let writer = claim.writer.clone();
+                self.load_position(UnitStart::Claimed(claim)).await?;
+                writer
+            }
+        };
+        Ok((writer, self.writer_position()))
+    }
+
+    /// Returns where the session's next unit of the commit queue or of the
+    /// publication lane starts when the session has its writer epoch, or
+    /// `None` when the session has none, so the unit claims one first (see
+    /// [`Self::claim`]). A fenced session returns `writer_fenced`.
+    pub fn kept_start(&self) -> Result<Option<UnitStart>> {
+        match &*self.position.lock_session() {
+            WriterSessionStatus::Acquired(writer) => Ok(Some(UnitStart::Kept(writer.clone()))),
+            WriterSessionStatus::Fenced(fence) => Err(CoreError::WriterFenced(fence.clone())),
+            WriterSessionStatus::Unacquired | WriterSessionStatus::NamespaceGone => Ok(None),
+        }
+    }
+
+    /// Returns where the session's next unit starts (see
+    /// [`Self::kept_start`]), after a claim in `lane`, the session's
+    /// publication lane, when the session has no writer epoch. The caller
+    /// keeps `lane` and the engine, as [`Self::claim`] requires.
+    pub async fn unit_start(&mut self, lane: &LaneGuard<'_>) -> Result<UnitStart> {
+        match self.kept_start()? {
+            Some(start) => Ok(start),
+            None => Ok(UnitStart::Claimed(self.claim(lane).await?)),
+        }
+    }
+
+    /// Acquires a writer epoch for a session that has none (see
+    /// [`Self::kept_start`]) with a claim and a fence, and returns the claim
+    /// for the next unit to start from. The claim doesn't compare the newest
+    /// manifest's epoch with the epoch the session used before, and an
+    /// acquisition that returns `writer_fenced` records the session as
+    /// fenced.
     ///
-    /// Every publication of the session that runs beside its commits, such
-    /// as a fold or a compaction unit, starts from a position that this
-    /// returns, so it publishes only while the session has its epoch.
-    pub async fn load_position(&mut self) -> Result<WriterPosition> {
+    /// The caller keeps `lane`, the session's publication lane, and the
+    /// engine, so the claim keeps both queues while it runs, and no
+    /// publication of the session is in flight. The claim records its
+    /// manifest as the session's newest published manifest, which a
+    /// publication that planned before the claim then builds on. The session
+    /// drops its position, and the next unit starts from the claim's
+    /// discovery.
+    pub async fn claim(&mut self, lane: &LaneGuard<'_>) -> Result<Claim> {
+        assert!(
+            lane.is_guard_of(&self.lane),
+            "a session claims in its own publication lane"
+        );
+        assert!(
+            matches!(self.kept_start(), Ok(None)),
+            "a session claims only without an epoch"
+        );
+        let acquisition = self
+            .namespace
+            .acquire_writer(&self.writer_id)
+            .await
+            .inspect_err(|error| self.position.record_session_error(error))?;
+        lane.record(acquisition.anchor.held());
+        self.position.current.clear();
+        *self.position.lock_session() = WriterSessionStatus::Acquired(acquisition.writer.clone());
+        Ok(Claim {
+            writer: acquisition.writer,
+            anchor: Box::new(acquisition.anchor),
+        })
+    }
+
+    /// Returns this session's position, loaded as a commit loads its view
+    /// from `start`: the claim's discovery, the engine's position once the
+    /// store shows that it's still current, or the writer's load. The engine
+    /// keeps the position, and a failed load drops it.
+    ///
+    /// The load publishes nothing, so a session that has its epoch loads
+    /// with the engine alone. While the session has its epoch, a load can't
+    /// find a manifest above the session's newest published manifest except
+    /// another writer's claim, which fences the load, and the loaded position
+    /// follows the newest published manifest as every copy of the position
+    /// does. Every publication of the session that runs beside its commits,
+    /// such as a fold or a compaction unit, starts from a position that this
+    /// stored, so it publishes only while the session has its epoch.
+    pub async fn load_position(&mut self, start: UnitStart) -> Result<WriterPosition> {
         let clock = self.namespace.start_clock();
         let Self {
             namespace,
-            writer_id,
             position,
+            ..
         } = self;
         let held = position
-            .load_publish_view(namespace, writer_id, &clock)
+            .load_publish_view(namespace, &clock, start)
             .await?
             .view
             .into_position();
@@ -414,54 +517,49 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         Ok(held)
     }
 
-    /// Folds the WAL tail from this session's position and publishes the
-    /// next manifest (format spec, "Publishing a manifest").
-    ///
-    /// The fold starts from [`Self::load_position`], so a session without its
-    /// writer epoch claims it first. The fold records the manifest that
-    /// covers the tail as the session's newest published manifest, as every
-    /// publication does (see [`Self::published_manifest`]), so the position
-    /// moves onto it and later commits plan against it, and a failed fold
-    /// drops the position. The stored position follows the manifest at once,
-    /// so the engine keeps no part of the tail that the fold covered. A fold
-    /// whose manifest put loses to another process's claim still builds
-    /// again on that claim through the publication loop of
-    /// [`NamespaceStore::fold_wal_tail_from`].
-    pub async fn fold(&mut self) -> Result<FoldedWalTail> {
-        let held = self.load_position().await?;
-        let clock = self.namespace.start_clock();
-        let folded = self.namespace.fold_wal_tail_from(&held, &clock).await;
-        let folded = folded.inspect_err(|error| {
-            self.position.record_session_error(error);
-            self.position.invalidate_projection();
-        })?;
-        drop(self.position.current.record_published(&folded.current));
-        Ok(folded)
+    /// Returns the turn of a publication of the session's lane, which `lane`
+    /// keeps, from the position that the session kept or, when it kept none,
+    /// from the position that the engine loads from `start` (see
+    /// [`Self::load_position`]).
+    pub async fn lane_turn<'g>(
+        &mut self,
+        lane: &'g LaneGuard<'_>,
+        start: UnitStart,
+    ) -> Result<LaneTurn<'g>> {
+        assert!(
+            lane.is_guard_of(&self.lane),
+            "a publication takes its turn in its own session's lane"
+        );
+        if let Some(turn) = lane.turn() {
+            return Ok(turn);
+        }
+        let position = self.load_position(start).await?;
+        Ok(lane.turn_from(position))
     }
 
     /// Advances the retention floor to `target` with a floor object, as one
-    /// unit of the session's publication queue, so the floor object never
+    /// unit of the session's commit queue, so the floor object never
     /// collides with the session's own commits (format spec, "Advancing the
     /// retention floor").
     ///
     /// The call first checks that the segments of `planned`, the manifest
     /// that the advance was planned from, exist. The session loads its view
-    /// as a commit does, so a session without its writer epoch claims it
-    /// first, and it puts the floor object at the number after its position's
-    /// tip, as it puts a commit, with no check after the put. The position
-    /// then replays the floor object, so its tip is the floor object's number
-    /// and its floor is raised. A session that discovery finds fenced returns
-    /// `writer_fenced`. A put that finds the number taken drops the position
-    /// and runs the writer's load, which returns `writer_fenced` when another
-    /// writer's fence took the number, and otherwise the put's error, so the
-    /// caller plans again. The
-    /// floor object's put doesn't change the session's status, because
-    /// collection never deletes a fence or a floor object (format spec,
-    /// "Advancing the retention floor"), and a put whose outcome is unknown
-    /// drops the position. The call writes nothing when the view's floor is
-    /// already at or above `target`.
+    /// from `start` as a commit does, and it puts the floor object at the
+    /// number after its position's tip, as it puts a commit, with no check
+    /// after the put. The position then replays the floor object, so its tip
+    /// is the floor object's number and its floor is raised. A session that
+    /// discovery finds fenced returns `writer_fenced`. A put that finds the
+    /// number taken drops the position and runs the writer's load, which
+    /// returns `writer_fenced` when another writer's fence took the number,
+    /// and otherwise the put's error, so the caller plans again. The floor
+    /// object's put doesn't change the session's status, because collection
+    /// never deletes a fence or a floor object (format spec, "Advancing the
+    /// retention floor"), and a put whose outcome is unknown drops the
+    /// position. The call writes nothing when the view's floor is already at
+    /// or above `target`.
     pub async fn publish_floor_object(
         &mut self,
+        start: UnitStart,
         planned: &LoadedManifest,
         target: CommitSeq,
         clock: &OperationClock,
@@ -473,21 +571,27 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             .await?;
         let Self {
             namespace,
-            writer_id,
             position,
+            ..
         } = self;
-        let loaded = position
-            .load_publish_view(namespace, writer_id, clock)
-            .await?;
+        let loaded = position.load_publish_view(namespace, clock, start).await?;
         position
             .publish_floor_object_against(namespace, loaded, target)
             .await
     }
 
-    /// Publishes `candidates` as one batch. Retries share `clock`, so the
-    /// batch keeps one commit time, and content evidence continues aging.
+    /// Publishes `candidates` as one batch from `start`. Retries share
+    /// `clock`, so the batch keeps one commit time, and content evidence
+    /// continues aging.
+    ///
+    /// The caller takes `start` from [`Self::kept_start`], which returns
+    /// `writer_fenced` for a fenced session, or, for a session without its
+    /// writer epoch, from a claim (see [`Self::claim`]). A claimed unit
+    /// starts from the claim's discovery, and any other unit starts from the
+    /// session's position, or from the writer's load, with the engine alone.
     pub async fn publish_batch(
         &mut self,
+        start: UnitStart,
         candidates: impl AsRef<[CommitCandidate]>,
         clock: &OperationClock,
     ) -> NamespaceCommitEnginePublishOutcome {
@@ -500,13 +604,10 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         }
         let Self {
             namespace,
-            writer_id,
             position,
+            ..
         } = self;
-        match position
-            .load_publish_view(namespace, writer_id, clock)
-            .await
-        {
+        match position.load_publish_view(namespace, clock, start).await {
             Ok(loaded) => {
                 position
                     .publish_against(namespace, loaded, candidates, clock)
@@ -517,46 +618,167 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     }
 }
 
+/// A claim of the session's writer epoch, from
+/// [`NamespaceCommitEngine::claim`], with the discovery that the claim's
+/// fence was put after, which the next unit starts from.
+#[derive(Debug)]
+pub struct Claim {
+    writer: AcquiredWriter,
+    anchor: Box<WriterAnchor>,
+}
+
+/// Where a unit of the session's commit queue, or a publication that loads
+/// the session's position, starts its view.
+#[derive(Debug)]
+pub enum UnitStart {
+    /// The session has this writer epoch, and the unit starts from the
+    /// session's position or from the writer's load (see
+    /// [`NamespaceCommitEngine::kept_start`]).
+    Kept(AcquiredWriter),
+    /// The caller claimed the writer epoch for the unit, which starts from
+    /// the claim's discovery.
+    Claimed(Claim),
+}
+
+/// The forms that a test uses whose engine no other task uses, so the engine
+/// takes its own publication lane whenever it claims, as the session's
+/// runtime does with the engine released first.
 #[cfg(any(test, feature = "test-support"))]
 impl<S: ObjectStore> NamespaceCommitEngine<S> {
-    /// Records the manifest that `report` says a publication from this
-    /// session's position published as the session's newest published
-    /// manifest, the last step of the one path by which a test publishes as a
-    /// session, the way the session's runtime publishes a window change or an
-    /// extension's entry: load the position (claiming first when the session
-    /// has no epoch, see [`Self::load_position`]), publish from it without the
-    /// engine, and record the manifest.
-    fn record_publication<T>(
-        &mut self,
-        report: crate::manifest::published::PublicationReport<T>,
-    ) -> crate::manifest::published::PublicationReport<T> {
-        if let Some(manifest) = &report.published {
-            drop(self.position.current.record_published(manifest));
+    /// Returns where the next unit starts, after a claim in the session's
+    /// own publication lane when the session has no writer epoch.
+    pub async fn start_alone(&mut self) -> Result<UnitStart> {
+        if let Some(start) = self.kept_start()? {
+            return Ok(start);
         }
-        report
+        let lane = self.publication_lane();
+        let guard = lane.lock().await;
+        Ok(UnitStart::Claimed(self.claim(&guard).await?))
     }
 
-    /// Sets the retention window as this session (see
-    /// [`Self::record_publication`] and
-    /// [`NamespaceStore::set_retention_window_from`]).
+    /// Loads the session's position, after a claim when the session needs
+    /// one (see [`Self::load_position`]).
+    pub async fn load_position_alone(&mut self) -> Result<WriterPosition> {
+        let start = self.start_alone().await?;
+        self.load_position(start).await
+    }
+
+    /// Publishes `candidates` as one batch, after a claim when the session
+    /// needs one (see [`Self::publish_batch`]).
+    pub async fn publish_batch_alone(
+        &mut self,
+        candidates: impl AsRef<[CommitCandidate]>,
+        clock: &OperationClock,
+    ) -> NamespaceCommitEnginePublishOutcome {
+        let candidates = candidates.as_ref();
+        match self.start_alone().await {
+            // Boxing keeps the futures of the tests that call this from
+            // exceeding rustc's type-recursion depth, as the runtime's worker
+            // boxes its publish.
+            Ok(start) => Box::pin(self.publish_batch(start, candidates, clock)).await,
+            Err(error) => failed_publication(candidates.len(), error),
+        }
+    }
+
+    /// Advances the retention floor, after a claim when the session needs
+    /// one (see [`Self::publish_floor_object`]).
+    pub async fn publish_floor_object_alone(
+        &mut self,
+        planned: &LoadedManifest,
+        target: CommitSeq,
+        clock: &OperationClock,
+    ) -> Result<FloorObjectReport> {
+        let start = self.start_alone().await?;
+        self.publish_floor_object(start, planned, target, clock)
+            .await
+    }
+
+    /// Deletes the namespace in the session's own publication lane (see
+    /// [`Self::delete_namespace`]).
+    pub async fn delete_namespace_alone(
+        &mut self,
+        administrator: &Administrator,
+        options: DeleteNamespaceOptions,
+    ) -> Result<DeleteNamespaceResponse> {
+        let lane = self.publication_lane();
+        let guard = lane.lock().await;
+        self.delete_namespace(&guard, administrator, options).await
+    }
+
+    /// Brings the stored position up to the manifest that a publication of
+    /// the session's lane recorded, as the runtime's release of the engine
+    /// does, so the engine keeps no part of the tail that the publication
+    /// folded. The lane keeps no copy of the position, because no release
+    /// of the engine would bring the copy up to the commits after it, so the
+    /// next turn loads the engine's position.
+    fn follow_alone(&mut self) {
+        let published = self.published_manifest();
+        let recorded = published.lock();
+        let replaced = self.follow_published(&recorded);
+        drop(recorded);
+        drop(replaced);
+        drop(self.lane.keep(None));
+    }
+
+    /// Takes a turn in the session's own publication lane, after a claim
+    /// when the session needs one (see [`Self::lane_turn`]).
+    async fn lane_turn_alone<'g>(&mut self, lane: &'g LaneGuard<'_>) -> Result<LaneTurn<'g>> {
+        let start = self.unit_start(lane).await?;
+        self.lane_turn(lane, start).await
+    }
+
+    /// Folds the WAL tail from this session's position as one publication of
+    /// its lane, and publishes the next manifest (format spec, "Publishing a
+    /// manifest").
+    ///
+    /// A session without its writer epoch claims it first. The fold records
+    /// the manifest that covers the tail as the session's newest published
+    /// manifest, as every publication of the lane does (see
+    /// [`Self::published_manifest`]), so the position moves onto it and later
+    /// commits plan against it, and a failed fold drops the position. A fold
+    /// whose manifest put loses to another process's claim still builds again
+    /// on that claim through the publication loop of
+    /// [`NamespaceStore::fold_wal_tail_from`]. The stored position follows
+    /// the manifest at once, so the engine keeps no part of the tail that the
+    /// fold covered.
+    pub async fn fold(&mut self) -> Result<crate::manifest::FoldedWalTail> {
+        let lane = self.publication_lane();
+        let guard = lane.lock().await;
+        let turn = self.lane_turn_alone(&guard).await?;
+        let clock = self.namespace.start_clock();
+        let folded = self.namespace.fold_wal_tail_from(turn, &clock).await;
+        let folded = folded.inspect_err(|error| {
+            self.position.record_session_error(error);
+            self.position.invalidate_projection();
+        })?;
+        drop(guard);
+        self.follow_alone();
+        Ok(folded)
+    }
+
+    /// Sets the retention window as one publication of this session's lane
+    /// (see [`NamespaceStore::set_retention_window_from`]).
     pub async fn set_retention_window(
         &mut self,
         retention_window_ms: Option<loonfs_types::RetentionWindow>,
     ) -> crate::Result<
         crate::manifest::published::PublicationReport<loonfs_types::SetRetentionWindowResponse>,
     > {
-        let position = self.load_position().await?;
+        let lane = self.publication_lane();
+        let guard = lane.lock().await;
+        let turn = self.lane_turn_alone(&guard).await?;
         let report = self
             .namespace
-            .set_retention_window_from(&position, retention_window_ms)
+            .set_retention_window_from(turn, retention_window_ms)
             .await?;
-        Ok(self.record_publication(report))
+        drop(guard);
+        self.follow_alone();
+        Ok(report)
     }
 
-    /// Publishes an extension's change as this session (see
-    /// [`Self::record_publication`] and
-    /// [`NamespaceStore::publish_extension_from`]). A basis of another
-    /// namespace returns `invalid_request` before the session claims
+    /// Publishes an extension's change as one publication of this session's
+    /// lane (see [`NamespaceStore::publish_extension_from`]). A basis of
+    /// another namespace returns `invalid_request` before the session claims
     /// anything (see [`ExtensionBasis::ensure_for`](crate::manifest::extension::ExtensionBasis::ensure_for)).
     pub async fn publish_extension(
         &mut self,
@@ -569,12 +791,16 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         >,
     > {
         basis.ensure_for(&self.namespace.namespace_id)?;
-        let position = self.load_position().await?;
+        let lane = self.publication_lane();
+        let guard = lane.lock().await;
+        let turn = self.lane_turn_alone(&guard).await?;
         let report = self
             .namespace
-            .publish_extension_from(&position, basis, name, entry)
+            .publish_extension_from(turn, basis, name, entry)
             .await?;
-        Ok(self.record_publication(report))
+        drop(guard);
+        self.follow_alone();
+        Ok(report)
     }
 }
 
@@ -589,7 +815,6 @@ impl PositionState {
 
     fn invalidate_projection(&mut self) {
         self.current.clear();
-        self.acquired_anchor = None;
     }
 
     /// Records that the session was fenced, or found its namespace deleted
@@ -612,66 +837,35 @@ impl PositionState {
         }
     }
 
-    /// Returns the session's writer epoch, and acquires one with a claim and
-    /// a fence when the session has none. The claim doesn't compare the
-    /// newest manifest's epoch with the epoch the session used before. A
-    /// fenced session fails immediately without accessing the store or
-    /// acquiring a new epoch, and an acquisition that returns
-    /// `writer_fenced` records the session as fenced.
-    async fn session_writer_epoch<S: ObjectStore>(
-        &mut self,
-        namespace: &NamespaceStore<S>,
-        writer_id: &WriterId,
-    ) -> Result<AcquiredWriter> {
-        match &*self.lock_session() {
-            WriterSessionStatus::Fenced(fence) => {
-                return Err(CoreError::WriterFenced(fence.clone()))
-            }
-            WriterSessionStatus::Acquired(acquired_writer) => return Ok(acquired_writer.clone()),
-            WriterSessionStatus::Unacquired | WriterSessionStatus::NamespaceGone => {}
-        }
-        let acquisition = namespace
-            .acquire_writer(writer_id)
-            .await
-            .inspect_err(|error| self.record_session_error(error))?;
-        self.acquired_anchor = Some(acquisition.anchor);
-        *self.lock_session() = WriterSessionStatus::Acquired(acquisition.writer.clone());
-        Ok(acquisition.writer)
-    }
-
-    /// Loads the view that one publication unit plans against: the
-    /// position, once the store shows that it's still current, or the
-    /// namespace's current manifest and WAL tail.
+    /// Loads the view that one publication unit plans against, from
+    /// `start`: the claim's discovery, the position once the store shows
+    /// that it's still current, or the namespace's current manifest and WAL
+    /// tail.
     ///
     /// The view borrows `namespace` rather than this state, so the caller
     /// can read the view and then publish against it.
     async fn load_publish_view<'a, S: ObjectStore>(
         &mut self,
         namespace: &'a NamespaceStore<S>,
-        writer_id: &WriterId,
         clock: &OperationClock,
+        start: UnitStart,
     ) -> Result<LoadedPublishView<'a, S>> {
         let attempt = clock.observe();
-        let acquired_writer = self.session_writer_epoch(namespace, writer_id).await?;
-
-        let acquired_anchor = self.acquired_anchor.take();
-        let cached_position = match acquired_anchor {
-            Some(_) => {
-                self.current.clear();
-                None
+        let (acquired_writer, start) = match start {
+            UnitStart::Kept(acquired_writer) => {
+                let start = match self.current.take() {
+                    Some(position) => ViewStart::Position(Box::new(position)),
+                    None => ViewStart::Load,
+                };
+                (acquired_writer, start)
             }
-            None => self.current.take(),
+            UnitStart::Claimed(claim) => (claim.writer, ViewStart::Anchor(claim.anchor)),
         };
         let loaded = namespace
-            .load_publish_metadata_view(
-                acquired_writer,
-                cached_position,
-                acquired_anchor,
-                attempt.clone(),
-            )
+            .load_publish_metadata_view(acquired_writer, start, attempt.clone())
             .await;
         let view = match loaded {
-            Ok(value) => value,
+            Ok(view) => view,
             Err(error) => {
                 self.invalidate_projection();
                 self.record_session_error(&error);
@@ -905,16 +1099,21 @@ fn failed_publication(count: usize, error: CoreError) -> NamespaceCommitEnginePu
 }
 
 impl<S: ObjectStore + Clone> NamespaceEngine<S, Writable> {
-    /// Deletes the current namespace by publishing a tombstone manifest.
-    /// Earlier committed changes remain durable. Later operations return `namespace_deleted`.
-    /// `administrator` proves the caller administers the namespace.
+    /// Deletes the current namespace by publishing a tombstone manifest, in
+    /// a new writer session that keeps its own publication lane for the
+    /// deletion. Earlier committed changes remain durable. Later operations
+    /// return `namespace_deleted`. `administrator` proves the caller
+    /// administers the namespace.
     pub async fn delete_namespace(
         &self,
         administrator: &Administrator,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
-        self.commit_engine()
-            .delete_namespace(administrator, options)
+        let mut engine = self.commit_engine();
+        let lane = engine.publication_lane();
+        let guard = lane.lock().await;
+        engine
+            .delete_namespace(&guard, administrator, options)
             .await
     }
 }

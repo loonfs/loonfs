@@ -137,7 +137,7 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
     );
     store.reset();
     let result = engine
-        .publish_batch(
+        .publish_batch_alone(
             vec![candidate],
             &OperationClock::start(clock.now_ms(), clock.clone()),
         )
@@ -176,11 +176,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         },
         publication.writer_id.clone(),
     );
-    engine
-        .position
-        .session_writer_epoch(&engine.namespace, &setup.writer_id)
-        .await
-        .expect("acquire writer");
+    engine.start_alone().await.expect("acquire writer");
     engine.invalidate_projection();
     let head_before = crate::test_support::namespace_store(&store, &namespace_id)
         .load_read_state()
@@ -188,7 +184,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         .expect("head");
     store.block_next();
     let batch = OperationClock::start(publication.now_ms, timer.clone());
-    let publish = engine.publish_batch(vec![put_candidate(&completed)], &batch);
+    let publish = engine.publish_batch_alone(vec![put_candidate(&completed)], &batch);
     let collect = async {
         store.wait_until_blocked().await;
         timer
@@ -269,7 +265,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     );
     let replay = CommitCandidate::new(create_directory_request("original", "original"));
     let original = engine
-        .publish_batch(
+        .publish_batch_alone(
             vec![replay.clone()],
             &OperationClock::start(setup.now_ms, timer.clone()),
         )
@@ -290,7 +286,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let candidates = vec![primary, alias, later, replay];
     let batch = OperationClock::start(publication.now_ms, timer.clone());
     let publish = async {
-        let mut result = engine.publish_batch(&candidates, &batch).await;
+        let mut result = engine.publish_batch_alone(&candidates, &batch).await;
         // The first attempt finds the proof expired after loading its view
         // and aborts; the retry owner tries again from the same origin.
         while result.results.iter().any(|result| {
@@ -301,7 +297,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
                 ))
             )
         }) {
-            result = engine.publish_batch(&candidates, &batch).await;
+            result = engine.publish_batch_alone(&candidates, &batch).await;
         }
         result
     };
@@ -405,7 +401,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     );
     let replay = CommitCandidate::new(create_directory_request("original", "original"));
     let original = engine
-        .publish_batch(
+        .publish_batch_alone(
             vec![replay.clone()],
             &OperationClock::start(setup.now_ms, timer.clone()),
         )
@@ -423,7 +419,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let later = CommitCandidate::new(create_directory_request("later", "later"));
     store.block_next();
     let batch = OperationClock::start(publication.now_ms, timer.clone());
-    let publish = engine.publish_batch(vec![primary, alias, later, replay], &batch);
+    let publish = engine.publish_batch_alone(vec![primary, alias, later, replay], &batch);
     let advance = async {
         store.wait_until_blocked().await;
         timer.0.store(2, Ordering::SeqCst);
@@ -546,7 +542,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
     );
     store.reset();
     let result = engine
-        .publish_batch(
+        .publish_batch_alone(
             vec![candidate.clone(), metadata],
             &OperationClock::start(publication.now_ms, timer.clone()),
         )
@@ -604,7 +600,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
     let later = CommitCandidate::new(create_directory_request("later", "later"));
     store.reset();
     let replay = engine
-        .publish_batch(
+        .publish_batch_alone(
             vec![candidate, later],
             &OperationClock::start(expired.now_ms, timer.clone()),
         )
@@ -719,16 +715,12 @@ async fn a_commit_after_an_embedded_writes_admission_window_is_refused_and_write
         },
         setup.writer_id.clone(),
     );
-    engine
-        .position
-        .session_writer_epoch(&engine.namespace, &setup.writer_id)
-        .await
-        .expect("acquire writer");
+    engine.start_alone().await.expect("acquire writer");
     engine.invalidate_projection();
     store.reset();
 
     let result = engine
-        .publish_batch(
+        .publish_batch_alone(
             vec![candidate],
             &OperationClock::start(setup.now_ms + OWNED_STAGING_ADMISSION_WINDOW_MS, timer),
         )

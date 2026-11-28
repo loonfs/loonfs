@@ -674,7 +674,7 @@ async fn put_file_content_with_id<S: ObjectStore>(
         crate::test_support::namespace_store(store, namespace_id),
         context(1_000).writer_id.clone(),
     )
-    .publish_batch(
+    .publish_batch_alone(
         vec![CommitCandidate::prepared(
             CommitIntent::single(
                 loonfs_types::CommitId::generate(),
@@ -734,7 +734,7 @@ async fn publish_inline(
         crate::test_support::namespace_store(store, namespace_id),
         setup.writer_id.clone(),
     )
-    .publish_batch(
+    .publish_batch_alone(
         [CommitCandidate::with_inline_content(
             request,
             Vec::new(),
@@ -997,7 +997,7 @@ async fn a_collection_keeps_folded_fences_and_floor_objects_and_deletes_commit_o
         crate::test_support::namespace_store(&store, &namespace_id),
         setup.writer_id.clone(),
     )
-    .publish_batch(
+    .publish_batch_alone(
         vec![CommitCandidate::new(
             crate::test_support::create_directory_request("small", "a"),
         )],

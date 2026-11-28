@@ -37,7 +37,7 @@ async fn publish_inline(store: &SharedObjectStore, namespace_id: &NamespaceId) -
         loonfs_core::test_support::namespace_store(store, namespace_id),
         writer.writer_id.clone(),
     )
-    .publish_batch(
+    .publish_batch_alone(
         [CommitCandidate::with_inline_content(
             request,
             Vec::new(),

@@ -78,7 +78,7 @@ async fn commit<S: ObjectStore + ?Sized>(
         crate::test_support::namespace_store(store, namespace_id),
         context.writer_id.clone(),
     )
-    .publish_batch(vec![candidate], &context.clock())
+    .publish_batch_alone(vec![candidate], &context.clock())
     .await
     .results
     .pop()

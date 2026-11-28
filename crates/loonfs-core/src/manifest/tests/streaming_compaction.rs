@@ -2753,7 +2753,7 @@ async fn an_expired_job_and_a_deletion_each_prevent_publication() {
         .writer_id
         .clone(),
     )
-    .delete_namespace(
+    .delete_namespace_alone(
         &crate::test_support::administrator_of(store.inner(), &namespace),
         Default::default(),
     )
@@ -3083,7 +3083,7 @@ async fn a_unit_loads_no_manifest_to_plan() {
     // The session's claim and its load of the position come before the unit.
     let position = engine
         .commit_engine()
-        .load_position()
+        .load_position_alone()
         .await
         .expect("the session's position");
     let next = position
@@ -3095,7 +3095,11 @@ async fn a_unit_loads_no_manifest_to_plan() {
         .expect("next manifest number");
     store.reset();
     let outcome = engine
-        .compact_metadata_unit_from(&position, &MaintenanceCancellation::default())
+        .compact_metadata_unit_from(
+            &position,
+            &crate::publish::PublicationLane::new(),
+            &MaintenanceCancellation::default(),
+        )
         .await
         .expect("run a compaction unit");
     assert_matches!(

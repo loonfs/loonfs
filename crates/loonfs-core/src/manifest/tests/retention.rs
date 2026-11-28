@@ -468,7 +468,7 @@ async fn commit_directories_with_long_messages<S: ObjectStore + ?Sized>(
         crate::test_support::namespace_store(store, namespace_id),
         context.writer_id.clone(),
     )
-    .publish_batch(candidates, &context.clock())
+    .publish_batch_alone(candidates, &context.clock())
     .await
     .results
     {
@@ -1104,7 +1104,7 @@ async fn publish_directories<S: ObjectStore>(
         })
         .collect();
     for result in writer
-        .publish_batch(candidates, &test_context().clock())
+        .publish_batch_alone(candidates, &test_context().clock())
         .await
         .results
     {
@@ -1146,7 +1146,7 @@ async fn publish_one<S: ObjectStore>(
     operation: FilesystemOperation,
 ) -> crate::error::Result<loonfs_types::Commit> {
     writer
-        .publish_batch(
+        .publish_batch_alone(
             vec![CommitCandidate::new(CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
@@ -1191,7 +1191,7 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let planned = namespace.load_current_manifest().await.expect("planned");
     writer
-        .publish_floor_object(&planned, deletion_seq, &namespace.start_clock())
+        .publish_floor_object_alone(&planned, deletion_seq, &namespace.start_clock())
         .await
         .expect("create the floor object");
 
@@ -1280,11 +1280,11 @@ async fn two_advances_to_different_floors_leave_the_higher_floor() {
             .wal_no;
 
         writer
-            .publish_floor_object(&planned, first, &namespace.start_clock())
+            .publish_floor_object_alone(&planned, first, &namespace.start_clock())
             .await
             .expect("the first advance");
         let report = writer
-            .publish_floor_object(&planned, second, &namespace.start_clock())
+            .publish_floor_object_alone(&planned, second, &namespace.start_clock())
             .await
             .expect("the second advance");
         assert_eq!(report.retention_floor_seq, CommitSeq(2));
@@ -1701,6 +1701,7 @@ async fn snapshot_verification_rejects_a_deleted_namespace() {
             Default::default(),
             crate::commit::session_epoch::SessionEpoch::new(&std::sync::Mutex::default(), acquired),
             None,
+            &crate::publish::PublicationLane::new().lock().await,
             &context.clock(),
         )
         .await
@@ -1811,7 +1812,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
             },
         );
         engine
-            .publish_batch(vec![CommitCandidate::new(request)], &context.clock())
+            .publish_batch_alone(vec![CommitCandidate::new(request)], &context.clock())
             .await
             .results
             .remove(0)
@@ -1827,7 +1828,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         },
     );
     let original = engine
-        .publish_batch(
+        .publish_batch_alone(
             vec![CommitCandidate::new(request.clone())],
             &context.clock(),
         )
@@ -1840,7 +1841,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     store.reset();
 
     let replay = engine
-        .publish_batch(
+        .publish_batch_alone(
             vec![CommitCandidate::new(request.clone())],
             &context.clock(),
         )
@@ -1869,7 +1870,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         (new_request.clone(), ErrorCode::MaintenanceRequired),
     ] {
         let result = engine
-            .publish_batch(vec![CommitCandidate::new(candidate)], &context.clock())
+            .publish_batch_alone(vec![CommitCandidate::new(candidate)], &context.clock())
             .await;
         assert_eq!(result.results.len(), 1);
         assert_eq!(
@@ -1881,7 +1882,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         );
     }
     let mixed = engine
-        .publish_batch(
+        .publish_batch_alone(
             vec![
                 CommitCandidate::new(request),
                 CommitCandidate::new(new_request.clone()),
@@ -2052,7 +2053,10 @@ async fn a_unit_whose_replaced_basis_lost_an_input_segment_is_abandoned() {
             publish_directories(&mut writer, prefix, 2).await;
             writer.fold().await.expect("fold");
         }
-        let position = writer.load_position().await.expect("the writer's position");
+        let position = writer
+            .load_position_alone()
+            .await
+            .expect("the writer's position");
         let basis = namespace
             .load_current_basis(crate::test_support::observed_now())
             .await
@@ -2089,6 +2093,7 @@ async fn a_unit_whose_replaced_basis_lost_an_input_segment_is_abandoned() {
         .engine()
         .compact_metadata_unit_from(
             &position,
+            &crate::publish::PublicationLane::new(),
             &crate::compaction::MaintenanceCancellation::default(),
         )
         .await;
@@ -2493,7 +2498,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
         crate::test_support::namespace_store(&store, &namespace_id),
         context.writer_id.clone(),
     )
-    .load_position()
+    .load_position_alone()
     .await
     .expect("the session's position");
     let manifest_before = crate::test_support::namespace_store(&store, &namespace_id)
@@ -2518,7 +2523,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     );
     let overrun = OperationClock::start(0, clock);
     let Err(error) = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail_from(&position, &overrun)
+        .fold_wal_tail_in_new_lane(&position, &overrun)
         .await
     else {
         panic!("over-budget publication must abort");

@@ -11,6 +11,7 @@ pub(crate) mod candidates;
 pub(crate) mod engine;
 mod error;
 mod plan;
+pub(crate) mod publication_lane;
 pub(crate) mod publish_view;
 pub(crate) mod published_manifest;
 mod session;

@@ -483,25 +483,27 @@ impl PublisherRegistry {
             .map(|report| report.response)
     }
 
-    /// Records `published`, a manifest that this runtime published or found
-    /// current, without waiting for the engine of the namespace's writer
-    /// session. The session's position moves onto it from then on, or is
-    /// dropped when it can't move there (see
+    /// Finishes the record of `published`, a manifest that an item of the
+    /// lane of the namespace's writer session in this runtime published or
+    /// found current, and recorded as the session's newest published
+    /// manifest before it dropped the lane, without waiting for the
+    /// session's engine. The session's positions move onto the recorded
+    /// manifest from then on, or are dropped when they can't move there (see
     /// [`PublishedManifest::follow`](loonfs_core::publish::PublishedManifest::follow)),
     /// and the runtime drops the namespace's cached head unless the cached
-    /// head is already against that manifest or a later one (see
+    /// head is already against `published` or a later manifest (see
     /// [`HeadAndWalTailCache::confirm_or_drop_head`](loonfs_core::cache::HeadAndWalTailCache::confirm_or_drop_head)).
     pub(crate) fn record_manifest_published(
         &self,
         namespace_id: &NamespaceId,
         published: &Held<LoadedManifest>,
     ) {
-        // The session records the manifest first, so a session that closes
-        // between the two steps hands the cached head a position on
-        // `published`, which the confirmation keeps, and not a position on an
-        // older manifest, which nothing would drop.
+        // The session's positions follow the manifest first, so a session
+        // that closes between the two steps hands the cached head a position
+        // on `published`, which the confirmation keeps, and not a position on
+        // an older manifest, which nothing would drop.
         if let Some(publisher) = self.live_publisher(namespace_id) {
-            publisher.record_published(published);
+            publisher.follow_published();
         }
         self.shared
             .context

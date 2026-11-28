@@ -836,7 +836,7 @@ async fn fork_into_a_deleted_id_leaves_no_source_snapshot() {
         crate::test_support::namespace_store(&store, &target),
         context.writer_id.clone(),
     )
-    .delete_namespace(
+    .delete_namespace_alone(
         &crate::test_support::administrator_of(&store, &target),
         Default::default(),
     )
@@ -967,7 +967,7 @@ async fn a_deletion_publishes_its_tombstone_from_the_position_its_fold_moved() {
     store.reset();
 
     let deleted = engine
-        .delete_namespace(
+        .delete_namespace_alone(
             &crate::test_support::administrator_of(&store, &namespace_id),
             Default::default(),
         )
@@ -1225,7 +1225,7 @@ async fn a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a
         context().writer_id,
     );
     let stale = engine
-        .delete_namespace(
+        .delete_namespace_alone(
             &crate::test_support::administrator_of(&store, &target),
             loonfs_types::options::DeleteNamespaceOptions {
                 expected_head_seq: Some(loonfs_types::CommitSeq(manifest_1.head_seq.0 + 1)),
@@ -1235,7 +1235,7 @@ async fn a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a
     assert_matches!(stale, Err(CoreError::StaleHeadPrecondition { .. }));
     store.reset();
     let deleted = engine
-        .delete_namespace(
+        .delete_namespace_alone(
             &crate::test_support::administrator_of(&store, &target),
             Default::default(),
         )
@@ -1293,7 +1293,7 @@ async fn delete<S: ObjectStore + Clone>(
         NamespaceFixture::new(store, namespace_id, &context()).namespace,
         context().writer_id,
     )
-    .delete_namespace(&administrator, Default::default())
+    .delete_namespace_alone(&administrator, Default::default())
     .await
 }
 

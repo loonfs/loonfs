@@ -162,6 +162,15 @@ pub struct WriterPosition {
     pub(crate) tail: Arc<ProjectedWalTail>,
 }
 
+/// A position is the position that a publication from it builds on, as a
+/// [`LaneTurn`](crate::publish::LaneTurn) is, so a runtime can start a
+/// publication from either.
+impl AsRef<WriterPosition> for WriterPosition {
+    fn as_ref(&self) -> &WriterPosition {
+        self
+    }
+}
+
 impl WriterPosition {
     /// Returns the head and the manifest it was read above, with the last
     /// check of that manifest.
@@ -293,29 +302,38 @@ pub enum PositionCheck {
     Drop,
 }
 
+/// Where the view of one publication unit starts.
+#[derive(Debug)]
+pub(crate) enum ViewStart {
+    /// The session's position, once the store shows that its manifest is
+    /// still there, and otherwise the writer's load.
+    Position(Box<WriterPosition>),
+    /// The discovery of the session's claim.
+    Anchor(Box<WriterAnchor>),
+    /// The writer's load: the namespace's current state in the store.
+    Load,
+}
+
 enum ViewSource<'a, S: ObjectStore + ?Sized> {
     Cached(Box<WriterPosition>, Box<VerifiedMetadataSegments<'a, S>>),
     Cold(Box<WriterAnchor>),
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Loads the view that a batch publishes from. The view starts from
-    /// `acquired_anchor` when the caller passes one, and otherwise from
-    /// `cached_position`, unless the position's manifest is missing from the
-    /// store and at or below the manifest boundary (see
-    /// `load_held_manifest`). Without either, the view starts from the
-    /// namespace's current state in the store, found by a discovery that
-    /// began after `attempt`, an observation that the caller read before the
-    /// call.
+    /// Loads the view that a batch publishes from, from `start`. A position
+    /// whose manifest is missing from the store and at or below the manifest
+    /// boundary (see `load_held_manifest`) starts from the writer's load
+    /// instead, as a session without a position does, from the namespace's
+    /// current state in the store, found by a discovery that began after
+    /// `attempt`, an observation that the caller read before the call.
     pub(crate) async fn load_publish_metadata_view(
         &self,
         acquired_writer: AcquiredWriter,
-        cached_position: Option<WriterPosition>,
-        acquired_anchor: Option<WriterAnchor>,
+        start: ViewStart,
         attempt: Observation,
     ) -> Result<PublishMetadataView<'_, S>> {
-        let cached = match cached_position.filter(|_| acquired_anchor.is_none()) {
-            Some(cached) => self
+        let source = match start {
+            ViewStart::Position(cached) => self
                 .load_held_manifest(
                     cached.read_basis().basis.manifest(),
                     cached.basis.boundary().clone(),
@@ -323,14 +341,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .await?
                 .map(|decoded| {
                     let segments = self.segments(decoded, self.keeper(KeptBy::Current));
-                    ViewSource::Cached(Box::new(cached), Box::new(segments.segments))
+                    ViewSource::Cached(cached, Box::new(segments.segments))
                 }),
-            None => None,
+            ViewStart::Anchor(anchor) => Some(ViewSource::Cold(anchor)),
+            ViewStart::Load => None,
         };
-        let source = match (cached, acquired_anchor) {
-            (Some(cached), _) => cached,
-            (None, Some(anchor)) => ViewSource::Cold(Box::new(anchor)),
-            (None, None) => ViewSource::Cold(Box::new(
+        let source = match source {
+            Some(source) => source,
+            None => ViewSource::Cold(Box::new(
                 self.load_writer_read_anchor(&acquired_writer, attempt)
                     .await?,
             )),

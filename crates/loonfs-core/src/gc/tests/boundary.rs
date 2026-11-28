@@ -503,7 +503,7 @@ async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
         )]
     };
     session
-        .publish_batch(commit("before"), &setup.clock())
+        .publish_batch_alone(commit("before"), &setup.clock())
         .await
         .results[0]
         .as_ref()
@@ -534,7 +534,7 @@ async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
     );
     for expected_deleted in [false, true] {
         let published = session
-            .publish_batch(commit("after"), &eligible.clock())
+            .publish_batch_alone(commit("after"), &eligible.clock())
             .await
             .results
             .remove(0);

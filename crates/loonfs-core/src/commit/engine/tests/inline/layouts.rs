@@ -322,6 +322,7 @@ async fn a_combined_span_must_match_its_objects_stored_checksum() {
     let mut session = NamespaceCommitEngine {
         namespace: crate::test_support::namespace_store(&incorrect, &namespace_id),
         writer_id: engine.writer_id,
+        lane: engine.lane.clone(),
         position: engine.position,
     };
     let error = session
@@ -1284,7 +1285,7 @@ async fn two_chains_in_one_fold_share_one_write_permit() {
         ..crate::test_support::namespace_store(&blocked, &namespace_id)
     };
     let position = engine.writer_position().expect("the session's position");
-    let mut fold = std::pin::pin!(namespace.fold_wal_tail_from(&position, &deadline));
+    let mut fold = std::pin::pin!(namespace.fold_wal_tail_in_new_lane(&position, &deadline));
     tokio::select! {
         () = blocked.inner().wait_until_blocked() => {}
         _ = &mut fold => panic!("fold finished before the content write"),
@@ -1669,7 +1670,7 @@ async fn a_pending_reference_keeps_its_chain_through_a_floor_advance() {
             .await
             .expect("commit reference");
         crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal_tail_from(
+            .fold_wal_tail_in_new_lane(
                 &fold,
                 &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
             )

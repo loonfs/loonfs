@@ -161,7 +161,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
             crate::test_support::namespace_store(&store, &namespace_id),
             crate::test_support::writer_at("test-writer", 0).writer_id,
         )
-        .load_position()
+        .load_position_alone()
         .await
         .expect("the session's position");
         store.inner().inner().reset();
@@ -174,8 +174,9 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
             },
             ..crate::test_support::namespace_store(&store, &namespace_id)
         };
-        let (result, verified_manifest) =
-            tokio::try_join!(namespace.fold_wal_tail_from(&position, &deadline), async {
+        let (result, verified_manifest) = tokio::try_join!(
+            namespace.fold_wal_tail_in_new_lane(&position, &deadline),
+            async {
                 store.wait_until_blocked().await;
                 let manifest = captured
                     .lock()
@@ -196,8 +197,9 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
                 verify_segments(&store, descriptors, &expected).await;
                 store.release();
                 Ok(manifest)
-            })
-            .expect("fold");
+            }
+        )
+        .expect("fold");
         assert_eq!(result.response.outcome, FoldWalOutcome::Published);
         let published = crate::test_support::namespace_store(&store, &namespace_id)
             .load_current_manifest()

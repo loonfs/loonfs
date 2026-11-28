@@ -1671,7 +1671,7 @@ async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
             ));
             store.take();
             let result = engine
-                .publish_batch(vec![candidate], &context.clock())
+                .publish_batch_alone(vec![candidate], &context.clock())
                 .await
                 .results
                 .into_iter()

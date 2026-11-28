@@ -422,16 +422,17 @@ impl Namespace<Writable> {
     /// when it has none.
     ///
     /// The publication lists `entry` as the extension's entry and changes
-    /// nothing else. When another manifest follows the position's first with
-    /// the same entry of `name`, such as the session's own fold, the change
-    /// is published over that manifest. When the position's manifest has
-    /// another entry, the call checks that the manifest is still the newest,
-    /// publishes nothing and returns [`ExtensionPublication::Superseded`].
-    /// When a manifest that another writer published is in the way, the
-    /// call returns `writer_fenced`. A `basis` loaded from another namespace
-    /// returns `invalid_request` before anything is claimed. After a
-    /// publication, this runtime's next read of the namespace starts from
-    /// the published manifest or a newer one. See
+    /// nothing else. It is one item of the session's publication lane, so it
+    /// builds on the newest manifest that the session published, such as the
+    /// session's own fold, and a put that loses to a manifest with the same
+    /// entry of `name` is published over that manifest. When the position's
+    /// manifest has another entry, the call checks that the manifest is
+    /// still the newest, publishes nothing and returns
+    /// [`ExtensionPublication::Superseded`]. When a manifest that another
+    /// writer published is in the way, the call returns `writer_fenced`. A
+    /// `basis` loaded from another namespace returns `invalid_request` before
+    /// anything is claimed. After a publication, this runtime's next read of
+    /// the namespace starts from the published manifest or a newer one. See
     /// [Extensions](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#124-extensions).
     pub async fn publish_extension(
         &self,

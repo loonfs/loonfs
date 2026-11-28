@@ -224,18 +224,20 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
     assert_eq!(kept.state(), entry.state());
 }
 
-/// A publication of the session's own that copies an extension's entry,
-/// which the session publishes after an extension's change took its
-/// position.
+/// A publication that copies an extension's entry, which another session of
+/// the writer's epoch (the test support's same-epoch publisher) publishes
+/// after an extension's change took its position. A publication of the
+/// change's own session would wait for the change in the session's
+/// publication lane instead.
 #[derive(Debug, Clone, Copy)]
-enum OwnCopy {
+enum RivalCopy {
     Fold,
     Compaction,
     RetentionAdvance,
     RetentionWindow,
 }
 
-impl OwnCopy {
+impl RivalCopy {
     async fn publish(self, store: &LocalFsStore, namespace_id: &NamespaceId) {
         let fixture = NamespaceFixture::new(store, namespace_id, &test_context());
         match self {
@@ -290,22 +292,23 @@ async fn session_position(
         .fixture_writer_session()
         .await
         .expect("the writer's session")
-        .load_position()
+        .load_position_alone()
         .await
         .expect("the session's position")
 }
 
-/// Checks that an extension's publication whose put loses to the session's
-/// own fold, compaction, retention advance, or retention window change,
-/// published after the change took its position, is built again over the
-/// manifest that won, which copied the entry, and changes only the entry.
+/// Checks that an extension's publication whose put loses to a fold,
+/// compaction, retention advance, or retention window change of another
+/// session of the writer's epoch, published after the change took its
+/// position, is built again over the manifest that won, which copied the
+/// entry, and changes only the entry.
 #[tokio::test]
-async fn an_extension_publication_that_loses_to_the_sessions_copy_of_its_entry_is_rebuilt() {
+async fn an_extension_publication_that_loses_to_a_rival_copy_of_its_entry_is_rebuilt() {
     for copy in [
-        OwnCopy::Fold,
-        OwnCopy::Compaction,
-        OwnCopy::RetentionAdvance,
-        OwnCopy::RetentionWindow,
+        RivalCopy::Fold,
+        RivalCopy::Compaction,
+        RivalCopy::RetentionAdvance,
+        RivalCopy::RetentionWindow,
     ] {
         let directory = tempdir().expect("directory");
         let store = LocalFsStore::new(directory.path()).expect("store");
@@ -317,7 +320,7 @@ async fn an_extension_publication_that_loses_to_the_sessions_copy_of_its_entry_i
                 .write_file_bytes(path, path.as_bytes(), None)
                 .await
                 .expect("write");
-            OwnCopy::Fold.publish(&store, &namespace_id).await;
+            RivalCopy::Fold.publish(&store, &namespace_id).await;
         }
         publish_entry(&fixture, "active").await;
         fixture
@@ -338,7 +341,12 @@ async fn an_extension_publication_that_loses_to_the_sessions_copy_of_its_entry_i
         );
 
         let rebuilt = crate::test_support::namespace_store(&store, &namespace_id)
-            .publish_extension_from(&position, &stale, &grep(), entry_after(&stale, "rebuilt"))
+            .publish_extension_in_new_lane(
+                &position,
+                &stale,
+                &grep(),
+                entry_after(&stale, "rebuilt"),
+            )
             .await
             .expect("publish");
         assert!(
@@ -385,7 +393,7 @@ async fn an_extension_publication_over_a_collected_position_manifest_reports_the
         .write_file_bytes("/a", b"a", None)
         .await
         .expect("write");
-    OwnCopy::Fold.publish(&store, &namespace_id).await;
+    RivalCopy::Fold.publish(&store, &namespace_id).await;
     publish_entry(&fixture, "active").await;
     let basis = fixture
         .engine()
@@ -396,7 +404,7 @@ async fn an_extension_publication_over_a_collected_position_manifest_reports_the
     let collected = position.read_basis().basis.manifest_no();
     // A window change publishes the manifest after the position's, and a
     // collection deletes the position's manifest, the only one old enough.
-    OwnCopy::RetentionWindow
+    RivalCopy::RetentionWindow
         .publish(&store, &namespace_id)
         .await;
     let newest = current_manifest(&store, &namespace_id).await;
@@ -417,7 +425,7 @@ async fn an_extension_publication_over_a_collected_position_manifest_reports_the
     assert_eq!(report.deleted.manifests, 1);
 
     let published = crate::test_support::namespace_store(&store, &namespace_id)
-        .publish_extension_from(&position, &basis, &grep(), entry_after(&basis, "next"))
+        .publish_extension_in_new_lane(&position, &basis, &grep(), entry_after(&basis, "next"))
         .await;
     assert_matches!(published, Err(CoreError::HeadMoved(_)));
     assert_eq!(
@@ -442,7 +450,7 @@ async fn an_extension_publication_whose_entry_the_session_replaced_publishes_not
         .write_file_bytes("/a", b"a", None)
         .await
         .expect("write");
-    OwnCopy::Fold.publish(&store, &namespace_id).await;
+    RivalCopy::Fold.publish(&store, &namespace_id).await;
     let engine = fixture.engine();
     let stale = engine.load_extension_basis().await.expect("basis");
     let won = publish_entry(&fixture, "won").await;
@@ -452,7 +460,7 @@ async fn an_extension_publication_whose_entry_the_session_replaced_publishes_not
 
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let lost = namespace
-        .publish_extension_from(&position, &stale, &grep(), entry_after(&stale, "lost"))
+        .publish_extension_in_new_lane(&position, &stale, &grep(), entry_after(&stale, "lost"))
         .await
         .expect("publish");
     assert!(matches!(lost.response, ExtensionPublication::Superseded));
@@ -475,7 +483,7 @@ async fn an_extension_publication_whose_entry_the_session_replaced_publishes_not
         .await
         .expect("delete");
     let deleted = namespace
-        .publish_extension_from(&position, &basis, &grep(), entry_after(&basis, "deleted"))
+        .publish_extension_in_new_lane(&position, &basis, &grep(), entry_after(&basis, "deleted"))
         .await
         .expect_err("a tombstone has no successor");
     assert!(

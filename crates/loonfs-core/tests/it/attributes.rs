@@ -115,7 +115,7 @@ async fn publish_request<S: ObjectStore>(
     context: &WriterAt,
 ) -> Result<loonfs_types::Commit, CoreError> {
     engine
-        .publish_batch(vec![CommitCandidate::new(request)], &context.clock())
+        .publish_batch_alone(vec![CommitCandidate::new(request)], &context.clock())
         .await
         .results
         .remove(0)

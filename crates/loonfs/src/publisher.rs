@@ -1,9 +1,16 @@
 //! Runtime publication service for namespace mutations.
 //!
-//! Each namespace writer session has one queue. Concurrent commits may share
-//! a WAL object and head update. Duplicate commit IDs join in flight,
-//! conflicting reuse is rejected, and namespace deletion and retention
-//! advances are ordered with other mutations.
+//! Each namespace writer session has two serial queues: the commit queue,
+//! which sends its WAL puts, and the publication lane, which sends its
+//! manifest puts. Concurrent commits may share a WAL object and head update.
+//! Duplicate commit IDs join in flight, conflicting reuse is rejected, and
+//! namespace deletion and retention advances are ordered with other
+//! mutations. Every manifest publication of the session other than a claim
+//! (a fold, a compaction unit, an extension entry, a window change, a
+//! deletion's manifests, and a snapshot's record put with its verification)
+//! takes its turn in the lane, and a claim keeps the lane and the commit
+//! queue while it runs. A commit of a session that has its writer epoch never
+//! waits for a manifest put.
 //!
 //! A new commit that reaches the write stop waits at the front of the queue
 //! for the session's fold, for at most the publication policy's write-stop
@@ -42,7 +49,8 @@ use folds::NamespaceTurns;
 pub(crate) use folds::{fold_due, FoldDue, FoldWhen, NamespaceFold, WalTailState};
 use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::{
-    NamespaceCommitEngine, WriterSessionStatus, WriterSessionStatusGuard, WriterSessionStatusView,
+    NamespaceCommitEngine, PublicationLane, UnitStart, WriterSessionStatus,
+    WriterSessionStatusGuard, WriterSessionStatusView,
 };
 use loonfs_core::time::Observation;
 use loonfs_core::MaintenanceCancellation;
@@ -81,8 +89,14 @@ struct PublisherContext {
     admission: Arc<PublicationAdmission>,
 }
 
-/// The commit queue and publication worker for one namespace's writer
-/// session.
+/// The commit queue, the publication lane and the publication worker for one
+/// namespace's writer session.
+///
+/// The session's locks are taken in one order: the namespace's fold lock,
+/// then the publication lane, then the engine, which is the commit queue. No
+/// task takes the lane while it has the engine, so a claim, which keeps the
+/// lane and the engine, can't wait for an item of the lane that waits for the
+/// engine.
 #[derive(Clone)]
 struct NamespacePublisher {
     context: Arc<PublisherContext>,
@@ -98,6 +112,11 @@ struct NamespacePublisher {
     /// process and can't be reconstructed from object storage. Invalidation
     /// drops only the engine's position and the position's WAL tail.
     engine: Arc<AsyncMutex<NamespaceCommitEngine<SharedObjectStore>>>,
+    /// The session's publication lane, through which every manifest
+    /// publication of the session goes, from the engine (see
+    /// [`PublicationLane`]). A unit of the commit queue never waits for it,
+    /// so a commit never waits for a manifest put.
+    lane: PublicationLane,
     /// The engine's position as of the last release of the engine, brought
     /// up to the newest manifest that this runtime published for the
     /// namespace, which reads in this runtime start from. A publication
@@ -254,6 +273,7 @@ impl NamespacePublisher {
             engine.published_manifest(),
         ));
         let session = engine.session_status();
+        let lane = engine.publication_lane();
         Self {
             context: Arc::clone(&shared.context),
             namespace_id,
@@ -271,6 +291,7 @@ impl NamespacePublisher {
                 counted_candidates: 0,
             })),
             engine: Arc::new(AsyncMutex::new(engine)),
+            lane,
             read_position,
             session,
             shared: Arc::downgrade(shared),
@@ -414,10 +435,41 @@ impl NamespacePublisher {
     /// the session's writer epoch that a read's check found, or drops the
     /// position when it can't move there, once no other task has the engine
     /// locked (see [`Self::drop_position`]). A manifest that this runtime
-    /// publishes doesn't wait for the engine: the publication records it in
-    /// `read_position`.
+    /// publishes doesn't wait for the engine: the item of the publication
+    /// lane that published it records it as the session's newest published
+    /// manifest.
     pub(super) async fn move_position(&self, newest: Held<LoadedManifest>) {
         self.lock_engine().await.move_position_onto(newest);
+    }
+
+    /// Locks the engine for one unit of the commit queue, a commit batch or a
+    /// retention advance, or for a load of the session's position outside
+    /// the publication lane (see [`Self::writer_position`]), and returns
+    /// where the unit or the load starts.
+    ///
+    /// A session that has its writer epoch starts from its position, or from
+    /// the writer's load, with the engine alone. A session without its epoch
+    /// claims it first, and a claim keeps the publication lane and the
+    /// engine, so the worker releases the engine, takes the lane, and takes
+    /// the engine again, in the order of the session's locks. The claim then
+    /// waits for the publication of the lane in flight, and the worker
+    /// releases the lane before the unit's put. A fenced session returns
+    /// `writer_fenced`.
+    pub(super) async fn lock_engine_for_unit(
+        &self,
+    ) -> std::result::Result<(LockedEngine<'_>, UnitStart), CoreError> {
+        let engine = self.lock_engine().await;
+        if let Some(start) = engine.kept_start()? {
+            return Ok((engine, start));
+        }
+        drop(engine);
+        let lane = self.lane.lock().await;
+        let mut engine = self.lock_engine().await;
+        if let Some(start) = engine.kept_start()? {
+            return Ok((engine, start));
+        }
+        let claim = engine.claim(&lane).await?;
+        Ok((engine, UnitStart::Claimed(claim)))
     }
 
     pub(super) async fn lock_engine(&self) -> LockedEngine<'_> {
@@ -473,7 +525,7 @@ impl NamespacePublisher {
             }
         }
         // The engine is unlocked with the published manifest locked, after
-        // both positions follow it (see `Self::record_published`).
+        // both positions follow it (see `Self::follow_published`).
         let recorded = self.read_position.published().lock();
         let replaced = engine.follow_published(&recorded);
         let followed = self.read_position.follow_stored(&recorded);
@@ -483,30 +535,28 @@ impl NamespacePublisher {
         self.read_position.finish_follow(followed);
     }
 
-    /// Records `published`, a manifest that this runtime published or found
-    /// current, as the session's newest published manifest, without waiting
-    /// for the engine. When no task has the engine locked, the engine's
-    /// position and the position that reads start from move onto the
-    /// manifest at once, and otherwise the engine's release moves both.
+    /// Brings the engine's position and the position that reads start from
+    /// up to the session's newest published manifest, which an item of the
+    /// publication lane recorded, without waiting for the engine. When no
+    /// task has the engine locked, both positions move onto the manifest at
+    /// once, and otherwise the engine's release moves both.
     ///
     /// Either way neither position keeps the tail that the manifest folded,
-    /// whatever the order of events. The record and the attempt to lock the
-    /// engine run with the published manifest locked, and so does the
-    /// release's move of both positions and its unlock of the engine. So
-    /// either the record comes before the release's move, which then follows
-    /// the manifest, or it comes after the unlock, and the attempt finds the
-    /// engine free, or locked by a later task, whose release comes after the
-    /// record. A unit that stores its position before the record and
-    /// releases the engine after it is the first case.
+    /// whatever the order of events. The record came before this call, and
+    /// the attempt to lock the engine runs with the published manifest
+    /// locked, and so does the release's move of both positions and its
+    /// unlock of the engine. So either the record comes before the release's
+    /// move, which then follows the manifest, or the release comes before
+    /// this attempt, which then finds the engine free, or locked by a later
+    /// task, whose release comes after the record.
     ///
-    /// Under the published manifest's lock run only the record, the two
-    /// follows with their stores, and the unlock of the engine. Dropping the
-    /// positions that the follows replaced, which can free a large WAL tail,
-    /// and handing a removed read position's tail to the read cache run
-    /// after the unlock.
-    pub(super) fn record_published(&self, published: &Held<LoadedManifest>) {
-        let mut recorded = self.read_position.published().lock();
-        recorded.record(published);
+    /// Under the published manifest's lock run only the two follows with
+    /// their stores, and the unlock of the engine. Dropping the positions
+    /// that the follows replaced, which can free a large WAL tail, and
+    /// handing a removed read position's tail to the read cache run after the
+    /// unlock.
+    pub(super) fn follow_published(&self) {
+        let recorded = self.read_position.published().lock();
         let Ok(mut engine) = self.engine.try_lock() else {
             return;
         };

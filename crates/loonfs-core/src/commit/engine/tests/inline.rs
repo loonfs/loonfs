@@ -50,11 +50,7 @@ async fn setup() -> (
         crate::test_support::namespace_store(Arc::clone(&store), &namespace_id),
         context.writer_id.clone(),
     );
-    engine
-        .position
-        .session_writer_epoch(&engine.namespace, &context.writer_id)
-        .await
-        .expect("acquire writer");
+    engine.load_position_alone().await.expect("acquire writer");
     store.reset();
     (directory, store, engine, context)
 }
@@ -113,7 +109,7 @@ async fn publish<S: ObjectStore>(
     candidate: CommitCandidate,
 ) -> Result<Commit> {
     engine
-        .publish_batch([candidate], &context.clock())
+        .publish_batch_alone([candidate], &context.clock())
         .await
         .results
         .pop()
@@ -533,7 +529,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
     for (index, input) in [advanced, reloaded].into_iter().enumerate() {
         store.reset();
         let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-            .fold_wal_tail_from(
+            .fold_wal_tail_in_new_lane(
                 &input,
                 &crate::time::OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
             )

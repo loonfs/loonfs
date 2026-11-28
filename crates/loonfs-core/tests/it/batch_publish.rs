@@ -1877,7 +1877,7 @@ async fn mixed_preconditions_report_the_first_failure_and_write_nothing() {
         context.writer_id.clone(),
     );
     engine
-        .publish_batch(
+        .publish_batch_alone(
             vec![CommitCandidate::new(scoped_directory("seed", vec![]))],
             &context.clock(),
         )
@@ -1905,7 +1905,7 @@ async fn mixed_preconditions_report_the_first_failure_and_write_nothing() {
     .enumerate()
     {
         let result = engine
-            .publish_batch(
+            .publish_batch_alone(
                 vec![CommitCandidate::new(scoped_directory(
                     &format!("mixed-{index}"),
                     preconditions,
@@ -1943,7 +1943,7 @@ async fn precondition_limit_rejects_before_planning_and_writes_nothing() {
         context.writer_id.clone(),
     );
     engine
-        .publish_batch(
+        .publish_batch_alone(
             vec![CommitCandidate::new(directory_with_preconditions(
                 "seed",
                 "/seed",
@@ -1964,7 +1964,7 @@ async fn precondition_limit_rejects_before_planning_and_writes_nothing() {
             loonfs_core::limits::MAX_COMMIT_PRECONDITIONS + 1
         ]);
     let error = engine
-        .publish_batch(vec![CommitCandidate::new(request)], &context.clock())
+        .publish_batch_alone(vec![CommitCandidate::new(request)], &context.clock())
         .await
         .results
         .remove(0)

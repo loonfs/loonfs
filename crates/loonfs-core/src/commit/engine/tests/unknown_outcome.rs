@@ -83,7 +83,7 @@ async fn a_stalled_put_after_an_unknown_outcome_is_never_written_at_an_emptied_n
 
     store.fail_next(1);
     let lost = engine
-        .publish_batch(vec![create_dir("beta", "beta")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("beta", "beta")], &writer.clock())
         .await;
     assert_matches!(
         lost.results.as_slice(),
@@ -126,7 +126,7 @@ async fn publish_while_the_put_is_written_and_collected(
     let (in_flight_key, in_flight_bytes) = in_flight;
     store.inner().block_next();
     let clock = writer.clock();
-    let stalled = engine.publish_batch(vec![create_dir(name, name)], &clock);
+    let stalled = engine.publish_batch_alone(vec![create_dir(name, name)], &clock);
     let meanwhile = async {
         store.inner().wait_until_blocked().await;
         local
@@ -214,7 +214,7 @@ async fn a_dropped_publish_future_leaves_the_session_without_its_epoch() {
     store.inner().block_next();
     {
         let clock = writer.clock();
-        let dropped = engine.publish_batch(vec![create_dir("beta", "beta")], &clock);
+        let dropped = engine.publish_batch_alone(vec![create_dir("beta", "beta")], &clock);
         tokio::select! {
             _ = dropped => panic!("the put of beta is held"),
             () = store.inner().wait_until_blocked() => {}
@@ -284,7 +284,7 @@ async fn a_publish_future_dropped_while_planning_leaves_the_session_acquired() {
     store.block_next();
     {
         let clock = writer.clock();
-        let dropped = engine.publish_batch(vec![create_dir("beta", "alpha/beta")], &clock);
+        let dropped = engine.publish_batch_alone(vec![create_dir("beta", "alpha/beta")], &clock);
         tokio::select! {
             _ = dropped => panic!("planning beta is held"),
             () = store.wait_until_blocked() => {}
@@ -354,7 +354,7 @@ async fn a_lost_fence_acknowledgment_never_fences_a_lone_writer() {
 
     store.fail_next(1);
     let lost = engine
-        .publish_batch(vec![create_dir("beta", "beta")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("beta", "beta")], &writer.clock())
         .await;
     assert_matches!(
         lost.results.as_slice(),
@@ -365,7 +365,7 @@ async fn a_lost_fence_acknowledgment_never_fences_a_lone_writer() {
     // The next WAL put is the fence, and its acknowledgment is lost too.
     store.fail_next(1);
     let fence_lost = engine
-        .publish_batch(vec![create_dir("gamma", "gamma")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("gamma", "gamma")], &writer.clock())
         .await;
     assert_eq!(
         fence_lost.results[0]
@@ -375,7 +375,7 @@ async fn a_lost_fence_acknowledgment_never_fences_a_lone_writer() {
         ErrorCode::OutcomeUnknown
     );
     let gamma = engine
-        .publish_batch(vec![create_dir("gamma", "gamma")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("gamma", "gamma")], &writer.clock())
         .await;
     gamma.results[0]
         .as_ref()
@@ -413,7 +413,7 @@ async fn an_unknown_floor_object_put_leaves_the_session_acquired() {
     store.fail_next(1);
     assert_matches!(
         engine
-            .publish_floor_object(&planned, CommitSeq(1), &writer.clock())
+            .publish_floor_object_alone(&planned, CommitSeq(1), &writer.clock())
             .await,
         Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(_)))
     );
@@ -450,7 +450,7 @@ async fn a_session_whose_put_was_unknown_claims_past_a_takeover() {
 
     store.fail_next(1);
     let lost = engine
-        .publish_batch(vec![create_dir("beta", "beta")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("beta", "beta")], &writer.clock())
         .await;
     assert_matches!(
         lost.results.as_slice(),
@@ -478,7 +478,7 @@ async fn a_session_whose_put_was_unknown_claims_past_a_takeover() {
         takeover,
     );
     let fenced = engine_b
-        .publish_batch(vec![create_dir("delta", "delta")], &writer_b.clock())
+        .publish_batch_alone(vec![create_dir("delta", "delta")], &writer_b.clock())
         .await;
     assert_eq!(
         fenced.results[0]
@@ -517,7 +517,7 @@ async fn an_acquisition_that_finds_a_later_claim_fences_the_session() {
 
     store.block_next();
     let clock = writer.clock();
-    let first = engine.publish_batch(vec![create_dir("alpha", "alpha")], &clock);
+    let first = engine.publish_batch_alone(vec![create_dir("alpha", "alpha")], &clock);
     let takeover = async {
         store.wait_until_blocked().await;
         namespace
@@ -546,7 +546,7 @@ async fn an_acquisition_that_finds_a_later_claim_fences_the_session() {
         .manifest_no;
 
     let second = engine
-        .publish_batch(vec![create_dir("beta", "beta")], &writer.clock())
+        .publish_batch_alone(vec![create_dir("beta", "beta")], &writer.clock())
         .await;
     assert_eq!(
         second.results[0]
