@@ -6,7 +6,7 @@ The WAL is also part of recovery and writer fencing. Keeping these operations to
 
 ## WAL numbers and commit sequences
 
-A WAL number identifies an object, and a commit sequence identifies a committed mutation. They're separate counters, because one WAL object can contain several commits, and a fence or a floor object contains none. A retention advance creates a [floor object](../specs/glossary.md#floor-object), which is a WAL object with no commits that records the new retention floor.
+A WAL number identifies an object, and a commit sequence identifies a committed mutation. They're separate counters, because one WAL object can contain several commits, and a fence or a floor object contains none. A [floor object](../specs/glossary.md#floor-object) is a WAL object with no commits that records a retention floor, which readers replay, and no writer creates one.
 
 For example, a namespace might have this log:
 

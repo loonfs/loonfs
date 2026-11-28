@@ -388,10 +388,11 @@ impl<S: ObjectStore + Clone> crate::engine::NamespaceEngine<S, crate::engine::Wr
     ///
     /// The advance plans the floor from the current manifest's floor, and
     /// returns that floor when the floor would not move. Otherwise, the
-    /// session puts a floor object at its tip,
-    /// unless the view that it loads already has the floor. Then, when no
-    /// manifest records the view's floor, the session folds the WAL tail, and
-    /// the report includes the fold's manifest, which records the floor.
+    /// session checks the segments of the manifest it planned from, folds
+    /// the WAL tail as an ordinary fold, and then publishes the manifest of
+    /// the fold of what arrived with the raised floor, which the report
+    /// includes (see
+    /// [`NamespaceCommitEngine::advance_retention_floor_alone`](crate::publish::NamespaceCommitEngine::advance_retention_floor_alone)).
     pub async fn advance_retention_floor(
         &self,
         target: crate::manifest::RetentionTarget,
@@ -401,35 +402,30 @@ impl<S: ObjectStore + Clone> crate::engine::NamespaceEngine<S, crate::engine::Wr
             .load_live_basis(crate::test_support::observed_now())
             .await?
             .into_manifest();
-        let mut session = self.namespace.fixture_writer_session().await?;
         let report = match self
             .namespace
             .plan_retention_floor(planned, planned.retention_floor_seq(), target)
             .await?
         {
             crate::manifest::RetentionPlan::Stays(retention_floor_seq) => {
-                crate::manifest::FloorObjectReport {
-                    retention_floor_seq,
-                    manifest_retention_floor_seq: planned.retention_floor_seq(),
+                crate::manifest::PublicationReport {
+                    response: retention_floor_seq,
+                    published: None,
                 }
             }
             crate::manifest::RetentionPlan::Moves(floor) => {
-                session
-                    .publish_floor_object_alone(planned, floor, &self.namespace.start_clock())
+                self.namespace
+                    .fixture_writer_session()
+                    .await?
+                    .advance_retention_floor_alone(planned, floor)
                     .await?
             }
         };
-        let published = if report.retention_floor_seq > report.manifest_retention_floor_seq {
-            session.fold().await?.published()
-        } else {
-            None
-        };
-        Ok(crate::manifest::PublicationReport {
-            response: loonfs_types::AdvanceRetentionResponse {
+        Ok(report.map(
+            |retention_floor_seq| loonfs_types::AdvanceRetentionResponse {
                 namespace_id: self.namespace.namespace_id.clone(),
-                retention_floor_seq: report.retention_floor_seq,
+                retention_floor_seq,
             },
-            published,
-        })
+        ))
     }
 }

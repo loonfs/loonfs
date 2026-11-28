@@ -700,6 +700,79 @@ async fn a_unit_and_its_split_pieces_reach_the_same_rows() {
     }
 }
 
+/// Checks that a base compaction prunes only at the floor of the manifest
+/// that it planned from, when a retention advance raises the floor before
+/// the compaction publishes: the rows that it publishes are the rows that
+/// the same compaction publishes without the advance, the manifest keeps the
+/// advance's floor, and a compaction planned at that floor drops more rows.
+#[tokio::test]
+async fn a_base_compaction_prunes_only_at_its_manifests_floor() {
+    let job_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(job_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_bindings_workload(&store, &namespace_id).await;
+    let group = MetadataFamilyGroup::Bindings;
+    let planned_floor = read_floor_seq(&store, &namespace_id).await;
+    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
+    assert_eq!(spec.frozen_floor_seq(), planned_floor);
+    let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
+    let Ok(result) = run_compaction(
+        &store,
+        &namespace_id,
+        &spec,
+        compact_everything_policy(),
+        &MaintenanceCancellation::default(),
+    )
+    .await
+    else {
+        panic!("nothing cancelled this job");
+    };
+
+    // The same durable bytes and output, published without the advance.
+    let without_dir = tempdir().expect("tempdir");
+    copy_store_tree(job_dir.path(), without_dir.path());
+    let without = LocalFsStore::new(without_dir.path()).expect("store");
+    publish_streaming_compaction(&without, &namespace_id, &spec, &input_keys, &result).await;
+    let pruned_at_the_plan = group_rows_of_current_manifest(&without, &namespace_id, group).await;
+
+    crate::test_support::NamespaceFixture::new(
+        &store,
+        &namespace_id,
+        &crate::test_support::writer_at(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(test_context().now_ms),
+        ),
+    )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
+    .await
+    .expect("advance the floor past the late deletion");
+    let raised_floor = read_floor_seq(&store, &namespace_id).await;
+    assert!(raised_floor > planned_floor, "the advance raises the floor");
+    publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, raised_floor);
+    let published = group_rows_of_current_manifest(&store, &namespace_id, group).await;
+    assert_eq!(
+        published, pruned_at_the_plan,
+        "the compaction prunes at the floor of the manifest it planned from"
+    );
+
+    // Teeth: a compaction planned at the raised floor drops more rows, so the
+    // comparison above would see a prune at that floor.
+    compact_group_whole(&store, &namespace_id, group).await;
+    let pruned_at_the_raised_floor =
+        group_rows_of_current_manifest(&store, &namespace_id, group).await;
+    let rows_of = |rows: &BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>>| {
+        rows.values().map(Vec::len).sum::<usize>()
+    };
+    assert!(
+        rows_of(&pruned_at_the_raised_floor) < rows_of(&published),
+        "{} rows at the raised floor, {} at the planned floor",
+        rows_of(&pruned_at_the_raised_floor),
+        rows_of(&published)
+    );
+}
+
 #[tokio::test]
 async fn compaction_keeps_retained_revisions_and_their_layouts() {
     let temp_dir = tempdir().expect("tempdir");

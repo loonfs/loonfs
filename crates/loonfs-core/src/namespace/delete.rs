@@ -33,7 +33,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // The deletion's whole run is bounded by the publication budget, so
         // a deletion past it writes nothing.
         clock.ensure_metadata_publication_budget(&self.namespace_id)?;
-        self.fold_while_paused(&position, lane, clock).await?;
+        self.fold_while_paused(&position, lane, clock, |_| {})
+            .await?;
         let turn = lane.acquired_turn();
         let payload = turn
             .basis()

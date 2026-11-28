@@ -6,7 +6,7 @@ use super::*;
 use loonfs_test_support::stores::RecordedOperation;
 
 /// Whether `operation` is the WAL put of a commit batch.
-fn is_commit_put(operation: &OperationContext<'_>) -> bool {
+pub(super) fn is_commit_put(operation: &OperationContext<'_>) -> bool {
     matches!(operation.kind(), OperationKind::Put { bytes, mode: PutMode::CreateIfAbsent }
     if decode_wal_object_envelope_zstd(bytes).is_ok_and(|wal| matches!(
         wal.payload().body,
@@ -21,12 +21,12 @@ fn is_tombstone_put(operation: &OperationContext<'_>) -> bool {
             .is_ok_and(|manifest| manifest.payload().status.is_deleted()))
 }
 
-/// A store that parks the deletion's ordinary fold at the put of its
+/// A store that parks an operation's ordinary fold at the put of its
 /// manifest, whose head is 1, and its fold of what arrived at the put of its
 /// manifest, whose head is 2, each once the test arms it.
-type TwoFoldStore = BlockingStore<BlockingStore<LocalFsStore>>;
+pub(super) type TwoFoldStore = BlockingStore<BlockingStore<LocalFsStore>>;
 
-fn two_fold_store(root: &Path) -> Arc<TwoFoldStore> {
+pub(super) fn two_fold_store(root: &Path) -> Arc<TwoFoldStore> {
     Arc::new(BlockingStore::matching(
         BlockingStore::matching(LocalFsStore::new(root).expect("store"), |operation| {
             is_fold_at(operation, CommitSeq(2))
@@ -35,9 +35,9 @@ fn two_fold_store(root: &Path) -> Arc<TwoFoldStore> {
     ))
 }
 
-/// The unpaced writer runtime and the open namespace whose session a
-/// deletion test drives, which the test keeps alive.
-struct SeededSession {
+/// The unpaced writer runtime and the open namespace whose session a test
+/// of a deletion or an advance drives, which the test keeps alive.
+pub(super) struct SeededSession {
     _writer: crate::LoonFs<crate::Writable>,
     _namespace: crate::Namespace<crate::Writable>,
 }
@@ -45,9 +45,9 @@ struct SeededSession {
 /// Returns the session's publisher of a new namespace in `store`, in an
 /// unpaced writer runtime, whose session committed one directory at
 /// sequence 1, which is unfolded. The session is in its runtime's table,
-/// so the session's check finds it, as it does for a refusal that a
-/// deletion computes from the session's position.
-async fn seeded_publisher(
+/// so the session's check finds it, as it does for a refusal that an
+/// operation computes from the session's position.
+pub(super) async fn seeded_publisher(
     store: SharedStore,
     namespace_id: &NamespaceId,
 ) -> (SeededSession, NamespacePublisher) {
@@ -77,9 +77,9 @@ async fn seeded_publisher(
     )
 }
 
-/// Folds the session's tail, so a deletion's ordinary fold finds nothing to
-/// fold and takes the lane at once for its pause.
-async fn fold_the_tail(publisher: &NamespacePublisher) {
+/// Folds the session's tail, so an operation's ordinary fold finds nothing
+/// to fold and takes the lane at once for its pause.
+pub(super) async fn fold_the_tail(publisher: &NamespacePublisher) {
     publisher
         .fold(FoldWhen::Always, &MaintenanceCancellation::default())
         .await
@@ -87,7 +87,7 @@ async fn fold_the_tail(publisher: &NamespacePublisher) {
 }
 
 /// Commits a directory and returns the commit, within a bound.
-async fn commit_now(publisher: &NamespacePublisher, name: &str) -> Commit {
+pub(super) async fn commit_now(publisher: &NamespacePublisher, name: &str) -> Commit {
     let namespace_id = publisher.namespace_id.clone();
     bounded(
         Duration::from_secs(10),
@@ -105,8 +105,8 @@ async fn commit_now(publisher: &NamespacePublisher, name: &str) -> Commit {
 }
 
 /// Yields until a task keeps the session's publication lane, which in these
-/// tests is a deletion's pause.
-async fn wait_until_the_lane_is_kept(publisher: &NamespacePublisher) {
+/// tests is a deletion's or an advance's pause.
+pub(super) async fn wait_until_the_lane_is_kept(publisher: &NamespacePublisher) {
     bounded(Duration::from_secs(10), async {
         loop {
             let kept = {
@@ -125,14 +125,14 @@ async fn wait_until_the_lane_is_kept(publisher: &NamespacePublisher) {
 
 /// Yields many times, so the session's worker would acknowledge a commit
 /// that it could publish.
-async fn let_the_worker_run() {
+pub(super) async fn let_the_worker_run() {
     for _ in 0..1_000 {
         tokio::task::yield_now().await;
     }
 }
 
 /// Returns the payload of the namespace's newest manifest.
-async fn newest_manifest<S: ObjectStore>(
+pub(super) async fn newest_manifest<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> loonfs_types::format::manifest::NamespaceManifestPayload {

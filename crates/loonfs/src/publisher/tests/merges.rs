@@ -87,12 +87,7 @@ async fn a_merge_is_published_alone_in_its_wal_object() {
     let batches = publisher_state(&publisher)
         .queue
         .iter()
-        .map(|item| match item {
-            WorkItem::Batch(batch) => batch.candidates.len(),
-            WorkItem::RetentionAdvance(_) => {
-                panic!("expected commit batch")
-            }
-        })
+        .map(|batch| batch.candidates.len())
         .collect::<Vec<_>>();
     assert_eq!(batches, [2, 1, 2]);
 

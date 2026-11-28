@@ -13,17 +13,14 @@ use super::unit_report::{UnitBasis, UnitReport};
 use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::publish::ManifestPublicationOutcome;
-use crate::manifest::FloorObjectReport;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::held::Held;
 use crate::namespace::read_anchor::WriterAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::time::{Observation, OperationClock};
-use crate::wal::{prepare_wal_object, publish_wal_object, WalPublishError};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
-use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::options::DeleteNamespaceOptions;
 use loonfs_types::{Commit, CommitSeq, DeleteNamespaceResponse, NamespaceId, WriterId};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -596,46 +593,49 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         Ok(lane.acquired_turn())
     }
 
-    /// Advances the retention floor to `target` with a floor object, as one
-    /// unit of the session's commit queue, so the floor object never
-    /// collides with the session's own commits (format spec, "Advancing the
-    /// retention floor").
+    /// Raises the retention floor to `target` in the manifest of the fold of
+    /// what arrived, the last step of a retention advance (format spec,
+    /// "Advancing the retention floor").
     ///
-    /// The call first checks that the segments of `planned`, the manifest
-    /// that the advance was planned from, exist. The session loads its view
-    /// from `start` as a commit does, and it puts the floor object at the
-    /// number after its position's tip, as it puts a commit, with no check
-    /// after the put. The position then replays the floor object, so its tip
-    /// is the floor object's number and its floor is raised. A session that
-    /// discovery finds fenced returns `writer_fenced`. A put that finds the
-    /// number taken drops the position and runs the writer's load, which
-    /// returns `writer_fenced` when another writer's fence took the number,
-    /// and otherwise the put's error, so the caller plans again. The floor
-    /// object's put is sent under the session's epoch, as a commit's WAL put
-    /// is, so a put whose outcome is unknown ends the epoch, and the
-    /// session's next unit claims. The call writes nothing when the view's
-    /// floor is already at or above `target`.
-    pub async fn publish_floor_object(
+    /// The caller keeps `lane`, the session's publication lane, and the
+    /// engine for this whole step, after the advance's ordinary fold (see
+    /// the runtime's `fold_then_pause`), so the WAL put in flight is settled
+    /// and no commit is written until the step ends. The step loads the
+    /// session's position (see [`Self::load_position_in_lane`]), so a
+    /// session without its writer epoch claims it here and folds from the
+    /// claim's position, and then publishes one manifest that includes the
+    /// fold of the position's tail and whose floor is the higher of the old
+    /// floor and `target` (see [`NamespaceStore::raise_retention_floor`]).
+    /// Every commit after the step is validated against that floor, because
+    /// the position follows the manifest.
+    ///
+    /// The value is the floor of the session's newest published manifest. A
+    /// step that publishes nothing, because nothing arrived and the floor is
+    /// already at or above `target`, is computed from the session's own state, under
+    /// the session's writer epoch ([`UnitBasis::Session`]), so the session
+    /// confirms its position before it returns the floor.
+    pub async fn raise_retention_floor(
         &mut self,
-        start: UnitStart,
-        planned: &LoadedManifest,
+        lane: &LaneGuard<'_>,
         target: CommitSeq,
-        clock: &OperationClock,
-    ) -> Result<FloorObjectReport> {
-        self.namespace
-            .current_segments(planned)
-            .segments
-            .verify_segments_exist()
-            .await?;
-        let Self {
-            namespace,
-            position,
-            ..
-        } = self;
-        let loaded = position.load_publish_view(namespace, clock, start).await?;
-        position
-            .publish_floor_object_against(namespace, loaded, target)
-            .await
+    ) -> UnitReport<Result<CommitSeq>> {
+        let clock = self.namespace.start_clock();
+        let raised = async {
+            let position = self.load_position_in_lane(lane).await?;
+            self.namespace
+                .raise_retention_floor(&position, lane, target, &clock)
+                .await
+        }
+        .await;
+        match raised {
+            Ok(report) => {
+                UnitReport::from_publication(report.map(Ok), lane.acquired_turn().writer_epoch())
+            }
+            Err(error) => {
+                self.position.record_session_error(&error);
+                UnitReport::from_store(Err(error))
+            }
+        }
     }
 
     /// Publishes `candidates` as one batch from `start`. Retries share
@@ -739,17 +739,32 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         }
     }
 
-    /// Advances the retention floor, after a claim when the session needs
-    /// one (see [`Self::publish_floor_object`]).
-    pub async fn publish_floor_object_alone(
+    /// Advances the retention floor to `target`, planned from `planned`, in
+    /// the steps that the runtime takes: checks the segments of `planned`,
+    /// folds the tail as an ordinary fold, and then raises the floor in the
+    /// manifest of the fold of what arrived, in the session's own
+    /// publication lane (see [`Self::raise_retention_floor`]).
+    pub async fn advance_retention_floor_alone(
         &mut self,
         planned: &LoadedManifest,
         target: CommitSeq,
-        clock: &OperationClock,
-    ) -> Result<FloorObjectReport> {
-        let start = self.start_alone().await?;
-        self.publish_floor_object(start, planned, target, clock)
-            .await
+    ) -> Result<crate::manifest::PublicationReport<CommitSeq>> {
+        self.namespace.verify_planned_segments(planned).await?;
+        self.fold().await?;
+        let lane = self.publication_lane();
+        let guard = lane.lock().await;
+        let raised = self.raise_retention_floor(&guard, target).await;
+        let published = match raised.basis {
+            UnitBasis::Store => self.published_manifest().recorded(),
+            UnitBasis::Session { .. } => None,
+        };
+        let retention_floor_seq = raised.value?;
+        drop(guard);
+        self.follow_alone();
+        Ok(crate::manifest::PublicationReport {
+            response: retention_floor_seq,
+            published,
+        })
     }
 
     /// Deletes the namespace in the session's own publication lane (see
@@ -993,71 +1008,6 @@ impl PositionState {
             }),
             basis,
         }
-    }
-
-    /// Puts a floor object for `target` at the number after the tip of
-    /// `loaded`, unless the view's floor is already at or above `target`, and
-    /// keeps the position that the put leaves.
-    async fn publish_floor_object_against<S: ObjectStore>(
-        &mut self,
-        namespace: &NamespaceStore<S>,
-        loaded: LoadedPublishView<'_, S>,
-        target: CommitSeq,
-    ) -> Result<FloorObjectReport> {
-        let LoadedPublishView { view, .. } = loaded;
-        let head = view.head().clone();
-        let manifest_retention_floor_seq = view.manifest_retention_floor_seq();
-        if head.retention_floor_seq >= target {
-            self.current.set(view.into_position());
-            return Ok(FloorObjectReport {
-                retention_floor_seq: head.retention_floor_seq,
-                manifest_retention_floor_seq,
-            });
-        }
-        let floor_object = prepare_wal_object(
-            &head,
-            view.acquired_writer.writer_epoch,
-            WalObjectBody::Floor {
-                retention_floor_seq: target,
-            },
-        )?;
-        let acquired_writer = view.acquired_writer.clone();
-        let published = SessionEpoch::new(&self.session, namespace)
-            .send_put(publish_wal_object(view.store(), &floor_object))
-            .await;
-        let position = view.into_position();
-        if let Err(error) = published {
-            // The session's next unit loads the namespace from the store.
-            self.invalidate_projection();
-            if matches!(error, CoreError::WalPublish(WalPublishError::NumberTaken)) {
-                // While the session has its epoch, only another writer's
-                // fence takes the session's next number, so the writer's load
-                // finds that writer's claim and returns `writer_fenced`.
-                let loaded = namespace
-                    .load_writer_read_anchor(&acquired_writer, namespace.start_clock().observe())
-                    .await;
-                if let Err(fenced) = loaded {
-                    self.record_session_error(&fenced);
-                    return Err(fenced);
-                }
-            }
-            return Err(error);
-        }
-        let head = head.after_wal_object(floor_object.envelope().payload());
-        let retention_floor_seq = head.retention_floor_seq;
-        self.update_publish_tail_projection(
-            &namespace.namespace_id,
-            position,
-            PublishViewEffect::Advanced {
-                body: floor_object.envelope().payload().body.clone(),
-                head,
-                wal_bytes: floor_object.as_bytes().len(),
-            },
-        );
-        Ok(FloorObjectReport {
-            retention_floor_seq,
-            manifest_retention_floor_seq,
-        })
     }
 
     /// Folds one batch's effect into the unit's position and its tail, keeps

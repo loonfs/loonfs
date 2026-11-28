@@ -233,9 +233,9 @@ pub use error::{
 };
 pub use loonfs_types::options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use manifest::{
-    ExtensionBasis, ExtensionPublication, FloorObjectReport, FoldWalOutcome, FoldWalResponse,
-    FoldWriteOutcome, FoldWrites, FoldedWalTail, ManifestLoadError, PublicationReport,
-    RetentionPlan, RetentionTarget,
+    ExtensionBasis, ExtensionPublication, FoldWalOutcome, FoldWalResponse, FoldWriteOutcome,
+    FoldWrites, FoldedWalTail, ManifestLoadError, PublicationReport, RetentionPlan,
+    RetentionTarget,
 };
 pub use merge::{
     MergeAllowance, MergePlan, MergeRequest, MergeReservation, ReplayPlan, MERGE_COMMITS_PAGE_BYTES,

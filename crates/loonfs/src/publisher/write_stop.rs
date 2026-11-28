@@ -1,6 +1,6 @@
 //! The wait of a namespace's queue at the write stop, for the session's fold.
 
-use super::queue::{OpenBatch, WorkItem};
+use super::queue::OpenBatch;
 use super::session_tasks::wait_for_exit;
 use super::worker::{elapsed_ms_from, sleep_ms};
 use super::NamespacePublisher;
@@ -26,7 +26,7 @@ impl NamespacePublisher {
         let oldest_enqueued_at = waiting.candidates[0].enqueued_at;
         let fold_task = {
             let mut state = self.lock_state();
-            state.queue.push_front(WorkItem::Batch(waiting));
+            state.queue.push_front(waiting);
             self.count_queued(&mut state);
             state.fold.as_ref().map(|fold| fold.liveness.clone())
         };
@@ -63,28 +63,24 @@ impl NamespacePublisher {
         let mut reasons = Vec::new();
         {
             let mut state = self.lock_state();
-            for item in &mut state.queue {
-                if let WorkItem::Batch(batch) = item {
-                    batch.candidates.retain_mut(|candidate| {
-                        if !candidate.write_stop_wait_recorded {
-                            candidate.write_stop_wait_recorded = true;
-                            first_waits += 1;
+            for batch in &mut state.queue {
+                batch.candidates.retain_mut(|candidate| {
+                    if !candidate.write_stop_wait_recorded {
+                        candidate.write_stop_wait_recorded = true;
+                        first_waits += 1;
+                    }
+                    let past = elapsed_ms_from(candidate.enqueued_at, now_ms) >= budget_ms;
+                    match &candidate.write_stop_reason {
+                        Some(reason) if past => {
+                            refused.push(candidate.commit_id.clone());
+                            reasons.push(reason.clone());
+                            false
                         }
-                        let past = elapsed_ms_from(candidate.enqueued_at, now_ms) >= budget_ms;
-                        match &candidate.write_stop_reason {
-                            Some(reason) if past => {
-                                refused.push(candidate.commit_id.clone());
-                                reasons.push(reason.clone());
-                                false
-                            }
-                            _ => true,
-                        }
-                    });
-                }
+                        _ => true,
+                    }
+                });
             }
-            state.queue.retain(
-                |item| !matches!(item, WorkItem::Batch(batch) if batch.candidates.is_empty()),
-            );
+            state.queue.retain(|batch| !batch.candidates.is_empty());
             self.count_queued(&mut state);
         }
         self.report_queue_depth();

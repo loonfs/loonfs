@@ -247,16 +247,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .list_prefix(&wal_objects_prefix)
         .await
         .expect("list wal");
-    assert_eq!(
-        after[..wal_objects.len()],
-        wal_objects[..],
-        "the advance leaves the WAL objects before it"
-    );
-    assert_eq!(
-        after.len(),
-        wal_objects.len() + 1,
-        "the advance writes one WAL object, its floor object"
-    );
+    assert_eq!(after, wal_objects, "the advance writes no WAL object");
     assert!(store
         .head(&current_manifest_key(&store, &namespace_id).await)
         .await
@@ -1164,15 +1155,7 @@ async fn publish_one<S: ObjectStore>(
 /// predecessor's floor and the floor object's, and a later floor object with
 /// a lower floor leaves the next fold's floor where it is.
 #[tokio::test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the test writes a floor object with a lower floor, which no process creates"
-)]
 async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_floor() {
-    use loonfs_types::format::wal::{
-        encode_wal_object_envelope_zstd, WalObjectBody, WalObjectPayload,
-    };
-
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1186,11 +1169,7 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
     let (_, deletion_seq) = create_and_delete(&mut writer, "gone").await;
     publish_directories(&mut writer, "after", 1).await;
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let planned = namespace.load_current_manifest().await.expect("planned");
-    writer
-        .publish_floor_object_alone(&planned, deletion_seq, &namespace.start_clock())
-        .await
-        .expect("create the floor object");
+    crate::test_support::put_floor_object(&store, &namespace_id, deletion_seq).await;
 
     let anchor = namespace
         .load_read_anchor(crate::test_support::observed_now())
@@ -1216,30 +1195,12 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
             if retention_floor_seq == deletion_seq
     );
 
-    writer.fold().await.expect("fold the floor object");
-    assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
-    let head = namespace.load_read_state().await.expect("read the head");
-    let lower = WalObjectPayload {
-        namespace_id: namespace_id.clone(),
-        wal_no: head.wal_no.successor().expect("next WAL number"),
-        writer_epoch: head.writer_epoch,
-        head_seq: head.seq,
-        body: WalObjectBody::Floor {
-            retention_floor_seq: CommitSeq(1),
-        },
-    };
-    let key = loonfs_objectstore::keys::wal_object(&namespace_id, &lower.wal_no);
-    store
-        .put(
-            &key,
-            encode_wal_object_envelope_zstd(lower)
-                .expect("encode a floor object")
-                .into_bytes()
-                .into(),
-            loonfs_objectstore::PutMode::CreateIfAbsent,
-        )
+    namespace
+        .fold_as_test_writer()
         .await
-        .expect("put a floor object with a lower floor");
+        .expect("fold the floor object");
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
+    crate::test_support::put_floor_object(&store, &namespace_id, CommitSeq(1)).await;
     namespace
         .fold_as_test_writer()
         .await
@@ -1249,8 +1210,7 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
 
 /// Checks that two advances of one writer session to different floors leave
 /// the higher floor, in either order. An advance whose target the session's
-/// earlier floor object already reached writes nothing, and the fold after
-/// both advances publishes the higher floor.
+/// earlier advance already reached publishes nothing.
 #[tokio::test]
 async fn two_advances_to_different_floors_leave_the_higher_floor() {
     for (first, second) in [(CommitSeq(2), CommitSeq(1)), (CommitSeq(1), CommitSeq(2))] {
@@ -1270,25 +1230,31 @@ async fn two_advances_to_different_floors_leave_the_higher_floor() {
             .load_current_manifest()
             .await
             .expect("load the planned manifest");
-        let tip = namespace
-            .load_read_state()
-            .await
-            .expect("read the head")
-            .wal_no;
 
         writer
-            .publish_floor_object_alone(&planned, first, &namespace.start_clock())
+            .advance_retention_floor_alone(&planned, first)
             .await
             .expect("the first advance");
+        let after_first = namespace
+            .load_current_manifest()
+            .await
+            .expect("the first advance's manifest")
+            .payload()
+            .manifest_no;
         let report = writer
-            .publish_floor_object_alone(&planned, second, &namespace.start_clock())
+            .advance_retention_floor_alone(&planned, second)
             .await
             .expect("the second advance");
-        assert_eq!(report.retention_floor_seq, CommitSeq(2));
-        let head = namespace.load_read_state().await.expect("read the head");
-        let floor_objects = if first > second { 1 } else { 2 };
-        assert_eq!(head.wal_no.0, tip.0 + floor_objects);
-        writer.fold().await.expect("fold");
+        assert_eq!(report.response, CommitSeq(2));
+        assert_eq!(report.published.is_some(), first < second);
+        let after_second = namespace
+            .load_current_manifest()
+            .await
+            .expect("the newest manifest")
+            .payload()
+            .manifest_no;
+        let published = if first > second { 0 } else { 1 };
+        assert_eq!(after_second.0, after_first.0 + published);
         assert_eq!(read_floor_seq(&store, &namespace_id).await, CommitSeq(2));
     }
 }

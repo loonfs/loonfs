@@ -120,7 +120,7 @@ The namespace's writer runs every maintenance operation that publishes a manifes
 | --- | --- |
 | Fold | Moves committed WAL tail records into new metadata segments and publishes the next manifest. |
 | Compaction | Rewrites metadata runs into fewer runs and drops obsolete rows without altering any retained view. |
-| Retention advance | Verifies the current manifest's segments and writes a [floor object](glossary.md#floor-object) to the WAL. The next fold copies the new floor into a manifest, allowing compaction to remove older history. |
+| Retention advance | Verifies the current manifest's segments, folds the tail, and then, with commits paused, folds what arrived and publishes the advance's manifest with the new floor, allowing compaction to remove older history. |
 | Garbage collection | Deletes unreferenced objects past the grace window from a fresh root scan. Namespace collections clean manifests, WAL commit objects, segments, and snapshots, while pool collections clean content objects and upload records across all pool members. |
 
 Deleting a file records a reversible subtree tombstone, and deleting a namespace publishes a final manifest with status `deleted`. Neither reclaims content immediately.

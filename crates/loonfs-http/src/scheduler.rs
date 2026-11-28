@@ -179,10 +179,10 @@ pub(crate) struct StepRetry {
 /// running a long compaction, and skipping the day's advance would make the
 /// window a day longer for exactly the namespaces that are busiest.
 ///
-/// An advance whose floor moves creates a floor object in the WAL through
-/// the namespace's writer session, as one item of the session's queue, and
-/// then folds the namespace, so a manifest records the new floor. A failed
-/// advance keeps no retry state either, and the next sweep tries it again.
+/// An advance whose floor moves folds the namespace through its writer
+/// session, and then pauses the session's commits for the fold of what
+/// arrived and the advance's manifest, which records the new floor. A failed advance
+/// keeps no retry state either, and the next sweep tries it again.
 ///
 /// The scheduler starts a session's steps without waiting for the steps
 /// that other sessions started at the interval before, so a long step on one

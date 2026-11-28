@@ -119,15 +119,6 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         &self.position.tail
     }
 
-    /// Returns the retention floor of the manifest that the view replays its
-    /// WAL tail above.
-    pub(super) fn manifest_retention_floor_seq(&self) -> CommitSeq {
-        self.manifest_segments
-            .manifest()
-            .payload()
-            .retention_floor_seq
-    }
-
     pub(crate) fn into_position(self) -> WriterPosition {
         self.position
     }

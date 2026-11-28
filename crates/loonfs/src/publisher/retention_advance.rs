@@ -1,36 +1,42 @@
-//! The retention advance in a writer session's queue, which creates a floor
-//! object at the session's tip so that the floor object never collides with
-//! the session's own commits.
+//! A retention floor advance through the namespace's writer session, which
+//! runs in its caller's task as admitted maintenance.
 
 use super::NamespacePublisher;
 use crate::{CommitSeq, CoreError, Error, Result};
-use loonfs_core::control::LoadedManifest;
-use loonfs_core::time::OperationClock;
-use loonfs_core::FloorObjectReport;
-use std::sync::Arc;
 
 impl NamespacePublisher {
-    /// Creates a floor object for `target` through the session's commit
-    /// engine, which puts the floor object after the position's tip as it
-    /// puts a commit, and moves the position onto the floor object. The
-    /// advance is a unit of the commit queue, which takes the session's
-    /// publication lane only for a claim (see
-    /// [`NamespacePublisher::lock_engine_for_unit`] and
-    /// [`NamespaceCommitEngine::publish_floor_object`](loonfs_core::publish::NamespaceCommitEngine::publish_floor_object)).
-    pub(super) async fn publish_floor_object(
-        &self,
-        planned: &LoadedManifest,
-        target: CommitSeq,
-    ) -> Result<FloorObjectReport> {
+    /// Raises the retention floor to `target` through the session's own
+    /// commit engine, so the floor is recorded in a manifest of the session
+    /// (format spec, "Advancing the retention floor").
+    ///
+    /// The advance folds the tail as an ordinary fold while commits
+    /// continue, and then, with the session's publication lane and its
+    /// commit queue kept, folds what arrived and publishes one manifest that
+    /// includes that fold and whose floor is the higher of the old floor and
+    /// `target` (see [`Self::fold_then_pause`] and
+    /// [`NamespaceCommitEngine::raise_retention_floor`](loonfs_core::publish::NamespaceCommitEngine::raise_retention_floor)).
+    /// So a commit acknowledged before the pause, such as a restore that was
+    /// validated against the old floor, is in that manifest, and a commit
+    /// that is still queued at the pause is validated against the new floor.
+    /// Two advances take turns at the fold lock, so the second folds from
+    /// the manifest that the first published.
+    ///
+    /// An advance that publishes nothing, because nothing arrived and the
+    /// floor is already at or above `target`, returns the floor of the
+    /// session's newest published manifest, which the session's check
+    /// confirms first (see [`Self::run_confirmed`]).
+    pub(super) async fn advance_retention_floor(&self, target: CommitSeq) -> Result<CommitSeq> {
         let Some(_writer) = self.context.writer.upgrade() else {
             return Err(CoreError::ShuttingDown.into());
         };
-        let core = &self.context.runtime_core;
-        let (mut engine, start) = self.lock_engine_for_unit().await?;
-        let clock = OperationClock::start(core.now_ms(), Arc::clone(core.timer()));
-        engine
-            .publish_floor_object(start, planned, target, &clock)
+        let stop = &self.stop;
+        self.run_confirmed(move || async move {
+            self.fold_then_pause(stop, async move |lane, engine| {
+                engine.raise_retention_floor(lane, target).await
+            })
             .await
-            .map_err(Error::from)
+        })
+        .await
+        .and_then(|raised| raised.map_err(Error::from))
     }
 }

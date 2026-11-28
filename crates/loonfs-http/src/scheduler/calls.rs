@@ -353,9 +353,9 @@ impl Scheduler {
     /// writable handle. A namespace without a window keeps its floor. A
     /// deleted namespace returns `namespace_deleted`, which isn't a failure.
     ///
-    /// A floor that moves is recorded in a floor object that the writer
-    /// session puts in the WAL, and the advance then folds the namespace, so
-    /// a manifest records the floor. For when the deletions below the new
+    /// A floor that moves is recorded in a manifest that the writer session
+    /// publishes after a fold, with the session's commits paused only for the
+    /// fold of what arrived meanwhile. For when the deletions below the new
     /// floor expire, and when their rows are removed, see [Advancing the
     /// floor on a
     /// schedule](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#advancing-the-floor-on-a-schedule).

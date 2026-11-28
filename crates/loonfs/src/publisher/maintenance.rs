@@ -10,7 +10,7 @@ use crate::{
 };
 use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::{UnitBasis, UnitReport, WriterPosition};
-use loonfs_core::{Administrator, ExtensionBasis, ExtensionPublication, FloorObjectReport};
+use loonfs_core::{Administrator, ExtensionBasis, ExtensionPublication};
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{CommitSeq, ExtensionName, RetentionWindow, SetRetentionWindowResponse};
 use std::future::Future;
@@ -134,17 +134,14 @@ impl AdmittedMaintenance<'_> {
             .await
     }
 
-    /// Enqueues an advance of the retention floor to `target`, planned from
-    /// `planned`, in the session's queue (see
-    /// [`NamespacePublisher::submit_retention_advance`]).
-    pub(crate) async fn submit_retention_advance(
-        &self,
-        planned: LoadedManifest,
-        target: CommitSeq,
-    ) -> Result<FloorObjectReport> {
-        self.publisher()
-            .submit_retention_advance(planned, target)
-            .await
+    /// Raises the retention floor to `target`, as
+    /// [`NamespacePublisher::advance_retention_floor`] describes, and returns
+    /// the floor of the manifest that records it. The session's stop ends the
+    /// advance's waits for the fold lock and a fold permit with the session's
+    /// refusal, and the session's close and the runtime's drain wait for an
+    /// advance that runs.
+    pub(crate) async fn advance_retention_floor(&self, target: CommitSeq) -> Result<CommitSeq> {
+        self.publisher().advance_retention_floor(target).await
     }
 
     /// Sets the namespace's retention window (see

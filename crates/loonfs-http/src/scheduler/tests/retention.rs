@@ -616,12 +616,13 @@ async fn writer_epoch(
 }
 
 /// Checks the three ways a sweep's advance runs. A namespace with a live
-/// session gets a floor object from that session's queue with no new writer
-/// epoch, a namespace with no session gets one from a session that the
-/// sweep opens, which claims the namespace first, and each is folded once.
-/// A namespace whose floor would not move gets no write.
+/// session gets the manifest that records its floor from that session with
+/// no new writer epoch, a namespace with no session gets it from a session
+/// that the sweep opens, which claims the namespace first, and neither gets
+/// a WAL object for the floor. A namespace whose floor would not move gets
+/// no write.
 #[tokio::test]
-async fn a_sweeps_advance_puts_its_floor_object_as_the_namespaces_writer() {
+async fn a_sweeps_advance_publishes_its_floor_as_the_namespaces_writer() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("local store"),
@@ -688,8 +689,8 @@ async fn a_sweeps_advance_puts_its_floor_object_as_the_namespaces_writer() {
     );
     assert_eq!(
         manifest_and_wal_puts(&operations, &held_id),
-        (1, 1),
-        "one floor object and the fold that records the floor"
+        (1, 0),
+        "the advance's manifest, after an ordinary fold with nothing to fold"
     );
 
     assert_eq!(server.retention_floor(&idle_id).await, idle_seq);
@@ -700,8 +701,8 @@ async fn a_sweeps_advance_puts_its_floor_object_as_the_namespaces_writer() {
     );
     assert_eq!(
         manifest_and_wal_puts(&operations, &idle_id),
-        (2, 2),
-        "the claim's fence and manifest, then one floor object and the fold that records the floor"
+        (3, 1),
+        "the claim's fence and manifest, the ordinary fold of the fence, and the advance's manifest"
     );
 
     assert_eq!(server.retention_floor(&recent_id).await, recent_floor);
@@ -717,7 +718,7 @@ async fn a_sweeps_advance_puts_its_floor_object_as_the_namespaces_writer() {
 }
 
 /// A namespace whose WAL tail has a floor object that no manifest records,
-/// left by an advance that put the floor object and then failed its fold.
+/// which the test writes, because no writer creates one.
 struct UnrecordedFloor {
     directory: tempfile::TempDir,
     config: TestConfig,
@@ -730,8 +731,11 @@ struct UnrecordedFloor {
 }
 
 /// Builds an [`UnrecordedFloor`]: a server commits and folds an old file,
-/// and a later server's sweep claims the namespace, puts a floor object
-/// past the file and fails the fold after it.
+/// and the test puts a floor object past the file at the next WAL number.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test writes a floor object, which no writer creates"
+)]
 async fn unrecorded_floor(name: &str) -> UnrecordedFloor {
     let directory = tempdir().expect("tempdir");
     let config = retention_config(Some(WINDOW_MS));
@@ -750,46 +754,52 @@ async fn unrecorded_floor(name: &str) -> UnrecordedFloor {
         .fold_wal()
         .await
         .expect("fold the history");
-    let folded = seeding
+    let manifest_no = seeding
         .diagnostics(&namespace_id)
         .await
         .current_manifest_no
         .expect("an active namespace's manifest");
     seeding.runtime.shutdown().await.expect("shutdown");
 
-    // The advance's session claims at the next manifest number, and its fold
-    // after the floor object puts the number after that one, which fails.
-    let fold_no = loonfs_types::ManifestNo(folded.0 + 2);
-    let failing = Arc::new(FailStore::new(
-        LocalFsStore::new(directory.path()).expect("local store"),
-        KeyPredicate::exact(loonfs_objectstore::keys::metadata_manifest_object(
-            &namespace_id,
-            &fold_no,
-        )),
-        OperationSelector::PutCreateIfAbsent,
-        InjectedError::PermissionDenied("the fold's put fails".to_owned()),
-    ));
-    failing.fail_next(1);
-    let advancing =
-        SchedulerServer::start(failing.clone(), &config, START_MS + 2 * WINDOW_MS).await;
-    advancing.scheduler.run_sweep().await;
-    assert_eq!(
-        failing.remaining(),
-        0,
-        "the fold after the floor object failed"
-    );
-    let unrecorded = advancing.diagnostics(&namespace_id).await;
-    assert_eq!(
-        unrecorded.retention_floor_seq, floor_seq,
-        "the floor object is put"
-    );
-    let manifest_no = loonfs_types::ManifestNo(folded.0 + 1);
+    let store = local_store(directory.path());
+    let head = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .load_read_state()
+        .await
+        .expect("read the head");
+    let floor_object = loonfs_types::format::wal::WalObjectPayload {
+        namespace_id: namespace_id.clone(),
+        wal_no: head.wal_no.successor().expect("next WAL number"),
+        writer_epoch: head.writer_epoch,
+        head_seq: head.seq,
+        body: loonfs_types::format::wal::WalObjectBody::Floor {
+            retention_floor_seq: floor_seq,
+        },
+    };
+    loonfs_objectstore::ObjectStore::put(
+        store.as_ref(),
+        &loonfs_objectstore::keys::wal_object(&namespace_id, &floor_object.wal_no),
+        loonfs_types::format::wal::encode_wal_object_envelope_zstd(floor_object)
+            .expect("encode a floor object")
+            .into_bytes()
+            .into(),
+        loonfs_objectstore::PutMode::CreateIfAbsent,
+    )
+    .await
+    .expect("put a floor object");
+    let checking = SchedulerServer::start(
+        local_store(directory.path()),
+        &config,
+        START_MS + 2 * WINDOW_MS,
+    )
+    .await;
+    let unrecorded = checking.diagnostics(&namespace_id).await;
+    assert_eq!(unrecorded.retention_floor_seq, floor_seq);
     assert_eq!(
         unrecorded.current_manifest_no,
         Some(manifest_no),
         "no fold records it"
     );
-    let due = advancing
+    let due = checking
         .maintenance
         .maintenance()
         .due_maintenance(&namespace_id)
@@ -799,7 +809,7 @@ async fn unrecorded_floor(name: &str) -> UnrecordedFloor {
         due.fold,
         "a floor that no manifest records makes a fold due"
     );
-    advancing.runtime.shutdown().await.expect("shutdown");
+    checking.runtime.shutdown().await.expect("shutdown");
     UnrecordedFloor {
         directory,
         config,
@@ -842,8 +852,7 @@ impl UnrecordedFloor {
     }
 }
 
-/// Checks that a floor object that no manifest records, left by an advance
-/// that put the floor object and then failed its fold, makes a fold due, so
+/// Checks that a floor object that no manifest records makes a fold due, so
 /// that one sweep of a server without a session for the namespace folds it
 /// and the manifest records the floor.
 #[tokio::test]
@@ -862,13 +871,11 @@ async fn a_floor_object_that_no_manifest_records_is_folded_by_the_next_sweep() {
     );
 }
 
-/// Checks that an advance whose target an earlier floor object already
-/// reached writes no floor object, and that it folds the tail, which claims
-/// the namespace, so that a manifest records the floor. The fold's manifest
-/// covers the claim's fence after the earlier floor object, and nothing
-/// after it.
+/// Checks that an advance whose target a floor object in the tail already
+/// reached writes nothing and claims nothing: it returns the view's floor,
+/// and the manifest and the WAL stay as they are.
 #[tokio::test]
-async fn an_advance_whose_target_a_floor_object_reached_writes_none_and_folds() {
+async fn an_advance_whose_target_a_floor_object_reached_writes_nothing() {
     let unrecorded = unrecorded_floor("reached-floor").await;
     let server = unrecorded.server().await;
     let before = unrecorded.manifest(&server).await;
@@ -884,18 +891,16 @@ async fn an_advance_whose_target_a_floor_object_reached_writes_none_and_folds() 
         .expect("the advance");
     assert_eq!(advanced.retention_floor_seq, unrecorded.floor_seq);
     let after = unrecorded.manifest(&server).await;
-    assert_eq!(after.payload().retention_floor_seq, unrecorded.floor_seq);
     assert_eq!(
-        after.payload().writer_epoch.0,
-        before.payload().writer_epoch.0 + 1,
-        "the fold claims the namespace"
+        after, before,
+        "the advance publishes nothing and claims nothing"
     );
+    assert_eq!(after.manifest().manifest_no, unrecorded.manifest_no);
     assert_eq!(
         unrecorded.wal_objects(),
-        wal_objects + 1,
-        "the claim puts its fence, and the advance writes no floor object"
+        wal_objects,
+        "the advance writes no WAL object"
     );
-    assert!(after.manifest().manifest_no > unrecorded.manifest_no);
     server.runtime.shutdown().await.expect("shutdown");
 }
 

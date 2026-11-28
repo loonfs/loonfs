@@ -196,35 +196,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
         writes: Box<FoldWrites>,
         clock: &OperationClock,
     ) -> Result<FoldedWalTail> {
-        assert_eq!(
-            writes.head.namespace_id, self.namespace_id,
-            "a fold publishes the segments that it wrote for its own namespace"
-        );
-        let previous = turn.basis().manifest().payload();
-        if previous.folded_wal_no >= writes.head.wal_no && previous.head_seq >= writes.head.seq {
+        let Some(payload) = fold_payload_over(
+            &self.namespace_id,
+            turn.basis().manifest().payload(),
+            &writes,
+        )?
+        else {
             return Ok(FoldedWalTail::new(
                 &self.namespace_id,
                 writes.head.seq,
                 turn.basis().clone(),
                 FoldWalOutcome::AlreadyCurrent,
             ));
-        }
-        // No state that this process writes reaches this branch. The session's
-        // folds run one at a time under the namespace's fold lock, so no fold of
-        // the session publishes between this fold's writes and its turn, and a
-        // fold of another writer that the session's claim builds on covers the
-        // whole tail below that writer's fence.
-        if previous.folded_wal_no != writes.started_folded_wal_no {
-            return Err(CoreError::NamespaceCorrupt(format!(
-                "manifest {} folds WAL number {}, but the fold that builds on it in a writer \
-                 session's lane started from folded WAL number {} and folds through {}",
-                previous.manifest_no,
-                previous.folded_wal_no,
-                writes.started_folded_wal_no,
-                writes.head.wal_no
-            )));
-        }
-        let payload = fold_payload(previous, &writes)?;
+        };
         let published = self.publish_manifest_in_turn(turn, payload, clock).await?;
         Ok(FoldedWalTail::new(
             &self.namespace_id,
@@ -234,30 +218,49 @@ impl<S: ObjectStore> NamespaceStore<S> {
         ))
     }
 
-    /// Folds the WAL tail of `position`, a writer session's position, as one
+    /// Folds the WAL tail of `position`, a writer session's position, and
+    /// publishes that fold with `change` applied as one manifest, one
     /// publication of the session's publication lane, while the caller keeps
     /// `lane` and the session's commit queue, so commits are paused. It is
     /// the fold of what arrived of an operation whose last manifest has to
-    /// cover every commit written before it, such as a namespace deletion
-    /// (format spec, "Deleting a namespace").
+    /// cover every commit written before it: a namespace deletion, which
+    /// changes nothing in the fold's manifest and then publishes its
+    /// tombstone, and a retention advance, which raises the floor in it
+    /// (format spec, "Deleting a namespace" and "Advancing the retention
+    /// floor").
     ///
     /// The operation's ordinary fold ran just before, while commits
-    /// continued, so this fold covers what arrived meanwhile, and publishes
-    /// nothing when nothing arrived. The session's newest published manifest
-    /// then covers the position's tip, which the operation's last manifest
-    /// builds on.
+    /// continued, so this fold covers what arrived meanwhile. When nothing
+    /// arrived, the manifest is the session's newest published manifest with
+    /// `change` applied, and the call publishes nothing when `change` leaves
+    /// that manifest as it is. The session's newest published manifest then
+    /// covers the position's tip. Returns the manifest that the call
+    /// published, or `None` when it published none.
     pub(crate) async fn fold_while_paused(
         &self,
         position: &WriterPosition,
         lane: &LaneGuard<'_>,
         clock: &OperationClock,
-    ) -> Result<()> {
-        if let FoldWriteOutcome::Written(writes) = self.write_fold_segments(position, clock).await?
-        {
-            self.publish_fold_in_turn(lane.acquired_turn(), writes, clock)
-                .await?;
+        change: impl FnOnce(&mut NamespaceManifestPayload),
+    ) -> Result<Option<Held<LoadedManifest>>> {
+        let folded = match self.write_fold_segments(position, clock).await? {
+            FoldWriteOutcome::Written(writes) => Some(writes),
+            FoldWriteOutcome::AlreadyFolded(_) => None,
+        };
+        let turn = lane.acquired_turn();
+        let basis = turn.basis().manifest().payload();
+        let folded = match folded {
+            Some(writes) => fold_payload_over(&self.namespace_id, basis, &writes)?,
+            None => None,
+        };
+        let mut payload = folded.unwrap_or_else(|| basis.clone());
+        change(&mut payload);
+        if payload == *basis {
+            return Ok(None);
         }
-        Ok(())
+        Ok(Some(
+            self.publish_manifest_in_turn(turn, payload, clock).await?,
+        ))
     }
 
     /// Returns the manifest and the WAL tail of this namespace's head:
@@ -406,6 +409,46 @@ struct FoldRun {
     segments: Vec<MetadataSegmentRef>,
 }
 
+/// Returns the manifest after `basis`, the newest manifest that a writer
+/// session published, that lists `writes`, a fold's run, or `None` when
+/// `basis` already covers the fold's tail (see
+/// [`NamespaceStore::publish_fold_in_turn`]). A basis that covers only part
+/// of the fold's tail is bad stored state, and returns `namespace_corrupt`.
+///
+/// # Panics
+///
+/// Panics if `writes` aren't `namespace_id`'s, which is a bug in the calling
+/// process.
+fn fold_payload_over(
+    namespace_id: &NamespaceId,
+    basis: &NamespaceManifestPayload,
+    writes: &FoldWrites,
+) -> Result<Option<NamespaceManifestPayload>> {
+    assert_eq!(
+        &writes.head.namespace_id, namespace_id,
+        "a fold publishes the segments that it wrote for its own namespace"
+    );
+    if basis.folded_wal_no >= writes.head.wal_no && basis.head_seq >= writes.head.seq {
+        return Ok(None);
+    }
+    // No state that this process writes reaches this branch. The session's
+    // folds run one at a time under the namespace's fold lock, so no fold of
+    // the session publishes between this fold's writes and its turn, and a
+    // fold of another writer that the session's claim builds on covers the
+    // whole tail below that writer's fence.
+    if basis.folded_wal_no != writes.started_folded_wal_no {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "manifest {} folds WAL number {}, but the fold that builds on it in a writer \
+             session's lane started from folded WAL number {} and folds through {}",
+            basis.manifest_no,
+            basis.folded_wal_no,
+            writes.started_folded_wal_no,
+            writes.head.wal_no
+        )));
+    }
+    fold_payload(basis, writes).map(Some)
+}
+
 /// Returns the manifest after `previous` that lists `writes`, a fold's run,
 /// with the fold's head. The manifest that first lists a run allocates its
 /// number, and an extension's publication can allocate numbers before the
@@ -498,7 +541,7 @@ impl FoldedWalTail {
     }
 
     /// The manifest this fold published, or `None` when it published none.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(crate) fn published(&self) -> Option<Held<LoadedManifest>> {
         (self.response.outcome == FoldWalOutcome::Published).then(|| self.current.clone())
     }

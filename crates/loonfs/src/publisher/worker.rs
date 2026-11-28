@@ -4,9 +4,7 @@
 use super::admission::AdmissionPermit;
 use super::folds::{fold_due, FoldDue, WalTailState};
 use super::metrics::PublishOutcome;
-use super::queue::{
-    queued_candidates, BatchCandidate, OpenBatch, PendingRetentionAdvance, WorkItem,
-};
+use super::queue::{queued_candidates, BatchCandidate, OpenBatch};
 use super::session_tasks::WorkerHandle;
 use super::{NamespacePublisher, NamespacePublisherState};
 use crate::metrics::RESULT_OK;
@@ -56,101 +54,77 @@ impl NamespacePublisher {
             // Queue ownership and admission remain intact while another
             // namespace uses the shared publication slots. No engine is kept.
             let publication = self.context.admission.publication_permit().await;
-            let Some(item) = self.take_next_item() else {
+            let Some(batch) = self.take_next_batch() else {
                 self.forget_if_ended();
                 return;
             };
-
-            match item {
-                WorkItem::Batch(batch) => {
-                    // Subscribed before the publish, so a fold that publishes
-                    // after the engine refuses commits at the write stop still
-                    // wakes the wait below.
-                    let fold_published = self.fold_published.subscribe();
-                    self.context
-                        .runtime_core
-                        .instruments()
-                        .publisher
-                        .batch(batch.candidates.len());
-                    phase_event!(
-                        self.context.runtime_core,
-                        Phase::BatchCollect,
-                        self.namespace_id,
-                        tracing::Level::INFO,
-                        batch_size = u64_from_usize(batch.candidates.len()),
-                        queue_depth_start = u64_from_usize(queue_depth_start),
-                        queue_depth_end = u64_from_usize(batch.candidates.len()),
-                        collect_ms = self.elapsed_ms_since(collect_started)
-                    );
-                    let OpenBatch {
-                        candidates,
-                        wal_record_bytes_upper_bound,
-                        inline_content_bytes,
-                    } = batch;
-                    let commit_ids = candidates
-                        .iter()
-                        .map(|candidate| candidate.commit_id.clone())
-                        .collect::<Vec<_>>();
-                    let waiting = match self
-                        .contain_panic("publish", self.publish_taken_batch(candidates))
-                        .await
-                    {
-                        Some(waiting) => waiting,
-                        None => {
-                            self.fail_panicked_commits(commit_ids);
-                            Vec::new()
-                        }
-                    };
-                    drop(publication);
-                    if !waiting.is_empty() {
-                        let waiting = OpenBatch {
-                            candidates: waiting,
-                            wal_record_bytes_upper_bound,
-                            inline_content_bytes,
-                        };
-                        self.wait_at_write_stop(waiting, fold_published).await;
-                    }
+            // Subscribed before the publish, so a fold that publishes
+            // after the engine refuses commits at the write stop still
+            // wakes the wait below.
+            let fold_published = self.fold_published.subscribe();
+            self.context
+                .runtime_core
+                .instruments()
+                .publisher
+                .batch(batch.candidates.len());
+            phase_event!(
+                self.context.runtime_core,
+                Phase::BatchCollect,
+                self.namespace_id,
+                tracing::Level::INFO,
+                batch_size = u64_from_usize(batch.candidates.len()),
+                queue_depth_start = u64_from_usize(queue_depth_start),
+                queue_depth_end = u64_from_usize(batch.candidates.len()),
+                collect_ms = self.elapsed_ms_since(collect_started)
+            );
+            let OpenBatch {
+                candidates,
+                wal_record_bytes_upper_bound,
+                inline_content_bytes,
+            } = batch;
+            let commit_ids = candidates
+                .iter()
+                .map(|candidate| candidate.commit_id.clone())
+                .collect::<Vec<_>>();
+            let waiting = match self
+                .contain_panic("publish", self.publish_taken_batch(candidates))
+                .await
+            {
+                Some(waiting) => waiting,
+                None => {
+                    self.fail_panicked_commits(commit_ids);
+                    Vec::new()
                 }
-                WorkItem::RetentionAdvance(PendingRetentionAdvance {
-                    target,
-                    planned,
-                    waiters,
-                }) => {
-                    // An advance is one WAL put, so it's bounded by the
-                    // publication permit, as a batch is.
-                    let outcome = self
-                        .contain_panic(
-                            "retention_advance",
-                            self.publish_floor_object(&planned, target),
-                        )
-                        .await
-                        .unwrap_or_else(panicked_outcome);
-                    drop(publication);
-                    for waiter in waiters {
-                        let _ = waiter.send(outcome.clone());
-                    }
-                }
+            };
+            drop(publication);
+            if !waiting.is_empty() {
+                let waiting = OpenBatch {
+                    candidates: waiting,
+                    wal_record_bytes_upper_bound,
+                    inline_content_bytes,
+                };
+                self.wait_at_write_stop(waiting, fold_published).await;
             }
         }
     }
 
-    /// Takes the next unit of work, or releases the worker slot.
+    /// Takes the next batch, or releases the worker slot.
     ///
     /// Ownership is released under the same lock that finds the queue empty,
     /// so a racing admission either queued before this check and is taken
     /// here, or finds no worker and spawns one.
-    pub(super) fn take_next_item(&self) -> Option<WorkItem> {
+    pub(super) fn take_next_batch(&self) -> Option<OpenBatch> {
         let mut state = self.lock_state();
         if state.queue.is_empty() {
             state.worker = None;
             return None;
         }
-        let item = state.queue.pop_front();
+        let batch = state.queue.pop_front();
         self.reserve_next_publish_slot(&mut state);
         self.count_queued(&mut state);
         drop(state);
         self.report_queue_depth();
-        item
+        batch
     }
 
     /// Returns `outcome_unknown` to every caller that still waits for one of

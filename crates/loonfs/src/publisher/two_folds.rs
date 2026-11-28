@@ -1,7 +1,7 @@
 //! The two folds of an operation that ends with a manifest that has to
-//! cover every commit written before it, such as a namespace deletion: an
-//! ordinary fold while commits continue, then a short pause of the commit
-//! queue for the fold of what arrived and the last manifest.
+//! cover every commit written before it, a namespace deletion or a retention
+//! advance: an ordinary fold while commits continue, then a short pause of
+//! the commit queue for the fold of what arrived and the last manifest.
 
 use super::{KeptLane, LockedEngine, NamespacePublisher};
 use crate::trace::phase_span;
@@ -12,7 +12,8 @@ use tracing::Instrument;
 impl NamespacePublisher {
     /// Folds the tail as an ordinary fold, and then runs `paused` with the
     /// session's publication lane and its commit queue kept, the pause
-    /// (format spec, "Deleting a namespace").
+    /// (format spec, "Deleting a namespace" and "Advancing the retention
+    /// floor").
     ///
     /// The call takes the namespace's fold lock and a fold permit, and keeps
     /// both until `paused` returns, so no other fold of the namespace runs
@@ -21,11 +22,16 @@ impl NamespacePublisher {
     /// while it runs. Then the call keeps the lane and locks the engine,
     /// which is the commit queue: the lock waits for the unit in flight,
     /// whose WAL put is then settled, and no commit is written until
-    /// `paused` returns. `paused` loads the session's position, which is
-    /// exact while the call keeps both, checks what its caller requires,
-    /// runs the fold of what arrived during the ordinary fold (core's
-    /// `NamespaceStore::fold_while_paused`), and publishes its last
-    /// manifest. So commits pause only for that fold and that manifest.
+    /// `paused` returns. `paused` is the operation's last step in the
+    /// session's commit engine, which loads the session's position (exact,
+    /// because the call keeps the lane and the commit queue) and checks what
+    /// its caller requires, and which folds
+    /// what arrived during the ordinary fold with core's
+    /// `NamespaceStore::fold_while_paused`, which publishes that fold with
+    /// the operation's change as one manifest. A deletion publishes its
+    /// tombstone after that manifest, and an advance raises the floor in it.
+    /// So commits pause only for that fold and the operation's last
+    /// manifest.
     ///
     /// An ordinary fold that fails returns its error, and `paused` doesn't
     /// run. A namespace that the ordinary fold doesn't find
@@ -59,6 +65,11 @@ impl NamespacePublisher {
         }
         let lane = self.lock_lane().await;
         let mut engine = self.lock_engine().await;
-        Ok(paused(&lane, &mut engine).await)
+        let ended = paused(&lane, &mut engine).await;
+        // Wakes the commits that wait at the write stop after the fold of what
+        // arrived, whether or not it published, because a woken commit that
+        // still finds the stop waits again.
+        self.fold_published.send_replace(());
+        Ok(ended)
     }
 }

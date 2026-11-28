@@ -159,6 +159,18 @@ async fn collect<S: ObjectStore>(
 
 /// Advances the retention floor to the head once the grace after `setup` has
 /// passed.
+/// Returns the floor of the namespace's newest manifest.
+async fn read_floor<S: ObjectStore>(
+    namespace: &crate::NamespaceStore<S>,
+) -> loonfs_types::CommitSeq {
+    namespace
+        .load_current_manifest()
+        .await
+        .expect("the newest manifest")
+        .payload()
+        .retention_floor_seq
+}
+
 async fn advance_floor_past<S: ObjectStore + Clone>(
     store: S,
     namespace_id: &NamespaceId,
@@ -272,6 +284,8 @@ async fn a_retired_namespace_keeps_its_boundary_fences_floor_objects_and_unrecog
         .await
         .expect("user snapshot");
     advance_floor_past(&store, &namespace_id, &setup).await;
+    let floor = read_floor(&crate::test_support::namespace_store(&store, &namespace_id)).await;
+    crate::test_support::put_floor_object(&store, &namespace_id, floor).await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
         .delete_namespace(
@@ -281,7 +295,7 @@ async fn a_retired_namespace_keeps_its_boundary_fences_floor_objects_and_unrecog
         .await
         .expect("delete namespace");
     // The WAL objects that no collection deletes: the fences of the writer
-    // sessions and the floor object of the advance.
+    // sessions and the floor object in the tail.
     let commit_keys = crate::test_support::commit_wal_keys(&store, &namespace_id).await;
     let kept_wal = store
         .list_prefix(&wal_prefix(&namespace_id))
@@ -958,10 +972,9 @@ async fn gc_never_deletes_the_live_replay_tail() {
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     let report = collect(&store, &namespace_id, &aged).await;
 
-    // The two folded commit objects go. The fences of their sessions and the
-    // advance's floor object stay.
+    // The two folded commit objects go. The fences of their sessions stay.
     assert_eq!(report.deleted.wal_objects, 2);
-    assert_eq!(report.retained.fences_and_floor_objects, 3);
+    assert_eq!(report.retained.fences_and_floor_objects, 2);
     // Latest reads replay the retained tail over the manifest basis.
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace
@@ -1008,11 +1021,17 @@ async fn a_collection_keeps_folded_fences_and_floor_objects_and_deletes_commit_o
     .pop()
     .expect("one result")
     .expect("create a directory");
-    // The floor advances over folded commits, and the advance folds its
-    // floor object.
+    // The floor advances over folded commits, and a fold covers a floor
+    // object in the tail.
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     namespace.fold_as_test_writer().await.expect("fold the WAL");
     advance_floor_past(&store, &namespace_id, &setup).await;
+    let floor = read_floor(&namespace).await;
+    crate::test_support::put_floor_object(&store, &namespace_id, floor).await;
+    namespace
+        .fold_as_test_writer()
+        .await
+        .expect("fold the floor object");
 
     let commit_keys = crate::test_support::commit_wal_keys(&store, &namespace_id).await;
     assert!(!commit_keys.is_empty());

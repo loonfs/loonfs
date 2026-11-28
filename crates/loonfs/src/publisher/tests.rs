@@ -714,12 +714,7 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
         let batches = publisher_state(&publisher)
             .queue
             .iter()
-            .map(|item| match item {
-                WorkItem::Batch(batch) => batch.candidates.len(),
-                WorkItem::RetentionAdvance(_) => {
-                    panic!("expected commit batch")
-                }
-            })
+            .map(|batch| batch.candidates.len())
             .collect::<Vec<_>>();
         assert_eq!(batches, expected_batches);
         for (response, expected_seq) in responses.into_iter().zip([CommitSeq(2), CommitSeq(3)]) {
@@ -1429,12 +1424,7 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
     let batches = publisher_state(&publisher)
         .queue
         .iter()
-        .map(|item| match item {
-            WorkItem::Batch(batch) => batch.candidates.len(),
-            WorkItem::RetentionAdvance(_) => {
-                panic!("expected commit batch")
-            }
-        })
+        .map(|batch| batch.candidates.len())
         .collect::<Vec<_>>();
     assert_eq!(batches, [2], "both candidates share one batch");
 
@@ -3849,6 +3839,7 @@ mod inline_writer;
 mod merges;
 mod preparation_panic;
 mod publication_clock;
+mod retention_advance;
 mod retention_expiry;
 mod session_compaction;
 mod snapshot_folds;

@@ -387,54 +387,6 @@ async fn a_lost_fence_acknowledgment_never_fences_a_lone_writer() {
     assert_readable(&local, &namespace_id, &["alpha", "gamma"]).await;
 }
 
-/// Checks that a session's floor object put with an unknown outcome ends the
-/// session's epoch, as every put of the session whose outcome is unknown
-/// does, and drops the position. The session's next commit claims a new
-/// epoch, writes a fence, and succeeds (format spec, "Failed and unknown
-/// outcomes").
-#[tokio::test]
-async fn an_unknown_floor_object_put_leaves_the_session_without_its_epoch() {
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let local = LocalFsStore::new(directory.path()).expect("store");
-    let (store, _last_wal_put) = holding_store(&directory, &namespace_id);
-    let writer = context("writer-a");
-    crate::test_support::NamespaceFixture::new(&local, &namespace_id, &writer)
-        .create()
-        .await
-        .expect("bootstrap");
-    let mut engine = NamespaceCommitEngine::new(
-        crate::test_support::namespace_store(&store, &namespace_id),
-        writer.writer_id.clone(),
-    );
-    publish_one(&mut engine, &writer, "alpha").await;
-    let planned = engine
-        .namespace
-        .load_current_manifest()
-        .await
-        .expect("the planned manifest");
-
-    store.fail_next(1);
-    assert_matches!(
-        engine
-            .publish_floor_object_alone(&planned, CommitSeq(1), &writer.clock())
-            .await,
-        Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(_)))
-    );
-    assert!(engine.writer_position().is_none());
-    assert_matches!(
-        *engine.position.lock_session(),
-        WriterSessionStatus::Unacquired
-    );
-    let before = newest_epoch(&local, &namespace_id).await;
-    publish_one(&mut engine, &writer, "beta").await;
-    assert!(
-        newest_epoch(&local, &namespace_id).await > before,
-        "the session's next commit claims"
-    );
-    assert_readable(&local, &namespace_id, &["alpha", "beta"]).await;
-}
-
 /// Checks that a session whose WAL put had an unknown outcome takes the
 /// namespace back from a writer that took it over in the meantime. The
 /// session has no epoch after the unknown outcome, so its next publication

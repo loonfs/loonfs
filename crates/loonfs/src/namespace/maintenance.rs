@@ -20,7 +20,7 @@ use crate::{
     SetRetentionWindowResponse, Writable,
 };
 use loonfs_core::control::LoadedManifest;
-use loonfs_core::{ExtensionBasis, ExtensionPublication, FloorObjectReport, RetentionPlan};
+use loonfs_core::{ExtensionBasis, ExtensionPublication, RetentionPlan};
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{CommitSeq, ExtensionName};
 
@@ -254,8 +254,8 @@ impl Namespace<Writable> {
             .await
     }
 
-    /// Advances the namespace retention floor toward `options.target` with a
-    /// floor object that this session puts in the WAL.
+    /// Advances the namespace retention floor toward `options.target`, and
+    /// records the new floor in a manifest that this session publishes.
     ///
     /// Whatever the target, the floor doesn't pass a commit dated less than
     /// the grace window ([`GC_GRACE_WINDOW_MS`](crate::GC_GRACE_WINDOW_MS))
@@ -278,19 +278,22 @@ impl Namespace<Writable> {
     /// `writer_fenced`.
     /// Without a position, it plans from the current manifest's floor and
     /// head, and claims nothing to plan. When that plan moves the floor, the
-    /// call reads the WAL tail above the manifest, and a floor that floor
-    /// objects in the tail already raised to the planned floor or above it
-    /// writes no floor object.
+    /// call reads the WAL tail above the manifest, and when the tail's view
+    /// already has a floor at or above the target, the call publishes
+    /// nothing.
     ///
-    /// A floor that moves is recorded in a floor object, one item of the
-    /// session's queue, after the commits admitted before it, and the
-    /// session's later commits are validated against the new floor. The
-    /// session puts the floor object at the number after its position's tip,
-    /// so a session without its writer epoch claims it first ([Advancing the
-    /// retention
+    /// A floor that moves is recorded in two steps of this session. The call
+    /// first checks that every segment of the manifest it planned from exists
+    /// (one HEAD each). It then takes the namespace's fold lock, folds the
+    /// tail as an ordinary fold while commits continue, and then keeps the
+    /// session's publication lane and pauses its commit queue, folds what
+    /// arrived, and publishes one manifest that includes that fold and whose
+    /// floor is the higher of the old floor and the target, even when
+    /// nothing arrived. So commits pause only for the fold of what arrived
+    /// and one manifest put, and the session's later commits are validated
+    /// against the new floor. A session without its writer epoch claims it
+    /// first ([Advancing the retention
     /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
-    /// The put writes nothing when the view that the session loads already
-    /// has a floor at or above the planned floor.
     ///
     /// The manifest that the advance plans from may be replaced, and its
     /// segments collected, after the check that found it. When the advance
@@ -302,15 +305,10 @@ impl Namespace<Writable> {
     /// `store_contention`. A missing segment of the current manifest returns
     /// `namespace_corrupt`.
     ///
-    /// When no manifest records the floor of the view after a plan that
-    /// moves the floor, including when an earlier advance's floor object
-    /// already raised it and that advance's fold failed, the call then folds
-    /// the namespace as this session, which claims the writer epoch first
-    /// when the session has none, so the fold's manifest records the floor.
-    /// The response's floor is the floor of the view after the advance, or,
-    /// when the plan leaves the floor where it is, the floor that the call
-    /// planned from (without a writer position, the current manifest's
-    /// floor).
+    /// The response's floor is the floor of the manifest that records the
+    /// advance, or, when the plan leaves the floor where it is, the floor
+    /// that the call planned from (without a writer position, the current
+    /// manifest's floor).
     pub async fn advance_retention_floor_with_options(
         &self,
         options: &AdvanceRetentionFloorOptions,
@@ -319,18 +317,15 @@ impl Namespace<Writable> {
             operation_span!(self.core, "advance_retention_floor", self.namespace_id),
             async {
                 let admitted = self.session().admit()?;
-                let report = self
+                let retention_floor_seq = self
                     .core
                     .run_again_after_replaced_manifest(|| {
-                        self.publish_retention_floor(&admitted, options)
+                        self.raise_retention_floor(&admitted, options)
                     })
                     .await?;
-                if report.retention_floor_seq > report.manifest_retention_floor_seq {
-                    admitted.fold(FoldWhen::Always).await?;
-                }
                 Ok(AdvanceRetentionResponse {
                     namespace_id: self.namespace_id.clone(),
-                    retention_floor_seq: report.retention_floor_seq,
+                    retention_floor_seq,
                 })
             },
         )
@@ -338,52 +333,42 @@ impl Namespace<Writable> {
     }
 
     /// Plans the retention floor of [`Self::advance_retention_floor_with_options`],
-    /// puts a floor object through the session's queue when the floor moves,
-    /// and returns the floors after the advance.
+    /// raises it through the session when it moves, and returns the floor
+    /// after the advance.
     ///
-    /// The plan and the floor object's check of the planned manifest's
-    /// segments read the manifest that the advance plans from. That manifest
-    /// can be the session's position's, which a newer manifest may have
-    /// replaced, and a collection may then have deleted its segments. A read
-    /// that finds a segment missing then returns `manifest_replaced`, and the
-    /// caller plans again from the newest manifest. A missing segment of the
-    /// current manifest stays `namespace_corrupt`.
-    async fn publish_retention_floor(
+    /// The plan and the check of the planned manifest's segments read the
+    /// manifest that the advance plans from. That manifest can be the
+    /// session's position's, which a newer manifest may have replaced, and a
+    /// collection may then have deleted its segments. A read that finds a
+    /// segment missing then returns `manifest_replaced`, and the caller plans
+    /// again from the newest manifest. A missing segment of the current
+    /// manifest stays `namespace_corrupt`.
+    async fn raise_retention_floor(
         &self,
         admitted: &AdmittedMaintenance<'_>,
         options: &AdvanceRetentionFloorOptions,
-    ) -> Result<FloorObjectReport> {
+    ) -> Result<CommitSeq> {
         let store = self.core.namespace_store(&self.namespace_id);
         let view = self.load_retention_view(admitted).await?;
         let plan = store
             .plan_retention_floor(view.manifest(), view.retention_floor_seq(), options.target)
             .await?;
         let target = match plan {
-            RetentionPlan::Stays(retention_floor_seq) => {
-                return Ok(FloorObjectReport {
-                    retention_floor_seq,
-                    manifest_retention_floor_seq: view.manifest().retention_floor_seq(),
-                })
-            }
+            RetentionPlan::Stays(retention_floor_seq) => return Ok(retention_floor_seq),
             RetentionPlan::Moves(target) => target,
         };
         if let RetentionView::Manifest(_) = view {
-            // Floor objects in the tail may already have raised the floor,
-            // such as an earlier advance's whose fold failed. Comparing
-            // before the queue's load keeps a session without its writer
-            // epoch from claiming for a floor object that writes nothing.
+            // The view of the tail may already have the floor. Comparing
+            // before the session's advance keeps a session without its
+            // writer epoch from claiming for an advance that changes nothing.
             let _permit = self.core.read_permit().await;
             let anchor = store.load_live_read_anchor(self.core.observation()).await?;
             if anchor.retention_floor_seq() >= target {
-                return Ok(FloorObjectReport {
-                    retention_floor_seq: anchor.retention_floor_seq(),
-                    manifest_retention_floor_seq: anchor.current_manifest().retention_floor_seq(),
-                });
+                return Ok(anchor.retention_floor_seq());
             }
         }
-        admitted
-            .submit_retention_advance(view.into_manifest(), target)
-            .await
+        store.verify_planned_segments(view.manifest()).await?;
+        admitted.advance_retention_floor(target).await
     }
 
     /// Returns the view that a retention advance plans from: the session's
@@ -581,12 +566,6 @@ enum RetentionView {
 
 impl RetentionView {
     fn manifest(&self) -> &LoadedManifest {
-        match self {
-            Self::Position { manifest, .. } | Self::Manifest(manifest) => manifest,
-        }
-    }
-
-    fn into_manifest(self) -> LoadedManifest {
         match self {
             Self::Position { manifest, .. } | Self::Manifest(manifest) => manifest,
         }
