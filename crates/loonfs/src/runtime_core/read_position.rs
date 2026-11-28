@@ -7,6 +7,7 @@ use crate::NamespaceId;
 use futures::future::BoxFuture;
 use loonfs_core::cache::{CachedHead, HeadAndWalTailCache, SharedCheck, WalTailCacheKey};
 use loonfs_core::control::{Held, HeldManifestForm, LoadedManifest};
+use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::publish::{
     FollowOutcome, PositionCheck, PublishedLock, PublishedManifest, WriterPosition,
 };
@@ -51,7 +52,7 @@ pub(crate) enum CheckedPosition {
     /// the read's maximum staleness.
     Confirmed(Arc<WriterPosition>),
     /// The session has a position that its check didn't confirm, after the
-    /// session settled it once. The read loads the namespace's head from the
+    /// session settled it on each check. The read loads the namespace's head from the
     /// store as a `strong` read does, because the read cache's head can be
     /// older than commits that the session acknowledged.
     Unconfirmed,
@@ -412,16 +413,20 @@ impl RuntimeCore {
     /// that found the position's manifest the newest, and returns whether a
     /// check did.
     ///
-    /// A check that finds a newer manifest asks the session to settle its
+    /// Each check that finds a newer manifest asks the session to settle its
     /// position (see [`HeadPositions::settle_replaced_position`]), and then
     /// checks the position that the session has once more. The newer manifest
     /// is the session's own publication between its put and its record, so
-    /// the position follows it once the publication records it and the
-    /// second check confirms it, or another writer's claim, so the settle's
-    /// writer's load fences the session, which then has no position. The
-    /// check runs at most twice, and a second check that finds a newer
-    /// manifest returns `false`. A settle that finds the session fenced
-    /// returns `false` too, so the read starts from the read cache.
+    /// the position follows it once the publication records it and the next
+    /// check confirms it, or another writer's claim, so the settle's writer's
+    /// load fences the session, which then has no position. When the
+    /// position followed the session's own manifest and the next check finds
+    /// that manifest replaced too, the next settle finds that the position
+    /// follows nothing newer, so its load finds the other writer's claim. The
+    /// check runs at most `MAX_CONTENTION_ATTEMPTS` times, and returns
+    /// `false` when the last one finds a newer manifest. A settle that finds
+    /// the session fenced returns `false` too, so the read starts from the
+    /// read cache.
     async fn check_writer_position(
         &self,
         namespace_id: &NamespaceId,
@@ -429,7 +434,7 @@ impl RuntimeCore {
         slot: &ReadPositionSlot,
     ) -> Result<bool, CoreError> {
         let namespace = self.namespace_store(namespace_id);
-        for settled in [false, true] {
+        for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
             let Some(position) = slot.current() else {
                 return Ok(false);
             };
@@ -438,7 +443,6 @@ impl RuntimeCore {
                     slot.record_check(&checked);
                     return Ok(true);
                 }
-                PositionCheck::Replaced if settled => return Ok(false),
                 PositionCheck::Replaced => {
                     let replaced = position.basis().manifest_no();
                     match positions
