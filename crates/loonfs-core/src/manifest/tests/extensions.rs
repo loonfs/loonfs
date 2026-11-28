@@ -252,8 +252,7 @@ async fn session_position(
 
 /// Checks that an extension's publication whose entry the session's own
 /// later change replaced, such as a disable, publishes nothing and returns
-/// `Superseded`, that the next one builds on the winner, and that a
-/// publication over a tombstone returns `namespace_deleted`.
+/// `Superseded`, and that the next one builds on the winner.
 #[tokio::test]
 async fn an_extension_publication_whose_entry_the_session_replaced_publishes_nothing() {
     let directory = tempdir().expect("directory");
@@ -287,31 +286,4 @@ async fn an_extension_publication_whose_entry_the_session_replaced_publishes_not
 
     let next = publish_entry(&fixture, "next").await;
     assert_eq!(next.runs[..1], won.runs);
-
-    let basis = engine.load_extension_basis().await.expect("basis");
-    engine
-        .delete_namespace(
-            &crate::test_support::administrator(&engine),
-            DeleteNamespaceOptions::default(),
-        )
-        .await
-        .expect("delete");
-    let tombstone = namespace
-        .load_current_basis(crate::test_support::observed_now())
-        .await
-        .expect("the tombstone");
-    let lane = crate::test_support::lane_at_manifest(tombstone);
-    let deleted = namespace
-        .publish_extension_from(
-            lane.lock().await.acquired_turn(),
-            &basis,
-            &grep(),
-            entry_after(&basis, "deleted"),
-        )
-        .await
-        .expect_err("a tombstone has no successor");
-    assert!(
-        matches!(deleted, CoreError::NamespaceDeleted { .. }),
-        "{deleted:?}"
-    );
 }

@@ -5,10 +5,10 @@ use super::admission::AdmissionPermit;
 use super::folds::{fold_due, FoldDue, WalTailState};
 use super::metrics::PublishOutcome;
 use super::queue::{
-    queued_candidates, BatchCandidate, OpenBatch, PendingDelete, PendingRetentionAdvance, WorkItem,
+    queued_candidates, BatchCandidate, OpenBatch, PendingRetentionAdvance, WorkItem,
 };
 use super::session_tasks::WorkerHandle;
-use super::{NamespacePublisher, NamespacePublisherState, PublisherAdmissionStatus};
+use super::{NamespacePublisher, NamespacePublisherState};
 use crate::metrics::RESULT_OK;
 use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
@@ -111,26 +111,6 @@ impl NamespacePublisher {
                         self.wait_at_write_stop(waiting, fold_published).await;
                     }
                 }
-                WorkItem::Delete(PendingDelete {
-                    options,
-                    administrator,
-                    waiters,
-                }) => {
-                    // A delete is bounded by its fold permit alone. Keeping a
-                    // publication permit while it waits for one would stall
-                    // other namespaces' publications behind folds.
-                    drop(publication);
-                    let outcome = self
-                        .contain_panic(
-                            "delete",
-                            self.delete_through_engine(&administrator, options),
-                        )
-                        .await
-                        .unwrap_or_else(panicked_outcome);
-                    if self.finish_delete(outcome, waiters).await {
-                        return;
-                    }
-                }
                 WorkItem::RetentionAdvance(PendingRetentionAdvance {
                     target,
                     planned,
@@ -161,9 +141,7 @@ impl NamespacePublisher {
     /// here, or finds no worker and spawns one.
     pub(super) fn take_next_item(&self) -> Option<WorkItem> {
         let mut state = self.lock_state();
-        // Terminal: a successful delete emptied the queue and set this
-        // before its worker returned, so nothing may be taken afterwards.
-        if matches!(state.admission, PublisherAdmissionStatus::Deleted) || state.queue.is_empty() {
+        if state.queue.is_empty() {
             state.worker = None;
             return None;
         }

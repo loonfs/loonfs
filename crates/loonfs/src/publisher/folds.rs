@@ -13,7 +13,7 @@ use loonfs_core::control::{
 use loonfs_core::limits::{fold_at_inline_bytes, FOLD_AT_WAL_BYTES, MAX_CONTENTION_ATTEMPTS};
 use loonfs_core::publish::{LaneGuard, LaneTurn, WalTailReport, WriterPosition};
 use loonfs_core::time::OperationClock;
-use loonfs_core::{FoldWriteOutcome, FoldedWalTail, MaintenanceCancellation, Phase};
+use loonfs_core::{BudgetPermit, FoldWriteOutcome, FoldedWalTail, MaintenanceCancellation, Phase};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Mutex as AsyncMutex;
@@ -261,7 +261,7 @@ impl NamespacePublisher {
         when: FoldWhen,
         stop: &MaintenanceCancellation,
     ) -> Result<NamespaceFold> {
-        drop(self.unfenced_session()?);
+        drop(self.live_session()?);
         let turns = &self.turns;
         let arrival = turns.started();
         if self.current_position().is_some() {
@@ -302,7 +302,8 @@ impl NamespacePublisher {
                 return Ok(NamespaceFold::Folded(Box::new(current)));
             }
         }
-        self.fold_under_turn(stop)
+        let _permit = self.fold_permit(stop).await?;
+        self.fold_under_turn()
             .await
             .map(|folded| NamespaceFold::Folded(Box::new(folded)))
     }
@@ -313,7 +314,7 @@ impl NamespacePublisher {
     /// the session's close or the runtime's drain waiting. `stop` is the
     /// session's stop, or a token that is never set for the session's own
     /// fold.
-    async fn unless_stopped<T>(
+    pub(super) async fn unless_stopped<T>(
         &self,
         stop: &MaintenanceCancellation,
         wait: impl Future<Output = T>,
@@ -325,8 +326,29 @@ impl NamespacePublisher {
         }
     }
 
-    /// Folds the tail from the session's position, with the fold lock that
-    /// the caller has.
+    /// Waits for a fold permit, or returns the session's refusal once `stop`
+    /// is set (see [`Self::unless_stopped`]). Every fold takes one before it
+    /// folds, and so does an operation that keeps one across two folds (see
+    /// [`Self::fold_then_pause`]).
+    pub(super) async fn fold_permit(
+        &self,
+        stop: &MaintenanceCancellation,
+    ) -> Result<BudgetPermit<'_>> {
+        let core = &self.context.runtime_core;
+        self.unless_stopped(
+            stop,
+            core.fold_permit().instrument(phase_span!(
+                core,
+                Phase::WaitForFoldPermit,
+                self.namespace_id
+            )),
+        )
+        .await
+    }
+
+    /// Folds the tail from the session's position, with the fold lock and
+    /// the fold permit that the caller has. Every fold of the session runs
+    /// here.
     ///
     /// The fold writes its content objects and segments from the session's
     /// position before it takes the session's publication lane (see
@@ -341,19 +363,9 @@ impl NamespacePublisher {
     /// fold locks only to load a position that the session doesn't keep. A
     /// fold that has its permit runs to its end, so the session's stop
     /// doesn't end its wait for the lane.
-    async fn fold_under_turn(&self, stop: &MaintenanceCancellation) -> Result<FoldedWalTail> {
+    pub(super) async fn fold_under_turn(&self) -> Result<FoldedWalTail> {
         let core = &self.context.runtime_core;
         let namespace_id = &self.namespace_id;
-        let _permit = self
-            .unless_stopped(
-                stop,
-                core.fold_permit().instrument(phase_span!(
-                    core,
-                    Phase::WaitForFoldPermit,
-                    namespace_id
-                )),
-            )
-            .await?;
         let round = self.turns.start_round();
         let started_at_ms = core.timer().monotonic_now_ms();
         let fold_span = phase_span!(
@@ -476,14 +488,15 @@ impl NamespacePublisher {
         if let Some(folded) = turns.folded_after(arrival) {
             return Ok(folded.current);
         }
-        drop(self.unfenced_session()?);
+        drop(self.live_session()?);
         if self.current_position().is_none() {
             let anchor = self.load_tail_anchor().await?;
             if !WalTailState::from(&anchor).has_change() {
                 return Ok(anchor.held().clone());
             }
         }
-        Ok(self.fold_under_turn(stop).await?.current)
+        let _permit = self.fold_permit(stop).await?;
+        Ok(self.fold_under_turn().await?.current)
     }
 
     /// Returns what a fold under `when` reports without folding, or `None`
@@ -548,7 +561,7 @@ impl NamespacePublisher {
     /// The caller keeps the lane and then locks the engine, which is the
     /// order of the session's locks, so a claim keeps both queues.
     pub(super) async fn lane_turn<'g>(&self, lane: &'g LaneGuard<'_>) -> Result<LaneTurn<'g>> {
-        drop(self.unfenced_session()?);
+        drop(self.live_session()?);
         if let Some(turn) = lane.turn() {
             return Ok(turn);
         }
@@ -567,7 +580,7 @@ impl NamespacePublisher {
     /// [`Self::lock_engine_for_unit`]). A fenced session returns
     /// `writer_fenced`.
     pub(super) async fn writer_position(&self) -> Result<WriterPosition> {
-        drop(self.unfenced_session()?);
+        drop(self.live_session()?);
         if let Some(position) = self.current_position() {
             return Ok(position);
         }

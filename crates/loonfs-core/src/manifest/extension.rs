@@ -6,7 +6,7 @@ use super::validate::validate_manifest;
 use crate::commit::publication_lane::LaneTurn;
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, Result};
-use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::publish::WriterPosition;
@@ -133,7 +133,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
         entry: ExtensionEntry,
     ) -> Result<PublicationReport<ExtensionPublication>> {
         let mut payload = turn.basis().manifest().payload().clone();
-        ensure_namespace_live(&payload.namespace_id, payload.status)?;
         if payload.extensions.get(name) != basis.find_entry(name) {
             return Ok(PublicationReport {
                 response: ExtensionPublication::Superseded,

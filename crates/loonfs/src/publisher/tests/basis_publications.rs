@@ -1169,11 +1169,11 @@ async fn a_confirmation_that_finds_the_sessions_own_claim_loads_the_position_wit
 /// confirm either, returns `store_contention` instead.
 #[tokio::test]
 async fn a_value_confirmed_under_a_newer_epoch_is_computed_again() {
-    for second_basis in [UnitBasis::Store, UnitBasis::Session] {
-        let value = computed_twice_under_new_epochs(second_basis).await;
-        match second_basis {
-            UnitBasis::Store => assert_eq!(value.expect("the unit's value"), "second"),
-            UnitBasis::Session => assert_eq!(
+    for second_from_store in [true, false] {
+        let value = computed_twice_under_new_epochs(second_from_store).await;
+        match second_from_store {
+            true => assert_eq!(value.expect("the unit's value"), "second"),
+            false => assert_eq!(
                 value.expect_err("the second value isn't confirmed").code(),
                 crate::ErrorCode::StoreContention
             ),
@@ -1183,8 +1183,10 @@ async fn a_value_confirmed_under_a_newer_epoch_is_computed_again() {
 
 /// Runs a unit through [`NamespacePublisher::run_confirmed`] whose every run
 /// ends the session's epoch before it returns its value, and whose second
-/// run's value rests on `second_basis`, and returns what the session returns.
-async fn computed_twice_under_new_epochs(second_basis: UnitBasis) -> crate::Result<&'static str> {
+/// run's value rests on the store when `second_from_store` is true, and on
+/// the session's state under the epoch that the run started with otherwise,
+/// and returns what the session returns.
+async fn computed_twice_under_new_epochs(second_from_store: bool) -> crate::Result<&'static str> {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("confirm-epoch").expect("namespace id");
     let failing = Arc::new(
@@ -1221,13 +1223,21 @@ async fn computed_twice_under_new_epochs(second_basis: UnitBasis) -> crate::Resu
         .expect("the session's first commit");
     let publisher = namespace.session().publisher.clone();
     let runs = std::sync::atomic::AtomicUsize::new(0);
-    let (runs, namespace, failing) = (&runs, &namespace, &failing);
+    let (runs, namespace, failing, publisher_ref) = (&runs, &namespace, &failing, &publisher);
     let value: crate::Result<&str> = publisher
         .run_confirmed(move || async move {
+            let writer_epoch = publisher_ref
+                .current_position()
+                .expect("the session's position before the run")
+                .read_basis()
+                .head()
+                .writer_epoch;
+            let session = UnitBasis::Session { writer_epoch };
             let (name, value, basis) = match runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             {
-                0 => ("unknown", "first", UnitBasis::Session),
-                _ => ("unknown-again", "second", second_basis),
+                0 => ("unknown", "first", session),
+                _ if second_from_store => ("unknown-again", "second", UnitBasis::Store),
+                _ => ("unknown-again", "second", session),
             };
             failing.fail_next(1);
             namespace

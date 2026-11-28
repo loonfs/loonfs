@@ -109,9 +109,15 @@ impl Namespace<Writable> {
     /// Ends the namespace after folding its final WAL tail.
     /// See [namespace deletion](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#94-deleting-a-namespace).
     ///
-    /// Sequenced as a barrier through the publication service: mutations
-    /// admitted before the delete publish first, and mutations admitted
-    /// after it fail once it succeeds.
+    /// The deletion folds the tail while commits continue, and then pauses
+    /// the session's commits (the pause) for the fold of what arrived and the
+    /// tombstone. A commit acknowledged before the pause is covered by the
+    /// tombstone, or, with `expected_head_seq`, moves the head so that the
+    /// deletion returns `stale_head`. A commit that is still queued at the
+    /// pause returns `namespace_deleted`, even if it was sent before this
+    /// call, and so does every later write. Two deletions at once don't share
+    /// an outcome. The second one runs after the first, and returns
+    /// `namespace_deleted` if the first succeeds.
     pub async fn delete_with_options(
         &self,
         options: &DeleteNamespaceOptions,
@@ -120,7 +126,10 @@ impl Namespace<Writable> {
             operation_span!(self.core, "delete", self.namespace_id),
             async {
                 let administrator = self.deletion_administrator().await?;
-                self.session().submit_delete(*options, administrator).await
+                self.session()
+                    .admit()?
+                    .delete_namespace(&administrator, *options)
+                    .await
             },
         )
         .await

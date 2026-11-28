@@ -159,6 +159,13 @@ impl LaneTurn<'_> {
         &self.writer
     }
 
+    /// Returns the number of the session's writer epoch, which a
+    /// publication that publishes nothing reports as the epoch that its
+    /// response rests on (see [`UnitBasis::Session`](crate::publish::UnitBasis::Session)).
+    pub fn writer_epoch(&self) -> loonfs_types::WriterEpoch {
+        self.writer.writer_epoch
+    }
+
     /// Returns the epoch of the session of `namespace`, which the
     /// publication sends its manifest put through.
     pub(crate) fn epoch<'a, S>(&'a self, namespace: &'a NamespaceStore<S>) -> SessionEpoch<'a> {

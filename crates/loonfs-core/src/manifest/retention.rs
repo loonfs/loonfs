@@ -7,7 +7,7 @@ use crate::commit::publication_lane::LaneTurn;
 use crate::error::Result;
 use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::metadata::manifest_index::commits_after_page;
-use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{CommitSeq, RetentionWindow, SetRetentionWindowResponse};
@@ -143,7 +143,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let retention_window_ms = retention_window_ms.map(NonZeroU64::from);
         let clock = self.start_clock();
         let mut payload = turn.basis().manifest().payload().clone();
-        ensure_namespace_live(&payload.namespace_id, payload.status)?;
         let response = SetRetentionWindowResponse {
             namespace_id: self.namespace_id.clone(),
             retention_window_ms: retention_window_ms.map(NonZeroU64::get),

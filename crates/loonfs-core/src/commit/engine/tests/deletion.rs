@@ -215,7 +215,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
     );
     // The refusal is computed from the session's kept position without a
     // put, so the session confirms the position before it returns it.
-    assert_eq!(refused.basis, crate::publish::UnitBasis::Session);
+    assert_matches!(refused.basis, crate::publish::UnitBasis::Session { .. });
     assert_eq!(
         engine.writer_position().as_ref(),
         Some(&position),
@@ -245,11 +245,13 @@ enum LearnedTombstonePut {
     CreatedResponseLost,
 }
 
-/// Checks that a deletion returns its response for each outcome of its
-/// tombstone put that the deletion learns, and that the session keeps its
-/// epoch after each one (format spec, "Failed and unknown outcomes").
+/// Checks that a deletion returns its response when it learns the outcome
+/// of its tombstone put, whether the put's response arrives or is lost and
+/// the deletion reads the tombstone back, and that the session's status is
+/// then `NamespaceGone`, not that of a session whose put had an unknown
+/// outcome (format spec, "Failed and unknown outcomes").
 #[tokio::test]
-async fn a_tombstone_put_whose_outcome_the_deletion_learns_leaves_the_session_its_epoch() {
+async fn a_tombstone_put_whose_outcome_the_deletion_learns_leaves_the_session_gone() {
     use loonfs_test_support::stores::{FailStore, InjectedError};
 
     for put in [
@@ -293,7 +295,7 @@ async fn a_tombstone_put_whose_outcome_the_deletion_learns_leaves_the_session_it
         assert_eq!(deleted.expect("the deletion").namespace_id, namespace_id);
         assert_matches!(
             *engine.session_status().lock(),
-            WriterSessionStatus::Acquired { .. },
+            WriterSessionStatus::NamespaceGone,
             "{put:?}"
         );
         let newest = newest_manifest(&base, &namespace_id).await;
@@ -557,4 +559,92 @@ async fn a_retried_deletion_after_an_unknown_tombstone_put_claims_and_deletes() 
     assert!(newest.status.is_deleted());
     assert_eq!(newest.writer_epoch, WriterEpoch(2));
     assert_eq!(newest.head_seq, CommitSeq(1));
+}
+
+/// Checks that a session's own deletion leaves it as a session whose
+/// namespace is gone, so a window change, an extension entry and a
+/// compaction unit that the session started before the deletion get no turn
+/// on the tombstone: each returns `namespace_deleted` at its turn, and none
+/// sends a put.
+#[tokio::test]
+async fn work_started_before_the_sessions_own_deletion_gets_no_turn_on_the_tombstone() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("deleted-turns").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let context = context();
+    let mut fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+    fixture.create().await.expect("bootstrap");
+    fixture.namespace.run_policy = crate::test_support::one_delta_run_policy();
+    let mut engine =
+        NamespaceCommitEngine::new(fixture.namespace.clone(), context.writer_id.clone());
+    let clock = OperationClock::start(context.now_ms, crate::test_support::std_timer());
+    for name in ["alpha", "beta"] {
+        engine
+            .publish_batch_alone([super::create_dir(name, name)], &clock)
+            .await
+            .results
+            .pop()
+            .expect("result")
+            .expect("commit");
+        engine.fold().await.expect("fold");
+    }
+    // The extension's basis and the compaction unit's output are planned and
+    // written before the deletion, as work that waits for its turn is.
+    let position = engine.load_position_alone().await.expect("position");
+    let extension = fixture
+        .namespace
+        .load_position_extension_basis(&position)
+        .await
+        .expect("extension basis");
+    let compaction = fixture
+        .engine()
+        .write_metadata_compaction_unit(
+            &position,
+            &crate::compaction::MaintenanceCancellation::default(),
+        )
+        .await
+        .expect("compaction unit");
+    assert_matches!(compaction, crate::CompactionWriteOutcome::Written(_));
+
+    engine
+        .delete_namespace_alone(
+            &crate::test_support::administrator_of(&store, &namespace_id),
+            Default::default(),
+        )
+        .await
+        .expect("delete");
+    assert_matches!(
+        *engine.session_status().lock(),
+        WriterSessionStatus::NamespaceGone
+    );
+    store.reset();
+    assert_matches!(
+        engine.set_retention_window(None).await,
+        Err(CoreError::NamespaceDeleted { .. })
+    );
+    assert_matches!(
+        engine
+            .publish_extension(
+                &extension,
+                &loonfs_types::ExtensionName::parse("grep").expect("name"),
+                loonfs_types::format::manifest::ExtensionEntry::new(
+                    1,
+                    Vec::new(),
+                    serde_json::Map::new(),
+                ),
+            )
+            .await,
+        Err(CoreError::NamespaceDeleted { .. })
+    );
+    let lane = engine.publication_lane();
+    let guard = lane.lock().await;
+    assert_matches!(
+        engine.lane_turn(&guard).await,
+        Err(CoreError::NamespaceDeleted { .. }),
+        "the compaction unit's publication gets no turn"
+    );
+    assert_eq!(store.counts().puts, 0);
 }

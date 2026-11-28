@@ -15,8 +15,8 @@
 use super::NamespacePublisher;
 use crate::runtime_core::CheckedPosition;
 use crate::{CoreError, Error, Result};
-use loonfs_core::publish::{UnitBasis, UnitReport, UnitStart, WriterPosition, WriterSessionStatus};
-use loonfs_types::{ManifestNo, WriterEpoch};
+use loonfs_core::publish::{UnitBasis, UnitReport, UnitStart, WriterPosition};
+use loonfs_types::ManifestNo;
 use std::future::Future;
 
 impl NamespacePublisher {
@@ -90,24 +90,23 @@ impl NamespacePublisher {
     ///
     /// The check confirms the position that the session has when the check
     /// runs, so the value is returned only when the confirmed position has
-    /// the writer epoch that the session had before `run`. A session can
-    /// lose its epoch to an unknown outcome on its other queue while `run`
-    /// computes, and claim and load again before the check. Otherwise `run`
-    /// runs once more. The second run's value rests on the store when its
-    /// start claims or loads a position, and a session that the check found
-    /// fenced returns `writer_fenced`. A second value that the unit computed
-    /// from the session's own state again is confirmed by the same check, and
-    /// when the check doesn't confirm it either, the call returns
-    /// `store_contention`, so the caller tries again.
+    /// the writer epoch that the unit computed its value under, which the
+    /// unit reports with its basis. A session can lose its epoch to an
+    /// unknown outcome on its other queue while `run` computes, and claim
+    /// and load again before the check. Otherwise `run` runs once more. The
+    /// second run's value rests on the store when its start claims or loads
+    /// a position, and a session that the check found fenced returns
+    /// `writer_fenced`. A second value that the unit computed from the
+    /// session's own state again is confirmed by the same check, under the
+    /// epoch in its own basis, and when the check doesn't confirm it either,
+    /// the call returns `store_contention`, so the caller tries again.
     ///
     /// A unit that returns an error isn't confirmed. Every such error comes
     /// from the store or from the session's own status, not from the kept
     /// position: a fenced, closed or deleted session's refusal, a claim's or
     /// a load's error, a write of segments or content, a publication budget
-    /// that ran out on the unit's own clock, a lane publication's
-    /// `namespace_deleted` from the session's newest published manifest
-    /// (a manifest of the session, so the session deleted the namespace), and
-    /// a position found behind, which [`Self::run_from_position`] settles.
+    /// that ran out on the unit's own clock, and a position found behind,
+    /// which [`Self::run_from_position`] settles.
     /// A commit's refusals are values of its batch, not errors of the unit.
     ///
     /// The check costs one HEAD of the successor of the position's manifest
@@ -121,14 +120,12 @@ impl NamespacePublisher {
         E: From<CoreError>,
         Fut: Future<Output = std::result::Result<UnitReport<T>, E>>,
     {
-        let epoch = self.writer_epoch();
         let first = run().await?;
-        if first.basis == UnitBasis::Store || self.confirms(epoch).await? {
+        if self.confirms(first.basis).await? {
             return Ok(first.value);
         }
-        let epoch = self.writer_epoch();
         let second = run().await?;
-        if second.basis == UnitBasis::Store || self.confirms(epoch).await? {
+        if self.confirms(second.basis).await? {
             return Ok(second.value);
         }
         Err(CoreError::StoreContention {
@@ -137,18 +134,17 @@ impl NamespacePublisher {
         .into())
     }
 
-    /// Returns the session's writer epoch, or `None` when the session
-    /// doesn't have one.
-    fn writer_epoch(&self) -> Option<WriterEpoch> {
-        match &*self.session.lock() {
-            WriterSessionStatus::Acquired { writer, .. } => Some(writer.writer_epoch),
-            _ => None,
-        }
-    }
-
-    /// Returns whether the session's check confirms a position with
-    /// `epoch`, the writer epoch that the session had before a unit ran.
-    async fn confirms(&self, epoch: Option<WriterEpoch>) -> std::result::Result<bool, CoreError> {
+    /// Returns whether a unit's value with `basis` can be returned: a value
+    /// from the store can, and a value from the session's own state can when
+    /// the session's check confirms a position with the writer epoch that
+    /// the unit computed its value under.
+    async fn confirms(&self, basis: UnitBasis) -> std::result::Result<bool, CoreError> {
+        let UnitBasis::Session {
+            writer_epoch: epoch,
+        } = basis
+        else {
+            return Ok(true);
+        };
         let checked = self
             .context
             .runtime_core
@@ -156,7 +152,7 @@ impl NamespacePublisher {
             .await?;
         Ok(match checked {
             CheckedPosition::Confirmed(position) => {
-                epoch == Some(position.read_basis().head().writer_epoch)
+                epoch == position.read_basis().head().writer_epoch
             }
             CheckedPosition::Absent | CheckedPosition::Unconfirmed => false,
         })

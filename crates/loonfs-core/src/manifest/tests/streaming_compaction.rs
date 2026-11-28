@@ -2046,7 +2046,7 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
 }
 
 #[tokio::test]
-async fn an_expired_job_and_a_deletion_each_prevent_publication() {
+async fn an_expired_job_prevents_publication() {
     use crate::limits::METADATA_COMPACTION_BUDGET_MS;
     use loonfs_test_support::stores::RecordingStore;
 
@@ -2082,39 +2082,6 @@ async fn an_expired_job_and_a_deletion_each_prevent_publication() {
         .expect("elapsed bound");
     assert_eq!(outcome, CompactionUnitOutcome::Abandoned);
     assert_eq!(store.counts().puts, 0);
-
-    timer.set_ms(0);
-    crate::commit::engine::NamespaceCommitEngine::new(
-        crate::test_support::namespace_store(store.inner(), &namespace),
-        (crate::test_support::WriterAt {
-            writer_id: loonfs_types::WriterId::parse("deleter").expect("writer"),
-            now_ms: 5_000,
-        })
-        .writer_id
-        .clone(),
-    )
-    .delete_namespace_alone(
-        &crate::test_support::administrator_of(store.inner(), &namespace),
-        Default::default(),
-    )
-    .await
-    .expect("delete while the job runs");
-    store.reset();
-    let outcome = publish_compaction_over_current(&store, &namespace, writes(), &cancellation)
-        .await
-        .expect("a deletion abandons the job");
-    assert_eq!(outcome, CompactionUnitOutcome::Abandoned);
-    assert_eq!(store.counts().puts, 0);
-    let tombstone = crate::test_support::namespace_store(&store, &namespace)
-        .load_current_manifest()
-        .await
-        .expect("tombstone");
-    let mut successor = tombstone.payload().clone();
-    successor.manifest_no = successor.manifest_no.successor().expect("next number");
-    let error = publish_once_within(&store, successor, &OperationClock::start(0, timer.clone()))
-        .await
-        .expect_err("a tombstone ends the namespace");
-    assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceDeleted);
 }
 
 /// Checks that a finalization from the current manifest, which a discovery

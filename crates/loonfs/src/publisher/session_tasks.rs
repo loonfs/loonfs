@@ -87,7 +87,7 @@ impl NamespacePublisher {
     /// left is at the trigger.
     pub(super) fn start_fold(&self) -> Option<oneshot::Sender<()>> {
         let mut state = self.lock_state();
-        let _session = self.unfenced_session().ok()?;
+        let _session = self.live_session().ok()?;
         if state
             .fold
             .as_ref()

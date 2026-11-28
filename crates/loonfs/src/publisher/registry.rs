@@ -6,12 +6,10 @@ use super::{lock_state, NamespacePublisher, NamespaceTurns, PublisherContext};
 use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
 use crate::trace::phase_event;
-use crate::{
-    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, Result, WriterState,
-};
+use crate::{CoreError, Error, Result, WriterState};
 use futures::future::BoxFuture;
 use loonfs_core::publish::WriterPosition;
-use loonfs_core::{Administrator, Phase};
+use loonfs_core::Phase;
 use loonfs_types::Commit;
 use loonfs_types::{CommitSeq, ManifestNo, NamespaceId};
 use std::collections::HashMap;
@@ -164,19 +162,6 @@ impl NamespaceSession {
         self.publisher.submit_merge(candidate, reservation).await
     }
 
-    /// Submits a namespace deletion, sequenced as a barrier: mutations
-    /// admitted before it publish first, and mutations admitted after it
-    /// fail once the delete succeeds. `administrator` proves the caller
-    /// administers the namespace, and the queue keeps the proof until the
-    /// deletion runs.
-    pub(crate) async fn submit_delete(
-        &self,
-        options: DeleteNamespaceOptions,
-        administrator: Administrator,
-    ) -> Result<DeleteNamespaceResponse> {
-        self.publisher.submit_delete(options, administrator).await
-    }
-
     pub(crate) fn state(&self) -> NamespaceSessionStatus {
         self.publisher.session_status()
     }
@@ -324,10 +309,11 @@ impl PublisherRegistry {
     ///
     /// A session whose last handle dropped stays in the table until its
     /// admitted work finishes, and an open before then continues it: a
-    /// second session would acquire a new epoch and fence that work. A fenced
-    /// session can't continue, so an open fails with the session's
-    /// `writer_fenced` while its work ends, then starts a new session even
-    /// while old handles still exist.
+    /// second session would acquire a new epoch and fence that work. A
+    /// session that is fenced, or whose namespace is gone, can't continue, so
+    /// an open fails with the session's `writer_fenced` or
+    /// `namespace_deleted` while its work ends, then starts a new session
+    /// even while old handles still exist.
     pub(crate) fn open_session(
         &self,
         namespace_id: &NamespaceId,
@@ -337,7 +323,7 @@ impl PublisherRegistry {
             return Err(CoreError::ShuttingDown);
         }
         if let Some(live) = state.sessions.get(namespace_id) {
-            if let Some(fenced) = live.publisher.unfenced_session().err() {
+            if let Some(fenced) = live.publisher.live_session().err() {
                 if !live.publisher.lock_state().has_ended(false) {
                     return Err(fenced);
                 }
@@ -384,12 +370,12 @@ impl PublisherRegistry {
     }
 
     /// Waits until the namespace's session in this runtime, if it admits no
-    /// more work because it's fenced or closed, has finished its work and
-    /// left the table, so that the next [`Self::open_session`] starts a new
-    /// session instead of returning the session's `writer_fenced` or
-    /// `writer_session_closed`. A session that admits work is left alone.
+    /// more work because it's fenced, closed or its namespace is gone, has
+    /// finished its work and left the table, so that the next
+    /// [`Self::open_session`] starts a new session instead of returning the
+    /// session's refusal. A session that admits work is left alone.
     ///
-    /// A fence and a close cancel the session's compaction (see
+    /// Each of these cancels the session's compaction (see
     /// [`NamespacePublisher::release_engine`]), and such a session admits and
     /// starts nothing more, so the wait ends once the commits and the
     /// maintenance that it admitted and a running fold end.
@@ -397,7 +383,7 @@ impl PublisherRegistry {
         let Some(publisher) = self.live_publisher(namespace_id) else {
             return;
         };
-        if publisher.session_is_fenced() || publisher.session_closed() {
+        if publisher.live_session().is_err() || publisher.session_closed() {
             publisher.end_session_work().await;
         }
     }

@@ -63,6 +63,15 @@ fn is_fold(operation: &OperationContext<'_>) -> bool {
     }
 }
 
+/// Whether `operation` is the put of a fold's manifest whose head is
+/// `head_seq`.
+fn is_fold_at(operation: &OperationContext<'_>, head_seq: CommitSeq) -> bool {
+    is_fold(operation)
+        && matches!(operation.kind(), OperationKind::Put { bytes, .. }
+            if loonfs_types::format::manifest::decode_namespace_manifest_json(bytes)
+                .is_ok_and(|manifest| manifest.payload().head_seq == head_seq))
+}
+
 fn blocking_fold_store<S>(inner: S, prefix: String) -> BlockingStore<S> {
     BlockingStore::matching(inner, move |operation| {
         operation.key().starts_with(&prefix) && is_fold(operation)
@@ -401,8 +410,8 @@ async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
         .expect("bootstrap");
 }
 
-/// Pacing for standalone test publishers, long enough that
-/// `wait_past_publish_pacing` outlasting it is meaningful.
+/// Pacing for standalone test publishers, long enough that a test sees a
+/// request wait for it.
 const TEST_STANDALONE_PACING_MS: u64 = 1_000;
 
 /// Returns an operation that puts the prepared content at `path`.
@@ -423,14 +432,6 @@ fn publisher_state(
         .state
         .lock()
         .expect("namespace publisher mutex should not be poisoned")
-}
-
-/// True while exactly one worker owns the publisher's queue.
-fn single_live_worker(publisher: &NamespacePublisher) -> bool {
-    publisher_state(publisher)
-        .worker
-        .as_ref()
-        .is_some_and(|worker| !*worker.liveness.borrow())
 }
 
 /// Yields until the publisher's queue holds at least `expected` candidates
@@ -498,37 +499,6 @@ async fn wait_for_commit_waiters(
     }
 }
 
-/// Yields until a delete sits at the tail of the publisher's queue.
-async fn wait_for_queued_delete(publisher: &NamespacePublisher) {
-    loop {
-        if matches!(
-            publisher_state(publisher).queue.back(),
-            Some(WorkItem::Delete(_))
-        ) {
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
-}
-
-/// Queued delete items and the waiters they hold, worker-untaken.
-fn queued_delete_shape(state: &NamespacePublisherState) -> (usize, usize) {
-    state
-        .queue
-        .iter()
-        .fold((0, 0), |(items, waiters), item| match item {
-            WorkItem::Delete(pending) => (items + 1, waiters + pending.waiters.len()),
-            _ => (items, waiters),
-        })
-}
-
-/// Yields until the queued deletes hold at least `expected` waiters.
-async fn wait_for_queued_delete_waiters(publisher: &NamespacePublisher, expected: usize) {
-    while queued_delete_shape(&publisher_state(publisher)).1 < expected {
-        tokio::task::yield_now().await;
-    }
-}
-
 /// Returns the administrator proof for the namespace of `publisher`, whose
 /// runtime has no subject in these tests, so the proof needs no read.
 fn administrator(publisher: &NamespacePublisher) -> loonfs_core::Administrator {
@@ -547,7 +517,7 @@ fn spawn_delete(
     let publisher = publisher.clone();
     tokio::spawn(async move {
         let administrator = administrator(&publisher);
-        publisher.submit_delete(options, administrator).await
+        publisher.delete_namespace(&administrator, options).await
     })
 }
 
@@ -589,19 +559,6 @@ fn standalone_publisher_with(
         writer: Arc::clone(&runtime.writer),
     };
     standalone_publisher(namespace_id, &runtime)
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "waits past wall-clock publish pacing interval in a race test"
-)]
-async fn wait_past_publish_pacing() {
-    // Deliberate wall-clock wait past the per-namespace CAS pacing
-    // interval. A work loop that were not single-flight would let a
-    // racing second task release a queued delete after exactly that
-    // interval, so outlasting it proves the delete is ordered behind
-    // the sealed batch, not merely paced behind it.
-    tokio::time::sleep(Duration::from_millis(TEST_STANDALONE_PACING_MS + 300)).await;
 }
 
 /// One directory creation directly under the root, named by the directory
@@ -759,7 +716,7 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
             .iter()
             .map(|item| match item {
                 WorkItem::Batch(batch) => batch.candidates.len(),
-                WorkItem::Delete(_) | WorkItem::RetentionAdvance(_) => {
+                WorkItem::RetentionAdvance(_) => {
                     panic!("expected commit batch")
                 }
             })
@@ -1156,7 +1113,7 @@ async fn publisher_contender_reports_conflict_after_retry_limit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests() {
+async fn publisher_limit_counts_active_duplicate_and_contended_requests() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
@@ -1212,10 +1169,6 @@ async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests()
             &namespace_id,
             create_directory_request("pending-0", "pending-0")
         ),
-        Err(CoreError::CommitQueueFull)
-    );
-    assert_matches!(
-        publisher.admit_delete(DeleteNamespaceOptions::default(), administrator(&publisher)),
         Err(CoreError::CommitQueueFull)
     );
 
@@ -1478,7 +1431,7 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
         .iter()
         .map(|item| match item {
             WorkItem::Batch(batch) => batch.candidates.len(),
-            WorkItem::Delete(_) | WorkItem::RetentionAdvance(_) => {
+            WorkItem::RetentionAdvance(_) => {
                 panic!("expected commit batch")
             }
         })
@@ -1496,87 +1449,6 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
         "a settled replay is not replaced by the failed retry"
     );
     assert!(answer_lost.load(AtomicOrdering::SeqCst));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
-    let shared = store.clone() as SharedStore;
-    let runtime = test_runtime(shared.clone());
-    create_namespace(&runtime, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &runtime);
-
-    // A publishes and blocks at its WAL put; B queues behind it.
-    store.block_next();
-    let before_a = admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("before-a", "before-a"),
-    );
-    store.wait_until_blocked().await;
-    let before_b = admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("before-b", "before-b"),
-    );
-
-    // The delete arrives: everything above was admitted before it,
-    // everything below after it.
-    let delete_task = {
-        let publisher = publisher.clone();
-        tokio::spawn(async move {
-            publisher
-                .submit_delete(DeleteNamespaceOptions::default(), administrator(&publisher))
-                .await
-        })
-    };
-    // Deterministic: wait until the delete has queued behind the open batch.
-    wait_for_queued_delete(&publisher).await;
-    let after = admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("after", "after"),
-    );
-
-    store.release();
-
-    // Admitted-before work publishes; the delete is published after it.
-    assert_eq!(
-        recv_commit(before_a, "before-a").await.committed_seq,
-        CommitSeq(1)
-    );
-    assert_eq!(
-        recv_commit(before_b, "before-b").await.committed_seq,
-        CommitSeq(2)
-    );
-    let response = delete_task
-        .await
-        .expect("delete task")
-        .expect("delete succeeds");
-    assert_eq!(response.head_seq, CommitSeq(2));
-    let statistics = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
-        .load_statistics()
-        .await
-        .expect("final statistics");
-    assert_eq!(statistics.activity.mutations.get(), 2);
-    assert_eq!(statistics.manifest.head_seq, response.head_seq);
-    assert_eq!(statistics.inode_record_count, 3);
-
-    // Admitted-after work is rejected, and the tombstone fails new
-    // admissions immediately.
-    let after_error = after
-        .await
-        .expect("after waiter answered")
-        .expect_err("admitted after the delete");
-    assert_eq!(after_error.code(), ErrorCode::NamespaceDeleted);
-    let fast_fail = try_admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("too-late", "too-late"),
-    );
-    assert_matches!(fast_fail, Err(CoreError::NamespaceDeleted { .. }));
 }
 
 /// Checks that a deletion folds the WAL tail with the runtime's configured
@@ -1615,7 +1487,10 @@ async fn deletion_folds_the_tail_with_the_configured_run_policy() {
     assert!(diagnostics.wal_tail_objects > 0, "the tail is unfolded");
 
     publisher
-        .submit_delete(DeleteNamespaceOptions::default(), administrator(&publisher))
+        .delete_namespace(
+            &administrator(&publisher),
+            DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete");
     let deleted = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
@@ -1636,8 +1511,12 @@ async fn deletion_folds_the_tail_with_the_configured_run_policy() {
     );
 }
 
+/// Checks that two deletions at once don't share an outcome: the second one
+/// waits for the first one's fold lock and returns `namespace_deleted`, and
+/// a commit that waits for the first one's pause returns `namespace_deleted`
+/// too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn second_delete_during_inflight_delete_settles_both() {
+async fn a_second_deletion_during_a_deletion_returns_namespace_deleted() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
@@ -1659,32 +1538,17 @@ async fn second_delete_during_inflight_delete_settles_both() {
     .await;
 
     store.block_next();
-    let first = {
-        let publisher = publisher.clone();
-        tokio::spawn(async move {
-            publisher
-                .submit_delete(DeleteNamespaceOptions::default(), administrator(&publisher))
-                .await
-        })
-    };
+    let first = spawn_delete(&publisher, DeleteNamespaceOptions::default());
     store.wait_until_blocked().await;
 
-    // Admitted while the first delete holds the head: a mutation, then a
-    // second delete behind it.
+    // Sent while the first deletion's tombstone put is in flight, with the
+    // commit queue paused: a commit, then a second deletion.
     let orphan = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("orphan", "orphan"),
     );
-    let second = {
-        let publisher = publisher.clone();
-        tokio::spawn(async move {
-            publisher
-                .submit_delete(DeleteNamespaceOptions::default(), administrator(&publisher))
-                .await
-        })
-    };
-    wait_for_queued_delete(&publisher).await;
+    let second = spawn_delete(&publisher, DeleteNamespaceOptions::default());
 
     store.release();
     let first_response = first
@@ -1703,181 +1567,8 @@ async fn second_delete_during_inflight_delete_settles_both() {
     let orphan_error = orphan
         .await
         .expect("orphan waiter answered")
-        .expect_err("admitted behind the delete");
+        .expect_err("queued at the first deletion's pause");
     assert_eq!(orphan_error.code(), ErrorCode::NamespaceDeleted);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn identical_pending_deletes_coalesce_into_one_outcome() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
-    let shared = store.clone() as SharedStore;
-    let runtime = test_runtime(shared.clone());
-    create_namespace(&runtime, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &runtime);
-
-    recv_commit(
-        admit_commit(
-            &publisher,
-            &namespace_id,
-            create_directory_request("seed", "seed"),
-        ),
-        "seed",
-    )
-    .await;
-
-    // A blocked publication holds the worker, so both deletes stay
-    // pending at the tail together.
-    store.block_next();
-    let gate = admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("gate", "gate"),
-    );
-    store.wait_until_blocked().await;
-
-    let options = DeleteNamespaceOptions {
-        expected_head_seq: Some(CommitSeq(2)),
-    };
-    let first = spawn_delete(&publisher, options);
-    wait_for_queued_delete_waiters(&publisher, 1).await;
-    let second = spawn_delete(&publisher, options);
-    wait_for_queued_delete_waiters(&publisher, 2).await;
-    assert_eq!(
-        queued_delete_shape(&publisher_state(&publisher)),
-        (1, 2),
-        "equal options coalesce into one pending delete"
-    );
-
-    store.release();
-    recv_commit(gate, "gate").await;
-    let first = settle_delete(first, "first delete")
-        .await
-        .expect("first delete succeeds");
-    let second = settle_delete(second, "second delete")
-        .await
-        .expect("second delete succeeds");
-    assert_eq!(first.head_seq, CommitSeq(2));
-    assert_eq!(second.head_seq, CommitSeq(2));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pending_deletes_with_different_preconditions_settle_separately() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
-    // The stale delete's refusal is computed from the session's position, so
-    // the session's check has to find the session in its runtime, which a
-    // standalone publisher isn't registered in.
-    let writer = test_writer(store.clone() as SharedStore).await;
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    let publisher = namespace.session().publisher.clone();
-
-    recv_commit(
-        admit_commit(
-            &publisher,
-            &namespace_id,
-            create_directory_request("seed", "seed"),
-        ),
-        "seed",
-    )
-    .await;
-
-    store.block_next();
-    let gate = admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("gate", "gate"),
-    );
-    store.wait_until_blocked().await;
-
-    let stale = spawn_delete(
-        &publisher,
-        DeleteNamespaceOptions {
-            expected_head_seq: Some(CommitSeq(1)),
-        },
-    );
-    wait_for_queued_delete_waiters(&publisher, 1).await;
-    let unconditional = spawn_delete(&publisher, DeleteNamespaceOptions::default());
-    wait_for_queued_delete_waiters(&publisher, 2).await;
-    assert_eq!(
-        queued_delete_shape(&publisher_state(&publisher)),
-        (2, 2),
-        "different options stay separate pending deletes"
-    );
-
-    store.release();
-    recv_commit(gate, "gate").await;
-    let stale_error = settle_delete(stale, "stale delete")
-        .await
-        .expect_err("the gate publication moved the head past its precondition");
-    assert_eq!(stale_error.code(), ErrorCode::StaleHead);
-    let deleted = settle_delete(unconditional, "unconditional delete")
-        .await
-        .expect("the unconditional delete is published after the stale one fails");
-    assert_eq!(deleted.head_seq, CommitSeq(2));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_stale_pending_delete_does_not_share_the_first_deletes_success() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
-    let shared = store.clone() as SharedStore;
-    let runtime = test_runtime(shared.clone());
-    create_namespace(&runtime, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &runtime);
-
-    recv_commit(
-        admit_commit(
-            &publisher,
-            &namespace_id,
-            create_directory_request("seed", "seed"),
-        ),
-        "seed",
-    )
-    .await;
-
-    store.block_next();
-    let gate = admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("gate", "gate"),
-    );
-    store.wait_until_blocked().await;
-
-    let valid = spawn_delete(
-        &publisher,
-        DeleteNamespaceOptions {
-            expected_head_seq: Some(CommitSeq(2)),
-        },
-    );
-    wait_for_queued_delete_waiters(&publisher, 1).await;
-    let stale = spawn_delete(
-        &publisher,
-        DeleteNamespaceOptions {
-            expected_head_seq: Some(CommitSeq(1)),
-        },
-    );
-    wait_for_queued_delete_waiters(&publisher, 2).await;
-
-    store.release();
-    recv_commit(gate, "gate").await;
-    let deleted = settle_delete(valid, "valid delete")
-        .await
-        .expect("the delete whose precondition holds is published");
-    assert_eq!(deleted.head_seq, CommitSeq(2));
-    let stale_error = settle_delete(stale, "stale delete")
-        .await
-        .expect_err("a precondition the tombstone outran");
-    assert_eq!(stale_error.code(), ErrorCode::NamespaceDeleted);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2470,20 +2161,25 @@ async fn a_first_commit_with_an_unknown_outcome_drops_the_cached_head() {
 }
 
 /// Checks that a deletion whose tombstone put stores the tombstone and then
-/// panics returns `outcome_unknown` and acknowledges no commit queued behind
-/// it. The deletion waits at the put of its fold while a commit queues, and
-/// its tombstone put panics after the store keeps the tombstone. If that
+/// panics acknowledges no commit queued at its pause. The deletion runs in
+/// its caller's task, as other maintenance does, so the panic reaches the
+/// caller. The deletion waits at the put of its fold while a commit queues,
+/// and its tombstone put panics after the store keeps the tombstone. If that
 /// commit were acknowledged, its WAL object would come after the tombstone's
 /// folded WAL number, so no read would replay it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_deletion_that_panics_after_its_tombstone_put_acknowledges_no_later_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(BlockingStore::matching(
-        PanicWalPutStore::new(temp_dir.path(), &namespace_id),
-        is_fold,
+    let first_fold = Arc::new(BlockingStore::matching(
+        BlockingStore::matching(
+            PanicWalPutStore::new(temp_dir.path(), &namespace_id),
+            |operation| is_fold_at(operation, CommitSeq(2)),
+        ),
+        |operation| is_fold_at(operation, CommitSeq(1)),
     ));
-    let writer = test_writer(store.clone() as SharedStore).await;
+    let paused_fold = first_fold.inner();
+    let writer = test_writer(first_fold.clone() as SharedStore).await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -2499,28 +2195,35 @@ async fn a_deletion_that_panics_after_its_tombstone_put_acknowledges_no_later_co
         .expect("a commit before the deletion");
     let publisher = namespace.session().publisher.clone();
 
-    store.block_next();
-    store.inner().arm_panic_after_put();
+    // The deletion's ordinary fold waits at its put while a second commit
+    // is acknowledged, so the deletion's fold at the pause has that commit
+    // to fold, and waits at its own put while a third commit queues.
+    first_fold.block_next();
+    paused_fold.block_next();
     let delete = spawn_delete(&publisher, DeleteNamespaceOptions::default());
-    store.wait_until_blocked().await;
-    let queued = {
-        let namespace = namespace.clone();
-        tokio::spawn(async move {
-            namespace
-                .commit_candidate(CommitCandidate::new(create_directory_request(
-                    "queued", "queued",
-                )))
-                .await
-        })
-    };
-    wait_for_queued_candidates(&publisher, 1).await;
-    store.release();
-
-    let delete_error = settle_delete(delete, "the panicked deletion")
+    first_fold.wait_until_blocked().await;
+    namespace
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "second", "second",
+        )))
         .await
+        .expect("a commit during the deletion's ordinary fold");
+    first_fold.release();
+    paused_fold.wait_until_blocked().await;
+    let queued = admit_commit(
+        &publisher,
+        &namespace_id,
+        create_directory_request("queued", "queued"),
+    );
+    paused_fold.inner().arm_panic_after_put();
+    paused_fold.release();
+
+    let panicked = bounded(Duration::from_secs(10), delete)
+        .await
+        .expect("the panicked deletion must settle, not hang")
         .expect_err("the deletion panicked after its tombstone put");
-    assert_eq!(delete_error.code(), ErrorCode::OutcomeUnknown);
-    let manifest = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+    assert!(panicked.is_panic());
+    let manifest = loonfs_core::test_support::namespace_store(first_fold.as_ref(), &namespace_id)
         .load_current_manifest()
         .await
         .expect("the current manifest");
@@ -2528,11 +2231,12 @@ async fn a_deletion_that_panics_after_its_tombstone_put_acknowledges_no_later_co
         manifest.payload().status.is_deleted(),
         "the tombstone is durable"
     );
+    assert_eq!(manifest.payload().head_seq, CommitSeq(2));
     let queued_error = bounded(Duration::from_secs(10), queued)
         .await
         .expect("the queued commit settles")
-        .expect("queued submit task")
-        .expect_err("a commit queued behind the tombstone");
+        .expect("the queued commit's answer")
+        .expect_err("a commit queued at the deletion's pause");
     assert_eq!(queued_error.code(), ErrorCode::NamespaceDeleted);
     let strong = namespace
         .strong()
@@ -3394,9 +3098,10 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         tokio::spawn(async move {
             namespace
                 .session()
-                .submit_delete(
+                .admit()?
+                .delete_namespace(
+                    &administrator(&namespace.session().publisher),
                     DeleteNamespaceOptions::default(),
-                    administrator(&namespace.session().publisher),
                 )
                 .await
         })
@@ -3406,10 +3111,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         panic!("delete completed while its earlier fold was parked: {completed:?}");
     }
 
-    assert!(!matches!(
-        publisher_state(&publisher).admission,
-        PublisherAdmissionStatus::Deleted
-    ));
+    assert!(publisher.live_session().is_ok());
     let manifest = loonfs_core::test_support::namespace_store(blocking.inner(), &namespace_id)
         .load_current_manifest()
         .await
@@ -3420,6 +3122,15 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     settle_delete(delete, "delete waiting for the earlier fold")
         .await
         .expect("delete namespace");
+    // The session's fold task, and the compaction that its fold started,
+    // can still be ending when the deletion returns. The deletion cancelled
+    // the compaction, so the session leaves the table once both end.
+    bounded(
+        Duration::from_secs(10),
+        registry.wait_for_ended_session(&namespace_id),
+    )
+    .await
+    .expect("the deleted session's work ends");
     assert!(
         registry.shared.lock_state().sessions.is_empty(),
         "a deleted session must not stay in the table while its handle is held"
@@ -3448,8 +3159,11 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     writer.shutdown().await.expect("shut down after delete");
 }
 
+/// Checks that a deletion that waits for a fold permit, while another
+/// namespace's fold has the only one, doesn't keep a third namespace's
+/// commit waiting.
 #[tokio::test]
-async fn a_delete_waiting_for_a_fold_does_not_hold_a_publication_slot() {
+async fn a_deletion_waiting_for_a_fold_permit_leaves_other_namespaces_committing() {
     let temp_dir = tempdir().expect("tempdir");
     let folding = NamespaceId::parse("folding").expect("valid namespace id");
     let a = NamespaceId::parse("a").expect("valid namespace id");
@@ -3547,7 +3261,7 @@ async fn close_admission_refuses_without_creating_publishers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_delete_admitted_before_close_admission_publishes_and_is_terminal() {
+async fn a_deletion_that_runs_when_admission_closes_publishes_and_is_terminal() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
@@ -3561,8 +3275,9 @@ async fn a_delete_admitted_before_close_admission_publishes_and_is_terminal() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
-    // A publication parks at its WAL put, so the delete deterministically
-    // queues behind it instead of being taken first.
+    // A publication parks at its WAL put with the engine locked, so the
+    // deletion's ordinary fold, which has its fold permit, waits for the
+    // engine to load the session's position.
     store.block_next();
     let active = {
         let namespace = namespace.clone();
@@ -3576,11 +3291,29 @@ async fn a_delete_admitted_before_close_admission_publishes_and_is_terminal() {
     };
     store.wait_until_blocked().await;
     let publisher = namespace.session().publisher.clone();
-    let delete = spawn_delete(&publisher, DeleteNamespaceOptions::default());
-    wait_for_queued_delete(&publisher).await;
+    let delete = {
+        let namespace = namespace.clone();
+        tokio::spawn(async move {
+            namespace
+                .session()
+                .admit()?
+                .delete_namespace(
+                    &administrator(&namespace.session().publisher),
+                    DeleteNamespaceOptions::default(),
+                )
+                .await
+        })
+    };
+    bounded(Duration::from_secs(10), async {
+        while writer.execution_budget().stats().folds_running != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the deletion takes its fold permit");
 
-    // Admission closes with the delete already admitted; releasing the gate
-    // lets the batch and then the delete publish.
+    // Admission closes while the deletion runs; releasing the gate lets the
+    // commit and then the deletion publish.
     writer.close_admission();
     store.release();
 
@@ -3591,13 +3324,13 @@ async fn a_delete_admitted_before_close_admission_publishes_and_is_terminal() {
     assert_eq!(response.committed_seq, CommitSeq(1));
     let deleted = settle_delete(delete, "delete admitted before close_admission")
         .await
-        .expect("an admitted delete is published after admission closes");
+        .expect("a running deletion is published after admission closes");
     assert_eq!(deleted.head_seq, CommitSeq(1));
 
-    assert!(matches!(
-        publisher_state(&publisher).admission,
-        PublisherAdmissionStatus::Deleted
-    ));
+    assert_matches!(
+        publisher.live_session().map(drop),
+        Err(CoreError::NamespaceDeleted { .. })
+    );
     let late = try_admit_commit(
         &publisher,
         &namespace_id,
@@ -3606,117 +3339,6 @@ async fn a_delete_admitted_before_close_admission_publishes_and_is_terminal() {
     .expect_err("submission after the delete is published");
     assert_eq!(late.code(), ErrorCode::NamespaceDeleted);
     writer.drain().await.expect("drain settles the delete");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn delete_queued_mid_publish_waits_behind_admitted_work() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
-    let shared = store.clone() as SharedStore;
-    let writer = test_writer(shared.clone()).await;
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("bootstrap");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-
-    // Park the first publication at its WAL put, batch a second commit
-    // behind it, then queue the delete: the queued batch must publish
-    // before the delete runs, and the blocked CAS outlasts the pacing
-    // interval (the interleaving where a racing second worker could run
-    // the delete first).
-    store.block_next();
-    let before = {
-        let namespace = namespace.clone();
-        tokio::spawn(async move {
-            namespace
-                .commit_candidate(CommitCandidate::new(create_directory_request(
-                    "before", "before",
-                )))
-                .await
-        })
-    };
-    store.wait_until_blocked().await;
-    let publisher = namespace.session().publisher.clone();
-
-    // The worker is parked in the blocked CAS, so this admission
-    // deterministically queues the next batch instead of being taken.
-    let second = {
-        let namespace = namespace.clone();
-        tokio::spawn(async move {
-            namespace
-                .commit_candidate(CommitCandidate::new(create_directory_request(
-                    "second", "second",
-                )))
-                .await
-        })
-    };
-    wait_for_queued_candidates(&publisher, 1).await;
-
-    let delete = {
-        let namespace = namespace.clone();
-        tokio::spawn(async move {
-            namespace
-                .session()
-                .submit_delete(
-                    DeleteNamespaceOptions::default(),
-                    administrator(&namespace.session().publisher),
-                )
-                .await
-        })
-    };
-    // Deterministic: the delete has queued behind the open batch.
-    wait_for_queued_delete(&publisher).await;
-
-    // Snapshots are taken while the CAS is blocked but asserted only
-    // after the gate is released: a regression then fails the test
-    // instead of hanging runtime teardown on the never-released gate.
-    let single_worker_while_blocked = single_live_worker(&publisher);
-    // With the queued batch still blocked at its WAL put, outlast the
-    // pacing interval: the delete must still not have run.
-    wait_past_publish_pacing().await;
-    let (deleted_while_blocked, delete_queued_while_blocked) = {
-        let state = publisher_state(&publisher);
-        (
-            matches!(state.admission, PublisherAdmissionStatus::Deleted),
-            matches!(state.queue.back(), Some(WorkItem::Delete(_))),
-        )
-    };
-
-    // Released: the parked commit publishes, then the queued batch, and
-    // only then the delete.
-    store.release();
-    assert!(
-        single_worker_while_blocked,
-        "a delete must not spawn a racing second worker"
-    );
-    assert!(
-        !deleted_while_blocked,
-        "delete executed while the queued batch was still publishing"
-    );
-    assert!(
-        delete_queued_while_blocked,
-        "delete must stay queued behind the admitted batch"
-    );
-    let before_response = before
-        .await
-        .expect("before submit task")
-        .expect("parked commit publishes before the delete");
-    assert_eq!(before_response.committed_seq, CommitSeq(1));
-    let second_response = second
-        .await
-        .expect("second submit task")
-        .expect("queued batch publishes before the delete");
-    assert_eq!(second_response.committed_seq, CommitSeq(2));
-    let delete_response = delete
-        .await
-        .expect("delete task")
-        .expect("delete succeeds after the queued batch");
-    assert_eq!(delete_response.head_seq, CommitSeq(2));
-    writer.shutdown().await.expect("drain settles both units");
 }
 
 /// Checks that a garbage collection, which publishes no manifest, leaves the
@@ -4125,15 +3747,6 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
         "disconnected work remains charged"
     );
     assert_eq!(budget.stats().admitted_requests, 2);
-    let error = writer_a
-        .session()
-        .submit_delete(
-            DeleteNamespaceOptions::default(),
-            administrator(&writer_a.session().publisher),
-        )
-        .await
-        .expect_err("budget remains full");
-    assert_eq!(error.code(), ErrorCode::CommitQueueFull);
     store.release();
     second
         .await
@@ -4229,6 +3842,7 @@ async fn current_manifest_no(
 }
 
 mod basis_publications;
+mod deletion;
 mod fenced_session;
 mod head_positions;
 mod inline_writer;
