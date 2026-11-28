@@ -1,34 +1,54 @@
-//! [`PublishedManifest`], the newest manifest that a writer session's runtime
-//! published, and [`KeptPosition`], the commit engine's position, which
-//! follows that manifest each time the engine reads or takes it.
+//! [`PublishedManifest`], a writer session's status with the newest manifest
+//! that the session published under its writer epoch, and [`KeptPosition`],
+//! the commit engine's position, which follows that manifest each time the
+//! engine reads or takes it.
 
 use super::engine::WriterSessionStatus;
 use super::publication_lane::PublicationLane;
 use super::publish_view::WriterPosition;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
-use std::sync::{Arc, Mutex, MutexGuard};
+use crate::namespace::writer_epoch::AcquiredWriter;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-/// The newest manifest that one writer session published for the session's
-/// namespace, shared by the session's commit engine and the runtime.
+/// One writer session's status with its newest published manifest, which
+/// the session's commit engine and the runtime share.
 ///
-/// A publication of the session's lane records its own manifest here as
-/// soon as its put and its boundary read succeed, before the lane takes the
-/// next publication, without waiting for a publication unit that has the
-/// engine, and a claim records its manifest here too. Both keep the lane
-/// while they record, and nothing else records a manifest here: a load of the
-/// session's position never moves it, so it never lists a manifest that
-/// isn't this session's (see [`PublicationLane`]). The engine's position
-/// still changes only on the engine's turn: the session's runtime brings
-/// the three copies of the position (the engine's, the lane's, and the one
-/// that reads start from) up to this manifest at once when no task has the
-/// engine, and at the engine's release otherwise, and every read of a copy
-/// follows it too (see [`Self::follow`]). So a unit that planned from an
-/// older manifest doesn't undo a publication when it puts its position
-/// back, and a read never starts from a manifest below the session's own
-/// newest one. A manifest at or below the recorded one never replaces it.
+/// While the session has its writer epoch, the status includes the newest
+/// manifest that the session published for its namespace. A claim sets the
+/// session's epoch with the claim's manifest. A publication of the session's
+/// lane records its own manifest here as soon as its put and its boundary
+/// read succeed, before the lane takes the next publication, without waiting
+/// for a publication unit that has the engine.
+/// Both keep the lane while they record, and nothing else records a manifest
+/// here: a load of the session's position never moves it, so it never lists
+/// a manifest that isn't this session's (see [`PublicationLane`]). A put of
+/// either of the session's queues whose outcome is unknown ends the epoch,
+/// and the manifest goes with it (see
+/// [`SessionEpoch::send_put`](super::session_epoch::SessionEpoch::send_put)).
+///
+/// The engine's position still changes only on the engine's turn: the
+/// session's runtime brings the three copies of the position (the engine's,
+/// the lane's, and the one that reads start from) up to this manifest at
+/// once when no task has the engine, and at the engine's release otherwise,
+/// and every read of a copy follows it too (see [`Self::follow`]). So a unit
+/// that planned from an older manifest doesn't undo a publication when it
+/// puts its position back, a read never starts from a manifest below the
+/// session's own newest one, and a session without its epoch has no
+/// position. A manifest at or below the recorded one never replaces it.
+///
+/// Every taker of the mutex, this type's and the runtime's through
+/// [`WriterSessionStatusView`](super::engine::WriterSessionStatusView),
+/// takes the status even when the mutex is poisoned. The runtime contains
+/// a panic in a unit of work and keeps running, and it keeps the view's
+/// guard across its own code, so a panic there poisons the mutex. A put's
+/// end runs while its task unwinds, too (see
+/// [`SessionEpoch`](super::session_epoch::SessionEpoch)), and a second
+/// panic there would abort the process. Each change under the mutex is one
+/// assignment of the status, so a poisoned mutex still has a status that
+/// was set whole.
 #[derive(Debug, Clone, Default)]
-pub struct PublishedManifest(Arc<Mutex<Option<Held<LoadedManifest>>>>);
+pub struct PublishedManifest(pub(super) Arc<Mutex<WriterSessionStatus>>);
 
 /// Where [`PublishedManifest::follow`] leaves a position.
 #[derive(Debug)]
@@ -38,45 +58,44 @@ pub enum FollowOutcome {
     Unchanged,
     /// The position moved onto the recorded manifest.
     Moved(Box<WriterPosition>),
-    /// The position is below the recorded manifest and can't move onto it,
-    /// so the session drops it (see `WriterPosition::move_to`). The next
-    /// load starts after the manifest was recorded, so it finds that manifest
-    /// or a later one.
+    /// The session drops the position: the position is below the recorded
+    /// manifest and can't move onto it (see `WriterPosition::move_to`), or
+    /// the session doesn't have the writer epoch that the position was
+    /// loaded under. The next load starts after the manifest was recorded,
+    /// so it finds that manifest or a later one, and a session without its
+    /// epoch claims before it loads.
     Dropped,
 }
 
 impl PublishedManifest {
-    /// Locks the recorded manifest. While the caller has the lock, no
-    /// publication records a manifest, so a caller that brings a position up
-    /// to the recorded manifest and stores it under the lock can't miss a
-    /// publication that's recorded meanwhile.
+    /// Locks the session's status. While the caller has the lock, no
+    /// publication records a manifest and the epoch neither starts nor ends,
+    /// so a caller that brings a position up to the recorded manifest and
+    /// stores it under the lock can't miss a publication that's recorded
+    /// meanwhile, or an end of the epoch.
     pub fn lock(&self) -> PublishedLock<'_> {
         PublishedLock {
             published: self,
-            // A critical section under this lock records a manifest, follows
-            // positions and stores them, reads the session's status, checks
-            // that a lock is its own cell's, and unlocks the engine. It calls
-            // no code outside these types, so a panic under it is a bug, and
-            // so is a poisoned lock. Dropping a replaced position and handing
-            // a dropped one's tail to the read cache happen after the unlock.
-            recorded: self
-                .0
-                .lock()
-                .expect("the published manifest lock should not be poisoned"),
+            // Dropping a replaced position and handing a dropped one's tail
+            // to the read cache happen after the unlock.
+            status: self.0.lock().unwrap_or_else(PoisonError::into_inner),
         }
     }
 
     /// Records `published` (see [`PublishedLock::record`]). Only an item of
-    /// the session's publication lane and a claim record a manifest (see
+    /// the session's publication lane records a manifest (see
     /// [`LaneGuard::record`](super::publication_lane::LaneGuard::record)).
     pub(crate) fn record(&self, published: &Held<LoadedManifest>) {
         self.lock().record(published);
     }
 
-    /// Returns the recorded manifest, or `None` before the session recorded
-    /// one.
+    /// Returns the recorded manifest, or `None` when the session doesn't
+    /// have its writer epoch.
     pub(crate) fn recorded(&self) -> Option<Held<LoadedManifest>> {
-        self.lock().recorded.clone()
+        match &*self.lock() {
+            WriterSessionStatus::Acquired { published, .. } => Some(published.clone()),
+            _ => None,
+        }
     }
 
     /// Returns where `position` goes once it's brought up to the recorded
@@ -84,13 +103,40 @@ impl PublishedManifest {
     pub fn follow(&self, position: &WriterPosition) -> FollowOutcome {
         self.lock().follow(position)
     }
+
+    /// Settles a put of the session at its end: a put whose outcome isn't
+    /// `known` ends the session's writer epoch, so the session's next
+    /// publication claims (see
+    /// [`SessionEpoch::send_put`](super::session_epoch::SessionEpoch::send_put)).
+    /// A fenced session, or one whose namespace is gone, keeps its status.
+    /// Returns whether the session still has its epoch.
+    ///
+    /// The status is the one that the put was sent under, or that an
+    /// earlier unknown outcome left, because a claim waits until neither of
+    /// the session's queues has a put in flight.
+    pub(crate) fn settle_put(&self, known: bool) -> bool {
+        let mut status = self.lock();
+        if !known && matches!(*status, WriterSessionStatus::Acquired { .. }) {
+            status.set(WriterSessionStatus::Unacquired);
+        }
+        matches!(*status, WriterSessionStatus::Acquired { .. })
+    }
 }
 
-/// A locked [`PublishedManifest`], from [`PublishedManifest::lock`].
+/// A locked [`PublishedManifest`], from [`PublishedManifest::lock`], which
+/// derefs to the session's status for reading.
 #[derive(Debug)]
 pub struct PublishedLock<'a> {
     published: &'a PublishedManifest,
-    recorded: MutexGuard<'a, Option<Held<LoadedManifest>>>,
+    status: MutexGuard<'a, WriterSessionStatus>,
+}
+
+impl std::ops::Deref for PublishedLock<'_> {
+    type Target = WriterSessionStatus;
+
+    fn deref(&self) -> &WriterSessionStatus {
+        &self.status
+    }
 }
 
 impl PublishedLock<'_> {
@@ -99,30 +145,62 @@ impl PublishedLock<'_> {
         Arc::ptr_eq(&self.published.0, &published.0)
     }
 
+    /// Sets the session's status to `status`.
+    pub(crate) fn set(&mut self, status: WriterSessionStatus) {
+        *self.status = status;
+    }
+
+    /// Starts the writer epoch `writer`, which a claim acquired, with
+    /// `claimed`, the claim's manifest, as the session's newest published
+    /// manifest.
+    pub(crate) fn acquire(&mut self, writer: AcquiredWriter, claimed: Held<LoadedManifest>) {
+        self.set(WriterSessionStatus::Acquired {
+            writer,
+            published: claimed,
+        });
+    }
+
     /// Records `published`, a manifest that the session's runtime published
-    /// or found current. A manifest above the recorded one replaces it, and
-    /// the recorded one otherwise takes `published`'s check (see
-    /// [`Held::merge`]).
+    /// or found current, while the session has its writer epoch. A manifest
+    /// above the recorded one replaces it, and the recorded one otherwise
+    /// takes `published`'s check (see [`Held::merge`]). A session without
+    /// its epoch records nothing, because a known outcome of one put never
+    /// restores an epoch that an unknown outcome of another put ended.
     pub(crate) fn record(&mut self, published: &Held<LoadedManifest>) {
-        match self.recorded.as_mut() {
-            Some(recorded) if recorded.manifest_no() >= published.manifest_no() => {
-                recorded.merge(published);
-            }
-            _ => *self.recorded = Some(published.clone()),
+        let WriterSessionStatus::Acquired {
+            published: recorded,
+            ..
+        } = &mut *self.status
+        else {
+            return;
+        };
+        if recorded.manifest_no() >= published.manifest_no() {
+            recorded.merge(published);
+        } else {
+            *recorded = published.clone();
         }
     }
 
     /// Returns where `position` goes once it's brought up to the recorded
-    /// manifest. A position below that manifest moves onto it by the rule of
-    /// `WriterPosition::move_to`, or it's dropped when it can't move there.
-    /// A position on that manifest takes the manifest's check when it's
-    /// younger (see [`WriterPosition::merge_check`]), so a read doesn't
-    /// repeat a check that a publication just made. A position above it
-    /// stays where it is.
+    /// manifest. A session without its writer epoch drops every position,
+    /// and so does a session whose epoch isn't the one that `position` was
+    /// loaded under. A position below the recorded manifest moves onto it by
+    /// the rule of `WriterPosition::move_to`, or it's dropped when it can't
+    /// move there. A position on that manifest takes the manifest's check
+    /// when it's younger (see [`WriterPosition::merge_check`]), so a read
+    /// doesn't repeat a check that a publication just made. A position above
+    /// it stays where it is.
     pub fn follow(&self, position: &WriterPosition) -> FollowOutcome {
-        let Some(recorded) = self.recorded.as_ref() else {
-            return FollowOutcome::Unchanged;
+        let WriterSessionStatus::Acquired {
+            writer,
+            published: recorded,
+        } = &*self.status
+        else {
+            return FollowOutcome::Dropped;
         };
+        if position.read_basis().head.writer_epoch != writer.writer_epoch {
+            return FollowOutcome::Dropped;
+        }
         let recorded_no = recorded.manifest_no();
         let position_no = position.basis.manifest_no();
         if recorded_no < position_no
@@ -152,7 +230,7 @@ impl PublishedLock<'_> {
 /// doesn't keep the part of the tail that a publication folded. That
 /// follow, which the runtime runs at each release of the engine, also
 /// leaves a copy of the stored position in the session's publication lane,
-/// unless the session is fenced, and each drop removes the copy. The lane's
+/// and each drop removes the copy. The lane's
 /// publications build on the copy (see
 /// [`LaneGuard::turn`](super::publication_lane::LaneGuard::turn)), so they
 /// don't wait for a unit that has the engine, and a unit's own changes to
@@ -201,16 +279,9 @@ impl KeptPosition {
     /// Brings the stored position up to the manifest that `published`, this
     /// position's locked [`PublishedManifest`], records, stores it, leaves a
     /// copy of it in the session's publication lane, and returns the
-    /// positions that it replaced.
-    ///
-    /// The lane stores no copy when `session` is fenced, because a fenced
-    /// session publishes nothing more, and its position would stay on a head
-    /// that the new writer has moved past.
-    pub(crate) fn follow_stored(
-        &mut self,
-        published: &PublishedLock<'_>,
-        session: &WriterSessionStatus,
-    ) -> ReplacedPositions {
+    /// positions that it replaced. A session without its writer epoch, such
+    /// as a fenced one, keeps neither (see [`PublishedLock::follow`]).
+    pub(crate) fn follow_stored(&mut self, published: &PublishedLock<'_>) -> ReplacedPositions {
         assert!(
             published.is_lock_of(self.lane.published_manifest()),
             "a position follows its own session's published manifest"
@@ -224,13 +295,9 @@ impl KeptPosition {
             Some(FollowOutcome::Moved(moved)) => self.position.replace(*moved),
             Some(FollowOutcome::Dropped) => self.position.take(),
         };
-        let copy = match session {
-            WriterSessionStatus::Fenced(_) => None,
-            _ => self.position.clone(),
-        };
         ReplacedPositions {
             _engine: engine,
-            _lane: self.lane.keep(copy),
+            _lane: self.lane.keep(self.position.clone()),
         }
     }
 
@@ -301,10 +368,17 @@ mod tests {
             )
         };
         let published = PublishedManifest::default();
+        published.lock().acquire(
+            AcquiredWriter {
+                writer_id: loonfs_test_support::ids::writer_id("writer-a"),
+                writer_epoch: loonfs_types::WriterEpoch(1),
+            },
+            manifest(1),
+        );
         for (recorded, expected) in [(3, 3), (2, 3), (3, 3), (4, 4)] {
             published.record(&manifest(recorded));
             assert_eq!(
-                published.lock().recorded.as_ref().map(Held::manifest_no),
+                published.recorded().as_ref().map(Held::manifest_no),
                 Some(ManifestNo(expected)),
                 "after recording manifest {recorded}"
             );

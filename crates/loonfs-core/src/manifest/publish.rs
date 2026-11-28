@@ -53,9 +53,10 @@ pub(crate) enum ManifestChange<T> {
 /// Who sends a manifest put.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ManifestSender<'a> {
-    /// A process that sends the put without holding a writer epoch for it,
-    /// such as a fold, a claim, or a create.
-    Process,
+    /// A claim, or a publication that initializes a namespace (a create, an
+    /// activation, a fork's manifests, or the tombstone of an initializing
+    /// namespace), which no writer session's epoch covers.
+    ClaimOrInitialization,
     /// A writer session, which sends the put under its epoch (see
     /// [`SessionEpoch::send_put`]).
     Session(&'a SessionEpoch<'a>),
@@ -124,7 +125,7 @@ enum NextAttempt {
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Publishes the next manifest after the current one, and tries again after
-    /// a lost put.
+    /// a lost put. Each put is sent by `sender`.
     ///
     /// Each attempt passes the manifest that it builds on to `change`. The first
     /// attempt builds on `basis` without a request, whatever its age, and
@@ -145,22 +146,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// the put finds the number at or below the boundary, and the put counts
     /// as lost (format spec, "Publishing a manifest").
     pub(crate) async fn update_manifest<T, F, Fut>(
-        &self,
-        basis: Option<Held<LoadedManifest>>,
-        clock: &OperationClock,
-        change: F,
-    ) -> Result<ManifestUpdate<T>>
-    where
-        F: FnMut(LoadedManifest) -> Fut,
-        Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
-    {
-        self.update_manifest_as(basis, clock, ManifestSender::Process, change)
-            .await
-    }
-
-    /// Publishes the next manifest after the current one, as
-    /// [`Self::update_manifest`] does, with each put sent by `sender`.
-    pub(crate) async fn update_manifest_as<T, F, Fut>(
         &self,
         basis: Option<Held<LoadedManifest>>,
         clock: &OperationClock,
@@ -238,13 +223,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         basis: Option<Held<LoadedManifest>>,
         clock: &OperationClock,
+        sender: ManifestSender<'_>,
         mut change: F,
     ) -> Result<ManifestUpdate<T>>
     where
         F: FnMut(NamespaceManifestPayload) -> Fut,
         Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
     {
-        self.update_manifest(basis, clock, |current: LoadedManifest| {
+        self.update_manifest(basis, clock, sender, |current: LoadedManifest| {
             let payload = current.payload();
             let changed = ensure_namespace_live(&payload.namespace_id, payload.status)
                 .map(|()| change(payload.clone()));
@@ -320,7 +306,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock: &OperationClock,
     ) -> Result<Held<LoadedManifest>> {
         match self
-            .publish_manifest_from(payload, clock, None, ManifestSender::Process)
+            .publish_manifest_from(payload, clock, None, ManifestSender::ClaimOrInitialization)
             .await?
         {
             ManifestPublicationOutcome::Published(basis) => Ok(basis),
@@ -347,8 +333,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// [`Self::settle_against_boundary`]).
     ///
     /// A writer session's put is sent through its [`SessionEpoch`], and the
-    /// session takes its epoch back only when the call settles the put's
-    /// outcome (`Published` or `Lost`).
+    /// session loses its epoch when the call returns `outcome_unknown`: the
+    /// put, or a check after it, failed in a way that leaves the put's
+    /// outcome unknown. Every other result shows the outcome.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
@@ -417,8 +404,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock.ensure_metadata_publication_budget(namespace_id)?;
         let sent = self.put_manifest(manifest, &candidate, current, expected_predecessor, clock);
         match sender {
-            ManifestSender::Process => sent.await,
-            ManifestSender::Session(epoch) => epoch.send_put(sent, Result::is_ok).await,
+            ManifestSender::ClaimOrInitialization => sent.await,
+            ManifestSender::Session(epoch) => epoch.send_put(sent).await,
         }
     }
 
@@ -490,7 +477,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// manifest boundary first. When the number is at or below the boundary,
     /// the call classifies the candidate against the newest manifest from the
     /// boundary instead, as [`Self::settle_against_boundary`] does, so the
-    /// caller's next attempt builds on a manifest above the boundary.
+    /// caller's next attempt builds on a manifest above the boundary. A read
+    /// that fails leaves the outcome unknown, as a classification that can't
+    /// tell does, so the call returns `outcome_unknown` for both.
     async fn settle_unconfirmed_put(
         &self,
         error: &ObjectStoreError,
@@ -499,61 +488,80 @@ impl<S: ObjectStore> NamespaceStore<S> {
         expected_predecessor: Option<ManifestNo>,
         clock: &OperationClock,
     ) -> Result<ManifestPublicationOutcome> {
+        let message = match self
+            .classify_unconfirmed_put(candidate, current, expected_predecessor, clock)
+            .await
+        {
+            Ok(ManifestKind::Settled(outcome)) => return Ok(outcome),
+            Ok(ManifestKind::Installable) => error.public_message().into_owned(),
+            Err(
+                settled @ (CoreError::OutcomeUnknown { .. }
+                | CoreError::NamespaceExists { .. }
+                | CoreError::NamespaceDeleted { .. }),
+            ) => return Err(settled),
+            Err(read) => read.to_string(),
+        };
+        let object_key = &candidate.object_key;
+        tracing::error!(
+            namespace_id = %self.namespace_id,
+            object_key = %object_key,
+            error = %error,
+            "the outcome of a manifest publication is unknown"
+        );
+        Err(CoreError::OutcomeUnknown {
+            object_key: object_key.clone(),
+            message,
+        })
+    }
+
+    /// Classifies `candidate`, whose put's response was lost, against the
+    /// manifest at its number or the manifest that's current (see
+    /// [`Self::settle_unconfirmed_put`]).
+    async fn classify_unconfirmed_put(
+        &self,
+        candidate: &LoadedManifest,
+        current: Option<&Held<LoadedManifest>>,
+        expected_predecessor: Option<ManifestNo>,
+        clock: &OperationClock,
+    ) -> Result<ManifestKind> {
         // Only the exact manifest at this number confirms the put;
         // a later manifest may already cover it.
         let found = self
             .load_manifest_by_no(candidate.payload().manifest_no)
             .await
             .map_err(CoreError::ControlObjectLoad)?;
-        let outcome = match found {
-            Some(found) => {
-                let kept = current
-                    .map(|current| current.boundary().clone())
-                    .unwrap_or_default();
-                let (above, boundary) = self.candidate_above_boundary(candidate, kept).await?;
-                if above {
-                    let checked = if found.manifest() == candidate.manifest() {
-                        // This call's own put, after the clock started.
-                        clock.origin()
-                    } else if let Some(current) = current {
-                        // Another publication's manifest after `current`: the
-                        // check that found `current` found no manifest after
-                        // it, so none after this later manifest either.
-                        current.checked().clone()
-                    } else {
-                        // Another creation's manifest 1, which a create
-                        // reports as `namespace_exists` or `namespace_deleted`.
-                        return Err(existing_namespace(self.namespace_id.clone(), &found));
-                    };
-                    classify_current(
-                        &Held::new(found, checked, boundary),
-                        candidate,
-                        expected_predecessor,
-                    )
-                } else {
-                    self.classify_current_manifest(None, candidate, expected_predecessor, clock)
-                        .await?
-                }
-            }
-            None => {
-                self.classify_current_manifest(current, candidate, expected_predecessor, clock)
-                    .await?
-            }
+        let Some(found) = found else {
+            return self
+                .classify_current_manifest(current, candidate, expected_predecessor, clock)
+                .await;
         };
-        let ManifestKind::Settled(outcome) = outcome else {
-            let object_key = &candidate.object_key;
-            tracing::error!(
-                namespace_id = %self.namespace_id,
-                object_key = %object_key,
-                error = %error,
-                "the outcome of a manifest publication is unknown"
-            );
-            return Err(CoreError::OutcomeUnknown {
-                object_key: object_key.clone(),
-                message: error.public_message().into_owned(),
-            });
+        let kept = current
+            .map(|current| current.boundary().clone())
+            .unwrap_or_default();
+        let (above, boundary) = self.candidate_above_boundary(candidate, kept).await?;
+        if !above {
+            return self
+                .classify_current_manifest(None, candidate, expected_predecessor, clock)
+                .await;
+        }
+        let checked = if found.manifest() == candidate.manifest() {
+            // This call's own put, after the clock started.
+            clock.origin()
+        } else if let Some(current) = current {
+            // Another publication's manifest after `current`: the check that
+            // found `current` found no manifest after it, so none after this
+            // later manifest either.
+            current.checked().clone()
+        } else {
+            // Another creation's manifest 1, which a create reports as
+            // `namespace_exists` or `namespace_deleted`.
+            return Err(existing_namespace(self.namespace_id.clone(), &found));
         };
-        Ok(outcome)
+        Ok(classify_current(
+            &Held::new(found, checked, boundary),
+            candidate,
+            expected_predecessor,
+        ))
     }
 
     /// Reads the manifest boundary after a put of `candidate` that succeeded,

@@ -4,7 +4,7 @@
 
 use super::fold::ManifestProjection;
 use super::load::{load_referenced_manifest, manifest_base_state, DecodedManifest};
-use super::publish::ManifestChange;
+use super::publish::{ManifestChange, ManifestSender};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::fork::ForkDeadline;
@@ -155,20 +155,25 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .await?
         };
         let update = self
-            .update_manifest(Some(manifest_1), clock, |current: LoadedManifest| {
-                let changed = match current.payload().status {
-                    NamespaceStatus::Initializing {}
-                        if current.payload().manifest_no == ManifestNo(1) =>
-                    {
-                        Ok(ManifestChange::Next(Box::new(manifest_2.clone()), ()))
-                    }
-                    NamespaceStatus::Initializing {} | NamespaceStatus::Active {} => {
-                        Ok(ManifestChange::Finished(()))
-                    }
-                    NamespaceStatus::Deleted { .. } => Err(self.namespace_deleted()),
-                };
-                async move { changed }
-            })
+            .update_manifest(
+                Some(manifest_1),
+                clock,
+                ManifestSender::ClaimOrInitialization,
+                |current: LoadedManifest| {
+                    let changed = match current.payload().status {
+                        NamespaceStatus::Initializing {}
+                            if current.payload().manifest_no == ManifestNo(1) =>
+                        {
+                            Ok(ManifestChange::Next(Box::new(manifest_2.clone()), ()))
+                        }
+                        NamespaceStatus::Initializing {} | NamespaceStatus::Active {} => {
+                            Ok(ManifestChange::Finished(()))
+                        }
+                        NamespaceStatus::Deleted { .. } => Err(self.namespace_deleted()),
+                    };
+                    async move { changed }
+                },
+            )
             .await?;
         Ok(update.current)
     }

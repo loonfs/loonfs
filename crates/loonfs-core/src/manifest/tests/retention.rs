@@ -906,6 +906,7 @@ async fn a_window_advance_under_a_recorded_window_shorter_than_the_grace_window_
         .update_live_manifest(
             None,
             &engine.namespace.start_clock(),
+            crate::manifest::publish::ManifestSender::ClaimOrInitialization,
             |mut payload: loonfs_types::format::manifest::NamespaceManifestPayload| async move {
                 payload.retention_window_ms = short_ms;
                 Ok(crate::manifest::publish::ManifestChange::Next(
@@ -1699,7 +1700,7 @@ async fn snapshot_verification_rejects_a_deleted_namespace() {
     crate::test_support::namespace_store(&store, &namespace_id)
         .delete_namespace(
             Default::default(),
-            crate::commit::session_epoch::SessionEpoch::new(&std::sync::Mutex::default(), acquired),
+            &acquired,
             None,
             &crate::publish::PublicationLane::new().lock().await,
             &context.clock(),

@@ -2,13 +2,13 @@
 
 use crate::commit::publication_lane::LaneGuard;
 use crate::commit::publish_view::{load_writer_position, WriterPosition};
-use crate::commit::session_epoch::SessionEpoch;
 use crate::error::{CoreError, Result};
 use crate::manifest::publish::{ManifestChange, ManifestSender, ManifestUpdate};
 use crate::manifest::PublicationReport;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
+use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
@@ -28,14 +28,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// manifest by [`WriterPosition::move_to`], and the deletion drops the
     /// position when the position can't move.
     ///
-    /// The caller keeps `lane`, the session's publication lane, for the
-    /// whole deletion, so the fold and the tombstone are items of the lane.
-    /// The tombstone's put is sent through `epoch` (see
-    /// [`SessionEpoch::send_put`]).
+    /// The caller keeps `lane`, the publication lane of the session that
+    /// has the epoch `writer`, for the whole deletion, so the fold and the
+    /// tombstone are items of the lane, and both puts are sent under the
+    /// session's epoch (see
+    /// [`SessionEpoch::send_put`](crate::commit::session_epoch::SessionEpoch::send_put)).
     pub(crate) async fn delete_namespace(
         &self,
         options: DeleteNamespaceOptions,
-        epoch: SessionEpoch<'_>,
+        writer: &AcquiredWriter,
         position: Option<WriterPosition>,
         lane: &LaneGuard<'_>,
         clock: &OperationClock,
@@ -48,9 +49,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // lock, because a future that a closure returns can't borrow the
         // closure's own state.
         let position = Mutex::new(position);
+        let epoch = lane.epoch(self);
         let sender = ManifestSender::Session(&epoch);
-        self.update_manifest_as(basis, clock, sender, |current: LoadedManifest| {
-            let acquired_writer = epoch.writer();
+        self.update_manifest(basis, clock, sender, |current: LoadedManifest| {
             let position = &position;
             async move {
                 let held = position
@@ -66,7 +67,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     // `WriterAnchor`).
                     None => {
                         let anchor = self
-                            .load_writer_read_anchor(acquired_writer, clock.observe())
+                            .load_writer_read_anchor(writer, clock.observe())
                             .await?;
                         load_writer_position(
                             &anchor,
@@ -126,7 +127,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         current: Held<LoadedManifest>,
         clock: &OperationClock,
     ) -> Result<ManifestUpdate<TombstoneOutcome>> {
-        self.update_manifest(Some(current), clock, |current: LoadedManifest| {
+        let sender = ManifestSender::ClaimOrInitialization;
+        self.update_manifest(Some(current), clock, sender, |current: LoadedManifest| {
             let payload = current.payload();
             let change = match payload.status {
                 NamespaceStatus::Initializing {} => ManifestChange::Next(

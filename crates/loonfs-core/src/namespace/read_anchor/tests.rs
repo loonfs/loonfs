@@ -216,10 +216,7 @@ impl RivalBeforeChecks {
                 namespace
                     .delete_namespace(
                         Default::default(),
-                        crate::commit::session_epoch::SessionEpoch::new(
-                            &std::sync::Mutex::default(),
-                            acquired,
-                        ),
+                        &acquired,
                         None,
                         &crate::publish::PublicationLane::new().lock().await,
                         &namespace.start_clock(),

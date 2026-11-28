@@ -612,6 +612,17 @@ impl CoreError {
         )
     }
 
+    /// Returns whether this error leaves the outcome of a put unknown, so the
+    /// put can still be written later at the number it was sent to (format
+    /// spec, "Failed and unknown outcomes").
+    pub fn is_outcome_unknown(&self) -> bool {
+        matches!(
+            self.failure(),
+            CoreError::OutcomeUnknown { .. }
+                | CoreError::WalPublish(WalPublishError::OutcomeUnknown(_))
+        )
+    }
+
     /// Returns whether a merge or a replay commit that failed with this error
     /// failed because the namespace that it commits into changed between the
     /// plan and the commit, so that a later plan reads the change.

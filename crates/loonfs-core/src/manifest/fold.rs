@@ -1,9 +1,10 @@
 //! Folds the visible WAL tail and publishes the next manifest number.
 
-use super::publish::ManifestChange;
+use super::publish::{ManifestChange, ManifestSender};
 use super::published::same_head;
 use crate::commit::publication_lane::LaneTurn;
 use crate::commit::publish_view::WriterPosition;
+use crate::commit::session_epoch::SessionEpoch;
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
@@ -157,17 +158,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock: &OperationClock,
     ) -> Result<FoldedWalTail> {
         let folded = self
-            .fold_wal_tail_from_position(turn.position(), clock)
+            .fold_wal_tail_from_position(turn.position(), &turn.epoch(self), clock)
             .await?;
         turn.record(&folded.current);
         Ok(folded)
     }
 
     /// Folds the WAL tail from `position`, as [`Self::fold_wal_tail_from`]
-    /// describes, without recording the manifest.
+    /// describes, with the manifest put sent under `epoch`, without
+    /// recording the manifest.
     async fn fold_wal_tail_from_position(
         &self,
         position: &WriterPosition,
+        epoch: &SessionEpoch<'_>,
         clock: &OperationClock,
     ) -> Result<FoldedWalTail> {
         let Some(projection) = self.load_position_projection(position.clone()).await? else {
@@ -195,10 +198,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
             layouts: None,
         });
         let folded = self
-            .update_manifest(Some(basis), clock, |current: LoadedManifest| {
-                let fold = &fold;
-                async move { fold.lock().await.attempt(current).await }
-            })
+            .update_manifest(
+                Some(basis),
+                clock,
+                ManifestSender::Session(epoch),
+                |current: LoadedManifest| {
+                    let fold = &fold;
+                    async move { fold.lock().await.attempt(current).await }
+                },
+            )
             .await;
         let built_on = position.read_basis().basis.manifest_no();
         let update = match folded.and_then(|update| update.published_or_unchanged(built_on)) {

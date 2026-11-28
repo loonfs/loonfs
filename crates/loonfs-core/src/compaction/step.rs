@@ -170,6 +170,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             Ok(compacted) => {
                 drop(segments);
                 let lane = lane.lock().await;
+                let epoch = lane.epoch(&self.namespace);
                 let outcome = self
                     .namespace
                     .finalize_metadata_compaction(
@@ -181,6 +182,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                         &CompactionPublication {
                             compaction,
                             publication: self.namespace.start_clock(),
+                            epoch: &epoch,
                         },
                     )
                     .await?;

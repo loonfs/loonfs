@@ -920,6 +920,7 @@ impl<S: ObjectStore + Clone> NamespaceStore<S> {
                     writer_id: writer.writer_id.clone(),
                     writer_epoch: payload.writer_epoch,
                 },
+                crate::namespace::Held::new(manifest.clone(), observed_now(), Default::default()),
             ),
             None => crate::publish::NamespaceCommitEngine::new(
                 self.clone(),

@@ -44,33 +44,17 @@ pub(crate) enum PublishViewEffect {
     /// Nothing was written: the loaded projection still describes the tail.
     Unchanged,
     /// The batch may have left durable state the loaded projection does not
-    /// account for, so that projection must be dropped.
+    /// account for, such as a WAL put that failed or whose outcome is
+    /// unknown, so that projection must be dropped. A put whose outcome is
+    /// unknown also ended the session's epoch (see
+    /// [`SessionEpoch::send_put`]).
     Invalidated,
-    /// The WAL put's outcome is unknown, so the put may still be written at
-    /// the number it was sent to. The session drops the projection and stays
-    /// without its epoch, so its next publication claims a new epoch and
-    /// writes a fence (format spec, "Failed and unknown outcomes").
-    OutcomeUnknown,
     Advanced {
         body: WalObjectBody,
         head: NamespaceReadState,
         /// The published WAL object's size in the store.
         wal_bytes: usize,
     },
-}
-
-impl PublishViewEffect {
-    /// The effect of a WAL put that failed with `error`.
-    pub(crate) fn after_failed_put(error: &CoreError) -> Self {
-        if matches!(
-            error,
-            CoreError::WalPublish(WalPublishError::OutcomeUnknown(_))
-        ) {
-            Self::OutcomeUnknown
-        } else {
-            Self::Invalidated
-        }
-    }
 }
 
 impl PublishBatchReport {
@@ -231,17 +215,10 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     ) {
         return abort_batch(slots, &error);
     }
-    let published = epoch
-        .send_put(publish_wal_object(view.store(), &wal), |published| {
-            !matches!(
-                published,
-                Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(_)))
-            )
-        })
-        .await;
+    let published = epoch.send_put(publish_wal_object(view.store(), &wal)).await;
     if let Err(error) = published {
         let mut report = abort_batch(slots, &error);
-        report.effect = PublishViewEffect::after_failed_put(&error);
+        report.effect = PublishViewEffect::Invalidated;
         return report;
     }
 
@@ -472,7 +449,7 @@ mod tests {
                 batch: &batch,
                 attempt,
             },
-            &SessionEpoch::new(&std::sync::Mutex::default(), view.acquired_writer.clone()),
+            &SessionEpoch::new(&crate::publish::PublishedManifest::default(), &namespace),
         )
         .await;
 
@@ -538,7 +515,7 @@ mod tests {
                 batch: &batch,
                 attempt: batch.observe(),
             },
-            &SessionEpoch::new(&std::sync::Mutex::default(), view.acquired_writer.clone()),
+            &SessionEpoch::new(&crate::publish::PublishedManifest::default(), &namespace),
         )
         .await;
 

@@ -349,10 +349,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
             crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
                 .delete_namespace(
                     Default::default(),
-                    crate::commit::session_epoch::SessionEpoch::new(
-                        &std::sync::Mutex::default(),
-                        writer,
-                    ),
+                    &writer,
                     None,
                     &crate::publish::PublicationLane::new().lock().await,
                     &fixture.context.clock(),

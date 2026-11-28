@@ -1,7 +1,7 @@
 //! An extension's publications: the manifest that an extension's change
 //! builds on, and the next manifest, which lists the change.
 
-use super::publish::ManifestChange;
+use super::publish::{ManifestChange, ManifestSender};
 use super::published::PublicationReport;
 use super::validate::validate_manifest;
 use crate::commit::publication_lane::LaneTurn;
@@ -150,10 +150,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let position_basis = self.load_publication_basis(turn.position()).await?;
         let position_manifest_no = position_basis.manifest_no();
         let mut first_built_on = None;
+        let epoch = turn.epoch(self);
         let update = self
             .update_live_manifest(
                 Some(position_basis),
                 &basis.clock,
+                ManifestSender::Session(&epoch),
                 |payload: NamespaceManifestPayload| {
                     first_built_on.get_or_insert(payload.manifest_no);
                     let change = extension_change(payload, name, built_on, &entry);

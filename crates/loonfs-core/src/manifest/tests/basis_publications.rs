@@ -51,12 +51,17 @@ async fn republish<S: ObjectStore + ?Sized>(
     let ManifestUpdate {
         current: published, ..
     } = crate::test_support::namespace_store(store, namespace_id)
-        .update_manifest(basis, deadline, |current: LoadedManifest| async move {
-            Ok(ManifestChange::Next(
-                Box::new(current.payload().clone()),
-                (),
-            ))
-        })
+        .update_manifest(
+            basis,
+            deadline,
+            crate::manifest::publish::ManifestSender::ClaimOrInitialization,
+            |current: LoadedManifest| async move {
+                Ok(ManifestChange::Next(
+                    Box::new(current.payload().clone()),
+                    (),
+                ))
+            },
+        )
         .await
         .expect("publish");
     published.into_manifest()
@@ -178,6 +183,7 @@ async fn a_publication_that_breaks_a_successor_rule_panics_before_its_put() {
     let Err(panic) = std::panic::AssertUnwindSafe(namespace.update_manifest(
         Some(basis),
         &deadline,
+        crate::manifest::publish::ManifestSender::ClaimOrInitialization,
         |current: LoadedManifest| async move {
             Ok(ManifestChange::Next(
                 Box::new(NamespaceManifestPayload {
