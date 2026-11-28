@@ -51,7 +51,6 @@ pub(super) fn render(state: &AppState) -> String {
 fn render_grep_publications(rendered: &mut String, stats: GrepPublicationStats) {
     let GrepPublicationStats {
         published,
-        rebuilt,
         superseded,
     } = stats;
     write_counter(
@@ -60,7 +59,6 @@ fn render_grep_publications(rendered: &mut String, stats: GrepPublicationStats) 
         "Publications of grep's entry by this server's index steps, by outcome",
         &[
             (&[("outcome", "published")], published),
-            (&[("outcome", "rebuilt")], rebuilt),
             (&[("outcome", "superseded")], superseded),
         ],
     );

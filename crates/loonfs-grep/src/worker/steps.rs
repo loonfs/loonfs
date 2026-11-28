@@ -21,14 +21,15 @@ pub const DEFAULT_GREP_PUBLISH_INTERVAL_MS: u64 = 5_000;
 /// How publishing a run's pending change ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrepPublishOutcome {
-    /// The pending change is in the manifest after the one it built on, or
-    /// after a manifest that followed that one with the same grep entry.
+    /// The pending change is in the manifest after the writer session's
+    /// newest published manifest, which has the grep entry that the change
+    /// built on.
     Published,
     /// The steps changed nothing since the last publication.
     NothingPending,
-    /// The writer session's position, confirmed as the newest manifest,
-    /// lists another grep entry than the one the change built on, such as
-    /// after the session's own disable, so the change wasn't published, and
+    /// The writer session's newest published manifest, confirmed as the
+    /// newest manifest, lists another grep entry than the one the change
+    /// built on, such as when the index was disabled through the same writer session, so the change wasn't published, and
     /// its segments are left to the collector. When another writer changed
     /// the entry, the publication returns `writer_fenced` instead.
     Superseded,
@@ -50,11 +51,8 @@ pub enum GrepProgress {
 pub struct GrepPublicationStats {
     /// Changes published in the manifest after the one that they built on.
     pub published: usize,
-    /// Changes whose put lost to a manifest with the same grep entry, such
-    /// as a fold's, and that were published over that manifest.
-    pub rebuilt: usize,
-    /// Changes that weren't published, because another process changed
-    /// grep's entry first.
+    /// Changes that weren't published, because grep's entry changed first,
+    /// such as when the index was disabled through the same writer session.
     pub superseded: usize,
 }
 
@@ -63,7 +61,6 @@ pub struct GrepPublicationStats {
 #[derive(Debug, Default)]
 pub(super) struct PublicationCounts {
     published: AtomicUsize,
-    rebuilt: AtomicUsize,
     superseded: AtomicUsize,
 }
 
@@ -71,7 +68,6 @@ impl PublicationCounts {
     pub(super) fn stats(&self) -> GrepPublicationStats {
         GrepPublicationStats {
             published: self.published.load(Ordering::Relaxed),
-            rebuilt: self.rebuilt.load(Ordering::Relaxed),
             superseded: self.superseded.load(Ordering::Relaxed),
         }
     }
@@ -212,11 +208,10 @@ fn invalid_entry(basis: &ExtensionBasis, error: GrepEntryError) -> GrepError {
 /// a step doesn't index again what an earlier step indexed. A step ends by
 /// publishing the pending change once `publish_interval_ms` has passed since
 /// the change loaded the manifest it builds on, and [`Self::publish`]
-/// publishes what's pending. When another manifest follows that manifest
-/// first with the same grep entry, the change is published over it. When
-/// the session's position lists another entry, nothing is published, the
-/// step returns `Superseded`, and the next step plans from the position's
-/// manifest. When another writer claimed the namespace, the publication
+/// publishes what's pending, over the writer session's newest published
+/// manifest when that manifest has the grep entry that the change built on.
+/// When it lists another entry, nothing is published, the step returns
+/// `Superseded`, and the next step plans from that manifest. When another writer claimed the namespace, the publication
 /// returns `writer_fenced`.
 /// A run that's dropped before it publishes leaves its segments to the
 /// collector.
@@ -348,13 +343,8 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
             .await?;
         let counts = &self.worker.publications;
         match publication {
-            ExtensionPublication::Published { basis, rebuilt } => {
-                let outcome = if rebuilt {
-                    &counts.rebuilt
-                } else {
-                    &counts.published
-                };
-                outcome.fetch_add(1, Ordering::Relaxed);
+            ExtensionPublication::Published { basis } => {
+                counts.published.fetch_add(1, Ordering::Relaxed);
                 self.pending = Some(PendingEntry::new(basis)?);
                 Ok(GrepPublishOutcome::Published)
             }

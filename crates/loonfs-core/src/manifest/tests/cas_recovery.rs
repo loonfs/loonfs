@@ -181,186 +181,6 @@ async fn an_ambiguous_manifest_read_back_after_its_budget_settles_the_put() {
     }
 }
 
-/// Checks that of two retention window changes with the same content, which
-/// store different bytes, the change whose put loses reports `Lost`.
-#[tokio::test]
-async fn window_changes_with_the_same_content_report_the_loser_as_lost() {
-    for race_at_put in [false, true] {
-        let directory = tempdir().expect("directory");
-        let namespace_id = NamespaceId::parse("demo").expect("namespace");
-        let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-        bootstrap_namespace(&store, &namespace_id, &test_context())
-            .await
-            .expect("bootstrap");
-        let current = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("current");
-        let mut payload = current.payload().clone();
-        payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
-        payload.retention_window_ms =
-            std::num::NonZeroU64::new(2 * crate::limits::GC_GRACE_WINDOW_MS);
-        let change = payload;
-        let blocked = BlockingStore::new(
-            store.clone(),
-            KeyPredicate::manifest(&namespace_id),
-            OperationSelector::Put,
-        );
-        let (losing, winning) = if race_at_put {
-            blocked.block_next();
-            let losing = publish_once(&blocked, change.clone());
-            let winning = async {
-                blocked.wait_until_blocked().await;
-                let outcome = publish_once(&store, change.clone()).await;
-                blocked.release();
-                outcome
-            };
-            futures::join!(losing, winning)
-        } else {
-            let winning = publish_once(&store, change.clone()).await;
-            (publish_once(&store, change).await, winning)
-        };
-        assert_matches!(
-            winning.expect("winner"),
-            ManifestPublicationOutcome::Published(_)
-        );
-        assert_matches!(losing.expect("loser"), ManifestPublicationOutcome::Lost(_));
-    }
-}
-
-#[tokio::test]
-async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
-    for newer_head in [false, true] {
-        let directory = tempdir().expect("directory");
-        let namespace_id = NamespaceId::parse("demo").expect("namespace");
-        let store = Arc::new(RecordingStore::new(
-            LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::manifest(&namespace_id),
-        ));
-        let context = test_context();
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .create()
-            .await
-            .expect("bootstrap");
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .acquire_writer_epoch(&context.writer_id)
-            .await
-            .expect("acquire");
-        let current = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("current");
-        let predecessor = current.manifest().manifest_no;
-        let mut payload = current.payload().clone();
-        payload.manifest_no = predecessor.successor().expect("next number");
-        let first = payload.clone();
-        if newer_head {
-            let mut engine = crate::commit::engine::NamespaceCommitEngine::with_acquired_session(
-                crate::test_support::namespace_store(&store, &namespace_id),
-                context.writer_id.clone(),
-                crate::namespace::writer_epoch::AcquiredWriter {
-                    writer_id: context.writer_id.clone(),
-                    writer_epoch: current.payload().writer_epoch,
-                },
-                crate::namespace::Held::new(
-                    current.clone(),
-                    crate::test_support::observed_now(),
-                    Default::default(),
-                ),
-            );
-            engine
-                .publish_batch_alone(
-                    vec![crate::commit::engine::CommitCandidate::new(
-                        crate::path::write::CommitIntent {
-                            commit_id: loonfs_types::CommitId::generate(),
-                            actor_id: loonfs_test_support::ids::test_actor(),
-                            subject: None,
-                            message: None,
-                            preconditions: Vec::new(),
-                            operations: vec![
-                                crate::path::write::FilesystemOperation::CreateDirectory {
-                                    path: loonfs_types::AbsolutePath::parse("/file").expect("path"),
-                                    parents: false,
-                                },
-                            ],
-                        },
-                    )],
-                    &context.clock(),
-                )
-                .await
-                .results
-                .remove(0)
-                .expect("write");
-            let projection = load_current_projection(&store, &namespace_id)
-                .await
-                .expect("projection");
-            payload = build_namespace_manifest_from_metadata_state(
-                &store,
-                &namespace_id,
-                ManifestMetadataSource {
-                    head: &projection.head,
-                    basis_manifest_no: Some(predecessor),
-                    retention_floor_seq: CommitSeq(0),
-                    metadata_state: &projection.metadata_state,
-                },
-                MetadataRunPolicy::default(),
-                payload.manifest_no,
-            )
-            .await
-            .expect("build")
-            .into_payload();
-        } else {
-            payload.next_run_no = RunNo(payload.next_run_no.0 + 1);
-        }
-        let second = payload;
-        store.reset();
-        let blocked = BlockingStore::new(
-            store.clone(),
-            KeyPredicate::manifest(&namespace_id),
-            OperationSelector::Put,
-        );
-        blocked.block_next();
-        let losing = publish_once(&blocked, second.clone());
-        let winning = async {
-            blocked.wait_until_blocked().await;
-            let result = publish_once(&store, first).await;
-            blocked.release();
-            result
-        };
-        let (losing, winning) = futures::join!(losing, winning);
-        assert_matches!(
-            winning.expect("winner"),
-            ManifestPublicationOutcome::Published(_)
-        );
-        let losing = losing.expect("loser loads winner");
-        assert_eq!(store.counts().create_if_absent_puts, 2);
-        assert_eq!(store.counts().compare_and_swaps, 0);
-        // Each publisher finds the newest manifest with one listing first.
-        assert_eq!(store.counts().lists, 2);
-        // Each publisher loads the current manifest, and the loser loads the
-        // winner.
-        assert!(store.counts().gets >= 3);
-        let keys = store
-            .inner()
-            .list_prefix(&metadata_manifest_prefix(&namespace_id))
-            .await
-            .expect("list for assertion");
-        // The create's two manifests, the claim, and the winner's manifest.
-        assert_eq!(keys.len(), 4);
-        if newer_head {
-            assert_matches!(losing, ManifestPublicationOutcome::Lost(_));
-            let mut retry = second;
-            retry.manifest_no = retry.manifest_no.successor().expect("next number");
-            assert_matches!(
-                publish_once(&store, retry).await.expect("publish retry"),
-                ManifestPublicationOutcome::Published(_)
-            );
-        } else {
-            assert_matches!(losing, ManifestPublicationOutcome::Lost(_));
-        }
-    }
-}
-
 /// Checks that a manifest put that succeeds, followed by a read of the
 /// manifest boundary that fails, returns `outcome_unknown` for the
 /// manifest's key.
@@ -391,7 +211,6 @@ async fn a_failed_boundary_read_after_a_put_has_an_unknown_outcome() {
             payload,
             &OperationClock::start(0, crate::test_support::std_timer()),
             Some(&basis),
-            crate::manifest::publish::ManifestSender::ClaimOrInitialization,
         )
         .await;
     let object_key = metadata_manifest_object(&namespace_id, &ManifestNo(3));
@@ -448,56 +267,6 @@ async fn manifest_publication_recovers_an_ambiguous_put() {
 }
 
 #[tokio::test]
-async fn a_manifest_update_stops_after_the_contention_limit() {
-    use super::super::publish::ManifestChange;
-
-    for rival_publishes in [false, true] {
-        let directory = tempdir().expect("directory");
-        let namespace_id = NamespaceId::parse("demo").expect("namespace");
-        let store = LocalFsStore::new(directory.path()).expect("store");
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
-            .create()
-            .await
-            .expect("bootstrap");
-        let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
-        let mut attempts = 0;
-        let result = crate::test_support::namespace_store(&store, &namespace_id)
-            .update_manifest(
-                None,
-                &deadline,
-                crate::manifest::publish::ManifestSender::ClaimOrInitialization,
-                |current: crate::namespace::control::LoadedManifest| {
-                    attempts += 1;
-                    let store = &store;
-                    let payload = current.payload().clone();
-                    async move {
-                        if !rival_publishes {
-                            return Ok(ManifestChange::Again);
-                        }
-                        let mut rival = payload.clone();
-                        rival.manifest_no = rival.manifest_no.successor().expect("next number");
-                        let key = metadata_manifest_object(&rival.namespace_id, &rival.manifest_no);
-                        store
-                            .put_if_absent(&key, Bytes::from(encode_manifest(rival).into_bytes()))
-                            .await
-                            .expect("rival manifest");
-                        Ok(ManifestChange::Next(Box::new(payload), ()))
-                    }
-                },
-            )
-            .await;
-        let Err(CoreError::StoreContention { object_key }) = result else {
-            panic!("expected StoreContention, got {:?}", result.map(|_| ()));
-        };
-        assert_eq!(attempts, crate::limits::MAX_CONTENTION_ATTEMPTS);
-        assert!(
-            object_key.starts_with(&metadata_manifest_prefix(&namespace_id)),
-            "{object_key}"
-        );
-    }
-}
-
-#[tokio::test]
 async fn a_fold_whose_manifest_put_succeeds_without_an_answer_reports_published() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
@@ -542,68 +311,6 @@ async fn a_fold_whose_manifest_put_succeeds_without_an_answer_reports_published(
     assert_eq!(
         folded.manifest_no,
         predecessor.successor().expect("next number")
-    );
-}
-
-#[tokio::test]
-async fn a_snapshot_whose_fold_loses_to_another_fold_reports_its_position_behind() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let context = test_context();
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .create()
-        .await
-        .expect("bootstrap");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .write_file_bytes("/file", b"data", None)
-        .await
-        .expect("write");
-    let blocked = BlockingStore::new(
-        store.clone(),
-        KeyPredicate::manifest(&namespace_id),
-        OperationSelector::Put,
-    );
-    blocked.block_next();
-    let losing = create_snapshot(&blocked, &namespace_id, &context);
-    let winning = async {
-        blocked.wait_until_blocked().await;
-        let snapshot = create_snapshot(&store, &namespace_id, &context).await;
-        blocked.release();
-        snapshot
-    };
-    let (losing, winning) = futures::join!(losing, winning);
-    // The winner's manifest ends the losing fold without a put, so the losing
-    // snapshot doesn't take its record at a manifest that it didn't publish.
-    assert_matches!(losing, Err(CoreError::HeadMoved(_)));
-    let winning = winning.expect("winner");
-    let winning = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&winning.snapshot_id)
-        .await
-        .expect("record")
-        .expect("present");
-    assert_eq!(
-        winning.state.manifest().manifest_no,
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("current")
-            .payload()
-            .manifest_no
-    );
-    let statistics = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_statistics()
-        .await
-        .expect("statistics");
-    assert_eq!(
-        statistics.activity,
-        loonfs_types::format::manifest::ManifestActivity {
-            content_bytes: loonfs_types::format::manifest::ActivityCounter::parse(4)
-                .expect("activity"),
-            file_revisions: loonfs_types::format::manifest::ActivityCounter::parse(1)
-                .expect("activity"),
-            mutations: loonfs_types::format::manifest::ActivityCounter::parse(1).expect("activity"),
-        }
     );
 }
 
@@ -732,7 +439,6 @@ async fn two_puts_of_one_payload_store_different_bytes() {
                 payload.clone(),
                 &OperationClock::start(0, crate::test_support::std_timer()),
                 Some(&basis),
-                crate::manifest::publish::ManifestSender::ClaimOrInitialization,
             )
             .await
             .expect("publish");
@@ -766,8 +472,6 @@ async fn two_puts_of_one_payload_store_different_bytes() {
 /// published with a publication ID of its own.
 #[tokio::test]
 async fn a_successor_that_copies_its_predecessor_gets_its_own_publication_id() {
-    use super::super::publish::ManifestChange;
-
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
@@ -776,24 +480,24 @@ async fn a_successor_that_copies_its_predecessor_gets_its_own_publication_id() {
         .await
         .expect("create");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let predecessor = namespace.load_current_manifest().await.expect("current");
-    let update = namespace
-        .update_manifest(
-            None,
+    let basis = namespace
+        .load_current_basis(crate::test_support::observed_now())
+        .await
+        .expect("current");
+    let predecessor = basis.manifest().clone();
+    let outcome = namespace
+        .publish_manifest_from(
+            predecessor.payload().clone(),
             &OperationClock::start(0, crate::test_support::std_timer()),
-            crate::manifest::publish::ManifestSender::ClaimOrInitialization,
-            |current: crate::namespace::control::LoadedManifest| async move {
-                Ok(ManifestChange::Next(
-                    Box::new(current.payload().clone()),
-                    (),
-                ))
-            },
+            Some(&basis),
         )
         .await
         .expect("publish a copy");
-    assert!(update.published);
+    let ManifestPublicationOutcome::Published(published) = outcome else {
+        panic!("the copy is published, got {outcome:?}");
+    };
     let successor = namespace.load_current_manifest().await.expect("current");
-    assert_eq!(successor.manifest(), update.current.manifest().manifest());
+    assert_eq!(successor.manifest(), published.manifest().manifest());
     assert_eq!(
         successor.payload().manifest_no,
         predecessor.payload().manifest_no.successor().expect("next")
@@ -802,89 +506,4 @@ async fn a_successor_that_copies_its_predecessor_gets_its_own_publication_id() {
         successor.payload().publication_id,
         predecessor.payload().publication_id
     );
-}
-
-/// Checks that a fold whose put loses its response, and whose number another
-/// process's fold took, doesn't return a result from that fold, or from the
-/// manifest above it, but reports its position behind, so the session loads
-/// its position again with the writer's load.
-#[tokio::test]
-async fn a_fold_that_finds_another_fold_after_a_lost_put_reports_its_position_behind() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let context = test_context();
-    let local = LocalFsStore::new(directory.path()).expect("store");
-    bootstrap_namespace(&local, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    crate::test_support::NamespaceFixture::new(&local, &namespace_id, &context)
-        .append_wal_objects(2)
-        .await
-        .expect("WAL tail");
-    let basis_no = crate::test_support::namespace_store(&local, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current")
-        .payload()
-        .manifest_no;
-    let head = crate::test_support::namespace_store(&local, &namespace_id)
-        .load_read_state()
-        .await
-        .expect("head");
-    let position_checked = crate::test_support::observed_now();
-    let position = crate::test_support::namespace_store(&local, &namespace_id)
-        .load_publish_metadata_view(
-            crate::namespace::writer_epoch::AcquiredWriter {
-                writer_id: context.writer_id.clone(),
-                writer_epoch: head.writer_epoch,
-            },
-            crate::commit::publish_view::ViewStart::Load,
-            position_checked,
-        )
-        .await
-        .expect("position")
-        .into_position();
-    // Another process folds the tail, and then publishes a manifest above
-    // that fold, before this fold's clock starts.
-    let folded_namespace = crate::test_support::namespace_store(&local, &namespace_id);
-    folded_namespace
-        .fixture_writer_session()
-        .await
-        .expect("the writer's session")
-        .fold()
-        .await
-        .expect("another process's fold");
-    crate::test_support::change_retention_window(
-        &crate::test_support::NamespaceFixture::new(&local, &namespace_id, &context).engine(),
-    )
-    .await;
-    let other_fold = basis_no.successor().expect("next number");
-    assert_eq!(
-        crate::test_support::namespace_store(&local, &namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("current")
-            .payload()
-            .manifest_no,
-        other_fold.successor().expect("next number")
-    );
-
-    let store = FailStore::new(
-        local,
-        KeyPredicate::exact(metadata_manifest_object(&namespace_id, &other_fold)),
-        OperationSelector::PutCreateIfAbsent,
-        InjectedError::Transport("lost request".to_owned()),
-    );
-    store.fail_next(1);
-    let folded = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail_in_new_lane(
-            &position,
-            &crate::time::OperationClock::start(
-                0,
-                Arc::new(crate::time::StdMonotonicTimer::default()),
-            ),
-        )
-        .await;
-    assert_eq!(store.remaining(), 0, "the fold's put lost its response");
-    assert!(matches!(folded, Err(CoreError::HeadMoved(_))));
 }

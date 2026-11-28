@@ -327,3 +327,76 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
         ExecutionBudgetStats::default()
     );
 }
+
+/// Checks that a fold of a session that another writer displaced loses its
+/// manifest put to that writer's claim, returns `writer_fenced` without
+/// building again, cancels the session's compaction, and records one
+/// displacement.
+#[tokio::test]
+async fn a_fold_that_loses_its_put_to_a_claim_is_fenced_and_records_one_displacement() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let (writer, old, recorder) = superseded_session(store).await;
+    let publisher = &old.session().publisher;
+    let error = old.fold_wal().await.expect_err("the fold loses its put");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+    assert!(publisher.stop.is_cancelled());
+    assert_eq!(counter(&recorder, "loonfs.publisher.displacements"), 1);
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a compaction unit of a session that another writer
+/// displaced, planned from the session's position, loses its manifest put
+/// to that writer's claim, returns `writer_fenced`, cancels the session's
+/// compaction, and records one displacement.
+#[tokio::test]
+async fn a_compaction_unit_that_loses_its_put_to_a_claim_is_fenced_and_records_one_displacement() {
+    let directory = tempdir().expect("tempdir");
+    let store: SharedStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .metrics_recorder(recorder.clone())
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..crate::RuntimeConfig::default()
+        })
+        .build()
+        .await
+        .expect("writer");
+    let namespace_id = NamespaceId::parse("fenced-unit").expect("namespace id");
+    let actor = loonfs_test_support::test_actor();
+    writer
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create");
+    let old = writer.open_namespace(&namespace_id).expect("open");
+    for index in 0..loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() + 2 {
+        old.create_directory(&format!("/d{index}"), &actor)
+            .await
+            .expect("commit");
+        old.fold_wal().await.expect("fold");
+    }
+    writer.drain().await.expect("drain");
+    let rival = LoonFs::builder_with_store(store, crate::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-b"))
+        .build()
+        .await
+        .expect("rival");
+    rival
+        .open_namespace(&namespace_id)
+        .expect("rival session")
+        .create_directory("/rival", &actor)
+        .await
+        .expect("take over");
+    rival.shutdown().await.expect("rival shutdown");
+    let publisher = &old.session().publisher;
+    let error = old
+        .compact_metadata(&crate::MaintenanceCancellation::new())
+        .await
+        .expect_err("the unit loses its put");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+    assert!(publisher.stop.is_cancelled());
+    assert_eq!(counter(&recorder, "loonfs.publisher.displacements"), 1);
+    writer.shutdown().await.expect("shutdown");
+}

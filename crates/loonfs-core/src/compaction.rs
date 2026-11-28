@@ -13,4 +13,6 @@ pub(crate) mod step;
 pub use self::run_iterator::{
     refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,
 };
-pub use self::step::{CompactionUnitOutcome, MaintenanceCancellation};
+pub use self::step::{
+    CompactionUnitOutcome, CompactionWriteOutcome, CompactionWrites, MaintenanceCancellation,
+};

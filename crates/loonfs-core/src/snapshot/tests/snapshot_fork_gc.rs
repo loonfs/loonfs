@@ -318,7 +318,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
 #[tokio::test]
 async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification() {
     let fixture = Fixture::new().await;
-    let writer = crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
+    crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
         .acquire_writer_epoch(&fixture.context.writer_id)
         .await
         .expect("writer");
@@ -347,13 +347,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
         async {
             gate.wait_until_blocked().await;
             crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
-                .delete_namespace(
-                    Default::default(),
-                    &writer,
-                    None,
-                    &crate::publish::PublicationLane::new().lock().await,
-                    &fixture.context.clock(),
-                )
+                .delete_in_new_session(&fixture.context.writer_id)
                 .await
                 .expect("delete source before the fork snapshot is written");
             gate.release();

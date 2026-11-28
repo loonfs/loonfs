@@ -245,7 +245,7 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let writer = crate::test_support::namespace_store(&store, &namespace_id)
+    crate::test_support::namespace_store(&store, &namespace_id)
         .acquire_writer_epoch(&context.writer_id)
         .await
         .expect("writer");
@@ -282,13 +282,7 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
                 1
             );
             crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .delete_namespace(
-                    Default::default(),
-                    &writer,
-                    None,
-                    &crate::publish::PublicationLane::new().lock().await,
-                    &context.clock(),
-                )
+                .delete_in_new_session(&context.writer_id)
                 .await
                 .expect("delete namespace during verification");
             store.release();

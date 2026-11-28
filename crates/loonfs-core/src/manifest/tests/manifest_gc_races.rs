@@ -2,7 +2,6 @@
 //! the manifest boundary and deletes old manifests.
 
 use super::*;
-use crate::manifest::publish::ManifestUpdate;
 use loonfs_test_support::stores::MetadataMapStore;
 use std::assert_matches;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -221,13 +220,15 @@ async fn a_late_ambiguous_put_at_an_emptied_number_is_lost() {
     );
 }
 
-/// Checks that a publication whose basis's successor a collection deleted
-/// puts the deleted number, counts that put as lost because the number is at
-/// the boundary, and publishes after the newest manifest. A put whose
-/// response is lost is read back, found at the boundary, and settled against
-/// the newest manifest too, so the next attempt builds on that manifest.
+/// Checks that an item of a writer session's publication lane whose basis's
+/// successor a collection deleted puts the deleted number, counts that put
+/// as lost because the number is at the boundary, and returns
+/// `writer_fenced` with the writer of the newest manifest, without another
+/// put (`writer_lane` `MC_PositionBasisLostBelowBoundaryWitness`). A put
+/// whose response is lost is read back, found at the boundary, and settled
+/// against the newest manifest too.
 #[tokio::test]
-async fn a_put_at_a_number_that_a_collection_emptied_is_lost() {
+async fn a_put_at_a_number_that_a_collection_emptied_returns_writer_fenced() {
     for ambiguous in [false, true] {
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("stale-basis").expect("namespace");
@@ -277,23 +278,26 @@ async fn a_put_at_a_number_that_a_collection_emptied_is_lost() {
         )
         .apply_then_fail();
         failing.fail_next(usize::from(ambiguous));
-        let ManifestUpdate {
-            current: published, ..
-        } = crate::test_support::namespace_store(&failing, &namespace_id)
-            .update_manifest(
-                Some(basis),
-                &OperationClock::start(0, crate::test_support::std_timer()),
-                crate::manifest::publish::ManifestSender::ClaimOrInitialization,
-                |current: crate::namespace::control::LoadedManifest| async move {
-                    Ok(super::super::publish::ManifestChange::Next(
-                        Box::new(current.payload().clone()),
-                        (),
-                    ))
-                },
+        // A session of manifest 2's writer epoch that has kept manifest 2
+        // as its newest published manifest changes the window.
+        let mut session = NamespaceCommitEngine::with_acquired_session(
+            crate::test_support::namespace_store(&failing, &namespace_id),
+            context.writer_id.clone(),
+            crate::namespace::writer_epoch::AcquiredWriter {
+                writer_id: context.writer_id.clone(),
+                writer_epoch: basis.manifest().payload().writer_epoch,
+            },
+            basis,
+        );
+        let published = session
+            .set_retention_window(
+                loonfs_types::RetentionWindow::new(2 * crate::limits::GC_GRACE_WINDOW_MS).ok(),
             )
-            .await
-            .expect("publish");
-        assert_eq!(published.manifest().manifest().manifest_no, ManifestNo(6));
+            .await;
+        let Err(CoreError::WriterFenced(fence)) = published.map(|report| report.response) else {
+            panic!("expected writer_fenced");
+        };
+        assert_eq!(fence.active_epoch, loonfs_types::WriterEpoch(3));
         let manifest = |number| metadata_manifest_object(&namespace_id, &ManifestNo(number));
         let boundary = boundary(&namespace_id);
         let read_back = ambiguous.then(|| ("get", manifest(3)));
@@ -307,8 +311,6 @@ async fn a_put_at_a_number_that_a_collection_emptied_is_lost() {
                     ("get", boundary.clone()),
                     ("list", metadata_manifest_prefix(&namespace_id)),
                     ("get", manifest(5)),
-                    ("get", boundary.clone()),
-                    ("put", manifest(6)),
                     ("get", boundary),
                 ])
                 .collect::<Vec<_>>(),

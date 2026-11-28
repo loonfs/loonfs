@@ -1,11 +1,8 @@
 //! Reads in a former writer's runtime after another writer takes over the
 //! namespace while the former writer's folds and publishes are in flight.
 
-use loonfs::{
-    ErrorCode, FoldWalOutcome, LoonFs, Namespace, NamespaceSessionStatus, ReadOnly,
-    SharedObjectStore, Writable,
-};
-use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
+use loonfs::{ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadOnly, SharedObjectStore, Writable};
+use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::PutMode;
 use loonfs_test_support::clock::bounded;
 use loonfs_test_support::ids::{namespace_id, writer_id};
@@ -13,7 +10,6 @@ use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MemoryStore, OperationContext, OperationKind, RecordedOperation,
     RecordingStore,
 };
-use loonfs_types::format::manifest::decode_namespace_manifest_json;
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::{ChecksumAlgorithm, ManifestNo, NamespaceId};
 use std::num::NonZeroU64;
@@ -27,20 +23,6 @@ type Gate = Arc<BlockingStore<SharedObjectStore>>;
 
 /// Selects the requests that a gate parks.
 type Selector = Box<dyn Fn(&OperationContext<'_>) -> bool + Send + Sync>;
-
-/// Selects a put-if-absent of a manifest that folds WAL objects.
-fn fold_manifest_put(namespace_id: &NamespaceId) -> impl Fn(&OperationContext<'_>) -> bool {
-    let prefix = metadata_manifest_prefix(namespace_id);
-    move |operation| {
-        operation.key().starts_with(&prefix)
-            && matches!(
-                operation.kind(),
-                OperationKind::Put { bytes, mode: PutMode::CreateIfAbsent }
-                    if decode_namespace_manifest_json(bytes)
-                        .is_ok_and(|manifest| manifest.payload().folded_wal_no.0 > 0)
-            )
-    }
-}
 
 /// Selects a put-if-absent of a WAL object with commits, which leaves out
 /// a writer's fence.
@@ -182,118 +164,8 @@ impl Takeover {
     }
 }
 
-fn parked_folds(
-    namespace_id: &NamespaceId,
-) -> Box<dyn Fn(&OperationContext<'_>) -> bool + Send + Sync> {
-    Box::new(fold_manifest_put(namespace_id))
-}
-
 fn parked_commits(namespace_id: &NamespaceId) -> Selector {
     Box::new(data_wal_put(namespace_id))
-}
-
-/// Checks that when A's own fold loses its manifest number to B's claim,
-/// the fold folds B's log over the claim, that A's session finds that it's
-/// fenced at its next commit and not from the fold, and that a read in A's
-/// runtime sees B's commit.
-///
-/// A's fold waits at its manifest put while B claims the namespace, and B's
-/// commit waits at its WAL put until A's fold has ended, so the claim and
-/// B's fence are all that the fold could load. The fold's manifest has B's
-/// writer epoch, so A's position doesn't move onto it.
-#[tokio::test]
-async fn a_session_fold_that_loses_to_a_claim_folds_the_new_writers_log() {
-    let fixture = takeover("fold-over-claim", parked_folds, Some(NonZeroU64::MIN)).await;
-    let peer_gate: Gate = Arc::new(BlockingStore::matching(
-        fixture.store.clone(),
-        data_wal_put(&fixture.namespace_id),
-    ));
-    let peer = fixture.peer(Some(peer_gate.clone())).await;
-    let peer_namespace = peer
-        .open_namespace(&fixture.namespace_id)
-        .expect("open namespace");
-    let actor = loonfs_test_support::test_actor();
-
-    fixture.gate.block_next();
-    fixture
-        .namespace
-        .put_file("/inline", b"inline", &actor)
-        .await
-        .expect("A's commit that starts its fold");
-    bounded(STEP, fixture.gate.wait_until_blocked())
-        .await
-        .expect("A's fold waits at its manifest put");
-    let claimed = fixture.current_manifest_no().await;
-
-    peer_gate.block_next();
-    let peer_commit = tokio::spawn(async move {
-        peer_namespace
-            .put_file("/b", b"b", &loonfs_test_support::test_actor())
-            .await
-    });
-    bounded(STEP, peer_gate.wait_until_blocked())
-        .await
-        .expect("B's commit waits at its WAL put");
-    fixture.gate.release();
-    bounded(STEP, fixture.writer.drain())
-        .await
-        .expect("A's fold ends")
-        .expect("drain");
-    assert_eq!(
-        fixture.namespace.session_status(),
-        NamespaceSessionStatus::Open,
-        "A's fold doesn't fence A's session"
-    );
-    assert_eq!(
-        fixture.current_manifest_no().await,
-        claimed
-            .successor()
-            .and_then(|claim| claim.successor())
-            .expect("the number after B's claim"),
-        "A's fold folded B's log over B's claim"
-    );
-
-    peer_gate.release();
-    bounded(STEP, peer_commit)
-        .await
-        .expect("B's commit ends")
-        .expect("join")
-        .expect("B's commit");
-    fixture.assert_sees_the_takeover().await;
-}
-
-/// Checks that when a fold through A's session folds over B's claim, a
-/// read in A's runtime still sees B's commit, because A's position doesn't
-/// move past B's claim.
-#[tokio::test]
-async fn a_maintenance_fold_over_a_claim_leaves_the_former_writer_reading_the_claim() {
-    let fixture = takeover("maintenance-fold-over-claim", parked_folds, None).await;
-    let actor = loonfs_test_support::test_actor();
-    fixture
-        .namespace
-        .put_file("/inline", b"inline", &actor)
-        .await
-        .expect("A's commit");
-    let peer = fixture.peer(None).await;
-    let maintenance = fixture.writer.clone();
-
-    fixture.gate.block_next();
-    let handle = maintenance
-        .open_namespace(&fixture.namespace_id)
-        .expect("open namespace");
-    let (folded, ()) = futures::join!(handle.fold_wal(), async {
-        bounded(STEP, fixture.gate.wait_until_blocked())
-            .await
-            .expect("the fold waits at its manifest put");
-        peer.open_namespace(&fixture.namespace_id)
-            .expect("open namespace")
-            .put_file("/b", b"b", &actor)
-            .await
-            .expect("B takes over and commits");
-        fixture.gate.release();
-    });
-    assert_eq!(folded.expect("fold").outcome, FoldWalOutcome::Published);
-    fixture.assert_sees_the_takeover().await;
 }
 
 impl Takeover {
@@ -398,41 +270,6 @@ async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
                 fixture.read_past_the_claim(claim, ClaimRequest::Get).await;
             });
             assert!(fixture.current_manifest_no().await > own);
-        })
-        .await;
-    fixture.assert_sees_the_takeover().await;
-}
-
-/// Checks that B's claim at a manifest number below A's newest own manifest
-/// isn't taken as A's own.
-///
-/// B claims the namespace while A's commit waits at its WAL put, and then a
-/// fold through A's session folds over B's claim, so A's own manifest
-/// follows B's claim and has B's writer epoch. A's position can't move onto
-/// that manifest, so the fold ends the position that reads start from at
-/// once, without waiting for A's commit, and a read in A's runtime loads the
-/// namespace from the store.
-#[tokio::test]
-async fn a_claim_below_this_runtimes_own_manifest_is_not_its_own() {
-    let fixture = takeover("claim-below-own", parked_commits, None).await;
-    fixture
-        .while_a_commit_waits(async {
-            fixture.peer_commits().await;
-            let claim = fixture.current_manifest_no().await;
-            let own = bounded(STEP, fixture.maintenance_fold())
-                .await
-                .expect("the fold doesn't wait for A's commit");
-            assert!(own > claim);
-            assert!(
-                !fixture.namespace.has_current_writer_position(),
-                "the fold ends A's position"
-            );
-            fixture
-                .reader
-                .stat("/b")
-                .await
-                .expect("a read in A's runtime sees B's commit");
-            fixture.gate.release();
         })
         .await;
     fixture.assert_sees_the_takeover().await;

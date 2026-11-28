@@ -22,7 +22,7 @@ What waits is the commit's place in the namespace's queue, where the commit is a
 4. Returns `maintenance_required` to each queued commit that has reached the write-stop wait.
 5. Takes a publication slot again, and publishes the queue in arrival order.
 
-Each fold that publishes a manifest wakes the worker. The fold runs as a session task, and that task folds again while the tail that its last fold left is still over the fold trigger, so the worker doesn't wait for the task to end. A fold that publishes nothing ends the task, and the task's end also wakes the worker. That happens when another process already folded the tail (the position moves onto that process's manifest), and when the fold fails (the next publish starts another fold).
+Each fold that publishes a manifest wakes the worker. The fold runs as a session task, and that task folds again while the tail that its last fold left is still over the fold trigger, so the worker doesn't wait for the task to end. A fold that publishes nothing ends the task, and the task's end also wakes the worker. That happens when a fold of the session already folded the tail, and when the fold fails (the next publish starts another fold).
 
 A fold frees the tail up to where it started, and commits published while it ran stay in the tail, so a fold can free less room than the queue needs. For example, if a fold starts at 256 WAL objects and 768 more are published while it runs, the next batch waits at the stop. The fold leaves 768 objects, so 256 more batches publish in arrival order, and the commits behind them keep waiting. The tail still has more than 256 WAL objects, so the fold task folds again.
 

@@ -65,7 +65,6 @@ pub enum MetadataCompactionOutcome {
     },
     /// The run was cancelled, so the current manifest didn't change.
     Cancelled,
-    /// The unit stopped because its inputs changed, time ran out, or every
-    /// publication attempt lost.
+    /// The unit stopped because its inputs changed or its time ran out.
     Abandoned,
 }

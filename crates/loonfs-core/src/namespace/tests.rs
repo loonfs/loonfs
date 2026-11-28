@@ -14,7 +14,7 @@ use crate::CoreError;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{
-    keys::{boundary, metadata_manifest_object, metadata_manifest_prefix, pool_member, wal_prefix},
+    keys::{boundary, metadata_manifest_object, metadata_manifest_prefix, pool_member},
     local_fs_store::LocalFsStore,
     ObjectStore,
 };
@@ -939,12 +939,11 @@ async fn a_fork_that_loses_target_publication_writes_no_fork_snapshot() {
     }
 }
 
-/// Checks that a writer session's deletion over unfolded commits moves the
-/// session's position onto the fold's manifest, so the attempt that
-/// publishes the tombstone takes the head from the position. Between the
-/// fold and the tombstone, the deletion reads no WAL object, and it reads
-/// the manifest boundary only right after the fold's put and after its probe
-/// for the fold's manifest.
+/// Checks that a writer session's deletion over unfolded commits publishes
+/// its tombstone over the fold's manifest, which the fold recorded as the
+/// session's newest published manifest: between the fold's put and the
+/// tombstone's put, the deletion sends only the boundary read after the
+/// fold's put.
 #[tokio::test]
 async fn a_deletion_publishes_its_tombstone_from_the_position_its_fold_moved() {
     let directory = tempdir().expect("directory");
@@ -988,16 +987,9 @@ async fn a_deletion_publishes_its_tombstone_from_the_position_its_fold_moved() {
     let [fold, tombstone] = manifest_puts[..] else {
         panic!("the fold and the tombstone, got {operations:?}");
     };
-    let (boundary, wal_prefix) = (boundary(&namespace_id), wal_prefix(&namespace_id));
     let between = &operations[fold + 1..tombstone];
     assert!(
-        between.len() > 2
-            && [&between[0], &between[between.len() - 1]]
-                .iter()
-                .all(|read| read.key() == boundary)
-            && !between[1..between.len() - 1].iter().any(|operation| {
-                operation.key() == boundary || operation.key().starts_with(&wal_prefix)
-            }),
+        matches!(between, [read] if read.key() == boundary(&namespace_id)),
         "{between:?}"
     );
     let current = crate::test_support::namespace_store(&store, &namespace_id)
@@ -1471,16 +1463,10 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
             panic!("manifest 1 is the newest manifest");
         };
         namespace
-            .update_manifest(
-                Some(current),
+            .publish_manifest_from(
+                current.manifest().payload().activated(),
                 &context().clock(),
-                crate::manifest::publish::ManifestSender::ClaimOrInitialization,
-                |current| async move {
-                    Ok(crate::manifest::publish::ManifestChange::Next(
-                        Box::new(current.payload().activated()),
-                        (),
-                    ))
-                },
+                Some(&current),
             )
             .await
             .expect("publish manifest 2");

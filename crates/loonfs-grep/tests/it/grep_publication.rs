@@ -126,7 +126,6 @@ async fn the_steps_of_a_run_publish_once_and_a_query_reads_the_published_entry()
         host.worker.publication_stats(),
         GrepPublicationStats {
             published: 2,
-            rebuilt: 0,
             superseded: 0,
         },
         "the enable and the run published, and an empty publication isn't one"
@@ -433,7 +432,6 @@ async fn a_step_and_the_sessions_window_change_take_their_turns_in_the_lane() {
         host.worker.publication_stats(),
         GrepPublicationStats {
             published: 2,
-            rebuilt: 0,
             superseded: 0,
         },
         "the enable and the step published at their first puts"
@@ -494,7 +492,6 @@ async fn a_step_whose_turn_comes_after_the_sessions_disable_publishes_nothing() 
         host.worker.publication_stats(),
         GrepPublicationStats {
             published: 2,
-            rebuilt: 0,
             superseded: 1,
         },
         "the enable and the disable published, and the step's change was superseded"

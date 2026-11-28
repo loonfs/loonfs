@@ -309,7 +309,6 @@ fn grep_publications_render_one_series_for_each_outcome() {
         &mut rendered,
         GrepPublicationStats {
             published: 5,
-            rebuilt: 2,
             superseded: 1,
         },
     );
@@ -320,7 +319,6 @@ fn grep_publications_render_one_series_for_each_outcome() {
          index steps, by outcome\n\
          # TYPE loonfs_grep_publications_total counter\n\
          loonfs_grep_publications_total{outcome=\"published\"} 5\n\
-         loonfs_grep_publications_total{outcome=\"rebuilt\"} 2\n\
          loonfs_grep_publications_total{outcome=\"superseded\"} 1\n"
     );
 }

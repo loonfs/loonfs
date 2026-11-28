@@ -255,10 +255,10 @@ async fn a_delete_after_another_writers_delete_is_fenced_and_a_new_session_finds
 }
 
 /// Checks that a session's delete after another writer's claim returns
-/// `writer_fenced` from the load of the newest manifest, before it reads
-/// the WAL tail above that manifest or checks the manifest. The delete's
-/// first attempt puts its tombstone on the session's position, loses the
-/// put to the claim, and finds the claim above the position.
+/// `writer_fenced` with the claim's writer, before it reads the WAL tail
+/// above that manifest. The delete puts its tombstone on the session's
+/// newest published manifest, loses the put to the claim, and finds the
+/// claim above that manifest.
 #[tokio::test]
 async fn a_fenced_delete_reads_no_wal_tail() {
     let temp_dir = tempdir().expect("tempdir");
@@ -286,14 +286,10 @@ async fn a_fenced_delete_reads_no_wal_tail() {
     // manifest 4, and loads the claim, manifest 5, which is the newest above
     // the boundary.
     expected.extend((5..=13).map(|number| format!("head {}", manifest(number))));
+    // The claim's writer epoch returns `writer_fenced`, and the deletion
+    // builds nothing again.
     expected.extend([
         format!("get {}", manifest(5)),
-        "get fenced-delete Boundary".to_owned(),
-        // The next attempt loads the writer anchor. Discovery finds the claim
-        // in the segment cache, and its writer epoch returns `writer_fenced`
-        // before a WAL read or a check of the claim.
-        "get fenced-delete Boundary".to_owned(),
-        "list namespaces/fenced-delete/manifests/".to_owned(),
         "get fenced-delete Boundary".to_owned(),
     ]);
     assert_eq!(

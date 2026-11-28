@@ -2,9 +2,10 @@
 
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
-use crate::manifest::publish::{ManifestChange, ManifestSender};
+use crate::limits::MAX_CONTENTION_ATTEMPTS;
+use crate::manifest::publish::ManifestPublicationOutcome;
 use crate::manifest::PublicationReport;
-use crate::namespace::control::LoadedManifest;
+use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::held::Checked;
 use crate::namespace::held::Held;
 use crate::namespace::read_anchor::WriterAnchor;
@@ -13,7 +14,6 @@ use crate::time::OperationClock;
 use crate::wal::{prepare_wal_object, publish_wal_object, wal_no_is_unfolded};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::WriterBlock;
-use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::{WriterEpoch, WriterId};
 
@@ -57,74 +57,87 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// a claim manifest with the next epoch, then writes a fence at the next WAL
     /// number (format spec, "Writer ownership").
     ///
-    /// After the fence put succeeds, the call checks whether the fence is
-    /// live (see [`wal_no_is_unfolded`]), and puts a dead fence again at the
-    /// new tip. A newest manifest with a higher writer epoch returns
-    /// `writer_fenced`.
-    ///
-    /// A writer session acquires its epoch here before its first publication.
-    /// The claim builds on the manifest of the namespace's cached head when no
-    /// writer has claimed the namespace at that head (see
-    /// [`Self::unclaimed_head_basis`]), and otherwise finds the newest
-    /// manifest first.
+    /// The claim builds on the manifest of the namespace's cached head when
+    /// no writer has claimed the namespace at that head (see
+    /// [`Self::unclaimed_head_basis`]), and otherwise on the newest manifest,
+    /// which it finds from the manifest boundary. A claim is the one
+    /// publication of an active namespace that builds again after a lost
+    /// put: it builds its claim on the manifest that won, for at most
+    /// [`MAX_CONTENTION_ATTEMPTS`] puts, after which it returns
+    /// `store_contention`. A tombstone returns `namespace_deleted`. After the
+    /// fence's put succeeds, the call checks whether the fence is live (see
+    /// [`Self::put_fence`]). A newest manifest with a higher writer epoch
+    /// returns `writer_fenced`.
     pub(crate) async fn acquire_writer(&self, writer_id: &WriterId) -> Result<WriterAcquisition> {
         let clock = self.start_clock();
         let acquired_at_ms = clock.request_at_ms();
-        let basis = self.unclaimed_head_basis().await?;
-        let update = self
-            .update_live_manifest(
-                basis,
-                &clock,
-                ManifestSender::ClaimOrInitialization,
-                |mut payload: NamespaceManifestPayload| async move {
-                    payload.writer_epoch = payload.writer_epoch.successor().map_err(|_| {
-                        CoreError::NamespaceCorrupt(format!(
-                            "manifest {} records writer epoch {}, the largest writer epoch, so no \
-                         writer can acquire the namespace",
-                            payload.manifest_no, payload.writer_epoch
-                        ))
-                    })?;
-                    payload.writer = Some(WriterBlock {
-                        writer_id: writer_id.clone(),
-                        acquired_at_ms,
-                    });
-                    let acquired = AcquiredWriter {
-                        writer_id: writer_id.clone(),
-                        writer_epoch: payload.writer_epoch,
-                    };
-                    Ok(ManifestChange::Next(Box::new(payload), acquired))
-                },
-            )
-            .await?;
-        let claim = update.current.clone();
-        let acquired = update.response;
-        // The tail read before the fence put doesn't check the manifest,
-        // because the check after the put does, and that check also tells
-        // whether the fence is live.
-        let anchor = self
-            .load_unchecked_writer_anchor(update.current, &acquired)
-            .await?;
-        let anchor = self.put_fence(&acquired, anchor, &clock).await?;
-        Ok(WriterAcquisition {
-            writer: acquired,
-            claim,
-            anchor,
-        })
+        let mut basis = match self.unclaimed_head_basis().await? {
+            Some(basis) => basis,
+            None => self.load_current_basis(clock.origin()).await?,
+        };
+        for _ in 0..MAX_CONTENTION_ATTEMPTS {
+            let mut payload = basis.manifest().payload().clone();
+            ensure_namespace_live(&payload.namespace_id, payload.status)?;
+            payload.writer_epoch = payload.writer_epoch.successor().map_err(|_| {
+                CoreError::NamespaceCorrupt(format!(
+                    "manifest {} records writer epoch {}, the largest writer epoch, so no writer \
+                     can acquire the namespace",
+                    payload.manifest_no, payload.writer_epoch
+                ))
+            })?;
+            payload.writer = Some(WriterBlock {
+                writer_id: writer_id.clone(),
+                acquired_at_ms,
+            });
+            let acquired = AcquiredWriter {
+                writer_id: writer_id.clone(),
+                writer_epoch: payload.writer_epoch,
+            };
+            let claim = match self
+                .publish_manifest_from(payload, &clock, Some(&basis))
+                .await?
+            {
+                ManifestPublicationOutcome::Published(claim) => claim,
+                ManifestPublicationOutcome::Lost(winner) => {
+                    basis = winner;
+                    continue;
+                }
+            };
+            // The tail read before the fence put doesn't check the manifest,
+            // because the check after the put does, and that check also
+            // tells whether the fence is live.
+            let anchor = self
+                .load_unchecked_writer_anchor(claim.clone(), &acquired)
+                .await?;
+            let anchor = self.put_fence(&acquired, anchor, &clock).await?;
+            return Ok(WriterAcquisition {
+                writer: acquired,
+                claim,
+                anchor,
+            });
+        }
+        Err(CoreError::contention_exhausted(
+            &basis.manifest().object_key,
+        ))
     }
 
-    /// Puts a fence with `acquired`'s epoch at the tip of `anchor`, checks
-    /// after the put whether it's live, and puts it again at the new tip while
-    /// it's dead or its number is taken (format spec, "Writer ownership").
-    /// Returns the writer anchor whose view includes the live fence.
+    /// Puts a fence with `acquired`'s epoch at the tip of `anchor`, and
+    /// checks after the put whether it's live (format spec, "Writer
+    /// ownership"). Returns the writer anchor whose view includes the live
+    /// fence.
     ///
     /// The fence is live when the anchor's manifest is still the newest, and
     /// otherwise when its number is above the `folded_wal_no` of the newest
     /// manifest (see [`wal_no_is_unfolded`]). The newest manifest is the one
-    /// that the next writer anchor's load finds (see
-    /// [`Self::load_writer_read_anchor`]), so a dead fence's next attempt
-    /// starts from that anchor without another load, and that load returns
-    /// `writer_fenced` for another writer's epoch. Every put after the first
-    /// checks the publication budget first, and the call returns
+    /// that the writer anchor's load finds (see
+    /// [`Self::load_writer_read_anchor`]), which returns `writer_fenced` for
+    /// another writer's epoch. A fence that the check finds folded returns
+    /// `namespace_corrupt`: only a fold between the claim and the fence
+    /// could fold it, and the claim's epoch is the namespace's, so no other
+    /// process publishes in between. A put that finds its number taken, by
+    /// a commit of the writer that the claim displaced, puts the fence again
+    /// at the tip of that writer anchor. Every put after the first checks
+    /// the publication budget first, and the call returns
     /// `store_contention` when the budget or the attempts run out.
     async fn put_fence(
         &self,
@@ -167,10 +180,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .load_writer_read_anchor(acquired, clock.observe())
                 .await?
                 .0;
-            if put_wal_no.is_some_and(|wal_no| {
-                wal_no_is_unfolded(wal_no, anchor.current_manifest().folded_wal_no())
-            }) {
-                return Ok(WriterAnchor(anchor));
+            if let Some(wal_no) = put_wal_no {
+                let folded_wal_no = anchor.current_manifest().folded_wal_no();
+                if wal_no_is_unfolded(wal_no, folded_wal_no) {
+                    return Ok(WriterAnchor(anchor));
+                }
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "the fence of writer epoch {} at WAL number {wal_no} is folded into manifest \
+                     {}, which was published after the claim of that epoch",
+                    acquired.writer_epoch,
+                    anchor.current_manifest().payload().manifest_no
+                )));
             }
         }
         Err(CoreError::contention_exhausted(
@@ -188,8 +208,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// A claim builds on this manifest without a request first. If another
     /// process published past the manifest, the claim's put is lost and the
-    /// claim builds on the manifest that won (format spec, "Publishing a
-    /// manifest").
+    /// claim builds on the manifest that won (see [`Self::acquire_writer`]).
     async fn unclaimed_head_basis(&self) -> Result<Option<Held<LoadedManifest>>> {
         let Some(head) = self.head_and_wal_tail_cache.get_head(&self.namespace_id) else {
             return Ok(None);
