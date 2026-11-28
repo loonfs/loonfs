@@ -287,9 +287,9 @@ impl TestRuntime {
 
     /// Advances the namespace's retention floor toward `options.target`
     /// through the fixture's writer session, with the writer's clock past
-    /// the grace window. An advance that moves the floor puts a floor object
-    /// at the session's tip, after the commits admitted before it, and then
-    /// folds the namespace.
+    /// the grace window. An advance that moves the floor folds the
+    /// namespace and publishes the floor in the manifest of its fold of what
+    /// arrived.
     pub(crate) async fn advance_retention_floor_with_options(
         &self,
         namespace_id: &NamespaceId,

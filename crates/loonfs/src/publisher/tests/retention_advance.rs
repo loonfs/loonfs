@@ -8,7 +8,6 @@ use super::deletion::{
 };
 use super::*;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::{DeleteDirectoryBehavior, FilesystemEvent, InodeId, ManifestNo};
 
 fn spawn_advance(
@@ -521,45 +520,4 @@ async fn two_advances_at_once_take_turns_and_the_second_publishes_nothing() {
         before.manifest_no.0 + 2,
         "the first advance's fold and floor, and nothing from the second"
     );
-}
-
-/// Checks that no WAL object that an advance writes is a floor object: after
-/// an advance with commits around both of its folds, every WAL object of the
-/// namespace has commits or is a fence.
-#[tokio::test]
-async fn no_wal_object_that_an_advance_writes_is_a_floor_object() {
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let store = two_fold_store(directory.path());
-    let (_runtime, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
-
-    store.block_next();
-    let advance = spawn_advance(&publisher, CommitSeq(1));
-    store.wait_until_blocked().await;
-    commit_now(&publisher, "during-the-fold").await;
-    store.release();
-    settle_advance(advance, "the advance")
-        .await
-        .expect("the advance");
-    commit_now(&publisher, "after").await;
-
-    for key in store
-        .list_prefix(&wal_prefix(&namespace_id))
-        .await
-        .expect("list the WAL")
-    {
-        let bytes = store
-            .get(&key, None)
-            .await
-            .expect("read a WAL object")
-            .expect("the WAL object exists");
-        let body = decode_wal_object_envelope_zstd(&bytes)
-            .expect("decode a WAL object")
-            .into_payload()
-            .body;
-        assert!(
-            matches!(body, WalObjectBody::Commits(_) | WalObjectBody::Fence),
-            "{key} is a floor object"
-        );
-    }
 }

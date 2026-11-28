@@ -535,8 +535,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &source_manifest,
         )?;
         // Only a head whose tail has commits has a manifest 2, which folds the
-        // tail. A tail of fences and floor objects changes nothing that the
-        // fork keeps, so the fork point is the source manifest's head.
+        // tail. A tail of fences changes nothing that the fork keeps, so the
+        // fork point is the source manifest's head.
         let head = head.filter(|head| head.head().seq > built_from.head_seq);
         let fork_basis = ForkBasis {
             manifest: built_from.manifest(),

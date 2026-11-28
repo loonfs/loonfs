@@ -132,7 +132,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "expired_row_removal_walk_limit",
     "expires_at_ms",
     "fenced_writer_epoch",
-    "fences_and_floor_objects",
+    "fences",
     "file_created",
     "file_revision",
     "fork_point_below_floor",

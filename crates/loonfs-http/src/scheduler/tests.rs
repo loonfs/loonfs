@@ -1524,8 +1524,8 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
     }
 }
 
-/// Requests that one retired namespace whose prefix stores its boundary, its
-/// fences and its floor objects costs in a sweep, under the namespace's prefix, and how many of
+/// Requests that one retired namespace whose prefix stores its boundary and
+/// its fences costs in a sweep, under the namespace's prefix, and how many of
 /// them are lists. The metadata call reads the boundary and stops at the
 /// retired boundary (1). The namespace's collection reads the boundary and
 /// lists the namespace's prefix (2). The namespace's retirement deleted its

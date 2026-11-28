@@ -1149,63 +1149,106 @@ async fn publish_one<S: ObjectStore>(
         .expect("one result")
 }
 
-/// Checks that a view that replays a floor object reports the floor before
-/// any manifest records it, so the change feed refuses a start below the
-/// floor. The fold that covers the floor object publishes the higher of its
-/// predecessor's floor and the floor object's, and a later floor object with
-/// a lower floor leaves the next fold's floor where it is.
+/// Returns the retention floor of a view of the namespace's head, which
+/// reads and restores check deletions against, and asserts that it's the
+/// floor of the view's manifest.
+async fn view_floor_seq<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> CommitSeq {
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
+        .await
+        .expect("load the view");
+    let anchor = namespace
+        .load_read_anchor(crate::test_support::observed_now())
+        .await
+        .expect("load the head");
+    assert_eq!(
+        view.retention_floor_seq(),
+        anchor.current_manifest().retention_floor_seq(),
+        "a view's floor is its manifest's"
+    );
+    view.retention_floor_seq()
+}
+
+/// Checks that a view's retention floor is its manifest's floor after an
+/// advance raises the floor, after a fold and a claim copy it, and in a fork,
+/// whose active manifest raises the floor to the fork point.
 #[tokio::test]
-async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_floor() {
+async fn a_views_floor_is_its_manifests_floor_after_an_advance_a_fold_a_claim_and_a_fork() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     bootstrap_namespace(&store, &namespace_id, &test_context())
         .await
         .expect("bootstrap");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let mut writer = NamespaceCommitEngine::new(
         crate::test_support::namespace_store(&store, &namespace_id),
         test_context().writer_id,
     );
     let (_, deletion_seq) = create_and_delete(&mut writer, "gone").await;
-    publish_directories(&mut writer, "after", 1).await;
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    crate::test_support::put_floor_object(&store, &namespace_id, deletion_seq).await;
+    assert_eq!(view_floor_seq(&store, &namespace_id).await, CommitSeq(0));
 
-    let anchor = namespace
-        .load_read_anchor(crate::test_support::observed_now())
+    let planned = namespace
+        .load_current_manifest()
         .await
-        .expect("load the view");
-    assert_eq!(anchor.retention_floor_seq(), deletion_seq);
-    assert_eq!(read_floor_seq(&store, &namespace_id).await, CommitSeq(0));
-    let context =
-        crate::RuntimeReadContext::new(&anchor.held_basis(), None).expect("a live namespace");
-    let error =
-        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
-            .list_changes_after(
-                loonfs_types::ChangeFeedPosition::after(CommitSeq(0)),
-                EffectiveLimit::new(std::num::NonZeroU32::new(4).expect("nonzero")),
-                loonfs_types::options::CommitSplitting::Whole,
-                &context,
-            )
-            .await
-            .expect_err("the feed starts below the view's floor");
-    assert_matches!(
-        error,
-        CoreError::BelowRetentionFloor { retention_floor_seq, .. }
-            if retention_floor_seq == deletion_seq
+        .expect("the planned manifest");
+    writer
+        .advance_retention_floor_alone(&planned, deletion_seq)
+        .await
+        .expect("the advance");
+    assert_eq!(view_floor_seq(&store, &namespace_id).await, deletion_seq);
+
+    publish_directories(&mut writer, "folded", 1).await;
+    writer.fold().await.expect("the fold");
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
+    assert_eq!(view_floor_seq(&store, &namespace_id).await, deletion_seq);
+
+    let mut claiming = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        test_context().writer_id,
     );
+    let epoch_before = writer
+        .writer_position()
+        .expect("a position")
+        .read_basis()
+        .head()
+        .writer_epoch;
+    publish_directories(&mut claiming, "claimed", 1).await;
+    let claim = namespace.load_current_manifest().await.expect("the claim");
+    assert!(
+        claim.payload().writer_epoch > epoch_before,
+        "the commit claims"
+    );
+    assert_eq!(claim.retention_floor_seq(), deletion_seq);
+    assert_eq!(view_floor_seq(&store, &namespace_id).await, deletion_seq);
 
-    namespace
-        .fold_as_test_writer()
+    claiming.fold().await.expect("fold the claim's commit");
+    let fork = NamespaceId::parse("demo-fork").expect("namespace id");
+    let fixture =
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context());
+    let created = fixture
+        .engine()
+        .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
+            fixture
+                .engine()
+                .find_fork_target(&fork)
+                .await
+                .expect("find the fork target"),
+            &loonfs_test_support::test_actor(),
+            crate::test_support::fold_before_fork(&namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
-        .expect("fold the floor object");
-    assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
-    crate::test_support::put_floor_object(&store, &namespace_id, CommitSeq(1)).await;
-    namespace
-        .fold_as_test_writer()
-        .await
-        .expect("fold the lower floor object");
-    assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
+        .expect("fork")
+        .created()
+        .expect("a new fork");
+    let fork_point_seq = created.fork_basis.expect("a fork basis").fork_point_seq;
+    assert!(fork_point_seq > deletion_seq);
+    assert_eq!(created.retention_floor_seq, fork_point_seq);
+    assert_eq!(view_floor_seq(&store, &fork).await, fork_point_seq);
 }
 
 /// Checks that two advances of one writer session to different floors leave

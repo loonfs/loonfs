@@ -679,7 +679,10 @@ async fn a_created_namespace_reads_manifest_two_before_its_first_fold() {
         anchor.current_manifest().payload().manifest_no,
         ManifestNo(2)
     );
-    assert_eq!(anchor.retention_floor_seq(), CommitSeq(0));
+    assert_eq!(
+        anchor.current_manifest().retention_floor_seq(),
+        CommitSeq(0)
+    );
 
     NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/first.txt", b"hello", Some(&commit_id("first-write")))
@@ -920,7 +923,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         .await
         .expect("clone anchor");
     assert_eq!(
-        clone_anchor.retention_floor_seq(),
+        clone_anchor.current_manifest().retention_floor_seq(),
         CommitSeq(1),
         "a fork's active manifest starts its retention floor at the fork point"
     );
@@ -1693,7 +1696,7 @@ async fn gc_preserves_unfolded_data_then_collects_the_retired_prefix() {
     assert_eq!(report.deleted.manifests, 1, "{report:?}");
     assert!(report.deleted.metadata_segments >= 1, "{report:?}");
     assert_eq!(report.retained.unrecognized_key, 2, "{report:?}");
-    assert_eq!(report.retained.fences_and_floor_objects, 2, "{report:?}");
+    assert_eq!(report.retained.fences, 2, "{report:?}");
     let listings = store
         .take()
         .into_iter()

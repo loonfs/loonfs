@@ -74,7 +74,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     // The fences of the session's claim and of the fold's claim stay, and
     // the commit object goes.
     assert_eq!(report.deleted.wal_objects, 1);
-    assert_eq!(report.retained.fences_and_floor_objects, 2);
+    assert_eq!(report.retained.fences, 2);
     assert!(crate::test_support::commit_wal_keys(&store, &namespace_id)
         .await
         .is_empty());

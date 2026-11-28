@@ -1,12 +1,12 @@
-# Keeping fences and floor objects
+# Keeping fences
 
-This note describes how a WAL writer puts its next WAL object with no limit on how old its view of the log is. The design has three rules. No process deletes a fence or a floor object, in any namespace, a retired one included. A writer puts at the next WAL number with no clock, and the put either creates the object or collides with the fence or floor object that took the number, however long the writer waited. And after a fence put succeeds, the process checks the put's number against the newest manifest's `folded_wal_no`, a number that only rises. The WAL publication budget and the tip confirmation are removed.
+This note describes how a WAL writer puts its next WAL object with no limit on how old its view of the log is. The design has three rules. No process deletes a fence, in any namespace, a retired one included. A writer puts at the next WAL number with no clock, and the put either creates the object or collides with the fence that took the number, however long the writer waited. And after a fence put succeeds, the process checks the put's number against the newest manifest's `folded_wal_no`, a number that only rises. The WAL publication budget and the tip confirmation are removed.
 
 ## The problem
 
 This section describes the time rule that protects a WAL put, why the rule exists, and what it costs.
 
-WAL objects are numbered in order, and a writer commits a batch by creating WAL object `tip + 1` with put-if-absent, where the "tip" is the highest WAL number that the writer has seen (see [A summary of the log protocol](../specs/format.md#26-a-summary-of-the-log-protocol)). Three kinds of object share these numbers. A data object contains commits. A "fence" is a WAL object with no commits that a new [writer session](../specs/glossary.md#writer-session) creates after its claim manifest, so that an older writer's next put collides with the fence. A "floor object" is a WAL object with no commits that records a new retention floor, which the namespace's writer session creates (see [Retention advance in the WAL](retention-advance-in-the-wal.md) and [One writer per namespace](one-writer-per-namespace.md)).
+WAL objects are numbered in order, and a writer commits a batch by creating WAL object `tip + 1` with put-if-absent, where the "tip" is the highest WAL number that the writer has seen (see [A summary of the log protocol](../specs/format.md#26-a-summary-of-the-log-protocol)). Two kinds of object share these numbers. A data object contains commits. A "fence" is a WAL object with no commits that a new [writer session](../specs/glossary.md#writer-session) creates after its claim manifest, so that an older writer's next put collides with the fence.
 
 A namespace's [collection](../specs/glossary.md#collection) deletes every WAL object at or below the current manifest's `folded_wal_no` (every WAL object, in a deleted namespace) once the object is older than the [grace window](../specs/glossary.md#grace-window) (24 hours), whatever kind of object it is (see [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules)). So a WAL number that was taken can be empty again, and a put at that number would succeed at or below `folded_wal_no`, where no reader replays the new object.
 
@@ -25,11 +25,11 @@ Why isn't the put itself enough? Put-if-absent checks that the number is empty n
 
 ## The design
 
-This section describes the objects that stay, the WAL put and why it's safe, the check after a fence put, how cleanup recognizes the objects that stay, and the time rules that remain.
+This section describes the fences that stay, the WAL put and why it's safe, the check after a fence put, how cleanup recognizes fences, and the time rules that remain.
 
-### Fences and floor objects stay
+### Fences stay
 
-No process deletes a fence or a floor object. A namespace's collection keeps them in an active namespace and in a deleted one, and the cleanup of a retired namespace keeps them too. A retired namespace's prefix keeps its [manifest boundary](../specs/glossary.md#manifest-boundary) object, its fences, and its floor objects, and nothing else (see [Retiring a namespace](manifest-boundary.md#retiring-a-namespace)).
+No process deletes a fence. A namespace's collection keeps fences in an active namespace and in a deleted one, and the cleanup of a retired namespace keeps them too. A retired namespace's prefix keeps its [manifest boundary](../specs/glossary.md#manifest-boundary) object and its fences, and nothing else (see [Retiring a namespace](manifest-boundary.md#retiring-a-namespace)).
 
 A collection still deletes data objects under the existing age rules, and the keys don't change (see [Object keys](../specs/format.md#a8-object-keys)).
 
@@ -40,7 +40,7 @@ To publish a batch, a writer:
 1. Plans the batch against its [writer position](../specs/glossary.md#writer-position) and builds one WAL object at `tip + 1`.
 2. Checks the content-admission evidence, and puts the object with put-if-absent, however old its tip observation is.
 3. If the put succeeds, the batch is committed. The writer moves its position and acknowledges the requests, with no check of the elapsed time.
-4. If the put collides, runs discovery, as after any collision. A higher writer epoch means that the writer is fenced. A floor object means that the writer plans the batch again against the new floor, at the next number.
+4. If the put collides, runs discovery, as after any collision. A higher writer epoch means that the writer is fenced.
 5. If the put's outcome is unknown, drops its position, as in [Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes). The writer loses its writer epoch at the unknown outcome, so its next publication claims a new epoch and writes a fence (see [Writer ownership](../specs/format.md#61-writer-ownership)), and the fence's discovery reads the number back.
 
 The session's successor probe still runs every second by default, so the session learns of claims and folds between commits (see [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal)), but the put doesn't wait for the probe.
@@ -59,13 +59,13 @@ A writer session `W` with writer epoch 5 has tip 30. When `W` observed tip 30 (b
 - **A writer with an older epoch.** `W` is acquired, so its own fence (say at 25) is at or below 30. To commit at 31, the older writer's tip would have to pass 25. It can't create WAL object 25 itself, because `W`'s fence is there, so it would have run a discovery that replays the fence or loads a manifest with epoch 5, and it would be fenced.
 - **A writer with a newer epoch.** That writer commits only above its own live fence (see [The check after a fence put](#the-check-after-a-fence-put)). If its fence were at 30 or below, `W` would have passed it in the same way, by discovery (and been fenced) or by a put at that number (which would have collided). So the fence is at 31 or above, and that writer's first object at 31 or above is its fence, not a commit.
 
-So the objects that can take 31 after `W`'s observation are a fence and a floor object, and no process deletes either one, so `W`'s put collides. The argument is true whenever the provider applies the put.
+So the only object that can take 31 after `W`'s observation is a fence, and no process deletes a fence, so `W`'s put collides. The argument is true whenever the provider applies the put.
 
 The same argument covers a deleted namespace. Deletion runs under an acquired writer epoch, so the deleting session wrote a fence. A stale writer's put collides, its discovery finds the tombstone (or the retired boundary), and it returns `namespace_deleted`.
 
-A fence put isn't covered, because a writer may legally commit at the numbers that it uses. [The check after a fence put](#the-check-after-a-fence-put) covers it. A writer session that creates a floor object from its own publication queue puts it at its position's tip plus one, like a commit, and the argument above covers that put. An unknown outcome of that put ends the session's epoch too, as an unknown outcome of any of the session's puts does (see [Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes)).
+A fence put isn't covered, because a writer may legally commit at the numbers that it uses. [The check after a fence put](#the-check-after-a-fence-put) covers it.
 
-Why keep fences? A stale writer whose next number was taken by a newer session's fence would commit at that number once a fold covered the fence and a collection deleted it, as the example in [The problem](#the-problem) shows. Why keep floor objects and not just fences? A floor object takes a WAL number as a commit does, so a stale writer's next number can be a floor object's, and the argument above needs every object that can take that number to stay. Only the namespace's writer session creates a floor object, at its position's tip plus one, and a collection can't tell a floor object from a fence by its listing (see [Recognizing fences and floor objects](#recognizing-fences-and-floor-objects)), so keeping floor objects costs nothing more than keeping fences. Why keep them in a retired namespace? A namespace ID can't be reused, so a stale writer's put there has to collide too, or the writer would acknowledge a commit that no reader replays.
+Why keep fences? A stale writer whose next number was taken by a newer session's fence would commit at that number once a fold covered the fence and a collection deleted it, as the example in [The problem](#the-problem) shows. Why keep them in a retired namespace? A namespace ID can't be reused, so a stale writer's put there has to collide too, or the writer would acknowledge a commit that no reader replays.
 
 ### The check after a fence put
 
@@ -83,15 +83,15 @@ The check also applies the rule of [Writer ownership](../specs/format.md#61-writ
 
 Why is the check enough? A fold covers only WAL objects that exist, so a number that a collection emptied was folded before the put, and the newest manifest at the check has a `folded_wal_no` at or above that number. After a passing check, the fence's number was never used. The previous writer writes consecutive numbers, so none of its objects is at or above the fence's number, and its next put collides with the fence.
 
-### Recognizing fences and floor objects
+### Recognizing fences
 
-A key doesn't show the kind of a WAL object. But the payload of a fence or a floor object has only the namespace ID, the WAL number, the writer epoch, the head sequence, an empty record list, and for a floor object, the floor. So its stored size is at or below a constant bound that the WAL encoding sets. A WAL object with commits is always larger than that bound, because the writer pads a commit object that would otherwise be at or below the bound, with padding that survives compression. The [WAL records](../specs/format.md#a5-wal-records) section of the format defines where the padding goes.
+A key doesn't show the kind of a WAL object. But the payload of a fence has only the namespace ID, the WAL number, the writer epoch, the head sequence, and an empty record list. So its stored size is at or below a constant bound that the WAL encoding sets. A WAL object with commits is always larger than that bound, because the writer pads a commit object that would otherwise be at or below the bound, with padding that survives compression. The [WAL records](../specs/format.md#a5-wal-records) section of the format defines where the padding goes.
 
-A collection then tells the kinds apart from the listing alone. A candidate at or below the bound is a fence or a floor object, and it stays. A candidate above the bound is a commit object, and the collection deletes it by key, under the age rules in [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules).
+A collection then tells the kinds apart from the listing alone. A candidate at or below the bound is a fence, and it stays. A candidate above the bound is a commit object, and the collection deletes it by key, under the age rules in [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules).
 
-For example, suppose the bound is 512 bytes, and `main`'s WAL objects 1 to 30 are folded and old enough. The listing shows floor object 12 and fence 25 at 300 bytes or less, and 28 commit objects above 512 bytes. The collection keeps 12 and 25 and deletes the other 28, with no GET.
+For example, suppose the bound is 512 bytes, and `main`'s WAL objects 1 to 30 are folded and old enough. The listing shows fences 12 and 25 at 300 bytes or less, and 28 commit objects above 512 bytes. The collection keeps 12 and 25 and deletes the other 28, with no GET.
 
-Why pad commit objects instead of reading small candidates? A read would cost one GET for every small commit object deleted, and every collection would read every fence and floor object again, a cost that grows as long as the store exists.
+Why pad commit objects instead of reading small candidates? A read would cost one GET for every small commit object deleted, and every collection would read every fence again, a cost that grows as long as the store exists.
 
 ### What stays
 
@@ -112,12 +112,11 @@ No rule depends on how long ago any process observed the WAL tip. These time rul
 
 ## Costs
 
-- Every fence and every floor object is stored as long as the store exists, and each is a few hundred bytes. A namespace gets one fence for each writer session that commits, and one floor object for each retention advance (a sweep makes at most one advance of each namespace, and sweeps run once a day by default). A namespace with one long-lived writer session keeps about 365 objects a year. A namespace written once an hour, by a server that closes a session after 30 idle minutes, starts 24 sessions a day and keeps about 9,100 objects a year, or about 3 MB.
-- Every listing of a namespace's WAL returns its fences and floor objects. After a year, the second namespace above adds about 9 listing pages of 1,000 keys to every collection.
+- Every fence is stored as long as the store exists, and each is a few hundred bytes. A namespace gets one fence for each writer session that commits. A namespace written once an hour, by a server that closes a session after 30 idle minutes, starts 24 sessions a day and keeps about 8,800 fences a year, or about 3 MB.
+- Every listing of a namespace's WAL returns its fences. After a year, that namespace adds about 9 listing pages of 1,000 keys to every collection.
 - How often writer sessions start sets the number of fences, so the server's idle-close setting is the one to change if the count matters.
 - A commit object that would be at or below the bound is padded, by at most the bound.
 - A fence put costs one check after the put: a HEAD request and a conditional read of the boundary.
-- A collision with a floor object costs the writer one discovery and one new plan of the batch, as before.
 - A WAL put whose outcome is unknown costs the writer session a claim of the next epoch and one fence, a small WAL object that no process deletes and that counts toward the unfolded WAL thresholds until a fold covers it.
 
 A commit after a quiet period longer than five minutes no longer waits for a tip confirmation's two round trips.
@@ -126,28 +125,26 @@ A commit after a quiet period longer than five minutes no longer waits for a tip
 
 The storage format changes in these sections:
 
-- [A summary of the log protocol](../specs/format.md#26-a-summary-of-the-log-protocol) says that garbage collection keeps fences and floor objects, and drops the time budget of every numbered put as the reason for the second guarantee.
-- [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal) removes the tip confirmation from how a position learns of a floor object and from a new position's previous probe.
+- [A summary of the log protocol](../specs/format.md#26-a-summary-of-the-log-protocol) says that garbage collection keeps fences, and drops the time budget of every numbered put as the reason for the second guarantee.
+- [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal) removes the tip confirmation from a new position's previous probe.
 - [Writer ownership](../specs/format.md#61-writer-ownership) removes the budget from the fence put and adds the check after it, and sends a session back to the claim step after a WAL put whose outcome it doesn't know.
 - [Publication and group commit](../specs/format.md#63-publication-and-group-commit) removes the budget check, the observations table, the tip confirmation, and the "why" paragraphs about the confirmation, and adds the argument in [Why the put can't reuse an emptied number](#why-the-put-cant-reuse-an-emptied-number).
 - [Commit identity and retries](../specs/format.md#65-commit-identity-and-retries) refreshes the receipt projection after a collision or a manifest successor, not after a budget.
-- [Advancing the retention floor](../specs/format.md#101-advancing-the-retention-floor) removes the budget and the tip confirmation from the floor object's put and the writer rules, and says that the writer session puts the floor object at its position's tip plus one, as it puts a commit.
-- [Retirement](../specs/format.md#95-retirement), [One complete collection](../specs/format.md#111-one-complete-collection), [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules), and [Retiring an eligible tombstone](../specs/format.md#118-retiring-an-eligible-tombstone) keep fences and floor objects, in a retired prefix too, and recognize them by their listed size.
+- [Retirement](../specs/format.md#95-retirement), [One complete collection](../specs/format.md#111-one-complete-collection), [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules), and [Retiring an eligible tombstone](../specs/format.md#118-retiring-an-eligible-tombstone) keep fences, in a retired prefix too, and recognize them by their listed size.
 - [Clock and operation assumptions](../specs/format.md#114-clock-and-operation-assumptions), [Publication during collection](../specs/format.md#115-publication-during-collection), and [Alternatives considered](../specs/format.md#13-alternatives-considered) replace the budget argument for WAL puts.
 - [Required operations](../specs/format.md#31-required-operations) says that a listing returns each object's size.
 - [WAL records](../specs/format.md#a5-wal-records) states the size bound and the padding of a commit object, and [Publication and collection timing](../specs/format.md#c1-publication-and-collection-timing) removes `WAL_PUBLISH_BUDGET_MS` and its term in the bound formulas.
 
-[Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes) says that a writer session releases its writer epoch from sending a put under the epoch (a commit's WAL put or a tombstone's put) until it learns the put's outcome, and [WAL records](../specs/format.md#a5-wal-records) says that writer epochs never decrease along the WAL, so a fence's epoch is at least the epoch of the object before it. [Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy) and [Object keys](../specs/format.md#a8-object-keys) don't change. The API spec adds `fences_and_floor_objects` to the reasons that a namespace's GC response counts in `retained`.
+[Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes) says that a writer session releases its writer epoch from sending a put under the epoch (a commit's WAL put or a tombstone's put) until it learns the put's outcome, and [WAL records](../specs/format.md#a5-wal-records) says that writer epochs never decrease along the WAL, so a fence's epoch is at least the epoch of the object before it. [Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy) and [Object keys](../specs/format.md#a8-object-keys) don't change. The API spec adds `fences` to the reasons that a namespace's GC response counts in `retained`.
 
-The design notes [Retention advance in the WAL](retention-advance-in-the-wal.md), [Retention window](retention-window.md#who-advances-the-floor), [Read freshness](read-freshness.md#what-the-format-and-api-specs-say), [The WAL implementation](wal-boundary.md#responsibilities-outside-the-wal), and [The manifest boundary](manifest-boundary.md) (its retirement, [time rules](manifest-boundary.md#time-rules), and [costs](manifest-boundary.md#costs)) change. In the glossary, "Fence" and "Floor object" say that no process deletes them, "Publication budget" covers manifest publications alone, and "Collection" and "Garbage collection" exclude fences and floor objects.
+The design notes [Retention window](retention-window.md#who-advances-the-floor), [Read freshness](read-freshness.md#what-the-format-and-api-specs-say), [The WAL implementation](wal-boundary.md#responsibilities-outside-the-wal), and [The manifest boundary](manifest-boundary.md) (its retirement, [time rules](manifest-boundary.md#time-rules), and [costs](manifest-boundary.md#costs)) change. In the glossary, "Fence" says that no process deletes a fence, "Publication budget" covers manifest publications alone, and "Collection" and "Garbage collection" exclude fences.
 
 ## Alternatives considered
 
 - **The publication budget and the tip confirmation.** This works, but a correctness rule then depends on a clock and a timer, where an object that stays does the same job with no clock.
-- **A manifest field that lists the numbers of fences and floor objects.** The collection would skip the listed numbers without reading them. Every fold would have to keep the field in step with the WAL, for information that the objects already contain.
+- **A manifest field that lists the numbers of fences.** The collection would skip the listed numbers without reading them. Every fold would have to keep the field in step with the WAL, for information that the objects already contain.
 - **A kind in the key, such as `.fence`.** A fence at a different key doesn't collide with a put at the WAL number, so it fences nothing.
-- **Empty fences that a listing recognizes by size.** A fence contains the writer epoch and a floor object contains its floor, so neither can be empty.
-- **Reading each candidate at or below the bound.** Each small commit object costs one GET before its deletion, and every collection reads every fence and floor object again, a cost that grows as long as the store exists.
+- **Empty fences that a listing recognizes by size.** A fence contains the writer epoch, so it can't be empty.
+- **Reading each candidate at or below the bound.** Each small commit object costs one GET before its deletion, and every collection reads every fence again, a cost that grows as long as the store exists.
 - **Keeping every small WAL object without a read.** A namespace whose commits are all small would never reclaim its WAL.
-- **Deleting fences and floor objects after a very long age.** An age longer than any writer runs is a clock rule again, with a larger number.
-- **Making floor objects through the writer session when one exists.** That doesn't remove the fence case, and a namespace with no session still needs a floor object.
+- **Deleting fences after a very long age.** An age longer than any writer runs is a clock rule again, with a larger number.

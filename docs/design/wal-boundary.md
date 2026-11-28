@@ -6,7 +6,7 @@ The WAL is also part of recovery and writer fencing. Keeping these operations to
 
 ## WAL numbers and commit sequences
 
-A WAL number identifies an object, and a commit sequence identifies a committed mutation. They're separate counters, because one WAL object can contain several commits, and a fence or a floor object contains none. A [floor object](../specs/glossary.md#floor-object) is a WAL object with no commits that records a retention floor, which readers replay, and no writer creates one.
+A WAL number identifies an object, and a commit sequence identifies a committed mutation. They're separate counters, because one WAL object can contain several commits, and a fence contains none.
 
 For example, a namespace might have this log:
 
@@ -18,7 +18,7 @@ For example, a namespace might have this log:
 
 During writer acquisition, LoonFS first records the new writer epoch in a manifest, and then publishes a fence at the next available WAL number. The fence prevents a stale writer from publishing at that number. It doesn't change the filesystem, and it doesn't advance the commit sequence.
 
-These differences matter during recovery and garbage collection. A fence or a floor object is still a WAL object, even though it contains no commits, so counting WAL objects isn't the same as counting committed changes.
+These differences matter during recovery and garbage collection. A fence is still a WAL object, even though it contains no commits, so counting WAL objects isn't the same as counting committed changes.
 
 ## Module responsibilities
 
@@ -44,7 +44,7 @@ To publish a commit, LoonFS prepares the next WAL object from the namespace's cu
 Several parts of the storage protocol involve both the log and other namespace state:
 
 - **Manifest management.** A process with nothing in memory finds the newest manifest by listing the manifests above the [manifest boundary](../specs/glossary.md#manifest-boundary), and a manifest publication reads the boundary after its put, as [Resolving the metadata basis](../specs/format.md#41-resolving-the-metadata-basis) and [Publishing a manifest](../specs/format.md#72-publishing-a-manifest) describe. The code that reads the boundary is in the namespace's control and boundary modules, and garbage collection raises the boundary before it deletes manifests. WAL discovery starts at the manifest's folded position and reads forward in windows.
-- **Garbage collection.** Listing objects, checking their ages, and deleting them are handled in `gc/`. For a live namespace, a WAL object is required if its number is above the folded position. An object at or below that position goes through the remaining collection checks. Collection keeps every fence and floor object, at any number, and tells them from data objects by their listed size, so a late WAL put collides with the object that took its number (see [Keeping fences and floor objects](kept-fences-and-floors.md)).
+- **Garbage collection.** Listing objects, checking their ages, and deleting them are handled in `gc/`. For a live namespace, a WAL object is required if its number is above the folded position. An object at or below that position goes through the remaining collection checks. Collection keeps every fence, at any number, and tells fences from data objects by their listed size, so a late WAL put collides with the object that took its number (see [Keeping fences](kept-fences.md)).
 - **Position tracking.** WAL numbers appear in the namespace head and in the durable manifest. The differences between them count the unfolded WAL objects, and LoonFS uses those counts to enforce maintenance and write limits.
 
 The module boundary separates the WAL operations, but code elsewhere in LoonFS still uses the numbered-log model.

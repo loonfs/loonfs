@@ -105,19 +105,6 @@ pub(crate) struct WalTailState {
     /// The earliest `committed_at_ms` of the tail's commits, or `None` for a
     /// tail without a commit.
     oldest_commit_at_ms: Option<u64>,
-    /// Whether a floor object in the tail raised the view's floor above the
-    /// manifest's, so that no manifest records the view's floor yet.
-    raises_retention_floor: bool,
-}
-
-impl WalTailState {
-    /// Whether the tail has a commit or a floor object that raises the
-    /// view's floor, which a fold publishes. A tail of only fences, or of
-    /// floor objects that the manifest's floor already covers, changes
-    /// nothing that a manifest records, so it counts as empty.
-    fn has_change(&self) -> bool {
-        self.oldest_commit_at_ms.is_some() || self.raises_retention_floor
-    }
 }
 
 impl From<&WriterPosition> for WalTailState {
@@ -127,7 +114,6 @@ impl From<&WriterPosition> for WalTailState {
             wal_bytes: position.wal_tail_bytes(),
             inline_bytes: position.wal_tail_inline_bytes(),
             oldest_commit_at_ms: position.wal_tail_oldest_commit_at_ms(),
-            raises_retention_floor: position.read_basis().head().raises_retention_floor(),
         }
     }
 }
@@ -139,7 +125,6 @@ impl From<&WalTailReport> for WalTailState {
             wal_bytes: report.wal_bytes,
             inline_bytes: report.inline_bytes,
             oldest_commit_at_ms: report.oldest_commit_at_ms,
-            raises_retention_floor: report.raises_retention_floor,
         }
     }
 }
@@ -152,7 +137,6 @@ impl From<&NamespaceReadAnchor> for WalTailState {
             wal_bytes: anchor.wal_tail_bytes(),
             inline_bytes: anchor.wal_tail_inline_bytes(),
             oldest_commit_at_ms: status.wal_tail_oldest_commit_at_ms,
-            raises_retention_floor: anchor.read_state().raises_retention_floor(),
         }
     }
 }
@@ -160,8 +144,7 @@ impl From<&NamespaceReadAnchor> for WalTailState {
 /// When a fold of a WAL tail is due.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FoldDue {
-    /// The tail has reached a fold threshold or the fold age, or a floor
-    /// object in it raised the view's floor above the manifest's.
+    /// The tail has reached a fold threshold or the fold age.
     Now,
     /// The tail's oldest commit reaches the fold age at `due_at_ms`, on the
     /// wall clock.
@@ -174,9 +157,7 @@ pub(crate) enum FoldDue {
 /// clock: once the tail reaches `max_wal_tail_objects` WAL objects,
 /// `FOLD_AT_WAL_BYTES`, or the inline fold trigger of the runtime's inline
 /// tail limit (see `fold_at_inline_bytes`), once its oldest commit is the
-/// runtime's fold age old, or at once when a floor object in it raised the
-/// view's floor above the manifest's, because no manifest records that floor
-/// yet.
+/// runtime's fold age old.
 ///
 /// The writer session's check after each publication and every maintenance
 /// check use this one rule, with their own object threshold.
@@ -186,8 +167,7 @@ pub(crate) fn fold_due(
     tail: &WalTailState,
     now_ms: u64,
 ) -> FoldDue {
-    let due_now = tail.raises_retention_floor
-        || tail.objects >= max_wal_tail_objects
+    let due_now = tail.objects >= max_wal_tail_objects
         || tail.wal_bytes >= FOLD_AT_WAL_BYTES
         || tail.inline_bytes
             >= fold_at_inline_bytes(core.config().inline_content.inline_content_tail_limit_bytes);
@@ -419,10 +399,8 @@ impl NamespacePublisher {
     /// spec, "Creating and verifying a snapshot").
     ///
     /// The manifest that covers the tail is a fold's when the session has a
-    /// position, or when the tail has a commit or a floor object that raises
-    /// the view's floor above its manifest's, the tail that a fold publishes
-    /// (see `WalTailState::has_change`), so such a snapshot folds, and a
-    /// session without its writer epoch claims it first. A tail of only
+    /// position, or when the tail has a commit, so such a snapshot folds, and
+    /// a session without its writer epoch claims it first. A tail of only
     /// fences counts as empty. Otherwise the snapshot is taken at the current
     /// manifest that the head was read from, and the call claims nothing.
     /// The check of the tail takes a read permit, which it releases before
@@ -491,7 +469,7 @@ impl NamespacePublisher {
         drop(self.live_session()?);
         if self.current_position().is_none() {
             let anchor = self.load_tail_anchor().await?;
-            if !WalTailState::from(&anchor).has_change() {
+            if WalTailState::from(&anchor).oldest_commit_at_ms.is_none() {
                 return Ok(anchor.held().clone());
             }
         }

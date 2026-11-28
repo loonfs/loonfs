@@ -15,7 +15,7 @@ Each namespace is represented by six main object types:
 | Object | What it stores |
 | --- | --- |
 | Manifest | Numbered, immutable snapshot of namespace identity, lifecycle status, current writer, metadata runs, and retention floor. |
-| WAL object | Numbered, immutable log object containing one or more commits, a writer [fence](glossary.md#fence), or a [floor object](glossary.md#floor-object) (which advances the retention floor with no commits). |
+| WAL object | Numbered, immutable log object containing one or more commits or a writer [fence](glossary.md#fence). |
 | Manifest boundary | Small control object recording a manifest number at or below which every manifest is obsolete. Garbage collection raises it before deleting old manifests. |
 | Snapshot | Record pointing to one manifest so garbage collection keeps that manifest and all of its segments. Callers create user snapshots, and forks create fork snapshots. |
 | Metadata segment | Immutable sorted metadata rows organized into independently readable blocks. |
@@ -125,6 +125,6 @@ The namespace's writer runs every maintenance operation that publishes a manifes
 
 Deleting a file records a reversible subtree tombstone, and deleting a namespace publishes a final manifest with status `deleted`. Neither reclaims content immediately.
 
-A deleted namespace becomes eligible for retirement once the grace window has elapsed and no snapshots remain on it besides its own fork point snapshot ([Retirement](format.md#95-retirement)). Retiring a namespace deletes its fork snapshots (if it is a fork), deletes its pool [member entry](glossary.md#member-entry), and raises its manifest boundary to `retired`. Later namespace collections delete everything under its prefix except the boundary object, fences, and floor objects ([Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)). Pool collections delete unreferenced content objects once no pool member references them and they pass the grace window ([Content roots](format.md#119-content-roots)).
+A deleted namespace becomes eligible for retirement once the grace window has elapsed and no snapshots remain on it besides its own fork point snapshot ([Retirement](format.md#95-retirement)). Retiring a namespace deletes its fork snapshots (if it is a fork), deletes its pool [member entry](glossary.md#member-entry), and raises its manifest boundary to `retired`. Later namespace collections delete everything under its prefix except the boundary object and fences ([Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)). Pool collections delete unreferenced content objects once no pool member references them and they pass the grace window ([Content roots](format.md#119-content-roots)).
 
 Hosts choose when and where to run maintenance, while the format defines what each operation may publish or delete. Extensions such as grep store their segment lists inside the namespace manifest and publish updates as the next manifest, so garbage collection cleans up unreferenced extension segments under the same age rule as metadata segments ([Extensions](format.md#124-extensions)).

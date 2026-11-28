@@ -1,10 +1,8 @@
 //! Retention advances through a runtime: the order of a session's restores
-//! around an advance's pause, and a read that finds a floor object in a
-//! tail.
+//! around an advance's pause.
 
 use super::*;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::{DeleteDirectoryBehavior, ErrorCode, FilesystemEvent, InodeId};
 
 /// The namespace's current manifest.
@@ -204,16 +202,12 @@ async fn listed_deletions(namespace: &crate::Namespace<crate::Writable>) -> Vec<
         .collect()
 }
 
-/// Checks that a strong read in a runtime with a cached head finds the floor
-/// of a floor object that no manifest records. The reader lists a deletion,
-/// a floor object at the tip expires it, and the reader's next listing
-/// leaves the expired deletion out.
+/// Checks that a strong read in another runtime with a cached head finds the
+/// floor that the writer's advance published in a manifest. The reader lists
+/// a deletion, the writer's advance expires it, and the reader's next
+/// listing leaves the expired deletion out.
 #[tokio::test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the test writes a floor object, which no writer creates"
-)]
-async fn a_read_from_a_cached_head_finds_an_unfolded_floor_object() {
+async fn a_cached_reader_drops_a_deletion_that_the_writers_advance_expired() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -236,37 +230,20 @@ async fn a_read_from_a_cached_head_finds_an_unfolded_floor_object() {
         .expect("open namespace");
     assert_eq!(listed_deletions(&reads).await, [deletion_seq]);
 
-    let head = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
-        .load_read_state()
+    writer_clock.advance_ms(crate::GC_GRACE_WINDOW_MS);
+    let advanced = namespace
+        .advance_retention_floor()
         .await
-        .expect("read the head");
-    let floor_object = loonfs_types::format::wal::WalObjectPayload {
-        namespace_id: namespace_id.clone(),
-        wal_no: head.wal_no.successor().expect("next WAL number"),
-        writer_epoch: head.writer_epoch,
-        head_seq: head.seq,
-        body: WalObjectBody::Floor {
-            retention_floor_seq: deletion_seq,
-        },
-    };
-    store
-        .put(
-            &loonfs_objectstore::keys::wal_object(&namespace_id, &floor_object.wal_no),
-            loonfs_types::format::wal::encode_wal_object_envelope_zstd(floor_object)
-                .expect("encode a floor object")
-                .into_bytes()
-                .into(),
-            PutMode::CreateIfAbsent,
-        )
-        .await
-        .expect("put a floor object");
+        .expect("advance the floor");
+    assert!(advanced.retention_floor_seq >= deletion_seq);
     assert_eq!(
         current_manifest(store.as_ref(), &namespace_id)
             .await
             .retention_floor_seq,
-        CommitSeq(0),
-        "no manifest records the floor"
+        advanced.retention_floor_seq,
+        "the advance's manifest records the floor"
     );
+    reader_clock.advance_ms(crate::RuntimeConfig::default().manifest_revalidation_interval_ms + 1);
     assert_eq!(listed_deletions(&reads).await, []);
     reader.shutdown().await.expect("shutdown");
     writer.shutdown().await.expect("shutdown");

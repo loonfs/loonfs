@@ -123,8 +123,8 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: CommitSeq) -> Option<Met
 /// operator processes this order without retaining the complete history.
 ///
 /// Only an advance's manifest and a fork's active manifest raise a
-/// manifest's floor, apart from a fold that covers a floor object in its
-/// tail, and every other publication copies its predecessor's floor. An
+/// manifest's floor, and every other publication copies its predecessor's
+/// floor. An
 /// advance's manifest includes the fold of what arrived, which the writer
 /// publishes with its commits paused, so it folds every WAL object written
 /// before it, and the writer validates every restore after it against the

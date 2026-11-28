@@ -277,10 +277,7 @@ impl Namespace<Writable> {
     /// and when another writer has claimed the namespace, the settle returns
     /// `writer_fenced`.
     /// Without a position, it plans from the current manifest's floor and
-    /// head, and claims nothing to plan. When that plan moves the floor, the
-    /// call reads the WAL tail above the manifest, and when the tail's view
-    /// already has a floor at or above the target, the call publishes
-    /// nothing.
+    /// head, and claims nothing to plan.
     ///
     /// A floor that moves is recorded in two steps of this session. The call
     /// first checks that every segment of the manifest it planned from exists
@@ -349,55 +346,39 @@ impl Namespace<Writable> {
         options: &AdvanceRetentionFloorOptions,
     ) -> Result<CommitSeq> {
         let store = self.core.namespace_store(&self.namespace_id);
-        let view = self.load_retention_view(admitted).await?;
-        let plan = store
-            .plan_retention_floor(view.manifest(), view.retention_floor_seq(), options.target)
-            .await?;
-        let target = match plan {
+        let planned = self.load_retention_manifest(admitted).await?;
+        let target = match store.plan_retention_floor(&planned, options.target).await? {
             RetentionPlan::Stays(retention_floor_seq) => return Ok(retention_floor_seq),
             RetentionPlan::Moves(target) => target,
         };
-        if let RetentionView::Manifest(_) = view {
-            // The view of the tail may already have the floor. Comparing
-            // before the session's advance keeps a session without its
-            // writer epoch from claiming for an advance that changes nothing.
-            let _permit = self.core.read_permit().await;
-            let anchor = store.load_live_read_anchor(self.core.observation()).await?;
-            if anchor.retention_floor_seq() >= target {
-                return Ok(anchor.retention_floor_seq());
-            }
-        }
-        store.verify_planned_segments(view.manifest()).await?;
+        store.verify_planned_segments(&planned).await?;
         admitted.advance_retention_floor(target).await
     }
 
-    /// Returns the view that a retention advance plans from: the session's
-    /// position after the check that confirms it (see
-    /// [`AdmittedMaintenance::load_confirmed`]), or the current manifest of
-    /// a live namespace, read without its WAL tail, for a session without a
-    /// position.
-    async fn load_retention_view(
+    /// Returns the manifest that a retention advance plans from: the
+    /// manifest of the session's position after the check that confirms it
+    /// (see [`AdmittedMaintenance::load_confirmed`]), or the current manifest
+    /// of a live namespace for a session without a position.
+    async fn load_retention_manifest(
         &self,
         admitted: &AdmittedMaintenance<'_>,
-    ) -> Result<RetentionView> {
+    ) -> Result<LoadedManifest> {
         let store = self.core.namespace_store(&self.namespace_id);
         let newest = async {
-            let current = store
+            Ok(store
                 .load_live_basis(self.core.observation())
                 .await?
-                .into_manifest();
-            Ok(RetentionView::Manifest(current))
+                .into_manifest())
         };
         admitted
             .load_confirmed(
                 |position| {
                     let store = &store;
                     async move {
-                        let basis = store.load_publication_basis(&position).await?;
-                        Ok(RetentionView::Position {
-                            manifest: basis.into_manifest(),
-                            retention_floor_seq: position.retention_floor_seq(),
-                        })
+                        Ok(store
+                            .load_publication_basis(&position)
+                            .await?
+                            .into_manifest())
                     }
                 },
                 newest,
@@ -549,37 +530,4 @@ async fn fold_when_due(
         max_wal_tail_objects: options.max_wal_tail_objects.get(),
     };
     admitted.fold(when).await
-}
-
-/// The view that a retention advance plans from.
-enum RetentionView {
-    /// The session's confirmed position: its manifest and the floor of its
-    /// view, which floor objects in its WAL tail may have raised.
-    Position {
-        manifest: LoadedManifest,
-        retention_floor_seq: CommitSeq,
-    },
-    /// The current manifest, read without its WAL tail by a session without
-    /// a position.
-    Manifest(LoadedManifest),
-}
-
-impl RetentionView {
-    fn manifest(&self) -> &LoadedManifest {
-        match self {
-            Self::Position { manifest, .. } | Self::Manifest(manifest) => manifest,
-        }
-    }
-
-    /// Returns the floor that the advance plans from: the position's, or
-    /// the manifest's.
-    fn retention_floor_seq(&self) -> CommitSeq {
-        match self {
-            Self::Position {
-                retention_floor_seq,
-                ..
-            } => *retention_floor_seq,
-            Self::Manifest(manifest) => manifest.retention_floor_seq(),
-        }
-    }
 }

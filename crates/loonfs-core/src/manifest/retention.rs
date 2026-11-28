@@ -49,7 +49,7 @@ pub enum RetentionTarget {
     Window,
 }
 
-/// What a retention advance does, planned from one manifest and floor.
+/// What a retention advance does, planned from one manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionPlan {
     /// The floor stays at this sequence, the floor that the plan started
@@ -60,28 +60,27 @@ pub enum RetentionPlan {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Plans where a retention advance toward `target` moves the floor of a
-    /// view whose manifest is `current` and whose floor is
-    /// `retention_floor_seq`, and publishes nothing (format spec, "Advancing
-    /// the retention floor"). The view is a writer position, or the current
-    /// manifest of a live namespace with that manifest's floor. The plan
-    /// uses the namespace's wall clock as the current time for the grace
-    /// window's cutoff and for a [`RetentionTarget::Window`] cutoff.
+    /// Plans where a retention advance toward `target` moves the floor of
+    /// `current`, the manifest of a writer position or the current manifest
+    /// of a live namespace, and publishes nothing (format spec, "Advancing
+    /// the retention floor"). The plan uses the namespace's wall clock as the
+    /// current time for the grace window's cutoff and for a
+    /// [`RetentionTarget::Window`] cutoff.
     ///
-    /// The plan makes no request when the target is at or below the view's
-    /// floor. Otherwise, it reads commits upward from the manifest's floor
+    /// The plan makes no request when the target is at or below the
+    /// manifest's floor. Otherwise, it reads commits upward from that floor
     /// once, and it stops at the target or at the first commit after the
     /// cutoff, which is the earlier of the target's own cutoff, if it has
-    /// one, and the current time minus the grace window. A floor that
-    /// isn't above the view's floor stays at the view's floor.
+    /// one, and the current time minus the grace window. A floor that isn't
+    /// above the manifest's floor stays at the manifest's floor.
     pub async fn plan_retention_floor(
         &self,
         current: &LoadedManifest,
-        retention_floor_seq: CommitSeq,
         target: RetentionTarget,
     ) -> Result<RetentionPlan> {
         let now_ms = self.start_clock().request_at_ms();
         let manifest = current.payload();
+        let retention_floor_seq = manifest.retention_floor_seq;
         let age_cutoff_at_ms = now_ms.saturating_sub(GC_GRACE_WINDOW_MS);
         let (through, cutoff_at_ms) = match target {
             RetentionTarget::Head => (manifest.head_seq, age_cutoff_at_ms),

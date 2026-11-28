@@ -34,8 +34,8 @@ impl Sweep<'_> {
         if self.live.protects(family, &entry.key) {
             return self.retain(RetainedReason::Referenced, None);
         }
-        if family.is_fence_or_floor_object(&entry) {
-            return self.retain(RetainedReason::FencesAndFloorObjects, None);
+        if family.is_fence(&entry) {
+            return self.retain(RetainedReason::Fences, None);
         }
         Decision::aged(
             entry,
@@ -58,7 +58,7 @@ impl Sweep<'_> {
 /// no roots. The caller leaves out the boundary object, which is not a
 /// candidate.
 ///
-/// A fence or a floor object is kept. Any other key of a candidate family,
+/// A fence is kept. Any other key of a candidate family,
 /// and any snapshot record, is deleted once its age (from its listed
 /// modification time) is at least the grace window. The report counts a
 /// snapshot record as a user snapshot, because the collection doesn't read its owner. Any other
@@ -73,8 +73,8 @@ pub(super) fn retired_candidate(
         .into_iter()
         .find(|family| family.recognizes(&entry.key))
     {
-        if family.is_fence_or_floor_object(&entry) {
-            return Decision::retain(RetainedReason::FencesAndFloorObjects, None, now_ms);
+        if family.is_fence(&entry) {
+            return Decision::retain(RetainedReason::Fences, None, now_ms);
         }
         return Decision::aged(entry, GC_GRACE_WINDOW_MS, now_ms, family.deleted_counter());
     }

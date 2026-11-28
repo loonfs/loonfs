@@ -24,7 +24,7 @@ Folds start in several places. A writer's host folds its session's tail after a 
 | Compaction | Maintainer | None (the manifest copies its predecessor's writer epoch) | The numbered create, and a change to the compaction's input segments after its basis, which ends the compaction without a manifest |
 | Fold | Maintainer | None (the manifest copies its predecessor's writer epoch) | The numbered create |
 | Extension publication | Maintainer | None (the manifest copies its predecessor's writer epoch) | The numbered create, and a change to the extension's entry after the publication's basis, which ends the publication without a manifest |
-| Retention advance | Maintainer | The current writer epoch, copied without a claim into a "[floor object](../specs/glossary.md#floor-object)", a WAL object with no commits that records the new floor (the fold after the floor object is an ordinary fold) | The numbered create |
+| Retention advance | Maintainer | The current writer epoch, copied without a claim into a "floor object", a WAL object with no commits that records the new floor (the fold after the floor object is an ordinary fold) | The numbered create |
 | Retention window change | Maintainer | None (the manifest copies its predecessor's writer epoch) | The numbered create |
 | Garbage collection | Maintainer | None (it publishes nothing) | Nothing. Concurrent collectors are safe under the age rules, and an object that's already gone needs no cleanup |
 | Pool collection | Maintainer | None (it publishes nothing) | Nothing, for the same reasons as a namespace's garbage collection |

@@ -93,11 +93,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// commits touched. Manifest 2 is still initializing. It lists manifest
     /// 1's runs and the new run, and its head is the fork point. Its
     /// retention floor, writer epoch, folded WAL number, and activity counters
-    /// stay manifest 1's. The floor objects in the tail aren't applied,
-    /// because a call that folds the tail again reads it only through the
-    /// fork point and can't see a floor object after the last commit, and the
-    /// activity counters stay because the source's commits are the source's
-    /// activity. The tail has at least one commit above manifest 1's head.
+    /// stay manifest 1's. The activity counters stay because the source's
+    /// commits are the source's activity. The tail has at least one commit
+    /// above manifest 1's head.
     ///
     /// The manifest is put once. If another call's manifest 2 won the put, or
     /// another call already made the fork active, this function returns the

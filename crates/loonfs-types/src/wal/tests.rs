@@ -358,9 +358,7 @@ fn decoder_accepts_the_limit_and_rejects_the_next_byte_before_decoding() {
         wal_no: WalNo(crate::MAX_PUBLIC_INTEGER),
         writer_epoch: WriterEpoch(crate::MAX_PUBLIC_INTEGER),
         head_seq: CommitSeq(crate::MAX_PUBLIC_INTEGER),
-        body: WalObjectBody::Floor {
-            retention_floor_seq: CommitSeq(crate::MAX_PUBLIC_INTEGER),
-        },
+        body: WalObjectBody::Fence,
     })
     .expect("encode");
     let document = zstd::stream::decode_all(encoded.as_bytes()).expect("decompress");
@@ -700,17 +698,17 @@ fn stored_document(bytes: &[u8]) -> WalObjectDocument {
 }
 
 #[test]
-fn the_fence_and_floor_object_bound_is_zstds_bound_for_the_longest_recordless_document() {
-    assert_eq!(RECORDLESS_WAL_DOCUMENT_BYTES, 508);
-    assert_eq!(MAX_FENCE_OR_FLOOR_OBJECT_BYTES, 572);
+fn the_fence_bound_is_zstds_bound_for_the_longest_recordless_document() {
+    assert_eq!(RECORDLESS_WAL_DOCUMENT_BYTES, 471);
+    assert_eq!(MAX_FENCE_BYTES, 535);
     assert_eq!(
-        MAX_FENCE_OR_FLOOR_OBJECT_BYTES,
+        MAX_FENCE_BYTES,
         zstd::zstd_safe::compress_bound(RECORDLESS_WAL_DOCUMENT_BYTES),
     );
 }
 
 #[test]
-fn every_fence_and_floor_object_is_stored_at_or_below_the_bound() {
+fn every_fence_is_stored_at_or_below_the_bound() {
     let hex_id = format!(
         "{}{}",
         crate::sha256_hex(b"first"),
@@ -718,21 +716,19 @@ fn every_fence_and_floor_object_is_stored_at_or_below_the_bound() {
     );
     let max = crate::MAX_PUBLIC_INTEGER;
     for namespace_id in ["n".repeat(crate::MAX_ID_BYTES), hex_id, "n".to_owned()] {
-        for (integer, floor) in [(max, None), (max, Some(max)), (0, None), (0, Some(0))] {
+        for integer in [max, 0] {
             let encoded = encode_wal_object_envelope_zstd(WalObjectPayload {
                 namespace_id: NamespaceId::parse(namespace_id.as_str()).expect("namespace"),
                 wal_no: WalNo(integer),
                 writer_epoch: WriterEpoch(integer),
                 head_seq: CommitSeq(integer),
-                body: floor.map_or(WalObjectBody::Fence, |floor| WalObjectBody::Floor {
-                    retention_floor_seq: CommitSeq(floor),
-                }),
+                body: WalObjectBody::Fence,
             })
             .expect("encode");
             assert!(encoded.document_bytes() <= RECORDLESS_WAL_DOCUMENT_BYTES);
             assert!(
-                encoded.as_bytes().len() <= MAX_FENCE_OR_FLOOR_OBJECT_BYTES,
-                "{namespace_id} {integer} {floor:?}: {} bytes",
+                encoded.as_bytes().len() <= MAX_FENCE_BYTES,
+                "{namespace_id} {integer}: {} bytes",
                 encoded.as_bytes().len()
             );
             assert!(stored_document(encoded.as_bytes()).padding.is_none());
@@ -744,10 +740,10 @@ fn every_fence_and_floor_object_is_stored_at_or_below_the_bound() {
 fn a_small_commit_object_is_padded_above_the_bound() {
     let payload = tiny_commit_object();
     let unpadded = unchecked_wal_object_bytes(&payload);
-    assert!(unpadded.len() <= MAX_FENCE_OR_FLOOR_OBJECT_BYTES);
+    assert!(unpadded.len() <= MAX_FENCE_BYTES);
 
     let encoded = encode_wal_object_envelope_zstd(payload.clone()).expect("encode");
-    assert!(encoded.as_bytes().len() > MAX_FENCE_OR_FLOOR_OBJECT_BYTES);
+    assert!(encoded.as_bytes().len() > MAX_FENCE_BYTES);
     assert!(encoded.document_bytes() <= WAL_OBJECT_OVERHEAD_BYTES);
     let document = stored_document(encoded.as_bytes());
     assert!(document.padding.is_some());
@@ -765,7 +761,7 @@ fn a_large_commit_object_has_no_padding() {
     commits_mut(&mut payload)[0].inline_content[0].bytes =
         wal_object_padding(&sha256_digest(b"incompressible"), 2048);
     let encoded = encode_wal_object_envelope_zstd(payload).expect("encode");
-    assert!(encoded.as_bytes().len() > MAX_FENCE_OR_FLOOR_OBJECT_BYTES);
+    assert!(encoded.as_bytes().len() > MAX_FENCE_BYTES);
     assert!(stored_document(encoded.as_bytes()).padding.is_none());
 }
 

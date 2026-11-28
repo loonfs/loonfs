@@ -4111,8 +4111,8 @@
       "RetainedCandidates": {
         "description": "The candidates that one garbage collection of a namespace inspected but didn't delete,\ncounted by reason.",
         "properties": {
-          "fences_and_floor_objects": {
-            "description": "The fences and floor objects, which no collection deletes. The collection tells them from\ndata WAL objects by their listed size.",
+          "fences": {
+            "description": "The fences, which no collection deletes. The collection tells them from data WAL objects\nby their listed size.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4154,7 +4154,7 @@
           "no_provider_timestamp",
           "unrecognized_key",
           "snapshot_not_deletable",
-          "fences_and_floor_objects"
+          "fences"
         ],
         "type": "object"
       },

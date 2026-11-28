@@ -16,7 +16,7 @@ use crate::wal::{
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{CommitSeq, ManifestNo};
+use loonfs_types::ManifestNo;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -35,12 +35,6 @@ impl NamespaceReadAnchor {
     /// manifest reached.
     pub fn read_state(&self) -> &NamespaceReadState {
         &self.read_state
-    }
-
-    /// Returns the retention floor of the anchor's view: the manifest's
-    /// floor, raised by the floor objects in the anchor's WAL tail.
-    pub fn retention_floor_seq(&self) -> CommitSeq {
-        self.read_state.retention_floor_seq
     }
 
     pub fn basis(&self) -> MetadataBasis {

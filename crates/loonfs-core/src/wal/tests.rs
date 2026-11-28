@@ -31,6 +31,130 @@ fn context(now_ms: u64) -> crate::test_support::WriterAt {
     crate::test_support::writer_at("writer", now_ms)
 }
 
+/// Appends the head of a CBOR item of major type `major` whose argument is
+/// `value`, in its shortest form.
+fn push_cbor_head(out: &mut Vec<u8>, major: u8, value: u64) {
+    let major = major << 5;
+    if value < 24 {
+        out.push(major | u8::try_from(value).expect("an argument below 24 fits a byte"));
+    } else if let Ok(value) = u8::try_from(value) {
+        out.extend([major | 24, value]);
+    } else if let Ok(value) = u16::try_from(value) {
+        out.push(major | 25);
+        out.extend(value.to_be_bytes());
+    } else if let Ok(value) = u32::try_from(value) {
+        out.push(major | 26);
+        out.extend(value.to_be_bytes());
+    } else {
+        out.push(major | 27);
+        out.extend(value.to_be_bytes());
+    }
+}
+
+/// Appends a CBOR text string.
+fn push_cbor_text(out: &mut Vec<u8>, text: &str) {
+    push_cbor_head(out, 3, u64::try_from(text.len()).expect("a short text"));
+    out.extend(text.as_bytes());
+}
+
+/// Returns the stored bytes of a WAL object with no records and a
+/// `retention_floor_seq` field, the shape of a floor object, which the
+/// format doesn't define. The test writes the CBOR itself, because the
+/// encoder can't write that field.
+fn floor_object_bytes(
+    fence: &loonfs_types::format::wal::WalObjectPayload,
+    wal_no: WalNo,
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    push_cbor_head(&mut payload, 5, 6);
+    push_cbor_text(&mut payload, "namespace_id");
+    push_cbor_text(&mut payload, fence.namespace_id.as_str());
+    for (field, value) in [
+        ("wal_no", wal_no.0),
+        ("writer_epoch", fence.writer_epoch.0),
+        ("head_seq", fence.head_seq.0),
+    ] {
+        push_cbor_text(&mut payload, field);
+        push_cbor_head(&mut payload, 0, value);
+    }
+    push_cbor_text(&mut payload, "records");
+    push_cbor_head(&mut payload, 4, 0);
+    push_cbor_text(&mut payload, "retention_floor_seq");
+    push_cbor_head(&mut payload, 0, fence.head_seq.0);
+
+    let mut document = Vec::new();
+    push_cbor_head(&mut document, 5, 4);
+    push_cbor_text(&mut document, "kind");
+    push_cbor_text(&mut document, "wal_object");
+    push_cbor_text(&mut document, "format_version");
+    push_cbor_head(&mut document, 0, 1);
+    push_cbor_text(&mut document, "payload_checksum");
+    push_cbor_text(
+        &mut document,
+        loonfs_types::sha256_digest(&payload).as_str(),
+    );
+    push_cbor_text(&mut document, "payload");
+    push_cbor_head(
+        &mut document,
+        2,
+        u64::try_from(payload.len()).expect("a short payload"),
+    );
+    document.extend(payload);
+    zstd::stream::encode_all(document.as_slice(), 3).expect("compress")
+}
+
+/// Checks that a WAL object with a retention floor, a floor object, in a
+/// namespace's tail makes a read of the namespace return
+/// `namespace_corrupt`, as any WAL object that the format doesn't define
+/// does, because the decoder rejects the unknown field.
+#[tokio::test]
+async fn a_floor_object_in_a_tail_is_namespace_corrupt() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("verification").expect("namespace");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
+        .create()
+        .await
+        .expect("create");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .acquire_writer_epoch(&context(1_000).writer_id)
+        .await
+        .expect("fence");
+    let tip = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("read the head")
+        .wal_no;
+    let fence = decode_wal_object_envelope_zstd(
+        &store
+            .get(&wal_object(&namespace_id, &tip), None)
+            .await
+            .expect("get")
+            .expect("fence"),
+    )
+    .expect("decode the fence")
+    .into_payload();
+    let wal_no = tip.successor().expect("next WAL number");
+    store
+        .put_if_absent(
+            &wal_object(&namespace_id, &wal_no),
+            floor_object_bytes(&fence, wal_no).into(),
+        )
+        .await
+        .expect("put the floor object");
+
+    let error = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_metadata_view()
+        .await
+        .err()
+        .expect("a floor object in the tail is corrupt");
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error:?}");
+    assert!(
+        format!("{error:?}").contains("retention_floor_seq"),
+        "{error:?}"
+    );
+}
+
 #[tokio::test]
 async fn readers_reject_invalid_numbers_epochs_and_sequences() {
     let directory = tempfile::tempdir().expect("directory");
@@ -192,7 +316,7 @@ async fn fences_fold_and_stay_after_a_collection() {
         .await
         .expect("collect");
     assert_eq!(report.deleted.wal_objects, 0);
-    assert_eq!(report.retained.fences_and_floor_objects, 1);
+    assert_eq!(report.retained.fences, 1);
     assert!(store
         .head(&wal_object(&namespace_id, &WalNo(1)))
         .await
@@ -849,7 +973,7 @@ async fn a_writer_resuming_after_a_collection_collides_with_the_kept_fence() {
                 .expect("collect the folded WAL");
             // The two commit objects go, and the two fences stay.
             assert_eq!(report.deleted.wal_objects, 2);
-            assert_eq!(report.retained.fences_and_floor_objects, 2);
+            assert_eq!(report.retained.fences, 2);
             assert!(blocked
                 .inner()
                 .head(&fence_key)

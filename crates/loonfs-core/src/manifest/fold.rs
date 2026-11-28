@@ -125,7 +125,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// The fold writes each chain's pending pieces as content objects and a
     /// metadata segment for each family that the tail's commits touched, as
     /// one new run: the base run when the manifest has no runs, and a delta
-    /// run otherwise. A tail of floor objects and no commits writes no run.
+    /// run otherwise. A tail of fences and no commits writes no run.
     /// A position whose manifest already folds its tail writes nothing and
     /// returns [`FoldWriteOutcome::AlreadyFolded`]. A position whose manifest
     /// is missing from the store and at or below the manifest boundary
@@ -174,8 +174,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// The manifest is the turn's basis, the session's newest published
     /// manifest, with the fold's run listed after whatever runs the basis
-    /// lists, the fold's head, and the higher of the basis's floor and the
-    /// floors of the floor objects that the fold covers (format spec,
+    /// lists, the fold's head, and the basis's floor (format spec,
     /// "Publishing a manifest"). The session's folds run one at a time from
     /// the session's position, and a publication of the session in between,
     /// such as a compaction unit, a window change or the session's own
@@ -476,16 +475,11 @@ fn fold_payload(
         });
         next_run_no = next_run_no_after(next_run_no)?;
     }
-    // The head's floor includes every floor object in the tail that the
-    // fold covers (format spec, "Publishing a manifest").
     Ok(NamespaceManifestPayload {
         activity,
         head_seq: writes.head.seq,
         next_run_no,
         folded_wal_no: writes.head.wal_no,
-        retention_floor_seq: previous
-            .retention_floor_seq
-            .max(writes.head.retention_floor_seq),
         ..previous
             .successor(runs)
             .map_err(|_| no_manifest_after(previous.manifest_no))?
@@ -563,7 +557,7 @@ pub(crate) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
 
 impl<S: ObjectStore + ?Sized> ManifestProjection<'_, S> {
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(self.head(), &self.manifest_segments, &self.tail_state)
+        MetadataView::over_loaded_basis(&self.manifest_segments, &self.tail_state, self.head().seq)
     }
 
     /// Returns the head that replaying the tail reached.

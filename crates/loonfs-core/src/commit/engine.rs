@@ -66,10 +66,6 @@ pub struct WalTailReport {
     /// records, or `None` when the tail has no commit, such as a tail of
     /// fences alone.
     pub oldest_commit_at_ms: Option<u64>,
-    /// Whether a floor object in the tail raised the view's floor above the
-    /// manifest's (see
-    /// [`NamespaceReadState::raises_retention_floor`](crate::control::NamespaceReadState::raises_retention_floor)).
-    pub raises_retention_floor: bool,
     /// Where the attempt found the tail.
     pub source: TailSource,
 }
@@ -999,7 +995,6 @@ impl PositionState {
                 wal_bytes: update.wal_tail_bytes,
                 inline_bytes: update.wal_tail_inline_bytes,
                 oldest_commit_at_ms: update.wal_tail_oldest_commit_at_ms,
-                raises_retention_floor: update.raises_retention_floor,
                 source: if wal_tail_discovered {
                     TailSource::Store
                 } else {
@@ -1073,7 +1068,6 @@ struct TailProjectionUpdate {
     wal_tail_bytes: usize,
     wal_tail_inline_bytes: usize,
     wal_tail_oldest_commit_at_ms: Option<u64>,
-    raises_retention_floor: bool,
 }
 
 impl TailProjectionUpdate {
@@ -1083,7 +1077,6 @@ impl TailProjectionUpdate {
             wal_tail_bytes: position.wal_tail_bytes(),
             wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
             wal_tail_oldest_commit_at_ms: position.wal_tail_oldest_commit_at_ms(),
-            raises_retention_floor: position.read_basis().head().raises_retention_floor(),
         }
     }
 }

@@ -159,18 +159,6 @@ async fn collect<S: ObjectStore>(
 
 /// Advances the retention floor to the head once the grace after `setup` has
 /// passed.
-/// Returns the floor of the namespace's newest manifest.
-async fn read_floor<S: ObjectStore>(
-    namespace: &crate::NamespaceStore<S>,
-) -> loonfs_types::CommitSeq {
-    namespace
-        .load_current_manifest()
-        .await
-        .expect("the newest manifest")
-        .payload()
-        .retention_floor_seq
-}
-
 async fn advance_floor_past<S: ObjectStore + Clone>(
     store: S,
     namespace_id: &NamespaceId,
@@ -259,7 +247,7 @@ async fn read_upload_session<S: ObjectStore + ?Sized>(
 /// and a later collection deletes an object written late under the prefix
 /// once that object is older than the grace window.
 #[tokio::test]
-async fn a_retired_namespace_keeps_its_boundary_fences_floor_objects_and_unrecognized_keys() {
+async fn a_retired_namespace_keeps_its_boundary_fences_and_unrecognized_keys() {
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -284,8 +272,6 @@ async fn a_retired_namespace_keeps_its_boundary_fences_floor_objects_and_unrecog
         .await
         .expect("user snapshot");
     advance_floor_past(&store, &namespace_id, &setup).await;
-    let floor = read_floor(&crate::test_support::namespace_store(&store, &namespace_id)).await;
-    crate::test_support::put_floor_object(&store, &namespace_id, floor).await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
         .delete_namespace(
@@ -295,7 +281,7 @@ async fn a_retired_namespace_keeps_its_boundary_fences_floor_objects_and_unrecog
         .await
         .expect("delete namespace");
     // The WAL objects that no collection deletes: the fences of the writer
-    // sessions and the floor object in the tail.
+    // sessions.
     let commit_keys = crate::test_support::commit_wal_keys(&store, &namespace_id).await;
     let kept_wal = store
         .list_prefix(&wal_prefix(&namespace_id))
@@ -304,7 +290,6 @@ async fn a_retired_namespace_keeps_its_boundary_fences_floor_objects_and_unrecog
         .into_iter()
         .filter(|key| !commit_keys.contains(key))
         .collect::<BTreeSet<_>>();
-    let mut floor_objects = 0;
     for key in &kept_wal {
         let bytes = store
             .get(key, None)
@@ -314,13 +299,8 @@ async fn a_retired_namespace_keeps_its_boundary_fences_floor_objects_and_unrecog
         let payload = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&bytes)
             .expect("decode a WAL object")
             .into_payload();
-        match payload.body {
-            WalObjectBody::Commits(_) => panic!("{key} contains commits"),
-            WalObjectBody::Fence => {}
-            WalObjectBody::Floor { .. } => floor_objects += 1,
-        }
+        assert_eq!(payload.body, WalObjectBody::Fence, "{key} is a fence");
     }
-    assert_eq!(floor_objects, 1);
     assert!(kept_wal.len() > 1, "{kept_wal:?}");
 
     let final_activity = crate::test_support::namespace_store(&store, &namespace_id)
@@ -344,12 +324,9 @@ async fn a_retired_namespace_keeps_its_boundary_fences_floor_objects_and_unrecog
         .await
         .expect("collection");
     // The deleted namespace's collection deletes the commit objects and
-    // keeps the fences and the floor object.
+    // keeps the fences.
     assert_eq!(report.deleted.wal_objects, commit_keys.len() as u64);
-    assert_eq!(
-        report.retained.fences_and_floor_objects,
-        kept_wal.len() as u64
-    );
+    assert_eq!(report.retained.fences, kept_wal.len() as u64);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert!(report.deleted.manifests > 0);
     assert_eq!(report.deleted_snapshots_by_owner.user, 1);
@@ -450,10 +427,7 @@ async fn a_retired_namespace_keeps_its_boundary_fences_floor_objects_and_unrecog
     assert_eq!(report.deleted.manifests, 1);
     assert!(report.deleted.metadata_segments > 0);
     assert_eq!(report.retained.unrecognized_key, 1);
-    assert_eq!(
-        report.retained.fences_and_floor_objects,
-        kept_wal.len() as u64
-    );
+    assert_eq!(report.retained.fences, kept_wal.len() as u64);
     assert_eq!(report.retires_at_ms, None);
     // Retirement deleted the member entry and the pool's collection deleted
     // the content, so nothing is under the pool's prefix.
@@ -974,7 +948,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
 
     // The two folded commit objects go. The fences of their sessions stay.
     assert_eq!(report.deleted.wal_objects, 2);
-    assert_eq!(report.retained.fences_and_floor_objects, 2);
+    assert_eq!(report.retained.fences, 2);
     // Latest reads replay the retained tail over the manifest basis.
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace
@@ -990,12 +964,11 @@ async fn gc_never_deletes_the_live_replay_tail() {
     .expect("tail commit stays readable");
 }
 
-/// Checks that an active namespace's collection keeps the fences and the
-/// floor object at or below `folded_wal_no` that are older than the grace
-/// window, and deletes the commit objects beside them, a padded one
-/// included.
+/// Checks that an active namespace's collection keeps the fences at or
+/// below `folded_wal_no` that are older than the grace window, and deletes
+/// the commit objects beside them, a padded one included.
 #[tokio::test]
-async fn a_collection_keeps_folded_fences_and_floor_objects_and_deletes_commit_objects() {
+async fn a_collection_keeps_folded_fences_and_deletes_commit_objects() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1021,17 +994,15 @@ async fn a_collection_keeps_folded_fences_and_floor_objects_and_deletes_commit_o
     .pop()
     .expect("one result")
     .expect("create a directory");
-    // The floor advances over folded commits, and a fold covers a floor
-    // object in the tail.
+    // The floor advances over folded commits, and a later writer's fold
+    // covers its own fence.
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     namespace.fold_as_test_writer().await.expect("fold the WAL");
     advance_floor_past(&store, &namespace_id, &setup).await;
-    let floor = read_floor(&namespace).await;
-    crate::test_support::put_floor_object(&store, &namespace_id, floor).await;
     namespace
         .fold_as_test_writer()
         .await
-        .expect("fold the floor object");
+        .expect("fold the WAL again");
 
     let commit_keys = crate::test_support::commit_wal_keys(&store, &namespace_id).await;
     assert!(!commit_keys.is_empty());
@@ -1051,7 +1022,6 @@ async fn a_collection_keeps_folded_fences_and_floor_objects_and_deletes_commit_o
         .filter(|key| !commit_keys.contains(key))
         .cloned()
         .collect::<Vec<_>>();
-    let mut floor_objects = 0;
     for key in &kept_wal {
         let bytes = store
             .get(key, None)
@@ -1061,13 +1031,8 @@ async fn a_collection_keeps_folded_fences_and_floor_objects_and_deletes_commit_o
         let payload = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&bytes)
             .expect("decode a WAL object")
             .into_payload();
-        match payload.body {
-            WalObjectBody::Commits(_) => panic!("{key} contains commits"),
-            WalObjectBody::Fence => {}
-            WalObjectBody::Floor { .. } => floor_objects += 1,
-        }
+        assert_eq!(payload.body, WalObjectBody::Fence, "{key} is a fence");
     }
-    assert_eq!(floor_objects, 1);
     assert!(kept_wal.len() > 1, "{kept_wal:?}");
     let folded_wal_no = namespace
         .load_current_manifest()
@@ -1084,10 +1049,7 @@ async fn a_collection_keeps_folded_fences_and_floor_objects_and_deletes_commit_o
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     let report = collect(&store, &namespace_id, &aged).await;
     assert_eq!(report.deleted.wal_objects, commit_keys.len() as u64);
-    assert_eq!(
-        report.retained.fences_and_floor_objects,
-        kept_wal.len() as u64
-    );
+    assert_eq!(report.retained.fences, kept_wal.len() as u64);
     assert_eq!(
         store
             .list_prefix(&wal_prefix(&namespace_id))
@@ -1097,10 +1059,7 @@ async fn a_collection_keeps_folded_fences_and_floor_objects_and_deletes_commit_o
     );
     let again = collect(&store, &namespace_id, &aged).await;
     assert_eq!(again.deleted.wal_objects, 0);
-    assert_eq!(
-        again.retained.fences_and_floor_objects,
-        kept_wal.len() as u64
-    );
+    assert_eq!(again.retained.fences, kept_wal.len() as u64);
 }
 
 async fn assert_basis_reaped(

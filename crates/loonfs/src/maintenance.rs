@@ -164,11 +164,7 @@ impl Maintenance {
                 let compaction = self.engine(namespace_id).metadata_compaction_due(current);
                 let retention_advance = matches!(
                     namespace
-                        .plan_retention_floor(
-                            current,
-                            anchor.retention_floor_seq(),
-                            crate::RetentionTarget::Window,
-                        )
+                        .plan_retention_floor(current, crate::RetentionTarget::Window)
                         .await?,
                     RetentionPlan::Moves(_)
                 );

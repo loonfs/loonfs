@@ -667,7 +667,7 @@ async fn a_fenced_merge_reports_the_request_that_its_first_plan_resolved() {
 /// The other host's clock is two grace windows behind, so its first commit
 /// is old enough for the floor to pass. This host's commit opens its held
 /// session, and the other host's next commit claims the namespace. The
-/// retention job's floor object then finds this host's session fenced, and
+/// retention job's publication then finds this host's session fenced, and
 /// the retry's session claims and advances the floor past the old commit.
 #[tokio::test]
 async fn a_fenced_maintenance_job_is_retried_once_in_a_new_session() {
@@ -715,7 +715,15 @@ async fn a_fenced_maintenance_job_is_retried_once_in_a_new_session() {
         "the retry's session claims the namespace back"
     );
     assert_eq!(
-        head(&state, &namespace_id).await.retention_floor_seq.0,
+        loonfs_core::test_support::namespace_store(
+            state.runtime.object_store().as_ref(),
+            &namespace_id
+        )
+        .load_current_manifest()
+        .await
+        .expect("the current manifest")
+        .retention_floor_seq()
+        .0,
         old_seq
     );
 }
