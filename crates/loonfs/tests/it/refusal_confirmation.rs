@@ -383,6 +383,117 @@ async fn a_refusal_during_the_sessions_own_publication_is_confirmed_without_a_lo
     );
 }
 
+/// Checks that a commit whose precondition fails returns `writer_fenced`
+/// when the session's own fold has put its manifest and not recorded it, and
+/// another writer then claims the namespace and deletes the directory.
+///
+/// The session's check finds the fold's manifest, and the settle waits for
+/// the fold's record, so the position follows the fold's manifest. The next
+/// check finds the other writer's claim after it, and the next settle finds
+/// no newer manifest of the session, so the writer's load fences the
+/// session. A session that stopped settling after the first check would
+/// refuse the commit again from the fold's manifest, which still has `/dir`.
+#[tokio::test]
+async fn a_refusal_after_the_sessions_own_publication_and_a_claim_returns_writer_fenced() {
+    let name = "refused-after-own-publication";
+    let fixture = fixture(name, Parked::BoundaryReads).await;
+    let actor = loonfs_test_support::test_actor();
+    fixture
+        .namespace
+        .create_directory("/dir", &actor)
+        .await
+        .expect("the session's commit");
+    let (fold, folded) = fold_parked_before_its_record(&fixture).await;
+    let peer = peer(&fixture, &format!("{name}-peer")).await;
+    peer.open_namespace(&fixture.namespace_id)
+        .expect("open namespace")
+        .delete_path("/dir", &actor)
+        .await
+        .expect("the peer claims the namespace and deletes the directory");
+    fixture.recording.reset();
+    let refused = tokio::spawn({
+        let namespace = fixture.namespace.clone();
+        let actor = actor.clone();
+        async move { namespace.create_directory("/dir", &actor).await }
+    });
+    wait_for_head_of(&fixture, folded).await;
+    fixture.recording.inner().release();
+    bounded(WAIT, fold)
+        .await
+        .expect("the fold ends")
+        .expect("fold");
+    let refused = bounded(WAIT, refused)
+        .await
+        .expect("the refusal ends")
+        .expect("join the refusal");
+    assert_eq!(
+        refused.expect_err("the session is displaced").code(),
+        ErrorCode::WriterFenced
+    );
+    assert_eq!(
+        fixture.namespace.session_status(),
+        NamespaceSessionStatus::Fenced
+    );
+    peer.shutdown().await.expect("shut down the peer");
+}
+
+/// Checks that a window change to the window that the session's manifest
+/// already has returns `writer_fenced` when the session's check finds the
+/// session's own fold's manifest and then another writer's claim after it.
+///
+/// The window change publishes nothing, and its check's HEAD waits while the
+/// session folds and another writer claims the namespace. The check then
+/// finds the fold's manifest, which the position already follows, and the
+/// next check finds the claim, whose settle fences the session. A session
+/// that stopped settling after the first check would run the window change
+/// again on the fold's manifest, which has the window, and return it.
+#[tokio::test]
+async fn a_window_change_after_the_sessions_own_fold_and_a_claim_returns_writer_fenced() {
+    let name = "window-after-own-fold";
+    let fixture = fixture(name, Parked::ManifestChecks).await;
+    let actor = loonfs_test_support::test_actor();
+    let window = loonfs::RetentionWindow::new(2 * loonfs::GC_GRACE_WINDOW_MS).expect("window");
+    fixture
+        .namespace
+        .set_retention_window(Some(window))
+        .await
+        .expect("the window change");
+    fixture
+        .namespace
+        .create_directory("/dir", &actor)
+        .await
+        .expect("the session's commit");
+    fixture.recording.inner().block_next();
+    let change = tokio::spawn({
+        let namespace = fixture.namespace.clone();
+        async move { namespace.set_retention_window(Some(window)).await }
+    });
+    bounded(WAIT, fixture.recording.inner().wait_until_blocked())
+        .await
+        .expect("the window change's check sends its HEAD");
+    let folded = bounded(WAIT, fixture.namespace.fold_wal())
+        .await
+        .expect("the fold doesn't wait for the check")
+        .expect("fold");
+    assert_eq!(folded.outcome, loonfs::FoldWalOutcome::Published);
+    let peer = peer(&fixture, &format!("{name}-peer")).await;
+    peer.open_namespace(&fixture.namespace_id)
+        .expect("open namespace")
+        .put_file("/peer.txt", b"peer", &actor)
+        .await
+        .expect("the peer claims the namespace");
+    fixture.recording.inner().release();
+    let change = bounded(WAIT, change)
+        .await
+        .expect("the window change ends")
+        .expect("join the window change");
+    assert_eq!(
+        change.expect_err("the session is displaced").code(),
+        ErrorCode::WriterFenced
+    );
+    peer.shutdown().await.expect("shut down the peer");
+}
+
 /// A value that a session computes from its own state without a put.
 #[derive(Debug, Clone, Copy)]
 enum Unconfirmed {

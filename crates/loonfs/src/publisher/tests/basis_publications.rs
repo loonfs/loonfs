@@ -1160,13 +1160,33 @@ async fn a_confirmation_that_finds_the_sessions_own_claim_loads_the_position_wit
 /// returned only when the session's check confirms a position with the
 /// writer epoch that the session had before the unit ran.
 ///
-/// The unit's first run computes its value under the session's epoch, and
+/// Each run of the unit computes its value under the session's epoch, and
 /// then a commit's WAL put ends with an unknown outcome, which ends the
 /// epoch, and the commit's retry claims a new epoch and loads a new position.
 /// The check then confirms that new position, so the session runs the unit
-/// once more and returns the second run's value.
+/// once more. A second value that rests on the store is returned, and a
+/// second value from the session's own state, which the check doesn't
+/// confirm either, returns `store_contention` instead.
 #[tokio::test]
 async fn a_value_confirmed_under_a_newer_epoch_is_computed_again() {
+    for second_from_store in [true, false] {
+        let value = computed_twice_under_new_epochs(second_from_store).await;
+        match second_from_store {
+            true => assert_eq!(value.expect("the unit's value"), "second"),
+            false => assert_eq!(
+                value.expect_err("the second value isn't confirmed").code(),
+                crate::ErrorCode::StoreContention
+            ),
+        }
+    }
+}
+
+/// Runs a unit through [`NamespacePublisher::run_confirmed`] whose every run
+/// ends the session's epoch before it returns its value, and whose second
+/// run's value rests on the store when `second_from_store` is true, and on
+/// the session's state under the epoch that the run started with otherwise,
+/// and returns what the session returns.
+async fn computed_twice_under_new_epochs(second_from_store: bool) -> crate::Result<&'static str> {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("confirm-epoch").expect("namespace id");
     let failing = Arc::new(
@@ -1202,33 +1222,32 @@ async fn a_value_confirmed_under_a_newer_epoch_is_computed_again() {
         .await
         .expect("the session's first commit");
     let publisher = namespace.session().publisher.clone();
-    let writer_epoch = publisher
-        .current_position()
-        .expect("the session's position after its first commit")
-        .read_basis()
-        .head()
-        .writer_epoch;
     let runs = std::sync::atomic::AtomicUsize::new(0);
-    let (runs, namespace, failing) = (&runs, &namespace, &failing);
+    let (runs, namespace, failing, publisher_ref) = (&runs, &namespace, &failing, &publisher);
     let value: crate::Result<&str> = publisher
         .run_confirmed(move || async move {
-            if runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
-                return Ok(UnitReport::from_store("second"));
-            }
+            let writer_epoch = publisher_ref
+                .current_position()
+                .expect("the session's position before the run")
+                .read_basis()
+                .head()
+                .writer_epoch;
+            let session = UnitBasis::Session { writer_epoch };
+            let (name, value, basis) = match runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            {
+                0 => ("unknown", "first", session),
+                _ if second_from_store => ("unknown-again", "second", UnitBasis::Store),
+                _ => ("unknown-again", "second", session),
+            };
             failing.fail_next(1);
             namespace
-                .commit_candidate(CommitCandidate::new(create_directory_request(
-                    "unknown", "unknown",
-                )))
+                .commit_candidate(CommitCandidate::new(create_directory_request(name, name)))
                 .await
                 .expect("the commit's retry claims and replays its receipt");
-            Ok(UnitReport {
-                value: "first",
-                basis: UnitBasis::Session { writer_epoch },
-            })
+            Ok(UnitReport { value, basis })
         })
         .await;
-    assert_eq!(value.expect("the unit's value"), "second");
     assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 2);
     writer.shutdown().await.expect("shut down writer");
+    value
 }

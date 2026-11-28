@@ -73,12 +73,22 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// fails, the call returns that read's error, and the session keeps its
     /// epoch, so the next publication of the lane puts at the same number,
     /// loses, and reads the winner.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `turn` is a turn of another namespace's lane, which is a
+    /// bug in the calling process.
     pub(crate) async fn publish_manifest_in_turn(
         &self,
         turn: LaneTurn<'_>,
         payload: NamespaceManifestPayload,
         clock: &OperationClock,
     ) -> Result<Held<LoadedManifest>> {
+        assert_eq!(
+            turn.basis().manifest().payload().namespace_id,
+            self.namespace_id,
+            "a publication takes a turn of its own namespace's publication lane"
+        );
         let outcome = turn
             .epoch(self)
             .send_put(self.publish_manifest_from(payload, clock, Some(turn.basis())))

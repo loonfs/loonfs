@@ -192,9 +192,11 @@ impl AdmittedMaintenance<'_> {
     /// of the session's position (see
     /// [`NamespacePublisher::run_from_position`]), confirmed before the call
     /// returns it (see [`NamespacePublisher::run_confirmed`]), or `newest`, a
-    /// fresh read of the newest manifest, for a session without a position,
-    /// which claims nothing. The load publishes nothing, so it takes no turn
-    /// in the session's publication lane.
+    /// fresh read of the newest manifest, for a session without a position
+    /// and when the check doesn't confirm the position, unless the check
+    /// found the session fenced, which returns `writer_fenced`. The load
+    /// claims nothing, and it publishes nothing, so it takes no turn in the
+    /// session's publication lane.
     pub(crate) async fn load_confirmed<T, Fut>(
         &self,
         from_position: impl Fn(WriterPosition) -> Fut,
@@ -208,19 +210,29 @@ impl AdmittedMaintenance<'_> {
             return newest.await;
         }
         let from_position = &from_position;
+        let mut newest = Some(newest);
+        let mut first = true;
         publisher
-            .run_confirmed(move || async move {
-                let (value, writer_epoch) = publisher
-                    .run_from_position(|position| {
-                        let writer_epoch = position.read_basis().head().writer_epoch;
-                        let value = from_position(position);
-                        async move { Ok((value.await?, writer_epoch)) }
+            .run_confirmed(move || {
+                let newest = if first { None } else { newest.take() };
+                first = false;
+                async move {
+                    if let Some(newest) = newest {
+                        drop(publisher.live_session()?);
+                        return Ok(UnitReport::from_store(newest.await?));
+                    }
+                    let (value, writer_epoch) = publisher
+                        .run_from_position(|position| {
+                            let writer_epoch = position.read_basis().head().writer_epoch;
+                            let value = from_position(position);
+                            async move { Ok((value.await?, writer_epoch)) }
+                        })
+                        .await?;
+                    Ok(UnitReport {
+                        value,
+                        basis: UnitBasis::Session { writer_epoch },
                     })
-                    .await?;
-                Ok(UnitReport {
-                    value,
-                    basis: UnitBasis::Session { writer_epoch },
-                })
+                }
             })
             .await
     }

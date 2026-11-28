@@ -359,6 +359,61 @@ async fn a_fold_moves_the_read_position_before_the_engine_is_released() {
     writer.shutdown().await.expect("shutdown");
 }
 
+/// Checks that a settle of a position that already follows a newer
+/// manifest of the session returns at once, without a request, while a
+/// commit keeps the engine and a long publication keeps the lane.
+///
+/// The test keeps the engine, as a commit's WAL put does, while the fold
+/// records its manifest, so only the position that reads start from follows
+/// the fold's manifest. The test then keeps the lane, as a publication of the
+/// lane does, and settles the manifest that the position had before the
+/// fold, as a read whose check found the fold's manifest before its record
+/// does.
+#[tokio::test]
+async fn a_settle_of_a_position_that_follows_a_newer_manifest_waits_for_nothing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let (writer, namespace) = published_namespace(recording.clone() as SharedStore).await;
+    let namespace_id = namespace.id().clone();
+    let replaced = writer
+        .core
+        .writer_position(&namespace_id)
+        .expect("a position after a commit")
+        .read_basis()
+        .basis()
+        .manifest_no();
+    let publisher = namespace.session().publisher.clone();
+    let engine = publisher.lock_engine().await;
+    let folded = bounded(Duration::from_secs(10), namespace.fold_wal())
+        .await
+        .expect("the fold doesn't wait for the engine")
+        .expect("fold");
+    assert_eq!(folded.outcome, FoldWalOutcome::Published);
+    let lane = publisher.lock_lane().await;
+    recording.reset();
+    bounded(
+        Duration::from_secs(10),
+        publisher.settle_replaced_position(replaced),
+    )
+    .await
+    .expect("the settle waits for neither the lane nor the engine")
+    .expect("settle");
+    assert_eq!(recording.take(), [], "the settle loads nothing");
+    assert_eq!(
+        writer
+            .core
+            .writer_position(&namespace_id)
+            .map(|position| position.read_basis().basis().manifest_no()),
+        Some(folded.manifest_no)
+    );
+    drop(lane);
+    drop(engine);
+    writer.shutdown().await.expect("shutdown");
+}
+
 /// Checks that a position that reads start from, and that can't follow the
 /// session's status, is removed by the first read while the session's
 /// engine is idle, so later reads find no position to move.

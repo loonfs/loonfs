@@ -35,15 +35,29 @@ fn two_fold_store(root: &Path) -> Arc<TwoFoldStore> {
     ))
 }
 
-/// Returns an unpaced standalone publisher of a new namespace in `store`
-/// whose session committed one directory at sequence 1, which is unfolded.
+/// The unpaced writer runtime and the open namespace whose session a
+/// deletion test drives, which the test keeps alive.
+struct SeededSession {
+    _writer: crate::LoonFs<crate::Writable>,
+    _namespace: crate::Namespace<crate::Writable>,
+}
+
+/// Returns the session's publisher of a new namespace in `store`, in an
+/// unpaced writer runtime, whose session committed one directory at
+/// sequence 1, which is unfolded. The session is in its runtime's table,
+/// so the session's check finds it, as it does for a refusal that a
+/// deletion computes from the session's position.
 async fn seeded_publisher(
     store: SharedStore,
     namespace_id: &NamespaceId,
-) -> (TestRuntime, NamespacePublisher) {
-    let runtime = test_runtime(store);
-    create_namespace(&runtime, namespace_id).await;
-    let publisher = standalone_publisher_with(namespace_id, &runtime, TestCore::unpaced());
+) -> (SeededSession, NamespacePublisher) {
+    let writer = test_writer_with_interval(store, 0).await;
+    writer
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    let publisher = namespace.session().publisher.clone();
     let seed = recv_commit(
         admit_commit(
             &publisher,
@@ -54,7 +68,13 @@ async fn seeded_publisher(
     )
     .await;
     assert_eq!(seed.committed_seq, CommitSeq(1));
-    (runtime, publisher)
+    (
+        SeededSession {
+            _writer: writer,
+            _namespace: namespace,
+        },
+        publisher,
+    )
 }
 
 /// Folds the session's tail, so a deletion's ordinary fold finds nothing to
@@ -134,7 +154,7 @@ async fn a_deletion_folds_while_commits_continue_and_pauses_only_for_what_arrive
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = two_fold_store(directory.path());
-    let (_runtime, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
+    let (_seeded, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
 
     store.block_next();
     store.inner().block_next();
@@ -185,7 +205,7 @@ async fn a_deletion_checks_its_expected_head_once_commits_are_paused() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = two_fold_store(directory.path());
-    let (_runtime, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
+    let (_seeded, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
 
     store.block_next();
     let delete = spawn_delete(
@@ -228,7 +248,7 @@ async fn a_commit_in_flight_at_the_pause_is_settled_before_the_head_check() {
         LocalFsStore::new(directory.path()).expect("store"),
         is_commit_put,
     ));
-    let (_runtime, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
+    let (_seeded, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
     fold_the_tail(&publisher).await;
 
     store.block_next();
@@ -272,7 +292,7 @@ async fn the_tombstone_is_published_with_commits_still_paused() {
         ),
         |operation| is_fold_at(operation, CommitSeq(1)),
     ));
-    let (_runtime, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
+    let (_seeded, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
 
     store.block_next();
     store.inner().block_next();
@@ -329,7 +349,7 @@ async fn a_deletion_whose_session_loses_its_epoch_at_the_pause_claims_and_return
         .apply_then_fail(),
         is_commit_put,
     ));
-    let (_runtime, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
+    let (_seeded, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
     fold_the_tail(&publisher).await;
     let epoch_before = newest_manifest(store.as_ref(), &namespace_id)
         .await
@@ -390,7 +410,7 @@ async fn a_failed_first_fold_leaves_the_namespace_active() {
         },
         InjectedError::PermissionDenied("segment puts refused".to_owned()),
     ));
-    let (_runtime, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
+    let (_seeded, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
 
     store.fail_all();
     let failed = settle_delete(
@@ -422,7 +442,7 @@ async fn a_deletion_deletes_acknowledged_commits_and_refuses_those_still_queued(
         LocalFsStore::new(directory.path()).expect("store"),
         is_commit_put,
     ));
-    let (_runtime, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
+    let (_seeded, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
     fold_the_tail(&publisher).await;
 
     store.block_next();
@@ -502,7 +522,7 @@ async fn a_unit_that_finds_the_tombstone_after_an_unknown_tombstone_put_ends_the
         ),
         KeyPredicate::any(),
     ));
-    let (_runtime, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
+    let (_seeded, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
     fold_the_tail(&publisher).await;
 
     store.inner().fail_next(1);
@@ -553,7 +573,7 @@ async fn a_deletion_dropped_during_its_ordinary_fold_leaves_nothing_locked() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = Arc::new(HeldFoldAnswer::new(directory.path(), &namespace_id));
-    let (_runtime, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
+    let (_seeded, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
 
     store.hold_next();
     let delete = spawn_delete(&publisher, DeleteNamespaceOptions::default());
@@ -588,7 +608,7 @@ async fn a_deletion_dropped_during_its_tombstone_put_ends_the_session_once_a_uni
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = Arc::new(HeldFoldAnswer::new(directory.path(), &namespace_id));
-    let (_runtime, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
+    let (_seeded, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
     fold_the_tail(&publisher).await;
 
     store.hold_next();
@@ -669,7 +689,7 @@ async fn a_stale_deletion_on_a_session_without_an_epoch_folds_once() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store")) as SharedStore;
-    let (_runtime, _seeded) = seeded_publisher(store.clone(), &namespace_id).await;
+    let (_seeded, _publisher) = seeded_publisher(store.clone(), &namespace_id).await;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = test_writer_with_cache(store, MetadataCache::default(), recorder.clone()).await;
     let namespace = writer.open_namespace(&namespace_id).expect("open");
@@ -712,7 +732,7 @@ async fn work_queued_after_a_deletion_returns_namespace_deleted_without_a_reques
         ),
         KeyPredicate::any(),
     ));
-    let (_runtime, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
+    let (_seeded, publisher) = seeded_publisher(store.clone() as SharedStore, &namespace_id).await;
     fold_the_tail(&publisher).await;
 
     store.inner().block_next();

@@ -13,6 +13,7 @@ mod expired_subtrees;
 pub(crate) mod extensions;
 mod index_parity;
 pub(crate) mod inspection_state;
+mod lane_turns;
 mod manifest_gc_races;
 mod manifest_round_trips;
 mod merges;

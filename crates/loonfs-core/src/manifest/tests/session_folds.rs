@@ -7,22 +7,28 @@ use crate::publish::InlineContent;
 use crate::FoldWalOutcome;
 use loonfs_types::{ContentId, WalNo, WriterEpoch};
 
-struct Writer {
+pub(super) struct Writer {
     _directory: tempfile::TempDir,
-    store: Arc<RecordingStore<LocalFsStore>>,
-    engine: NamespaceCommitEngine<Arc<RecordingStore<LocalFsStore>>>,
-    context: WriterAt,
-    namespace_id: NamespaceId,
+    pub(super) store: Arc<RecordingStore<LocalFsStore>>,
+    pub(super) engine: NamespaceCommitEngine<Arc<RecordingStore<LocalFsStore>>>,
+    pub(super) context: WriterAt,
+    pub(super) namespace_id: NamespaceId,
 }
 
 impl Writer {
     async fn open() -> Self {
+        Self::open_namespace("fold-race").await
+    }
+
+    /// Creates the namespace `namespace` in a new store, and returns a
+    /// writer session of it that hasn't claimed yet.
+    pub(super) async fn open_namespace(namespace: &str) -> Self {
         let directory = tempdir().expect("directory");
         let store = Arc::new(RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::any(),
         ));
-        let namespace_id = NamespaceId::parse("fold-race").expect("namespace");
+        let namespace_id = NamespaceId::parse(namespace).expect("namespace");
         let context = test_context();
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
             .create()
@@ -41,7 +47,7 @@ impl Writer {
     }
 
     /// Commits `operations`, then one inline file at each of `files`.
-    async fn commit(
+    pub(super) async fn commit(
         &mut self,
         commit_id: &str,
         mut operations: Vec<FilesystemOperation>,
@@ -85,7 +91,7 @@ impl Writer {
     }
 }
 
-fn deadline() -> OperationClock {
+pub(super) fn deadline() -> OperationClock {
     OperationClock::start(0, Arc::new(StdMonotonicTimer::default()))
 }
 

@@ -3376,6 +3376,65 @@ async fn garbage_collection_leaves_the_writer_tail() {
     writer.shutdown().await.expect("shutdown");
 }
 
+/// Checks that a mutation outside the namespace's writer session, such as a
+/// create, a fork or a change to a snapshot, whose result is a stale basis or
+/// a fence drops the namespace's cached head, so the next read loads the
+/// namespace from the store, and that another error keeps the cached head.
+#[tokio::test]
+async fn a_mutation_that_finds_a_stale_basis_or_a_fence_drops_the_cached_head() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let writer = test_writer(store).await;
+    let fence = CoreError::WriterFenced(crate::WriterFence {
+        fenced_epoch: loonfs_types::WriterEpoch(1),
+        active_epoch: loonfs_types::WriterEpoch(2),
+        active_writer: loonfs_types::format::control::WriterBlock {
+            writer_id: loonfs_test_support::ids::writer_id("writer-b"),
+            acquired_at_ms: 2_000,
+        },
+    });
+    let cases = [
+        (
+            "stale-basis",
+            CoreError::HeadMoved("a newer manifest".to_owned()),
+            true,
+        ),
+        ("fence", fence, true),
+        (
+            "other",
+            CoreError::PathNotFound("/missing".to_owned()),
+            false,
+        ),
+    ];
+    for (name, error, dropped) in cases {
+        let namespace_id = NamespaceId::parse(name).expect("valid namespace id");
+        writer
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+            .await
+            .expect("create namespace");
+        let reader = writer.read_only().namespace(&namespace_id);
+        reader.stat("/").await.expect("stat the root");
+        let cached = || {
+            writer
+                .core
+                .head_and_wal_tail_cache()
+                .get_head(&namespace_id)
+                .is_some()
+        };
+        assert!(cached(), "{name}: the read caches the head");
+        let code = error.code();
+        let finished: crate::Result<()> = writer
+            .mode
+            .publisher
+            .finish_namespace_mutation(&namespace_id, Err(error.into()));
+        assert_eq!(finished.expect_err("the mutation's error").code(), code);
+        assert_eq!(cached(), !dropped, "{name}");
+        reader.stat("/").await.expect("the next read");
+        assert!(cached(), "{name}: the next read loads the head");
+    }
+    writer.shutdown().await.expect("shutdown");
+}
+
 /// Creates a writer whose store records the WAL requests of `namespace_id`,
 /// and whose eventual reads take a head that was confirmed less than the
 /// revalidation bound ago, so a read sends no request to confirm it.

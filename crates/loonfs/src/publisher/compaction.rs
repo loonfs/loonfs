@@ -12,8 +12,9 @@ use tracing::Instrument;
 
 /// Abandoned compaction units in a row after which
 /// [`NamespacePublisher::compact_namespace`] stops, so a loop whose units
-/// keep finding their inputs replaced or their segments missing, or keep
-/// passing their time bound, can't spin.
+/// keep passing their time bound, such as over a slow store, can't run
+/// without end. The next unit plans the same window from the same position,
+/// so a unit that passed its time bound is likely to pass it again.
 const MAX_LOST_COMPACTION_RACES: usize = 3;
 
 /// Compaction units that one call of [`NamespacePublisher::compact_namespace`]

@@ -218,9 +218,18 @@ async fn a_retry_of_a_merge_in_flight_returns_the_merge() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("main").expect("namespace");
     let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let runtime = test_runtime(store);
-    create_namespace(&runtime, &namespace_id).await;
-    let publisher = standalone_publisher_with(&namespace_id, &runtime, TestCore::unpaced());
+    // The range check's refusal is computed from the session's position, so
+    // the session's check has to find the session in its runtime, which a
+    // standalone publisher isn't registered in.
+    let writer = test_writer_with_interval(store, 0).await;
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let publisher = namespace.session().publisher.clone();
 
     let mut first = Box::pin(submit_merge(&publisher, merge("merge", "merged")));
     assert!(
