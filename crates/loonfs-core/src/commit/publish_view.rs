@@ -18,7 +18,7 @@ use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
 use crate::Permits;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{CommitId, CommitSeq};
+use loonfs_types::CommitId;
 use std::sync::Arc;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
@@ -112,7 +112,11 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     }
 
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(self.head(), &self.manifest_segments, &self.position.tail)
+        MetadataView::over_loaded_basis(
+            &self.manifest_segments,
+            &self.position.tail,
+            self.head().seq,
+        )
     }
 
     pub(crate) fn wal_tail(&self) -> &ProjectedWalTail {
@@ -184,13 +188,6 @@ impl WriterPosition {
     /// position changed.
     pub fn merge_check<M: HeldManifestForm>(&mut self, check: &Held<M>) -> bool {
         self.basis.merge(check)
-    }
-
-    /// Returns the position's retention floor, which the checks of a restore
-    /// and the merge floor rule read: the basis manifest's floor, raised by the
-    /// floor objects in the position's WAL tail.
-    pub fn retention_floor_seq(&self) -> CommitSeq {
-        self.read_basis().head.retention_floor_seq
     }
 
     /// Returns the number of unfolded WAL objects at the position's head,

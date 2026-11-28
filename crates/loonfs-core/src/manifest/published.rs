@@ -13,12 +13,13 @@ use std::sync::Arc;
 /// the same number, to the same commit. `head` is a head above `basis`, so
 /// it has the basis's folded WAL number and writer epoch.
 ///
-/// Such a manifest is a compaction, a retention window change, or an
-/// extension's publication over `basis`, or several of them, because another
-/// writer's claim changes the writer epoch, a fold changes the folded WAL
-/// number, and a tombstone changes the status. Those three publications copy
-/// every field of their predecessor
-/// that replay reads (`head_seq` and `folded_wal_no`), and they keep
+/// Such a manifest is a compaction, a retention window change, an
+/// extension's publication, or a retention advance's manifest that folds
+/// nothing, over `basis`, or several of them, because another writer's claim
+/// changes the writer epoch, a fold changes the folded WAL number, and a
+/// tombstone changes the status. Those four publications copy every field of
+/// their predecessor that replay reads (`head_seq` and `folded_wal_no`), and
+/// they keep
 /// whether the manifest lists runs. Replay adds the root directory above a
 /// manifest that lists no runs. So the WAL tail projected above `basis` is
 /// also the tail above `manifest`. (A compaction needs runs to
@@ -57,12 +58,12 @@ pub(crate) fn same_head(
 /// instead of cutting it.
 ///
 /// A fold that folds past the head's WAL number covered a WAL object that
-/// the head hasn't read, such as another process's floor object. Moving onto
-/// it would leave the head's WAL number below its folded WAL number, which
-/// the tail and the head's count of unfolded WAL objects assume never
-/// happens, so the head can't move onto it, whichever process published the
-/// fold (format spec, "Replaying the visible WAL"). The head that moves
-/// keeps the higher of its own retention floor and the manifest's.
+/// the head hasn't read. Moving onto it would leave the head's WAL number
+/// below its folded WAL number, which the tail and the head's count of
+/// unfolded WAL objects assume never happens, so the head can't move onto
+/// it, whichever process published the fold (format spec, "Replaying the
+/// visible WAL"). The head that moves has the manifest's retention floor,
+/// because a view's floor is its manifest's.
 ///
 /// The rule doesn't depend on whether this runtime or another process
 /// published the manifest, or on the order in which manifests arrive.
@@ -97,8 +98,6 @@ pub(crate) fn move_read_basis(
             head.folded_wal_no = payload.folded_wal_no;
             *tail = Arc::new(after);
         }
-        head.retention_floor_seq = head.retention_floor_seq.max(payload.retention_floor_seq);
-        head.manifest_retention_floor_seq = payload.retention_floor_seq;
         *basis = MetadataBasis::new(loaded.manifest());
     }
     held.merge(manifest);

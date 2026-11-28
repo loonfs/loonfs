@@ -101,8 +101,9 @@ pub(crate) fn created_namespace(manifest: &NamespaceManifestPayload) -> Namespac
     namespace_metadata(NamespaceReadState::from(manifest), manifest)
 }
 
-/// Combines the head, whose retention floor is the view's, with the retention
-/// window of `manifest`, which is the current manifest below that head.
+/// Combines the head with the retention floor and the retention window of
+/// `manifest`, the manifest below that head. A view's floor is its
+/// manifest's floor.
 fn namespace_metadata(
     head: NamespaceReadState,
     manifest: &NamespaceManifestPayload,
@@ -114,7 +115,7 @@ fn namespace_metadata(
         pool_id: head.pool_id,
         namespace_id: head.namespace_id,
         head_seq: head.seq,
-        retention_floor_seq: head.retention_floor_seq,
+        retention_floor_seq: manifest.retention_floor_seq,
         retention_window_ms: manifest.retention_window_ms.map(NonZeroU64::get),
     }
 }
@@ -128,7 +129,7 @@ impl From<&NamespaceReadAnchor> for NamespaceStorageDiagnostics {
             created_by: head.created_by.clone(),
             fork_basis: fork_basis(head.fork_basis.clone()),
             head_seq: head.seq,
-            retention_floor_seq: anchor.retention_floor_seq(),
+            retention_floor_seq: anchor.current_manifest().retention_floor_seq(),
             current_manifest_no: anchor.current_manifest().manifest().manifest_no,
             wal_tail_objects: head.unfolded_wal_objects(),
             wal_tail_oldest_commit_at_ms: anchor.tail.oldest_commit_at_ms(),

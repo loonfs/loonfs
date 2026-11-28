@@ -105,7 +105,7 @@ impl ValidatedWalTail {
             .iter()
             .flat_map(|object| match &object.envelope().payload().body {
                 WalObjectBody::Commits(commits) => &commits[..],
-                WalObjectBody::Fence | WalObjectBody::Floor { .. } => &[],
+                WalObjectBody::Fence => &[],
             })
             .map(|commit| commit.committed_at_ms)
             .min()
@@ -131,7 +131,7 @@ impl ValidatedWalTail {
                 WalObjectBody::Commits(commits) => {
                     super::projected_tail::inline_piece_bytes(commits)
                 }
-                WalObjectBody::Fence | WalObjectBody::Floor { .. } => 0,
+                WalObjectBody::Fence => 0,
             })
             .sum()
     }

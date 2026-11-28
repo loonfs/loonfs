@@ -608,9 +608,8 @@ impl MetadataState {
 impl MetadataVisibilityReads for MetadataStateReads<'_> {
     type Error = VisiblePathError;
 
-    /// In-memory state has no manifest and no floor object, so like a new
-    /// namespace's first manifest, it has a floor of 0 and no deletion in it
-    /// has expired.
+    /// In-memory state has no manifest, so like a new namespace's first
+    /// manifest, it has a floor of 0 and no deletion in it has expired.
     fn retention_floor_seq(&self) -> CommitSeq {
         CommitSeq(0)
     }

@@ -49,7 +49,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
             visible_seq <= head.seq,
             "a read context should read at or below its head"
         );
-        let retention_floor_seq = head.retention_floor_seq;
+        let retention_floor_seq = loaded_basis
+            .segments
+            .manifest()
+            .payload()
+            .retention_floor_seq;
         if visible_seq < retention_floor_seq {
             return Err(CoreError::BelowRetentionFloor {
                 below: HistoryPosition::ReadSeq {
@@ -136,10 +140,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         self.visible_seq
     }
 
-    /// Returns the view's retention floor, the head's (format spec,
-    /// "Replaying the visible WAL").
+    /// Returns the view's retention floor, which is its manifest's
+    /// `retention_floor_seq` (format spec, "Replaying the visible WAL").
     pub(crate) fn retention_floor_seq(&self) -> CommitSeq {
-        self.head.retention_floor_seq
+        self.segments.manifest().payload().retention_floor_seq
     }
 
     #[cfg(test)]
@@ -211,12 +215,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::over_loaded_basis(
-            &self.head,
-            &self.segments,
-            &self.wal_tail,
-            self.visible_seq,
-        )
+        MetadataView::over_loaded_basis(&self.segments, &self.wal_tail, self.visible_seq)
     }
 
     /// Returns the view of this basis at `visible_seq`, a retained sequence
@@ -226,7 +225,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             visible_seq <= self.head.seq,
             "a view of a loaded basis should be at or below the basis's head"
         );
-        MetadataView::over_loaded_basis(&self.head, &self.segments, &self.wal_tail, visible_seq)
+        MetadataView::over_loaded_basis(&self.segments, &self.wal_tail, visible_seq)
     }
 }
 

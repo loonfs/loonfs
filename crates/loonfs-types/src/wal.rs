@@ -69,15 +69,6 @@ pub enum WalCodecError {
         /// Format rule violated by the merge record.
         reason: &'static str,
     },
-    /// Reports a floor object with records, or with a retention floor above
-    /// its `head_seq`.
-    #[error("invalid WAL floor object `{wal_no}`: {reason}")]
-    InvalidWalFloorObject {
-        /// The rejected WAL object's number.
-        wal_no: WalNo,
-        /// Format rule violated by the floor object.
-        reason: &'static str,
-    },
 }
 
 /// Version 1: a zstd-compressed CBOR envelope document that contains the payload as
@@ -103,8 +94,8 @@ pub const MAX_WAL_INLINE_CONTENT_BYTES: usize = 256 * 1024;
 pub const MAX_WAL_OBJECT_INLINE_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Upper bound for the document of a WAL object with no records: the envelope
-/// fields and a payload with the longest namespace ID, four integers, an
-/// empty record list and a retention floor.
+/// fields and a payload with the longest namespace ID, four integers and an
+/// empty record list.
 const RECORDLESS_WAL_DOCUMENT_BYTES: usize = cbor_map_bytes(&[
     (
         "kind",
@@ -119,25 +110,23 @@ const RECORDLESS_WAL_DOCUMENT_BYTES: usize = cbor_map_bytes(&[
     ("writer_epoch", 9),
     ("head_seq", 9),
     ("records", 9),
-    ("retention_floor_seq", 9),
 ]);
 
-/// Largest stored size of a fence or a floor object, which is zstd's
-/// compression bound for [`RECORDLESS_WAL_DOCUMENT_BYTES`].
+/// Largest stored size of a fence, which is zstd's compression bound for
+/// [`RECORDLESS_WAL_DOCUMENT_BYTES`].
 ///
 /// A WAL object with records is stored in more bytes than this, because the
 /// encoder pads one that would otherwise be stored in this many bytes or
-/// fewer. A collection tells a fence or a floor object from a commit object
-/// by its listed size alone
+/// fewer. A collection tells a fence from a commit object by its listed size
+/// alone
 /// ([Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records)).
-pub const MAX_FENCE_OR_FLOOR_OBJECT_BYTES: usize =
-    zstd_compress_bound(RECORDLESS_WAL_DOCUMENT_BYTES);
+pub const MAX_FENCE_BYTES: usize = zstd_compress_bound(RECORDLESS_WAL_DOCUMENT_BYTES);
 
 /// Upper bound for the document and payload fields outside commit records,
 /// the longest padding included.
 pub const WAL_OBJECT_OVERHEAD_BYTES: usize = RECORDLESS_WAL_DOCUMENT_BYTES
     + cbor_string_bytes("padding".len())
-    + cbor_string_bytes(MAX_FENCE_OR_FLOOR_OBJECT_BYTES + 1);
+    + cbor_string_bytes(MAX_FENCE_BYTES + 1);
 
 /// Returns zstd's bound on the compressed size of `length` input bytes, as
 /// the `ZSTD_COMPRESSBOUND` macro in `zstd.h` defines it.
@@ -531,28 +520,22 @@ pub struct WalObjectPayload {
 }
 
 impl WalObjectPayload {
-    /// Returns the WAL object's commits. A fence and a floor object have none.
+    /// Returns the WAL object's commits. A fence has none.
     pub fn records(&self) -> &[WalCommitPayload] {
         match &self.body {
             WalObjectBody::Commits(commits) => commits,
-            WalObjectBody::Fence | WalObjectBody::Floor { .. } => &[],
+            WalObjectBody::Fence => &[],
         }
     }
 }
 
-/// Lists the three kinds of WAL object and what each one contains.
+/// Lists the two kinds of WAL object and what each one contains.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WalObjectBody {
     /// A data WAL object, which contains one or more commits.
     Commits(WalCommits),
     /// A fence, which contains no commits and leaves the head unchanged.
     Fence,
-    /// A floor object, which records a retention floor at or below its
-    /// `head_seq` and leaves the head unchanged.
-    Floor {
-        /// The retention floor that the floor object records.
-        retention_floor_seq: CommitSeq,
-    },
 }
 
 /// The commits of a data WAL object: at least one, in contiguous ascending
@@ -597,8 +580,7 @@ impl std::ops::DerefMut for WalCommits {
 }
 
 /// Lists the CBOR fields of a stored WAL object's payload. `records` is
-/// empty in a fence and a floor object, and `retention_floor_seq` appears
-/// only in a floor object.
+/// empty in a fence.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WalPayloadDocument<'a> {
@@ -607,8 +589,6 @@ struct WalPayloadDocument<'a> {
     writer_epoch: WriterEpoch,
     head_seq: CommitSeq,
     records: Cow<'a, [WalCommitPayload]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    retention_floor_seq: Option<CommitSeq>,
 }
 
 impl<'a> From<&'a WalObjectPayload> for WalPayloadDocument<'a> {
@@ -619,41 +599,23 @@ impl<'a> From<&'a WalObjectPayload> for WalPayloadDocument<'a> {
             writer_epoch: payload.writer_epoch,
             head_seq: payload.head_seq,
             records: Cow::Borrowed(payload.records()),
-            retention_floor_seq: match payload.body {
-                WalObjectBody::Floor {
-                    retention_floor_seq,
-                } => Some(retention_floor_seq),
-                WalObjectBody::Commits(_) | WalObjectBody::Fence => None,
-            },
         }
     }
 }
 
-impl TryFrom<WalPayloadDocument<'_>> for WalObjectPayload {
-    type Error = WalCodecError;
-
-    fn try_from(document: WalPayloadDocument<'_>) -> Result<Self, WalCodecError> {
-        let commits = WalCommits::new(document.records.into_owned());
-        let body = match (commits, document.retention_floor_seq) {
-            (Some(commits), None) => WalObjectBody::Commits(commits),
-            (None, None) => WalObjectBody::Fence,
-            (None, Some(retention_floor_seq)) => WalObjectBody::Floor {
-                retention_floor_seq,
-            },
-            (Some(_), Some(_)) => {
-                return Err(WalCodecError::InvalidWalFloorObject {
-                    wal_no: document.wal_no,
-                    reason: "a floor object has no records",
-                })
-            }
+impl From<WalPayloadDocument<'_>> for WalObjectPayload {
+    fn from(document: WalPayloadDocument<'_>) -> Self {
+        let body = match WalCommits::new(document.records.into_owned()) {
+            Some(commits) => WalObjectBody::Commits(commits),
+            None => WalObjectBody::Fence,
         };
-        Ok(Self {
+        Self {
             namespace_id: document.namespace_id.into_owned(),
             wal_no: document.wal_no,
             writer_epoch: document.writer_epoch,
             head_seq: document.head_seq,
             body,
-        })
+        }
     }
 }
 
@@ -674,7 +636,7 @@ struct WalObjectDocument {
     #[serde(with = "serde_bytes")]
     payload: Vec<u8>,
     /// Bytes that keep a commit object's stored size above
-    /// [`MAX_FENCE_OR_FLOOR_OBJECT_BYTES`], left out when the object is
+    /// [`MAX_FENCE_BYTES`], left out when the object is
     /// larger without them. `payload_checksum` doesn't cover them, and
     /// readers ignore their content.
     #[serde(default, with = "serde_bytes", skip_serializing_if = "Option::is_none")]
@@ -702,7 +664,7 @@ pub(crate) fn encode_wal_payload_cbor(
 
 /// Encodes a WAL payload once, then checksums and compresses its durable document.
 ///
-/// A commit object that would be stored in [`MAX_FENCE_OR_FLOOR_OBJECT_BYTES`]
+/// A commit object that would be stored in [`MAX_FENCE_BYTES`]
 /// or fewer gets padding until its stored size is above that bound.
 pub fn encode_wal_object_envelope_zstd(
     payload: WalObjectPayload,
@@ -726,8 +688,8 @@ pub fn encode_wal_object_envelope_zstd(
         let bytes = envelope::compress_document(&encoded)?;
         let padding_bytes = document.padding.as_ref().map_or(0, Vec::len);
         if !matches!(payload.body, WalObjectBody::Commits(_))
-            || bytes.len() > MAX_FENCE_OR_FLOOR_OBJECT_BYTES
-            || padding_bytes > MAX_FENCE_OR_FLOOR_OBJECT_BYTES
+            || bytes.len() > MAX_FENCE_BYTES
+            || padding_bytes > MAX_FENCE_BYTES
         {
             return Ok(crate::envelope::EncodedEnvelope {
                 envelope: crate::envelope::VerifiedEnvelope {
@@ -738,8 +700,8 @@ pub fn encode_wal_object_envelope_zstd(
                 document_bytes: encoded.len(),
             });
         }
-        let padding_bytes = (padding_bytes + MAX_FENCE_OR_FLOOR_OBJECT_BYTES + 1 - bytes.len())
-            .min(MAX_FENCE_OR_FLOOR_OBJECT_BYTES + 1);
+        let padding_bytes =
+            (padding_bytes + MAX_FENCE_BYTES + 1 - bytes.len()).min(MAX_FENCE_BYTES + 1);
         document.padding = Some(wal_object_padding(&payload_checksum, padding_bytes));
     }
 }
@@ -793,7 +755,7 @@ fn decode_wal_object_envelope_zstd_with_limit(
     envelope::verify_payload_checksum(&document.payload_checksum, &document.payload)?;
     let payload_document: WalPayloadDocument = from_reader(document.payload.as_slice())
         .map_err(|err| EnvelopeCodecError::PayloadDecode(err.to_string()))?;
-    let payload = WalObjectPayload::try_from(payload_document)?;
+    let payload = WalObjectPayload::from(payload_document);
     validate_wal_payload(&payload)?;
 
     Ok(WalObjectEnvelope {
@@ -806,8 +768,7 @@ fn validate_wal_payload(payload: &WalObjectPayload) -> Result<(), WalCodecError>
     validate_wal_inline_content(payload)?;
     validate_wal_revision_layouts(payload)?;
     validate_wal_bind_revisions(payload)?;
-    validate_wal_merges(payload)?;
-    validate_wal_floor_object(payload)
+    validate_wal_merges(payload)
 }
 
 fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
@@ -1014,20 +975,6 @@ fn validate_wal_merges(payload: &WalObjectPayload) -> Result<(), WalCodecError> 
         }
     }
     Ok(())
-}
-
-/// Requires a floor object's retention floor to be at or below its
-/// `head_seq`.
-fn validate_wal_floor_object(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
-    match payload.body {
-        WalObjectBody::Floor {
-            retention_floor_seq,
-        } if retention_floor_seq > payload.head_seq => Err(WalCodecError::InvalidWalFloorObject {
-            wal_no: payload.wal_no,
-            reason: "`retention_floor_seq` is above `head_seq`",
-        }),
-        WalObjectBody::Commits(_) | WalObjectBody::Fence | WalObjectBody::Floor { .. } => Ok(()),
-    }
 }
 
 #[cfg(test)]

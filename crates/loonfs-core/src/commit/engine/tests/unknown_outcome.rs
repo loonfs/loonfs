@@ -1,5 +1,5 @@
 //! A writer session after a put whose outcome is unknown: a commit's WAL
-//! put, a floor object's put, or a manifest put of its publication lane.
+//! put or a manifest put of its publication lane.
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};

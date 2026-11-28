@@ -548,14 +548,11 @@ fn gc_summaries_report_counts_retention_namespace_retirement_and_skipped_pool_wo
         "{summary}"
     );
     for _ in 0..5 {
-        pass.retain(RetainedReason::FencesAndFloorObjects);
+        pass.retain(RetainedReason::Fences);
     }
     let summary = gc_summary(&pass);
     assert!(summary.contains("(10 retained)"), "{summary}");
-    assert!(
-        summary.contains("mostly fences_and_floor_objects: 5"),
-        "{summary}"
-    );
+    assert!(summary.contains("mostly fences: 5"), "{summary}");
 
     pass.retires_at_ms = Some(1_700_000_000_000);
     for next in [

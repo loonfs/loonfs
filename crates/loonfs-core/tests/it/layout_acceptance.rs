@@ -261,9 +261,9 @@ async fn maintenance_preserves_the_logical_head() {
         .load_read_state()
         .await
         .expect("namespace state");
-    // A retention advance creates a floor object and claims no epoch
-    // (format spec, "Advancing the retention floor"), and neither do the
-    // other maintenance calls.
+    // A retention advance through the fixture's writer session claims no
+    // epoch, because the session continues the newest manifest's epoch, and
+    // neither do the other maintenance calls.
     assert_eq!(after.writer_epoch, before.writer_epoch);
     assert_eq!(after.seq, before.seq);
 }

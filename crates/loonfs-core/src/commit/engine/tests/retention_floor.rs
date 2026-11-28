@@ -134,7 +134,11 @@ async fn a_sessions_advance_orders_its_restores_around_the_floor() {
         "the advance writes no WAL object"
     );
     assert_eq!(after.read_basis().head.seq, before.read_basis().head.seq);
-    assert_eq!(after.retention_floor_seq(), expired_seq);
+    assert_eq!(
+        after.read_basis().basis().manifest_no(),
+        floor.manifest().manifest().manifest_no,
+        "the position's floor is the floor of the manifest that it moved onto"
+    );
     assert_eq!(
         after.read_basis().head.writer_epoch,
         before.read_basis().head.writer_epoch,
@@ -264,10 +268,11 @@ async fn an_advance_claims_first_or_returns_writer_fenced() {
     );
     assert_eq!(
         namespace
-            .load_read_state()
+            .load_read_anchor(crate::test_support::observed_now())
             .await
             .expect("head")
-            .retention_floor_seq,
+            .current_manifest()
+            .retention_floor_seq(),
         first_seq,
         "the head's floor is the target"
     );

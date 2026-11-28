@@ -192,18 +192,13 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     Ok(summary)
 }
 
-/// The namespace's effective retention floor: the floor object when it
-/// exists, and the namespace's birth sequence until the first advance
-/// publishes one.
+/// The retention floor of the namespace's current manifest, which is the
+/// floor of a view of the namespace.
 pub(super) async fn read_floor_seq<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> CommitSeq {
-    let head = crate::test_support::namespace_store(store, namespace_id)
-        .load_read_state()
-        .await
-        .expect("read head");
-    crate::test_support::namespace_store(store, &head.namespace_id)
+    crate::test_support::namespace_store(store, namespace_id)
         .load_current_manifest()
         .await
         .expect("resolve retention floor")

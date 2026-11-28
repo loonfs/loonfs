@@ -125,7 +125,7 @@ impl ProjectedWalTail {
 
     /// Appends the body of one WAL object in `namespace_id`. `wal_bytes` is
     /// that object's stored size. A data WAL object adds a chunk, and a fence
-    /// or a floor object adds no chunk and no bytes.
+    /// adds no chunk and no bytes.
     pub(crate) fn push_object(
         &mut self,
         namespace_id: &NamespaceId,
@@ -138,7 +138,7 @@ impl ProjectedWalTail {
                 commits,
                 wal_bytes,
             )?)),
-            WalObjectBody::Fence | WalObjectBody::Floor { .. } => Ok(()),
+            WalObjectBody::Fence => Ok(()),
         }
     }
 

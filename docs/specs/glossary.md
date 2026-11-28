@@ -24,7 +24,7 @@ A random ID (`publication_id`, such as `pub_5b7tx2k9wq0mhd4yzc8vn3jr6e`) that ea
 
 ### WAL
 
-The write-ahead log: a namespace's sequence of numbered, immutable WAL objects. Each WAL object contains one or more commits, one [fence](#fence), or one [floor object](#floor-object). Writing the next WAL object commits every record inside it. See [Publishing a commit](format.md#6-publishing-a-commit).
+The write-ahead log: a namespace's sequence of numbered, immutable WAL objects. Each WAL object contains one or more commits or one [fence](#fence). Writing the next WAL object commits every record inside it. See [Publishing a commit](format.md#6-publishing-a-commit).
 
 ### WAL tip
 
@@ -48,7 +48,7 @@ An object's 1-based position in a numbered series (`manifest_no`, `wal_no`, or p
 
 ### Garbage collection (`gc`)
 
-The stateless process that deletes unreferenced stored objects once they pass the [grace window](#grace-window), including obsolete manifests, folded commit WAL objects, unused segments, expired snapshots, and unreferenced content. It never deletes [fences](#fence) or [floor objects](#floor-object). Each invocation runs one [collection](#collection).
+The stateless process that deletes unreferenced stored objects once they pass the [grace window](#grace-window), including obsolete manifests, folded commit WAL objects, unused segments, expired snapshots, and unreferenced content. It never deletes [fences](#fence). Each invocation runs one [collection](#collection).
 
 ### Head
 
@@ -242,7 +242,7 @@ The sequence boundary below which full history is no longer guaranteed. Above th
 - Visible files and recoverable deleted files keep at least their newest revision, while compaction can drop older revisions, superseded bindings, old attribute/access rows, and commit receipts.
 - Deletions with `deletion_seq <= retention_floor_seq` expire (cannot be restored, leave trash, and have their hidden rows removed by base compaction).
 
-The floor only moves forward, in a manifest that the namespace's writer publishes for a retention advance while it pauses its commit queue for the fold of what arrived (ordering advances against restores), or in a fork's active manifest. A [read view's](#read-view) effective floor is the maximum of its manifest's floor and any floor objects in its WAL tail. Snapshots below the floor still protect their manifests. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+The floor only moves forward, in a manifest that the namespace's writer publishes for a retention advance while it pauses its commit queue for the fold of what arrived (ordering advances against restores), or in a fork's active manifest. A [read view's](#read-view) floor is its manifest's floor. Snapshots below the floor still protect their manifests. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Retention window
 
@@ -256,7 +256,7 @@ A small object coordinating discovery, cleanup, retained views, uploads, or pool
 
 ### Read view
 
-The consistent in-memory namespace state observed by one read (or a grouped request), with its effective [retention floor](#retention-floor) raised by any [floor objects](#floor-object) in its WAL tail. A read view is ephemeral and does not protect objects from garbage collection.
+The consistent in-memory namespace state observed by one read (or a grouped request), whose [retention floor](#retention-floor) is its manifest's. A read view is ephemeral and does not protect objects from garbage collection.
 
 ### Metadata basis
 
@@ -353,10 +353,6 @@ A manifest publication incrementing the writer epoch by 1. The claim must be fol
 
 A commitless WAL object written by a new writer session at the next WAL number to block commits from older writer epochs. Fences are never deleted (even after retirement), ensuring stale WAL writes always collide.
 
-### Floor object
-
-A commitless WAL object recording a `retention_floor_seq`. A view that replays one raises its floor to it, and a fold that covers one copies the floor into its manifest. No writer creates one, because the writer raises the floor in a manifest. Floor objects are never deleted. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
-
 ### Job
 
 One maintenance API request (`POST .../jobs`) and the work it executes, selected by `kind` (`metadata`, `retention`, `retention_window`, or `gc` on namespaces, or `gc` on pools). Jobs run to completion, return a report, and never create snapshots. See [Maintenance jobs](api.md#maintenance-jobs).
@@ -375,7 +371,7 @@ A conditional object update that succeeds only if the object's version token (su
 
 ### Publication budget
 
-The maximum elapsed time allowed between starting a manifest publication and issuing its manifest put (`METADATA_PUBLICATION_BUDGET_MS`). Exceeding it aborts before putting and returns `store_contention` (`cause: "publication_budget"`). WAL puts have no publication budget because fences and floor objects are never deleted. See [Publication and collection timing](format.md#c1-publication-and-collection-timing).
+The maximum elapsed time allowed between starting a manifest publication and issuing its manifest put (`METADATA_PUBLICATION_BUDGET_MS`). Exceeding it aborts before putting and returns `store_contention` (`cause: "publication_budget"`). WAL puts have no publication budget because fences are never deleted. See [Publication and collection timing](format.md#c1-publication-and-collection-timing).
 
 ## Deletion and garbage collection
 
@@ -383,7 +379,7 @@ The maximum elapsed time allowed between starting a manifest publication and iss
 
 One complete, stateless garbage collection pass over a namespace or a [pool](#pool). It reads live roots, lists every object family in scope, and deletes unreferenced objects older than the [grace window](#grace-window) without saving progress between runs:
 
-- **Namespace collection** covers manifests, WAL commit objects (distinguishing fences and floor objects by listed size and keeping them), metadata segments, extension segments, and snapshots.
+- **Namespace collection** covers manifests, WAL commit objects (distinguishing fences by listed size and keeping them), metadata segments, extension segments, and snapshots.
 - **Pool collection** gathers roots from every pool member and covers content objects and upload records.
 
 See [One complete collection](format.md#111-one-complete-collection).
@@ -396,7 +392,7 @@ The universal 24-hour safety wait (`GC_GRACE_WINDOW_MS`) applied to unreferenced
 
 Removing a deleted namespace from its [pool](#pool) once the [grace window](#grace-window) has elapsed after deletion and no snapshots remain on it besides its own fork point snapshot. The namespace's collection deletes its fork snapshots (if any), deletes its pool [member entry](#member-entry), and raises its [manifest boundary](#manifest-boundary) to `retired`. (The tombstone's own content references stop protecting pool content at the retirement deadline.)
 
-After retirement, later namespace collections delete everything under its prefix except `boundary.json`, fences, and floor objects, while requests to the ID continue returning `namespace_deleted`. Retirement itself deletes no content. Pool collection reclaims unreferenced content under its normal age rules. See [Retirement](format.md#95-retirement) and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone).
+After retirement, later namespace collections delete everything under its prefix except `boundary.json` and fences, while requests to the ID continue returning `namespace_deleted`. Retirement itself deletes no content. Pool collection reclaims unreferenced content under its normal age rules. See [Retirement](format.md#95-retirement) and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone).
 
 ## API
 

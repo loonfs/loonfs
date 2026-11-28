@@ -254,7 +254,7 @@ async fn a_longer_window_bounds_an_advance_from_a_cached_stale_position() {
 }
 
 /// Checks that a window-based advance through A, after B took the namespace
-/// over, plans from the namespace's current head, and that A's floor object
+/// over, plans from the namespace's current head, and that A's publication
 /// returns `writer_fenced` instead of moving the floor, with no new writer
 /// epoch and no panicked task in A's runtime.
 ///
@@ -263,8 +263,8 @@ async fn a_longer_window_bounds_an_advance_from_a_cached_stale_position() {
 /// own fold's manifest. The advance's check of the position finds a manifest
 /// of a higher writer epoch and drops the position, so the advance plans
 /// from the current manifest, whose head is B's last commit. A's session
-/// then finds itself fenced when it loads the namespace for the floor
-/// object, and only the namespace's writer, B, puts floor objects.
+/// then finds itself fenced when it publishes the floor, and only the
+/// namespace's writer, B, publishes manifests.
 #[tokio::test]
 async fn an_advance_after_a_takeover_returns_writer_fenced() {
     let fixture = fixture("takeover", true, false).await;

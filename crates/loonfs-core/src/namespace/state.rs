@@ -2,7 +2,6 @@
 
 use loonfs_types::format::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::format::wal::WalObjectBody;
 use loonfs_types::{ActorId, CommitSeq, NamespaceId, PoolId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 
@@ -19,26 +18,10 @@ pub struct NamespaceReadState {
     pub seq: CommitSeq,
     pub wal_no: WalNo,
     pub folded_wal_no: WalNo,
-    /// The retention floor of the view at this head: the manifest's
-    /// `retention_floor_seq`, raised by each floor object in the WAL tail
-    /// that replay read to reach the head (format spec, "Replaying the
-    /// visible WAL").
-    pub retention_floor_seq: CommitSeq,
-    /// The `retention_floor_seq` of the manifest that replay read the WAL
-    /// tail above.
-    pub(crate) manifest_retention_floor_seq: CommitSeq,
 }
 
 impl NamespaceReadState {
-    /// Whether a floor object in the WAL tail raised the view's floor above
-    /// the manifest's, so that no manifest records the view's floor yet and
-    /// a fold of the tail publishes it.
-    pub fn raises_retention_floor(&self) -> bool {
-        self.retention_floor_seq > self.manifest_retention_floor_seq
-    }
-
-    /// Returns the head after the WAL object `payload`, whose floor is the
-    /// higher of this head's floor and the floor that a floor object records.
+    /// Returns the head after the WAL object `payload`.
     pub(crate) fn after_wal_object(
         &self,
         payload: &loonfs_types::format::wal::WalObjectPayload,
@@ -46,12 +29,6 @@ impl NamespaceReadState {
         Self {
             seq: payload.head_seq,
             wal_no: payload.wal_no,
-            retention_floor_seq: match payload.body {
-                WalObjectBody::Floor {
-                    retention_floor_seq,
-                } => retention_floor_seq.max(self.retention_floor_seq),
-                WalObjectBody::Commits(_) | WalObjectBody::Fence => self.retention_floor_seq,
-            },
             ..self.clone()
         }
     }
@@ -76,8 +53,6 @@ impl From<&NamespaceManifestPayload> for NamespaceReadState {
             seq: manifest.head_seq,
             wal_no: manifest.folded_wal_no,
             folded_wal_no: manifest.folded_wal_no,
-            retention_floor_seq: manifest.retention_floor_seq,
-            manifest_retention_floor_seq: manifest.retention_floor_seq,
         }
     }
 }

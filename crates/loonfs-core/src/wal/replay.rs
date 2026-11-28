@@ -37,7 +37,7 @@ pub(crate) fn validate_wal_object_for_replay(
     let payload = envelope.payload();
     let commits = match &payload.body {
         WalObjectBody::Commits(commits) => commits,
-        WalObjectBody::Fence | WalObjectBody::Floor { .. } => {
+        WalObjectBody::Fence => {
             if payload.head_seq != expected_prior_head_seq {
                 return Err(WalObjectError::SummaryMismatch);
             }

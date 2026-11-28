@@ -97,8 +97,8 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .await
         .map(|(record, _)| record)
         .expect("take a snapshot of the original history");
-    // The session advances the floor itself, through a floor object at its
-    // tip, so it keeps its position for the replay below.
+    // The session advances the floor itself, in a manifest that it
+    // publishes, so it keeps its position for the replay below.
     let floor =
         crate::commit::engine::tests::advance_in_session(&mut engine, original.committed_seq).await;
     assert_eq!(

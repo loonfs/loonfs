@@ -7,7 +7,7 @@ use loonfs_objectstore::keys::{
 };
 use loonfs_objectstore::layout::{manifest_no_of, parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::ListedObject;
-use loonfs_types::format::wal::MAX_FENCE_OR_FLOOR_OBJECT_BYTES;
+use loonfs_types::format::wal::MAX_FENCE_BYTES;
 use loonfs_types::{GcResponse, NamespaceId};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,12 +39,12 @@ impl CandidateFamily {
         }
     }
 
-    /// Reports whether a listed object of this family is a fence or a floor
-    /// object, which no collection deletes. A WAL object stored in
-    /// [`MAX_FENCE_OR_FLOOR_OBJECT_BYTES`] or fewer is one, because the
-    /// encoder pads every commit object above that size.
-    pub(super) fn is_fence_or_floor_object(self, entry: &ListedObject) -> bool {
-        self == Self::WalObjects && entry.size_bytes <= MAX_FENCE_OR_FLOOR_OBJECT_BYTES as u64
+    /// Reports whether a listed object of this family is a fence, which no
+    /// collection deletes. A WAL object stored in [`MAX_FENCE_BYTES`] or
+    /// fewer is a fence, because the encoder pads every commit object above that
+    /// size.
+    pub(super) fn is_fence(self, entry: &ListedObject) -> bool {
+        self == Self::WalObjects && entry.size_bytes <= MAX_FENCE_BYTES as u64
     }
 
     /// Returns the report counter of the family's deleted objects.

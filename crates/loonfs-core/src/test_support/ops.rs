@@ -402,11 +402,7 @@ impl<S: ObjectStore + Clone> crate::engine::NamespaceEngine<S, crate::engine::Wr
             .load_live_basis(crate::test_support::observed_now())
             .await?
             .into_manifest();
-        let report = match self
-            .namespace
-            .plan_retention_floor(planned, planned.retention_floor_seq(), target)
-            .await?
-        {
+        let report = match self.namespace.plan_retention_floor(planned, target).await? {
             crate::manifest::RetentionPlan::Stays(retention_floor_seq) => {
                 crate::manifest::PublicationReport {
                     response: retention_floor_seq,

@@ -13,7 +13,6 @@ use crate::metadata::{
     AccessRevisionRecord, CommitReceiptRecord, ContentLayoutRecord, DirentryBindingRecord,
     InodeRecord, MetadataState, ResolvedVisiblePath, SubtreeTombstoneRecord,
 };
-use crate::namespace::state::NamespaceReadState;
 use crate::segment::{BlocksPerRefill, VerifiedMetadataSegments};
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
@@ -38,9 +37,6 @@ pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
 
 pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
     visible_seq: CommitSeq,
-    /// The view's retention floor: the manifest's floor, raised by the floor
-    /// objects in the WAL tail that the view replays.
-    retention_floor_seq: CommitSeq,
     sources: MetadataSourceStack<'a, 'store, S>,
 }
 
@@ -84,7 +80,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ) -> Self {
         Self {
             visible_seq,
-            retention_floor_seq: manifest.manifest().payload().retention_floor_seq,
             sources: MetadataSourceStack {
                 overlay,
                 batch_accepted: None,
@@ -95,26 +90,17 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         }
     }
 
-    pub(crate) fn from_loaded_head(
-        head: &'a NamespaceReadState,
-        segments: &'a VerifiedMetadataSegments<'store, S>,
-        wal_tail: &'a ProjectedWalTail,
-    ) -> Self {
-        Self::over_loaded_basis(head, segments, wal_tail, head.seq)
-    }
-
     /// Creates a view of a manifest's segments and the WAL tail replayed
-    /// above them to `head`, at `visible_seq`, which can be below `head` and
-    /// below the manifest's head. The view's retention floor is `head`'s.
+    /// above them, at `visible_seq`, which can be below the tail's head and
+    /// below the manifest's head. The view's retention floor is the
+    /// manifest's.
     pub(crate) fn over_loaded_basis(
-        head: &NamespaceReadState,
         segments: &'a VerifiedMetadataSegments<'store, S>,
         wal_tail: &'a ProjectedWalTail,
         visible_seq: CommitSeq,
     ) -> Self {
         Self {
             visible_seq,
-            retention_floor_seq: head.retention_floor_seq,
             sources: MetadataSourceStack {
                 overlay: None,
                 batch_accepted: None,
@@ -127,10 +113,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 
     /// Creates a view containing only one manifest, at its folded head.
     ///
-    /// Unlike [`Self::from_loaded_head`], this view does not replay the current
-    /// WAL tail, so later commits can't affect the result, and its retention
-    /// floor is the manifest's. Tests use it to read one manifest's rows at a
-    /// sequence.
+    /// Unlike [`Self::over_loaded_basis`], this view does not replay the current
+    /// WAL tail, so later commits can't affect the result. Tests use it to
+    /// read one manifest's rows at a sequence.
     #[cfg(test)]
     pub(crate) fn over_manifest_segments(
         segments: &'a VerifiedMetadataSegments<'store, S>,
@@ -138,7 +123,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ) -> Self {
         Self {
             visible_seq: folded_head_seq,
-            retention_floor_seq: segments.manifest().payload().retention_floor_seq,
             sources: MetadataSourceStack {
                 overlay: None,
                 batch_accepted: None,
@@ -157,7 +141,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ) -> MetadataView<'view, 'store, S> {
         MetadataView {
             visible_seq,
-            retention_floor_seq: self.retention_floor_seq,
             sources: MetadataSourceStack {
                 overlay,
                 batch_accepted: Some(batch_accepted),
@@ -181,7 +164,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         );
         MetadataView {
             visible_seq,
-            retention_floor_seq: self.retention_floor_seq,
             sources: MetadataSourceStack {
                 overlay: self.sources.overlay,
                 batch_accepted: self.sources.batch_accepted,
@@ -192,10 +174,14 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         }
     }
 
-    /// The view's retention floor (format spec, "Replaying the visible
-    /// WAL"). A deletion at or below it has expired in the view.
+    /// The view's retention floor, which is its manifest's
+    /// `retention_floor_seq` (format spec, "Replaying the visible WAL"). A deletion at or below it has expired in the view.
     pub(crate) fn retention_floor_seq(&self) -> CommitSeq {
-        self.retention_floor_seq
+        self.sources
+            .manifest
+            .manifest()
+            .payload()
+            .retention_floor_seq
     }
 
     /// Attaches a cache for durable lookups performed during one batch.

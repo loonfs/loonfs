@@ -27,9 +27,8 @@ use std::sync::Arc;
 /// Identifies one projected WAL tail, the tail above a manifest that ends
 /// at a head.
 ///
-/// The head's WAL number is part of the key, because a WAL object with no
-/// commits, such as a floor object, moves the head without changing its
-/// sequence.
+/// The head's WAL number is part of the key, because a fence, which contains
+/// no commits, moves the head's WAL number without changing its sequence.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WalTailCacheKey {
     pub namespace_id: NamespaceId,
@@ -137,7 +136,7 @@ impl CachedHead {
 
     /// The durable order that [`HeadAndWalTailCache::replace_head`] compares
     /// heads in: head sequence, then manifest number, then WAL number. A
-    /// floor object moves the WAL number alone.
+    /// fence moves the WAL number alone.
     fn order(&self) -> (CommitSeq, ManifestNo, WalNo) {
         (
             self.read_basis().head.seq,
@@ -335,8 +334,8 @@ impl HeadAndWalTailCache {
     ///
     /// A head is newer when its sequence is higher, or when its sequence is
     /// the same and its basis is a later manifest, or when both are the same
-    /// and its WAL number is higher. A floor object raises the WAL number
-    /// and the head's retention floor, and nothing else.
+    /// and its WAL number is higher. A fence raises the WAL number and
+    /// nothing else.
     ///
     /// - A candidate below the cached head changes nothing, and the read
     ///   starts from the cached head.
@@ -495,8 +494,6 @@ mod tests {
                 seq: CommitSeq(seq),
                 wal_no: WalNo(seq),
                 folded_wal_no: WalNo(0),
-                retention_floor_seq: CommitSeq(0),
-                manifest_retention_floor_seq: CommitSeq(0),
             },
             basis: MetadataBasis::new(ManifestRef {
                 owner_namespace_id: namespace_id,
@@ -616,29 +613,20 @@ mod tests {
     }
 
     /// Checks that a candidate at the cached head's sequence and manifest
-    /// with a higher WAL number, which is the head after a floor object,
-    /// becomes the cached head, and that the head before the floor object
-    /// doesn't replace it.
+    /// with a higher WAL number, which is the head after a fence, becomes
+    /// the cached head, and that the head before the fence doesn't replace
+    /// it.
     #[test]
-    fn a_head_after_a_floor_object_replaces_the_cached_head() {
+    fn a_head_after_a_fence_replaces_the_cached_head() {
         let now = crate::test_support::observed_now();
         let cache = HeadAndWalTailCache::unshared(1 << 20);
         cache.replace_head(head_at(5, 1, &now));
-        let mut after_floor_object = head_at(5, 1, &now);
-        after_floor_object.basis.read_basis_mut().head.wal_no = WalNo(6);
-        after_floor_object
-            .basis
-            .read_basis_mut()
-            .head
-            .retention_floor_seq = CommitSeq(3);
-        let installed = cache.replace_head(after_floor_object);
-        assert_eq!(
-            installed.read_basis().head.retention_floor_seq,
-            CommitSeq(3)
-        );
+        let mut after_fence = head_at(5, 1, &now);
+        after_fence.basis.read_basis_mut().head.wal_no = WalNo(6);
+        let installed = cache.replace_head(after_fence);
+        assert_eq!(installed.read_basis().head.wal_no, WalNo(6));
         let kept = cache.replace_head(head_at(5, 1, &now));
         assert_eq!(kept.read_basis().head.wal_no, WalNo(6));
-        assert_eq!(kept.read_basis().head.retention_floor_seq, CommitSeq(3));
     }
 
     /// Checks that a candidate equal to the cached head takes the newer of
