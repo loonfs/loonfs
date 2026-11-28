@@ -14,7 +14,7 @@ use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
 use crate::{CoreError, Error, Result};
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
-use loonfs_core::publish::{settle_publish_attempt, TailSource, WalPublishError};
+use loonfs_core::publish::{settle_publish_attempt, TailSource, UnitReport, WalPublishError};
 use loonfs_core::time::OperationClock;
 use loonfs_core::Phase;
 use loonfs_types::Commit;
@@ -256,25 +256,46 @@ impl NamespacePublisher {
 
     /// Publishes through the publisher-owned engine: one namespace, one
     /// engine, one writer session, for the publisher's whole life.
+    ///
+    /// A batch that sends no put from the session's kept position, such as
+    /// one whose commits were all refused, is confirmed by the session's check
+    /// before its results are returned (see [`Self::run_confirmed`]), so a session that another
+    /// writer displaced returns `writer_fenced` for the batch's requests
+    /// instead of refusals computed from a replaced manifest.
     pub(super) async fn publish_through_engine(
         &self,
         candidates: &[CommitCandidate],
         clock: &OperationClock,
     ) -> Vec<std::result::Result<Commit, CoreError>> {
-        let (mut engine, start) = match self.lock_engine_for_unit().await {
-            Ok(unit) => unit,
-            Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
-        };
-        // Boxing erases the engine's deeply nested publish future. Without
-        // it, callers awaiting a put or commit (CLI, server, embedding
-        // crates) exceed rustc's type-recursion depth.
-        let publish = Box::pin(engine.publish_batch(start, candidates, clock)).await;
-        let fold_start = self.record_publication(&publish);
-        drop(engine);
-        if let Some(start) = fold_start {
-            let _ = start.send(());
+        let confirmed: std::result::Result<_, CoreError> = self
+            .run_confirmed(move || async move {
+                let (mut engine, start) = match self.lock_engine_for_unit().await {
+                    Ok(unit) => unit,
+                    Err(error) => {
+                        return Ok(UnitReport::from_store(
+                            candidates.iter().map(|_| Err(error.clone())).collect(),
+                        ))
+                    }
+                };
+                // Boxing erases the engine's deeply nested publish future.
+                // Without it, callers awaiting a put or commit (CLI, server,
+                // embedding crates) exceed rustc's type-recursion depth.
+                let publish = Box::pin(engine.publish_batch(start, candidates, clock)).await;
+                let fold_start = self.record_publication(&publish);
+                drop(engine);
+                if let Some(start) = fold_start {
+                    let _ = start.send(());
+                }
+                Ok(UnitReport {
+                    value: publish.results,
+                    basis: publish.basis,
+                })
+            })
+            .await;
+        match confirmed {
+            Ok(results) => results,
+            Err(error) => candidates.iter().map(|_| Err(error.clone())).collect(),
         }
-        publish.results
     }
 
     /// Records the newest commit that `publish` published, and starts a fold

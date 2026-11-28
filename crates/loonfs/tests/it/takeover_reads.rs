@@ -110,17 +110,6 @@ async fn takeover(
     }
 }
 
-/// The request with which a read's check in A's runtime reaches B's claim.
-#[derive(Debug, Clone, Copy)]
-enum ClaimRequest {
-    /// The check's walk loads the claim from the store.
-    Get,
-    /// The check's HEAD for a successor finds the claim, and the walk loads
-    /// the claim from the segment cache, because an earlier load in A's
-    /// runtime loaded the claim first.
-    Head,
-}
-
 impl Takeover {
     /// Opens writer B over the shared store, or over `gate` when given.
     async fn peer(&self, gate: Option<Gate>) -> LoonFs<Writable> {
@@ -216,21 +205,18 @@ impl Takeover {
     }
 
     /// Reads `/b` in A's runtime while A's commit waits, and releases the
-    /// commit once the read's check has walked to B's claim at `claim` with
-    /// `reached`, so the check's drop of A's position waits for A's commit.
-    async fn read_past_the_claim(&self, claim: ManifestNo, reached: ClaimRequest) {
+    /// commit once the read's check has found B's claim at `claim` with its
+    /// HEAD for a successor, so the session's settle of A's position waits
+    /// for A's commit, whose put then finds B's fence.
+    async fn read_past_the_claim(&self, claim: ManifestNo) {
         self.recording.reset();
         let (entry, ()) = futures::join!(self.reader.stat("/b"), async {
             let claim =
                 loonfs_objectstore::keys::metadata_manifest_object(&self.namespace_id, &claim);
-            crate::common::wait_for_operation(&self.recording, |operation| match reached {
-                ClaimRequest::Get => {
-                    matches!(operation, RecordedOperation::Get { key, .. } if *key == claim)
-                }
-                ClaimRequest::Head => {
-                    matches!(operation, RecordedOperation::Head { key } if *key == claim)
-                }
-            })
+            crate::common::wait_for_operation(
+                &self.recording,
+                |operation| matches!(operation, RecordedOperation::Head { key } if *key == claim),
+            )
             .await;
             self.gate.release();
         });
@@ -255,7 +241,8 @@ impl Takeover {
 /// A's session's fold publishes A's manifest while A's commit
 /// waits at its WAL put, and moves A's position onto it without waiting for
 /// the commit. The read's check finds the next number, which is B's claim,
-/// and its drop of the position waits for A's commit.
+/// and the session's settle of its position waits for A's commit, which
+/// finds B's fence, so the read reads B's state from the store.
 #[tokio::test]
 async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
     let fixture = takeover("past-own-manifest", parked_commits, None).await;
@@ -267,7 +254,7 @@ async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
                 fixture.peer_commits().await;
                 let claim = fixture.current_manifest_no().await;
                 assert!(claim > before.successor().expect("A's own manifest"));
-                fixture.read_past_the_claim(claim, ClaimRequest::Get).await;
+                fixture.read_past_the_claim(claim).await;
             });
             assert!(fixture.current_manifest_no().await > own);
         })
@@ -276,8 +263,8 @@ async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
 }
 
 /// Checks that a read's check that finds B's claim with its HEAD for a
-/// successor, and loads the claim from the segment cache, drops A's
-/// position, and that the read sees B's commit.
+/// successor, while A's segment cache has the claim, fences A's session
+/// through the session's settle, and that the read sees B's commit.
 ///
 /// B claims the namespace while A's commit waits at its WAL put. A's
 /// diagnostics load the newest manifest, which is B's claim, through A's
@@ -297,7 +284,7 @@ async fn a_check_finds_a_cached_claim_with_its_successor_head() {
                 .await
                 .expect("diagnostics");
             assert!(fixture.namespace.has_current_writer_position());
-            fixture.read_past_the_claim(claim, ClaimRequest::Head).await;
+            fixture.read_past_the_claim(claim).await;
         })
         .await;
     fixture.assert_sees_the_takeover().await;

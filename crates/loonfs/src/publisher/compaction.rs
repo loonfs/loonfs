@@ -1,7 +1,6 @@
 //! The compaction loop of a writer session: compaction units under the
 //! namespace's compaction lock, planned from the session's position.
 
-use super::registry::NamespaceChange;
 use super::NamespacePublisher;
 use crate::maintenance::MetadataCompactionOutcome;
 use crate::trace::phase_span;
@@ -142,7 +141,9 @@ impl NamespacePublisher {
     /// when it's given, and otherwise on the manifest of the session's
     /// position, or on the current manifest when the session has no
     /// position. Checking that reads the store only without a position, and
-    /// claims nothing, so a namespace with nothing due is left alone. The
+    /// claims nothing, so a namespace with nothing due is left alone. A
+    /// position whose manifest is gone is behind, and the session loads it
+    /// again (see [`Self::run_from_position`]). The
     /// caller has the namespace's compaction lock, so no other unit of the
     /// session publishes before this one plans, and the session's position
     /// follows every manifest that the session publishes.
@@ -155,13 +156,13 @@ impl NamespacePublisher {
         let position = self.current_position();
         let screened = match (observed, &position) {
             (Some(observed), _) => observed,
-            (None, Some(position)) => match namespace.load_position_basis(position).await? {
-                Some(basis) => basis,
-                None => {
-                    core.forget_namespace_view(&self.namespace_id).await;
-                    namespace.load_live_basis(core.observation()).await?
-                }
-            },
+            (None, Some(_)) => {
+                self.run_from_position(|position| {
+                    let namespace = &namespace;
+                    async move { namespace.load_publication_basis(&position).await }
+                })
+                .await?
+            }
             (None, None) => namespace.load_live_basis(core.observation()).await?,
         };
         if !self
@@ -236,7 +237,7 @@ impl NamespacePublisher {
                 CompactionWriteOutcome::Ended(outcome) => return Ok(outcome),
                 CompactionWriteOutcome::Written(writes) => writes,
             };
-            let lane = self.lane.lock().await;
+            let lane = self.lock_lane().await;
             let turn = self.lane_turn(&lane).await?;
             Ok(core
                 .namespace_store(namespace_id)
@@ -251,15 +252,6 @@ impl NamespacePublisher {
         core.instruments()
             .compactions
             .finished(&outcome, elapsed_ms);
-        let registry = self.registry()?;
-        let outcome = registry
-            .finish_namespace_mutation(namespace_id, outcome, |outcome| match outcome {
-                loonfs_core::CompactionUnitOutcome::Published { manifest, .. } => {
-                    NamespaceChange::Published(Box::new(manifest.clone()))
-                }
-                _ => NamespaceChange::Unchanged,
-            })
-            .await;
         outcome.map(compaction_outcome)
     }
 }

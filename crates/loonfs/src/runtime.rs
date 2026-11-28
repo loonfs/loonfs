@@ -24,7 +24,7 @@
 //! `builder_with_store` only when the supplied store is safe to use from
 //! that Tokio runtime.
 
-use crate::publisher::{FoldWhen, NamespaceChange, NamespaceSession, PublisherRegistry};
+use crate::publisher::{FoldWhen, NamespaceSession, PublisherRegistry};
 use crate::runtime_core::RuntimeCore;
 use crate::trace::{self, operation_span, phase_span};
 use crate::{
@@ -425,8 +425,7 @@ impl LoonFs<Writable> {
                 // namespace active changes nothing.
                 self.mode
                     .publisher
-                    .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unchanged)
-                    .await
+                    .finish_namespace_mutation(namespace_id, result)
             },
         )
         .await
@@ -594,8 +593,7 @@ impl LoonFs<Writable> {
         // found, which the fork installed as the new namespace's cached head.
         self.mode
             .publisher
-            .finish_namespace_mutation(source_namespace_id, result, |_| NamespaceChange::Unchanged)
-            .await
+            .finish_namespace_mutation(source_namespace_id, result)
     }
 }
 

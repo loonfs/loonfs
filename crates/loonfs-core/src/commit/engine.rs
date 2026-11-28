@@ -9,6 +9,7 @@ use super::published_manifest::{
     KeptPosition, PublishedLock, PublishedManifest, ReplacedPositions,
 };
 use super::session_epoch::SessionEpoch;
+use super::unit_report::{UnitBasis, UnitReport};
 use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::publish::ManifestPublicationOutcome;
@@ -38,6 +39,19 @@ pub struct NamespaceCommitEnginePublishOutcome {
     /// The WAL tail this attempt loaded, for opportunistic maintenance
     /// scheduling, or `None` when it loaded no projection.
     pub wal_tail: Option<WalTailReport>,
+    /// What the results rest on, which says whether the session confirms
+    /// its position before it returns them (see [`UnitReport`]).
+    pub basis: UnitBasis,
+}
+
+/// Where a deletion of a writer session starts (see
+/// `NamespaceCommitEngine::load_position_for_deletion`).
+enum DeletionStart {
+    /// The session's position, which the deletion folds and tombstones.
+    Position(Box<WriterPosition>),
+    /// The namespace was initializing, and the deletion published its
+    /// tombstone without a writer session.
+    Initializing(DeleteNamespaceResponse),
 }
 
 /// The WAL tail one publish attempt loaded.
@@ -308,28 +322,6 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         self.position.current.stored().cloned()
     }
 
-    /// Moves the position onto `manifest`, a manifest above it such as one
-    /// that a read's check found, or drops the position when it can't move
-    /// there (see `WriterPosition::move_to` for the rule).
-    ///
-    /// Later commits then plan against the new manifest, and reads in this
-    /// runtime start from it. The position keeps the WAL tail above the new
-    /// manifest, and it merges `manifest`'s check (see [`Held::merge`]). The
-    /// session's runtime records the manifests that it publishes itself in
-    /// [`Self::published_manifest`] instead, which doesn't wait for the
-    /// engine.
-    pub fn move_position_onto(&mut self, manifest: Held<LoadedManifest>) {
-        let state = &mut self.position;
-        let Some(mut position) = state.current.take() else {
-            return;
-        };
-        if position.move_to(&manifest) {
-            state.current.set(position);
-        } else {
-            state.invalidate_projection();
-        }
-    }
-
     /// Deletes the namespace using this writer session (format spec,
     /// "Deleting a namespace").
     ///
@@ -337,10 +329,14 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// [`Self::publish_batch`]. Fenced sessions fail before accessing the store,
     /// and a put that another writer's claim won fences the session. A
     /// session without its writer epoch claims it first, and the deletion
-    /// then starts from the claim's discovery. A deletion first folds the WAL
-    /// tail under the namespace's run policy, and then publishes the
+    /// then starts from the claim's discovery. A deletion first checks the
+    /// request's expected head against the position's head, then folds the
+    /// WAL tail under the namespace's run policy, and then publishes the
     /// tombstone over the fold's manifest (see
-    /// [`NamespaceStore::delete_namespace`]).
+    /// [`NamespaceStore::delete_namespace`]). A deletion whose expected head
+    /// doesn't match the session's kept position sends no put, so its report
+    /// rests on the session's own state alone ([`UnitBasis::Session`]), and
+    /// the session confirms its position before it returns the refusal.
     ///
     /// An initializing namespace has no writer session, so its deletion is a
     /// plain manifest publication of its tombstone (see
@@ -360,67 +356,101 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         lane: &LaneGuard<'_>,
         administrator: &Administrator,
         options: DeleteNamespaceOptions,
-    ) -> Result<DeleteNamespaceResponse> {
+    ) -> UnitReport<Result<DeleteNamespaceResponse>> {
         administrator.assert_for(&self.namespace.namespace_id);
         let clock = self.namespace.start_clock();
-        let position = match self.load_position_in_lane(lane).await {
-            Ok(position) => position,
-            Err(error @ CoreError::NamespaceNotFound { .. }) => {
-                let NewestManifest::Manifest(current) =
-                    self.namespace.find_newest_manifest(clock.origin()).await?
-                else {
-                    return Err(error);
-                };
-                let payload = current.manifest().payload();
-                if !matches!(payload.status, NamespaceStatus::Initializing {}) {
-                    return Err(error);
-                }
-                if let Some(expected) = options.expected_head_seq {
-                    if payload.head_seq != expected {
-                        return Err(CoreError::StaleHeadPrecondition {
-                            expected,
-                            actual: payload.head_seq,
-                        });
-                    }
-                }
-                let winner = match self
-                    .namespace
-                    .tombstone_initializing_namespace(current, &clock)
-                    .await?
-                {
-                    ManifestPublicationOutcome::Published(tombstone) => {
-                        return Ok(DeleteNamespaceResponse {
-                            namespace_id: self.namespace.namespace_id.clone(),
-                            head_seq: tombstone.manifest().payload().head_seq,
-                        });
-                    }
-                    ManifestPublicationOutcome::Lost(winner) => winner,
-                };
-                match winner.manifest().payload().status {
-                    NamespaceStatus::Active {} => self.load_position_in_lane(lane).await?,
-                    NamespaceStatus::Deleted { .. } => {
-                        return Err(CoreError::NamespaceDeleted {
-                            namespace_id: self.namespace.namespace_id.clone(),
-                        })
-                    }
-                    NamespaceStatus::Initializing {} => {
-                        return Err(CoreError::NamespaceCorrupt(format!(
-                            "manifest {} of namespace `{}` is initializing after a fork's \
-                             manifest 2",
-                            winner.manifest_no(),
-                            self.namespace.namespace_id
-                        )))
-                    }
-                }
-            }
-            Err(error) => return Err(error),
+        let kept = self.writer_position().is_some();
+        let position = match self
+            .load_position_for_deletion(lane, &options, &clock)
+            .await
+        {
+            Ok(DeletionStart::Position(position)) => *position,
+            Ok(DeletionStart::Initializing(deleted)) => return UnitReport::from_store(Ok(deleted)),
+            Err(error) => return UnitReport::from_store(Err(error)),
         };
+        if let Some(expected) = options.expected_head_seq {
+            let actual = position.read_basis().head.seq;
+            if actual != expected {
+                // The refusal sends no put, so the session keeps its
+                // position for the check that confirms the refusal.
+                return UnitReport {
+                    value: Err(CoreError::StaleHeadPrecondition { expected, actual }),
+                    basis: if kept {
+                        UnitBasis::Session
+                    } else {
+                        UnitBasis::Store
+                    },
+                };
+            }
+        }
         let deleted = self
             .namespace
-            .delete_namespace(options, position, lane, &clock)
+            .delete_namespace(position, lane, &clock)
             .await;
         self.position.invalidate_projection();
-        deleted.inspect_err(|error| self.position.record_session_error(error))
+        UnitReport::from_store(
+            deleted.inspect_err(|error| self.position.record_session_error(error)),
+        )
+    }
+
+    /// Returns where a deletion starts: the session's position (see
+    /// [`Self::load_position_in_lane`]), or the response of the deletion of
+    /// an initializing namespace, which has no writer session and publishes
+    /// its tombstone without one.
+    async fn load_position_for_deletion(
+        &mut self,
+        lane: &LaneGuard<'_>,
+        options: &DeleteNamespaceOptions,
+        clock: &OperationClock,
+    ) -> Result<DeletionStart> {
+        let error = match self.load_position_in_lane(lane).await {
+            Ok(position) => return Ok(DeletionStart::Position(Box::new(position))),
+            Err(error @ CoreError::NamespaceNotFound { .. }) => error,
+            Err(error) => return Err(error),
+        };
+        let NewestManifest::Manifest(current) =
+            self.namespace.find_newest_manifest(clock.origin()).await?
+        else {
+            return Err(error);
+        };
+        let payload = current.manifest().payload();
+        if !matches!(payload.status, NamespaceStatus::Initializing {}) {
+            return Err(error);
+        }
+        if let Some(expected) = options.expected_head_seq {
+            if payload.head_seq != expected {
+                return Err(CoreError::StaleHeadPrecondition {
+                    expected,
+                    actual: payload.head_seq,
+                });
+            }
+        }
+        let winner = match self
+            .namespace
+            .tombstone_initializing_namespace(current, clock)
+            .await?
+        {
+            ManifestPublicationOutcome::Published(tombstone) => {
+                return Ok(DeletionStart::Initializing(DeleteNamespaceResponse {
+                    namespace_id: self.namespace.namespace_id.clone(),
+                    head_seq: tombstone.manifest().payload().head_seq,
+                }));
+            }
+            ManifestPublicationOutcome::Lost(winner) => winner,
+        };
+        match winner.manifest().payload().status {
+            NamespaceStatus::Active {} => Ok(DeletionStart::Position(Box::new(
+                self.load_position_in_lane(lane).await?,
+            ))),
+            NamespaceStatus::Deleted { .. } => Err(CoreError::NamespaceDeleted {
+                namespace_id: self.namespace.namespace_id.clone(),
+            }),
+            NamespaceStatus::Initializing {} => Err(CoreError::NamespaceCorrupt(format!(
+                "manifest {} of namespace `{}` is initializing after a fork's manifest 2",
+                winner.manifest_no(),
+                self.namespace.namespace_id
+            ))),
+        }
     }
 
     /// Returns the session's position, loaded while the caller keeps `lane`,
@@ -609,6 +639,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             return NamespaceCommitEnginePublishOutcome {
                 results: Vec::new(),
                 wal_tail: None,
+                basis: UnitBasis::Store,
             };
         }
         let Self {
@@ -711,7 +742,26 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     ) -> Result<DeleteNamespaceResponse> {
         let lane = self.publication_lane();
         let guard = lane.lock().await;
-        self.delete_namespace(&guard, administrator, options).await
+        self.delete_namespace(&guard, administrator, options)
+            .await
+            .value
+    }
+
+    /// Moves the position onto `manifest`, a manifest above it that a test
+    /// published outside the session's lane, or drops the position when it
+    /// can't move there (see `WriterPosition::move_to` for the rule). Only
+    /// the session's queues move the position in a runtime: a commit, a
+    /// publication of the lane, and the writer's load.
+    pub fn move_position_onto(&mut self, manifest: Held<LoadedManifest>) {
+        let state = &mut self.position;
+        let Some(mut position) = state.current.take() else {
+            return;
+        };
+        if position.move_to(&manifest) {
+            state.current.set(position);
+        } else {
+            state.invalidate_projection();
+        }
     }
 
     /// Brings the stored position up to the manifest that a publication of
@@ -895,6 +945,10 @@ impl PositionState {
         .await;
         let position = publish_view.into_position();
         let published = drop_replaced_basis(published);
+        let basis = match published.effect {
+            PublishViewEffect::Unchanged if !wal_tail_discovered => UnitBasis::Session,
+            _ => UnitBasis::Store,
+        };
         let update = self.update_publish_tail_projection(
             &namespace.namespace_id,
             position,
@@ -914,6 +968,7 @@ impl PositionState {
                     TailSource::Cached
                 },
             }),
+            basis,
         }
     }
 
@@ -1083,6 +1138,7 @@ fn failed_publication(count: usize, error: CoreError) -> NamespaceCommitEnginePu
     NamespaceCommitEnginePublishOutcome {
         results: repeated_error(count, error),
         wal_tail: None,
+        basis: UnitBasis::Store,
     }
 }
 
@@ -1103,6 +1159,7 @@ impl<S: ObjectStore + Clone> NamespaceEngine<S, Writable> {
         engine
             .delete_namespace(&guard, administrator, options)
             .await
+            .value
     }
 }
 

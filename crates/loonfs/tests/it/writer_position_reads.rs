@@ -3,12 +3,11 @@
 
 use crate::common::is_manifest_head;
 use loonfs::metrics::DefaultMetricsRecorder;
-use loonfs::test_support::{counter, writer};
+use loonfs::test_support::{counter, writer, writer_position_manifest_no};
 use loonfs::{
-    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, MetadataCache, Namespace, ReadOnly,
-    SharedObjectStore, Writable,
+    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, MetadataCache, Namespace,
+    NamespaceSessionStatus, ReadOnly, SharedObjectStore, Writable,
 };
-use loonfs_core::limits::MAX_POSITION_MOVES;
 use loonfs_objectstore::keys::{boundary, metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::ids::{namespace_id, writer_id};
@@ -47,7 +46,7 @@ pub(crate) struct Fixture {
     recorder: Arc<DefaultMetricsRecorder>,
     pub(crate) clock: Arc<ManualClock>,
     pub(crate) namespace_id: NamespaceId,
-    namespace: Namespace<Writable>,
+    pub(crate) namespace: Namespace<Writable>,
     pub(crate) reader: Namespace<ReadOnly>,
     pub(crate) writer: LoonFs<Writable>,
 }
@@ -66,6 +65,9 @@ pub(crate) enum Parked {
     LoadChecks,
     /// GET requests for the namespace's WAL objects.
     WalReads,
+    /// Reads of the namespace's manifest boundary, such as the one after a
+    /// manifest put, which comes before the session records the manifest.
+    BoundaryReads,
 }
 
 /// Creates a writer runtime with a one-second maximum staleness, a namespace
@@ -107,6 +109,11 @@ async fn fixture_with_cache(name: &str, parked: Parked, metadata_cache: Metadata
         Parked::WalReads => {
             BlockingStore::new(memory, KeyPredicate::prefix(wal), OperationSelector::Get)
         }
+        Parked::BoundaryReads => BlockingStore::new(
+            memory,
+            KeyPredicate::exact(boundary(&namespace_id)),
+            OperationSelector::Read,
+        ),
     };
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
@@ -160,9 +167,18 @@ impl Fixture {
             .await
     }
 
+    /// Returns how many displacements the writer's runtime recorded.
+    fn displacements(&self) -> u64 {
+        counter(
+            &self.recorder.snapshot(),
+            "loonfs.publisher.displacements",
+            &[],
+        )
+    }
+
     /// Returns how many reads started from the writer's position and how
     /// many refreshed or loaded the namespace's head.
-    fn head_sources(&self) -> (u64, u64) {
+    pub(crate) fn head_sources(&self) -> (u64, u64) {
         let source = |label| {
             counter(
                 &self.recorder.snapshot(),
@@ -187,9 +203,8 @@ impl Fixture {
             || operation.key() == boundary(&self.namespace_id)
     }
 
-    /// Drops the session's position and the cached head the way a change of
-    /// unknown effect does, so the next read loads the namespace from the
-    /// store.
+    /// Drops the session's position and the cached head through the test
+    /// hook, so the next read loads the namespace from the store.
     pub(crate) async fn drop_position(&self) {
         loonfs::test_support::drop_namespace_view(&self.writer, &self.namespace_id).await;
     }
@@ -211,32 +226,6 @@ impl Fixture {
             "loonfs.publisher.tail_replays",
             &[],
         )
-    }
-
-    /// Asserts that the requests since the last reset start with a successor
-    /// check of a manifest, that the walk after it loads that manifest and
-    /// no later one, and that the read then reloads the namespace from its
-    /// manifest boundary.
-    fn assert_check_stopped_at_the_claim(&self) {
-        let operations = self.recording.take();
-        let Some(reload) = operations
-            .iter()
-            .position(|operation| operation.key() == boundary(&self.namespace_id))
-        else {
-            panic!("no reload from the manifest boundary: {operations:?}");
-        };
-        let walked: Vec<&str> = operations[..reload]
-            .iter()
-            .filter(|operation| matches!(operation, RecordedOperation::Get { .. }))
-            .map(RecordedOperation::key)
-            .collect();
-        assert!(
-            matches!(
-                operations.first(),
-                Some(RecordedOperation::Head { key }) if walked == [key.as_str()]
-            ),
-            "a successor check, a walk that stops at the claim, and a reload: {operations:?}"
-        );
     }
 }
 
@@ -368,16 +357,20 @@ async fn a_read_during_a_publish_starts_from_the_head_before_it() {
 
 /// Checks that another writer's takeover is visible in the old writer's
 /// runtime to a strong read at once, and to an eventual read once its
-/// maximum staleness passes, and not before.
+/// maximum staleness passes, and not before, and that the first read whose
+/// check finds the takeover fences the old session, which is idle.
 ///
 /// Within the staleness, an eventual read starts from the old session's
 /// position and sends nothing. A strong read, and the first eventual read
 /// after the staleness, waits for the session's check of the position's
-/// manifest. The check finds the new writer's claim, and its walk stops
-/// there instead of loading the fold that the new writer published above
-/// the claim, so the read reloads the namespace.
+/// manifest. The check finds the new writer's claim after it, so the session
+/// settles its position: its writer's load finds the claim and fences the
+/// session, which records one displacement and drops its position. The read
+/// then loads the namespace from the store, as a read in a runtime without
+/// the session does, and later reads send no HEAD of the old position's
+/// successor.
 #[tokio::test]
-async fn another_writers_takeover_is_seen_by_a_strong_read_and_past_the_staleness() {
+async fn a_read_that_finds_another_writers_claim_fences_the_idle_session() {
     for (name, advance_ms, consistency) in [
         ("takeover-strong", 0, Consistency::Strong),
         ("takeover-eventual", MAX_STALENESS_MS, Consistency::Eventual),
@@ -409,7 +402,12 @@ async fn another_writers_takeover_is_seen_by_a_strong_read_and_past_the_stalenes
         assert_eq!(fixture.recording.take(), [], "{name}");
 
         fixture.clock.advance_ms(advance_ms);
-        let (positions, anchors) = fixture.head_sources();
+        let position = writer_position_manifest_no(&fixture.writer, &fixture.namespace_id)
+            .expect("the old session has a position");
+        let successor = metadata_manifest_object(
+            &fixture.namespace_id,
+            &position.successor().expect("the next manifest number"),
+        );
         let reader = match consistency {
             Consistency::Eventual => fixture.reader.clone(),
             Consistency::Strong => fixture.reader.strong(),
@@ -419,70 +417,36 @@ async fn another_writers_takeover_is_seen_by_a_strong_read_and_past_the_stalenes
             .await
             .expect("the check finds the claim");
         assert_eq!(entry.head_seq, peer_commit.committed_seq, "{name}");
-        fixture.assert_check_stopped_at_the_claim();
-        assert_eq!(fixture.head_sources(), (positions, anchors + 1), "{name}");
+        assert_eq!(
+            fixture.namespace.session_status(),
+            NamespaceSessionStatus::Fenced,
+            "{name}"
+        );
+        assert_eq!(fixture.displacements(), 1, "{name}");
+        assert_eq!(
+            writer_position_manifest_no(&fixture.writer, &fixture.namespace_id),
+            None,
+            "{name}: the fenced session has no position"
+        );
+        fixture.recording.reset();
+        for reader in [fixture.reader.clone(), fixture.reader.strong()] {
+            reader.stat("/peer.txt").await.expect("a later read");
+        }
+        let operations = fixture.recording.take();
+        assert!(
+            !operations.iter().any(
+                |operation| matches!(operation, RecordedOperation::Head { key } if *key == successor)
+            ),
+            "{name}: later reads don't check the old position: {operations:?}"
+        );
         let fenced = fixture.put("/after.txt").await;
         assert_eq!(
             fenced.expect_err("the old session is fenced").code(),
             ErrorCode::WriterFenced,
             "{name}"
         );
+        assert_eq!(fixture.displacements(), 1, "{name}");
     }
-}
-
-/// Checks that a check whose walk finds more manifests above the position
-/// than one check moves the position onto drops the position, and that the
-/// read reloads the namespace from its manifest boundary.
-///
-/// The test support's same-epoch publisher folds each of the session's
-/// commits, one fold more than the cap, under the session's writer epoch, so
-/// the walk loads one manifest past the cap and stops there. In a runtime,
-/// at most one publication of each kind is put and not yet recorded, so the
-/// session's own publications never make a walk this long. Only a store that
-/// breaks the format, or a publisher at the session's epoch that the design
-/// doesn't allow, reaches the cap, and the cap is there so that such a store
-/// can't make the walk run without end.
-#[tokio::test]
-async fn a_walk_past_its_cap_drops_the_position() {
-    let fixture = fixture("walk-cap", Parked::WalPuts).await;
-    let store: SharedObjectStore = fixture.recording.clone();
-    for index in 0..=MAX_POSITION_MOVES {
-        fixture
-            .put(&format!("/fill-{index}.txt"))
-            .await
-            .expect("commit");
-        let folded =
-            loonfs_core::test_support::namespace_store(store.clone(), &fixture.namespace_id)
-                .fixture_writer_session()
-                .await
-                .expect("the writer's epoch")
-                .fold()
-                .await
-                .expect("fold");
-        assert_eq!(
-            folded.response.outcome,
-            loonfs_core::FoldWalOutcome::Published
-        );
-    }
-    let (positions, anchors) = fixture.head_sources();
-    fixture.recording.reset();
-    fixture
-        .reader
-        .strong()
-        .stat("/small.txt")
-        .await
-        .expect("stat");
-    let operations = fixture.recording.take();
-    let reload = operations
-        .iter()
-        .position(|operation| operation.key() == boundary(&fixture.namespace_id))
-        .expect("a reload from the manifest boundary");
-    let walked = operations[..reload]
-        .iter()
-        .filter(|operation| matches!(operation, RecordedOperation::Get { .. }))
-        .count();
-    assert_eq!(walked, MAX_POSITION_MOVES + 1, "{operations:?}");
-    assert_eq!(fixture.head_sources(), (positions, anchors + 1));
 }
 
 /// Checks that a fold that this runtime publishes while a publish has the
@@ -596,34 +560,6 @@ async fn a_fenced_sessions_next_read_reads_the_store() {
     assert_eq!(fixture.head_sources(), (positions, anchors + 1));
 }
 
-/// Checks that a change of unknown effect drops the runtime's view of the
-/// namespace, and that the next read loads the namespace by discovery, even
-/// an eventual read within its maximum staleness.
-#[tokio::test]
-async fn a_change_of_unknown_effect_drops_the_view_and_the_next_read_loads_it() {
-    let fixture = fixture("unknown-change", Parked::WalPuts).await;
-    let commit = fixture.put("/next.txt").await.expect("commit");
-    fixture.drop_position().await;
-    let (positions, anchors) = fixture.head_sources();
-    fixture.recording.reset();
-    let entry = fixture
-        .reader
-        .stat("/next.txt")
-        .await
-        .expect("an eventual read after the drop");
-    assert_eq!(entry.head_seq, commit.committed_seq);
-    let operations = fixture.recording.take();
-    assert!(
-        matches!(
-            operations.first(),
-            Some(RecordedOperation::GetWithMetadata { key, .. })
-                if *key == boundary(&fixture.namespace_id)
-        ),
-        "the read loads the namespace from its manifest boundary: {operations:?}"
-    );
-    assert_eq!(fixture.head_sources(), (positions, anchors + 1));
-}
-
 /// Checks that a fork keeps the runtime's view of the source. The fork folds
 /// the source's tail through the runtime's fold path, which moves the
 /// position onto the fold's manifest, and the snapshot records that the fork
@@ -668,17 +604,17 @@ async fn a_fork_keeps_the_sources_position() {
     );
 }
 
-/// Checks that a refresh that started before a change of unknown effect,
-/// and finishes after the runtime dropped its view for that change, installs
-/// nothing, so the next read loads the namespace by discovery.
+/// Checks that a refresh that started before the runtime dropped the
+/// namespace's cached head, and finishes after the drop, installs nothing,
+/// so the next read loads the namespace by discovery.
 ///
 /// The test drops the position first, and a read loads the namespace into
 /// the read cache. A strong read's refresh of that view then waits at its
-/// WAL probe while a change of unknown effect drops the view. The refresh's
-/// head is from before the change, so an eventual read after it would
-/// otherwise start from that head without a request.
+/// WAL probe while the test drops the cached head. The refresh's head is from
+/// before the drop, so an eventual read after it would otherwise start from
+/// that head without a request.
 #[tokio::test]
-async fn a_refresh_that_spans_a_change_of_unknown_effect_installs_nothing() {
+async fn a_refresh_that_spans_a_drop_of_the_cached_head_installs_nothing() {
     let fixture = fixture("spanning-refresh", Parked::WalReads).await;
     fixture.drop_position().await;
     fixture
@@ -838,9 +774,9 @@ fn uses_manifest(
 
 /// Returns the requests of a strong read's check of a writer position on
 /// `position`, a manifest at or below the manifest boundary: a HEAD of the
-/// manifest after `position`, and a read of the boundary, which drops the
-/// position. Then come the requests of the discovery that finds the newest
-/// manifest, `newest`.
+/// manifest after `position`, and a read of the boundary, which shows the
+/// position's manifest replaced. Then come the requests of the discovery
+/// that finds the newest manifest, `newest`.
 fn collected_position_check(
     namespace_id: &NamespaceId,
     position: ManifestNo,
@@ -851,6 +787,27 @@ fn collected_position_check(
             "head {namespace_id} MetadataManifest {:020}",
             position.0 + 1
         ),
+        format!("get {namespace_id} Boundary"),
+        format!("get {namespace_id} Boundary"),
+        format!("list namespaces/{namespace_id}/manifests/"),
+        format!("get {namespace_id} MetadataManifest {:020}", newest.0),
+        format!("get {namespace_id} Boundary"),
+    ]
+}
+
+/// Returns the requests of a load from a writer position on `position`, a
+/// manifest that a collection deleted and that is at or below the manifest
+/// boundary: a GET of the manifest, which finds nothing, and a read of the
+/// boundary, which shows the position behind. Then come the requests of the
+/// writer's load that loads the position again, whose discovery finds the
+/// newest manifest, `newest`.
+fn collected_position_load(
+    namespace_id: &NamespaceId,
+    position: ManifestNo,
+    newest: ManifestNo,
+) -> Vec<String> {
+    vec![
+        format!("get {namespace_id} MetadataManifest {:020}", position.0),
         format!("get {namespace_id} Boundary"),
         format!("get {namespace_id} Boundary"),
         format!("list namespaces/{namespace_id}/manifests/"),
@@ -937,10 +894,10 @@ async fn a_fold_from_a_collected_position_after_a_claim_returns_writer_fenced() 
 }
 
 /// Checks that a retention advance from a position whose manifest a
-/// collection deleted, after a rival's claim, checks the position first, as
-/// a strong read does, and that the check finds the manifest at or below the
-/// manifest boundary and drops the position. The session then loads its
-/// position again with the writer's load, as a fold does (see
+/// collection deleted, after a rival's claim, finds the manifest missing at
+/// or below the manifest boundary when it loads the manifest to plan from,
+/// so the position is behind. The session then loads its position again
+/// with the writer's load, as a fold does (see
 /// [`a_fold_from_a_collected_position_after_a_claim_returns_writer_fenced`]),
 /// which finds the rival's claim and returns `writer_fenced`, so the advance
 /// doesn't return a result computed from the rival's manifest. A strong
@@ -960,7 +917,7 @@ async fn a_retention_advance_from_a_collected_position_after_a_claim_returns_wri
     let operations = fixture.recording.take();
     assert_eq!(
         loonfs_test_support::stores::request_lines(&operations),
-        collected_position_check(&fixture.namespace_id, position, newest)
+        collected_position_load(&fixture.namespace_id, position, newest)
     );
     fixture
         .reader
@@ -1309,11 +1266,13 @@ const ADMINISTRATOR: &str = "prn_root";
 /// or not the runtime's segment cache still has the deleted manifest, and
 /// sends no request for that manifest.
 ///
-/// The advance first checks the position as a strong read does. The check
-/// finds the position's manifest at or below the manifest boundary and drops
-/// the position, so in both cases the session loads its position again with
-/// the writer's load, which finds the rival's claim by discovery, as the
-/// sweep's fold and the snapshot do (see
+/// Without the manifest in the cache, the advance's load of the manifest
+/// finds it missing at or below the manifest boundary, so the position is
+/// behind. With the manifest in the cache, the advance plans from it, and
+/// the check that confirms a result without a put, as a strong read does,
+/// finds a newer manifest. In both cases the session loads its position
+/// again with the writer's load, which finds the rival's claim by discovery,
+/// as the sweep's fold and the snapshot do (see
 /// [`a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_are_fenced`]).
 #[tokio::test]
 async fn a_retention_advance_from_a_position_on_a_collected_manifest_is_fenced() {
@@ -1333,9 +1292,14 @@ async fn a_retention_advance_from_a_position_on_a_collected_manifest_is_fenced()
             ErrorCode::WriterFenced,
             "cached={cached}: {error:?}"
         );
+        let expected = if cached {
+            collected_position_check(&fixture.namespace_id, position, newest)
+        } else {
+            collected_position_load(&fixture.namespace_id, position, newest)
+        };
         assert_eq!(
             loonfs_test_support::stores::request_lines(&fixture.recording.take()),
-            collected_position_check(&fixture.namespace_id, position, newest),
+            expected,
             "cached={cached}"
         );
     }
@@ -1461,9 +1425,13 @@ async fn a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_are_fenc
 /// Checks that a read of the namespace's metadata and a lookup of an
 /// extension's entry, as grep looks up its own, succeed from a writer
 /// position whose manifest a collection deleted when neither the segment
-/// cache nor the store has the manifest. Each finds the manifest missing at
-/// or below the manifest boundary, returns `ManifestReplaced`, and runs again
-/// from the newest manifest.
+/// cache nor the store has the manifest.
+///
+/// A collection deletes the manifest only once the manifest that replaced it
+/// is a grace window old, so the position's last check is older than the
+/// maximum staleness by then. Each read checks the position, finds a newer
+/// manifest, and reads from the newest manifest, and the session's position
+/// stays as it is.
 #[tokio::test]
 async fn reads_of_the_manifest_alone_from_a_collected_position_succeed() {
     for metadata in [true, false] {
@@ -1473,6 +1441,7 @@ async fn reads_of_the_manifest_alone_from_a_collected_position_succeed() {
             "collected-extension-entry"
         };
         let (fixture, _, _) = position_on_a_collected_manifest(name, false, History::Files).await;
+        fixture.clock.advance_ms(MAX_STALENESS_MS);
         if metadata {
             fixture
                 .reader
@@ -1516,9 +1485,12 @@ async fn a_next_merge_range_from_a_position_on_a_collected_manifest_succeeds() {
 /// Checks that an eventual read of the next merge range succeeds when the
 /// writer session's position in the fork is on a manifest that a collection
 /// deleted, the runtime caches no manifest, and the namespace's own position
-/// is current. The read finds the fork's manifest missing at or below the
-/// fork's manifest boundary, the loop drops the runtime's view of the fork,
-/// and the read runs again from the fork's newest manifest.
+/// is current.
+///
+/// A collection deletes the manifest only once the manifest that replaced it
+/// is a grace window old, so the fork position's last check is older than
+/// the maximum staleness by then. The read checks the fork's position, finds
+/// a newer manifest, and reads the fork's newest manifest.
 #[tokio::test]
 async fn a_next_merge_range_from_a_fork_position_on_a_collected_manifest_succeeds() {
     use loonfs_objectstore::ObjectStore;
@@ -1573,6 +1545,7 @@ async fn a_next_merge_range_from_a_fork_position_on_a_collected_manifest_succeed
         store.head(&key).await.expect("HEAD").is_none(),
         "the collection deletes the fork position's manifest"
     );
+    fixture.clock.advance_ms(MAX_STALENESS_MS);
     fixture
         .namespace
         .next_merge_range(&fork)
@@ -1622,10 +1595,11 @@ async fn a_rebase_from_a_position_on_a_collected_manifest_succeeds() {
 /// manifest.
 ///
 /// The fixture's collection deletes the manifest, and the test puts the
-/// manifest back by hand. The advance first checks the position as a strong
-/// read does. The check finds the manifest at or below the manifest boundary
-/// and drops the position, so the advance doesn't read the stored manifest,
-/// and the writer's load that follows finds the rival's claim by discovery.
+/// manifest back by hand. The advance plans from the stored manifest, and
+/// the check that confirms a result without a put, as a strong read does,
+/// finds a newer manifest, so the writer's load that follows finds the
+/// rival's claim by discovery, and the advance returns no result computed
+/// from the stored manifest.
 #[tokio::test]
 async fn a_retention_advance_from_a_stored_position_manifest_below_the_boundary_is_fenced() {
     use loonfs_objectstore::ObjectStore;
@@ -1649,9 +1623,18 @@ async fn a_retention_advance_from_a_stored_position_manifest_below_the_boundary_
         .await
         .expect_err("the rival's claim fences the session");
     assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+    let mut expected = vec![format!(
+        "get {} MetadataManifest {:020}",
+        fixture.namespace_id, position.0
+    )];
+    expected.extend(collected_position_check(
+        &fixture.namespace_id,
+        position,
+        newest,
+    ));
     assert_eq!(
         loonfs_test_support::stores::request_lines(&fixture.recording.take()),
-        collected_position_check(&fixture.namespace_id, position, newest)
+        expected
     );
 }
 

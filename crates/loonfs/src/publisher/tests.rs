@@ -3746,61 +3746,6 @@ async fn garbage_collection_leaves_the_writer_tail() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a drop of the writer's position that arrives during a publish
-/// waits for the publish to release the engine, that reads keep the position
-/// until then, and that the drop then removes the position, so the next
-/// publish reads its tail from the store.
-#[tokio::test]
-async fn a_drop_during_a_publish_applies_when_the_publish_releases_the_engine() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer = test_writer_with_cache(
-        store.clone() as SharedStore,
-        MetadataCache::default(),
-        recorder.clone(),
-    )
-    .await;
-    let namespaces = publish_once_into_each(&writer, std::slice::from_ref(&namespace_id)).await;
-    let replays = counter(&recorder, "loonfs.publisher.tail_replays");
-    let commit = |name| {
-        namespaces[0].commit_candidate(CommitCandidate::new(create_directory_request(name, name)))
-    };
-
-    store.block_next();
-    let (during, ()) = futures::join!(commit("during"), async {
-        store.wait_until_blocked().await;
-        let mut drop = std::pin::pin!(writer
-            .mode
-            .publisher
-            .invalidate_namespace(&namespace_id, NamespaceChange::Unknown));
-        assert!(
-            futures::poll!(drop.as_mut()).is_pending(),
-            "the drop waits for the publish"
-        );
-        assert!(
-            writer.core.writer_position(&namespace_id).is_some(),
-            "reads keep the position while the publish runs"
-        );
-        store.release();
-        drop.await;
-    });
-    during.expect("the publish succeeds");
-    assert!(
-        writer.core.writer_position(&namespace_id).is_none(),
-        "the drop applied once the publish released the engine"
-    );
-    commit("after").await.expect("publish after the drop");
-
-    assert_eq!(
-        counter(&recorder, "loonfs.publisher.tail_replays"),
-        replays + 1,
-        "the drop was applied once the publish released the engine"
-    );
-    writer.shutdown().await.expect("shutdown");
-}
-
 /// Creates a writer whose store records the WAL requests of `namespace_id`,
 /// and whose eventual reads take a head that was confirmed less than the
 /// revalidation bound ago, so a read sends no request to confirm it.

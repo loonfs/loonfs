@@ -307,9 +307,9 @@ Replaying a fork's unmerged commits onto a fresh fork of its parent namespace wh
 
 ### Writer position
 
-The in-memory head and manifest that an active writer session plans commits against. Reads in the writer's process start from the writer position instead of probing the WAL. The position advances on every local commit (before acknowledgement) and onto every manifest that the session's [publication lane](#publication-lane) publishes, each of which builds on the session's newest published manifest.
+The in-memory head and manifest that an active writer session plans commits against. Reads in the writer's process start from the writer position instead of probing the WAL. The position advances on every local commit (before acknowledgement) and onto every manifest that the session's [publication lane](#publication-lane) publishes, each of which builds on the session's newest published manifest. Only the session's queues (the commit queue and the publication lane) change the position, so a read never changes it itself.
 
-Manifest checks detect manifests published above the position: the position advances onto a newer manifest with the same writer epoch unless it folded past the position's WAL tip, and drops the position (falling back to full discovery) on a new writer's epoch claim or a fold past the tip. `strong` reads wait for a fresh manifest check, while `eventual` reads wait only past `max_staleness_ms`. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
+A manifest check of the position (a HEAD of the next manifest number and a conditional read of `boundary.json`) finds a newer manifest when the session's own publication is between its put and its record, or after another writer's claim. The read then asks the session to settle its position: the session waits for its publication lane, and when the position doesn't follow a newer manifest of the session's own, it loads the namespace again from the store under its writer epoch, which fences the session after a claim. `strong` reads wait for a fresh manifest check, while `eventual` reads wait only past `max_staleness_ms`. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
 
 ### Consistency
 

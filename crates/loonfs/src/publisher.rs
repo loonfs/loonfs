@@ -33,6 +33,7 @@ mod delete_barrier;
 mod folds;
 mod maintenance;
 pub(crate) mod metrics;
+mod position;
 mod queue;
 mod registry;
 mod retention_advance;
@@ -47,9 +48,8 @@ use admission::PublicationAdmission;
 pub(crate) use compaction::MAX_COMPACTION_UNITS_PER_CALL;
 use folds::NamespaceTurns;
 pub(crate) use folds::{fold_due, FoldDue, FoldWhen, NamespaceFold, WalTailState};
-use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::{
-    NamespaceCommitEngine, PublicationLane, UnitStart, WriterSessionStatus,
+    LaneGuard, NamespaceCommitEngine, PublicationLane, UnitStart, WriterSessionStatus,
     WriterSessionStatusGuard, WriterSessionStatusView,
 };
 use loonfs_core::time::Observation;
@@ -59,7 +59,7 @@ pub(crate) use maintenance::AdmittedMaintenance;
 use queue::{InFlightRequest, WorkItem};
 use registry::RegistryShared;
 pub use registry::{CloseNamespaceReport, NamespaceSessionStatus};
-pub(crate) use registry::{MergeReservation, NamespaceChange, NamespaceSession, PublisherRegistry};
+pub(crate) use registry::{MergeReservation, NamespaceSession, PublisherRegistry};
 use session_tasks::{SessionTask, WorkerHandle};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -115,7 +115,8 @@ struct NamespacePublisher {
     /// The session's publication lane, through which every manifest
     /// publication of the session goes, from the engine (see
     /// [`PublicationLane`]). A unit of the commit queue never waits for it,
-    /// so a commit never waits for a manifest put.
+    /// so a commit never waits for a manifest put. Lock it through
+    /// [`Self::lock_lane`].
     lane: PublicationLane,
     /// The engine's position as of the last release of the engine, brought
     /// up to the newest manifest that this runtime published for the
@@ -184,6 +185,32 @@ impl Drop for LockedEngine<'_> {
         if let Some(guard) = self.guard.take() {
             self.publisher.release_engine(guard);
         }
+    }
+}
+
+/// The publication lane of one publisher, kept through
+/// [`NamespacePublisher::lock_lane`].
+///
+/// Releasing it finishes the lane's turn (see
+/// [`NamespacePublisher::release_lane`]).
+pub(crate) struct KeptLane<'a> {
+    publisher: &'a NamespacePublisher,
+    /// `None` only while `drop` runs.
+    guard: Option<LaneGuard<'a>>,
+}
+
+impl<'a> std::ops::Deref for KeptLane<'a> {
+    type Target = LaneGuard<'a>;
+
+    fn deref(&self) -> &LaneGuard<'a> {
+        self.guard.as_ref().expect("a kept lane keeps its guard")
+    }
+}
+
+impl Drop for KeptLane<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        self.publisher.release_lane();
     }
 }
 
@@ -420,40 +447,6 @@ impl NamespacePublisher {
         matches!(*self.session.lock(), WriterSessionStatus::Fenced(_))
     }
 
-    /// Drops the engine's position once no other task has the engine
-    /// locked.
-    ///
-    /// Until then, reads keep the position they have. A position on a
-    /// manifest that this runtime has replaced still reads correctly,
-    /// because garbage collection keeps that manifest's objects for at least
-    /// one grace.
-    ///
-    /// A fenced session keeps no position, because every copy of the
-    /// position follows the session's status and is dropped when the
-    /// session is fenced (see
-    /// [`PublishedManifest::follow`](loonfs_core::publish::PublishedManifest::follow)),
-    /// so its drop doesn't wait for a unit that has the engine. It records
-    /// the displacement instead (see [`Self::record_displacement`]), because
-    /// a publication of the lane finds a fence without the engine.
-    pub(super) async fn drop_position(&self) {
-        if self.session_is_fenced() {
-            self.record_displacement();
-            return;
-        }
-        self.lock_engine().await.invalidate_projection();
-    }
-
-    /// Moves the engine's position onto `newest`, a manifest above it under
-    /// the session's writer epoch that a read's check found, or drops the
-    /// position when it can't move there, once no other task has the engine
-    /// locked (see [`Self::drop_position`]). A manifest that this runtime
-    /// publishes doesn't wait for the engine: the item of the publication
-    /// lane that published it records it as the session's newest published
-    /// manifest.
-    pub(super) async fn move_position(&self, newest: Held<LoadedManifest>) {
-        self.lock_engine().await.move_position_onto(newest);
-    }
-
     /// Locks the engine for one unit of the commit queue, a commit batch or a
     /// retention advance, or for a load of the session's position outside
     /// the publication lane (see [`Self::writer_position`]), and returns
@@ -475,7 +468,7 @@ impl NamespacePublisher {
             return Ok((engine, start));
         }
         drop(engine);
-        let lane = self.lane.lock().await;
+        let lane = self.lock_lane().await;
         let mut engine = self.lock_engine().await;
         if let Some(start) = engine.kept_start()? {
             return Ok((engine, start));
@@ -491,12 +484,49 @@ impl NamespacePublisher {
         }
     }
 
+    /// Waits for the session's publication lane, and keeps it until the
+    /// caller drops the guard, whose drop finishes the turn (see
+    /// [`Self::release_lane`]). Every task that keeps the lane goes through
+    /// this guard.
+    pub(super) async fn lock_lane(&self) -> KeptLane<'_> {
+        KeptLane {
+            publisher: self,
+            guard: Some(self.lane.lock().await),
+        }
+    }
+
+    /// Finishes a turn of the session's publication lane once the lane is
+    /// released: records the session's displacement when the turn found a
+    /// fence (see [`Self::record_displacement`]), and brings the session's
+    /// positions and the namespace's cached head up to the session's newest
+    /// published manifest.
+    ///
+    /// Every publication of the lane passes here. A publication of the lane
+    /// runs without the engine, so a fence that it finds is recorded here.
+    /// The engine's release records a fence that a unit of the commit queue
+    /// found. The positions follow the newest
+    /// published manifest at once when no task has the engine (see
+    /// [`Self::follow_published`]), and the cached head stays when it's
+    /// against that manifest or a later one and is dropped otherwise (see
+    /// [`HeadAndWalTailCache::confirm_or_drop_head`](loonfs_core::cache::HeadAndWalTailCache::confirm_or_drop_head)).
+    fn release_lane(&self) {
+        self.record_displacement();
+        self.follow_published();
+        let published = match &*self.session.lock() {
+            WriterSessionStatus::Acquired { published, .. } => published.clone(),
+            _ => return,
+        };
+        self.context
+            .runtime_core
+            .head_and_wal_tail_cache()
+            .confirm_or_drop_head(&self.namespace_id, &published);
+    }
+
     /// Stores the engine's position for reads, and releases the engine. The
     /// first release after the engine found the session fenced records the
     /// displacement (see [`Self::record_displacement`]). A publication of the
-    /// lane that finds a fence without the engine records it
-    /// when the runtime drops the session's position after the item (see
-    /// [`Self::drop_position`]).
+    /// lane that finds a fence without the engine records it when it
+    /// releases the lane (see [`Self::release_lane`]).
     pub(super) fn release_engine(
         &self,
         mut engine: tokio::sync::MutexGuard<'_, NamespaceCommitEngine<SharedObjectStore>>,

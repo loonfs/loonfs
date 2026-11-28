@@ -24,10 +24,11 @@ fn replaced_on_every_run(namespace_id: &NamespaceId, current_manifest_no: Manife
 
 impl RuntimeCore {
     /// Runs `read` at the namespace's live head, confirmed as `confirmation`
-    /// asks, and again from the newest manifest each time a newer manifest
-    /// replaced the read's basis, up to `MAX_CONTENTION_ATTEMPTS` reads in
-    /// all (see [`Self::run_again_after_replaced_manifest`]). A read whose
-    /// basis was replaced on every attempt returns `store_contention`.
+    /// asks, and again from the newest manifest, confirmed as a `strong` read
+    /// confirms it, each time a newer manifest replaced the read's basis, up
+    /// to `MAX_CONTENTION_ATTEMPTS` reads in all (see
+    /// [`Self::run_again_after_replaced_manifest`]). A read whose basis was
+    /// replaced on every attempt returns `store_contention`.
     pub(crate) async fn read<T, F, Fut>(
         &self,
         namespace_id: &NamespaceId,
@@ -85,7 +86,9 @@ impl RuntimeCore {
                     .await?;
             }
             // The first run reads at the head pinned above, and each later
-            // run pins the head again.
+            // run pins the head again as a `strong` read does, so a run after
+            // a replaced manifest that a writer position of this runtime
+            // started from checks that position and reads from the store.
             let mut first = Some(pinned);
             let read = &read;
             self.run_again_after_replaced_manifest(|| {
@@ -94,7 +97,7 @@ impl RuntimeCore {
                     let pinned = match first {
                         Some(pinned) => pinned,
                         None => {
-                            self.pinned_read(namespace_id, confirmation)
+                            self.pinned_read(namespace_id, Consistency::Strong)
                                 .instrument(phase_span!(self, Phase::PinRead, namespace_id))
                                 .await?
                         }
@@ -112,12 +115,16 @@ impl RuntimeCore {
     /// every run returns `ManifestReplaced`, this method returns
     /// `store_contention`.
     ///
-    /// Before each run after the first, the method drops this runtime's view
-    /// of the namespace whose manifest the last run found replaced (see
-    /// [`Self::forget_namespace_view`]), which can differ from the namespace
-    /// that the read started from, such as a fork that a merge reads. `attempt` reads each namespace at its head as the head is when
-    /// the run starts, so a run after a drop loads that namespace's head by
-    /// discovery, and reads a newer manifest than the run before it read.
+    /// Before each run after the first, the method drops this runtime's
+    /// cached head of the namespace whose manifest the last run found
+    /// replaced (see [`Self::invalidate_namespace_read_cache`]), which can
+    /// differ from the namespace that the read started from, such as a fork
+    /// that a merge reads. `attempt` reads each namespace at its head as the
+    /// head is when the run starts, so a run after the drop loads that
+    /// namespace's head by discovery, and reads a newer manifest than the run
+    /// before it read. A writer session's position stays: its manifest's
+    /// segments are missing only after another writer's claim, and the
+    /// session finds that claim at its next put or confirmation.
     /// [`Self::read_at_least`] runs an ordinary read through this method,
     /// with a head that it pins for each run.
     pub(crate) async fn run_again_after_replaced_manifest<T, F, Fut>(
@@ -131,7 +138,7 @@ impl RuntimeCore {
         for _ in 1..MAX_CONTENTION_ATTEMPTS {
             match attempt().await {
                 Err(Error::Core(CoreError::ManifestReplaced { namespace_id, .. })) => {
-                    self.forget_namespace_view(&namespace_id).await;
+                    self.invalidate_namespace_read_cache(&namespace_id);
                 }
                 result => return result,
             }
