@@ -1,5 +1,6 @@
 //! Publication through the next immutable manifest number.
 
+use super::validate::validate_namespace_manifest;
 use crate::commit::publication_lane::LaneTurn;
 use crate::error::{CoreError, Result};
 use crate::namespace::boundary::KeptBoundary;
@@ -77,7 +78,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// # Panics
     ///
     /// Panics if `turn` is a turn of another namespace's lane, which is a
-    /// bug in the calling process.
+    /// bug in the calling process. The check runs before the put is sent
+    /// under the session's epoch, so such a turn panics before it can end
+    /// the other namespace's session's epoch.
     pub(crate) async fn publish_manifest_in_turn(
         &self,
         turn: LaneTurn<'_>,
@@ -241,6 +244,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// `outcome_unknown` when the put, or a check after it, failed in a way
     /// that leaves the put's outcome unknown, and every other result shows
     /// the outcome.
+    ///
+    /// # Panics
+    ///
+    /// Panics before any request if the candidate manifest fails the
+    /// validation that a reader applies when it decodes a manifest, such as
+    /// for a payload of another namespace or one that lists a segment in two
+    /// runs, or if the candidate isn't a legal successor of `current`. Every
+    /// candidate is built by this process, so either failure is a bug in the
+    /// process.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
@@ -254,18 +266,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock: &OperationClock,
         current: Option<&Held<LoadedManifest>>,
     ) -> Result<ManifestPublicationOutcome> {
-        payload.manifest_no = match current {
+        let manifest_no = match current {
             Some(current) => super::fold::next_manifest_no_after(current.manifest_no())?,
             None => ManifestNo(1),
         };
+        payload.manifest_no = manifest_no;
         payload.publication_id = PublicationId::generate();
         let manifest = encode_manifest(payload);
-        let namespace_id = manifest.envelope().payload().namespace_id.clone();
-        let namespace_id = &namespace_id;
-        debug_assert_eq!(
-            namespace_id, &self.namespace_id,
-            "a manifest publishes through its own namespace's components"
-        );
+        let namespace_id = &self.namespace_id;
+        let object_key = metadata_manifest_object(namespace_id, &manifest_no);
+        validate_namespace_manifest(namespace_id, manifest_no, &object_key, manifest.envelope())
+            .expect("a candidate manifest should pass the validation of a reader's decoding");
         // A reader refuses a larger document, so publishing one would leave the
         // namespace unreadable.
         if manifest.document_bytes() > MAX_NAMESPACE_MANIFEST_BYTES {
@@ -275,16 +286,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 max_bytes: MAX_NAMESPACE_MANIFEST_BYTES,
             });
         }
-        let expected_predecessor = manifest
-            .envelope()
-            .payload()
-            .manifest_no
+        let expected_predecessor = manifest_no
             .0
             .checked_sub(1)
             .filter(|number| *number > 0)
             .map(ManifestNo);
-        let object_key =
-            metadata_manifest_object(namespace_id, &manifest.envelope().payload().manifest_no);
         let candidate = LoadedManifest {
             object_key,
             manifest_bytes: manifest.as_bytes().len() as u64,

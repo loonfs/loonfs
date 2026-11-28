@@ -2,7 +2,6 @@
 //! builds on, and the next manifest, which lists the change.
 
 use super::published::PublicationReport;
-use super::validate::validate_manifest;
 use crate::commit::publication_lane::LaneTurn;
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, Result};
@@ -11,7 +10,6 @@ use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::publish::WriterPosition;
 use crate::time::OperationClock;
-use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{ExtensionEntry, NamespaceManifestPayload};
 use loonfs_types::{ExtensionName, NamespaceId};
@@ -123,8 +121,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// # Panics
     ///
-    /// Panics if the manifest would be invalid, such as when the entry lists
-    /// a segment twice.
+    /// Panics before the put if a reader would refuse the manifest, such as
+    /// when the entry lists a segment twice (see
+    /// [`Self::publish_manifest_from`]).
     pub async fn publish_extension_from(
         &self,
         turn: LaneTurn<'_>,
@@ -139,10 +138,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 published: None,
             });
         }
-        let object_key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
         payload.extensions.insert(name.clone(), entry);
-        validate_manifest(&object_key, &payload)
-            .expect("an extension's publication should list valid runs");
         let published = self
             .publish_manifest_in_turn(turn, payload, &basis.clock)
             .await?;
