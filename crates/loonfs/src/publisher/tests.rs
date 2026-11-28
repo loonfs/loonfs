@@ -3122,6 +3122,15 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     settle_delete(delete, "delete waiting for the earlier fold")
         .await
         .expect("delete namespace");
+    // The session's fold task, and the compaction that its fold started,
+    // can still be ending when the deletion returns. The deletion cancelled
+    // the compaction, so the session leaves the table once both end.
+    bounded(
+        Duration::from_secs(10),
+        registry.wait_for_ended_session(&namespace_id),
+    )
+    .await
+    .expect("the deleted session's work ends");
     assert!(
         registry.shared.lock_state().sessions.is_empty(),
         "a deleted session must not stay in the table while its handle is held"
