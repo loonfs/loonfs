@@ -262,6 +262,11 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                     writer_id: context.writer_id.clone(),
                     writer_epoch: current.payload().writer_epoch,
                 },
+                crate::namespace::Held::new(
+                    current.clone(),
+                    crate::test_support::observed_now(),
+                    Default::default(),
+                ),
             );
             engine
                 .publish_batch_alone(
@@ -386,7 +391,7 @@ async fn a_failed_boundary_read_after_a_put_has_an_unknown_outcome() {
             payload,
             &OperationClock::start(0, crate::test_support::std_timer()),
             Some(&basis),
-            crate::manifest::publish::ManifestSender::Process,
+            crate::manifest::publish::ManifestSender::ClaimOrInitialization,
         )
         .await;
     let object_key = metadata_manifest_object(&namespace_id, &ManifestNo(3));
@@ -460,6 +465,7 @@ async fn a_manifest_update_stops_after_the_contention_limit() {
             .update_manifest(
                 None,
                 &deadline,
+                crate::manifest::publish::ManifestSender::ClaimOrInitialization,
                 |current: crate::namespace::control::LoadedManifest| {
                     attempts += 1;
                     let store = &store;
@@ -516,12 +522,12 @@ async fn a_fold_whose_manifest_put_succeeds_without_an_answer_reports_published(
     let acquired = crate::test_support::namespace_store(&store, &namespace_id)
         .acquire_writer(&context.writer_id)
         .await
-        .expect("claim")
-        .writer;
+        .expect("claim");
     let mut session = NamespaceCommitEngine::with_acquired_session(
         crate::test_support::namespace_store(&store, &namespace_id),
         context.writer_id.clone(),
-        acquired,
+        acquired.writer,
+        acquired.claim,
     );
     let predecessor = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
@@ -726,7 +732,7 @@ async fn two_puts_of_one_payload_store_different_bytes() {
                 payload.clone(),
                 &OperationClock::start(0, crate::test_support::std_timer()),
                 Some(&basis),
-                crate::manifest::publish::ManifestSender::Process,
+                crate::manifest::publish::ManifestSender::ClaimOrInitialization,
             )
             .await
             .expect("publish");
@@ -775,6 +781,7 @@ async fn a_successor_that_copies_its_predecessor_gets_its_own_publication_id() {
         .update_manifest(
             None,
             &OperationClock::start(0, crate::test_support::std_timer()),
+            crate::manifest::publish::ManifestSender::ClaimOrInitialization,
             |current: crate::namespace::control::LoadedManifest| async move {
                 Ok(ManifestChange::Next(
                     Box::new(current.payload().clone()),

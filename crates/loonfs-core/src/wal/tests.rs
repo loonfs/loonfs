@@ -341,7 +341,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
     );
     publish(&mut stale, "old").await.expect("old writer");
     let acquired = crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context(1_000).writer_id)
+        .acquire_writer(&context(1_000).writer_id)
         .await
         .expect("takeover fence");
     store.reset();
@@ -364,7 +364,8 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
     let mut active = NamespaceCommitEngine::with_acquired_session(
         crate::test_support::namespace_store(&store, &namespace_id),
         context(1_000).writer_id,
-        acquired,
+        acquired.writer,
+        acquired.claim,
     );
     assert_eq!(
         publish(&mut active, "new")

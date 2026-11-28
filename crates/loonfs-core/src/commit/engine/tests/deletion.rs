@@ -205,10 +205,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
                 DeleteNamespaceOptions {
                     expected_head_seq: Some(expected_head_seq),
                 },
-                crate::commit::session_epoch::SessionEpoch::new(
-                    &std::sync::Mutex::default(),
-                    acquired_writer.clone(),
-                ),
+                &acquired_writer,
                 None,
                 &crate::publish::PublicationLane::new().lock().await,
                 &deadline,
@@ -248,8 +245,8 @@ enum LearnedTombstonePut {
 }
 
 /// Checks what a deletion returns for each outcome of its tombstone put that
-/// the deletion learns, and that the session takes its epoch back after each
-/// one (format spec, "Failed and unknown outcomes"): the deletion's own
+/// the deletion learns, and that the session keeps its epoch after each one
+/// (format spec, "Failed and unknown outcomes"): the deletion's own
 /// tombstone returns the deletion's response, and another deletion's
 /// tombstone at that number returns `namespace_deleted`.
 #[tokio::test]
@@ -319,13 +316,10 @@ async fn a_tombstone_put_whose_outcome_the_deletion_learns_leaves_the_session_it
                 .namespace
                 .delete_namespace(
                     Default::default(),
-                    crate::commit::session_epoch::SessionEpoch::new(
-                        &std::sync::Mutex::default(),
-                        AcquiredWriter {
-                            writer_id: context.writer_id.clone(),
-                            writer_epoch: WriterEpoch(1),
-                        },
-                    ),
+                    &AcquiredWriter {
+                        writer_id: context.writer_id.clone(),
+                        writer_epoch: WriterEpoch(1),
+                    },
                     None,
                     &crate::publish::PublicationLane::new().lock().await,
                     &other.namespace.start_clock(),
@@ -346,7 +340,7 @@ async fn a_tombstone_put_whose_outcome_the_deletion_learns_leaves_the_session_it
             assert_eq!(deleted.expect("the deletion").namespace_id, namespace_id);
             assert_matches!(
                 *engine.session_status().lock(),
-                WriterSessionStatus::Acquired(_),
+                WriterSessionStatus::Acquired { .. },
                 "{put:?}"
             );
         }

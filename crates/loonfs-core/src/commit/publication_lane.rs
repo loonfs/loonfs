@@ -4,8 +4,10 @@
 
 use super::publish_view::WriterPosition;
 use super::published_manifest::{FollowOutcome, PublishedManifest};
+use super::session_epoch::SessionEpoch;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
+use crate::namespace::store::NamespaceStore;
 use std::sync::{Arc, Mutex};
 
 /// The publication lane of one writer session, a serial queue beside the
@@ -21,12 +23,12 @@ use std::sync::{Arc, Mutex};
 /// number, and the next publication builds on the manifest that the one
 /// before it published. A commit's WAL put never waits for the lane.
 ///
-/// The lane keeps the newest manifest that the session published, which
-/// every copy of the session's position follows, and a copy of the position
-/// that the session's commit engine keeps, which the lane's publications
-/// build on (see [`LaneGuard::turn`]). Only a publication of the lane and a
-/// claim record a manifest, each while it keeps the lane, and a load of the
-/// position never does. A claim isn't a publication of the lane: it keeps
+/// The lane keeps the session's status with the newest manifest that the
+/// session published, which every copy of the session's position follows,
+/// and a copy of the position that the session's commit engine keeps, which
+/// the lane's publications build on (see [`LaneGuard::turn`]). Only a
+/// publication of the lane and a claim record a manifest, each while it
+/// keeps the lane, and a load of the position never does. A claim isn't a publication of the lane: it keeps
 /// the lane and the commit queue while it runs, so it waits for the
 /// publication in flight, and no publication puts while it runs. The order of
 /// the locks is the namespace's fold lock, then the lane, then the commit
@@ -41,8 +43,8 @@ struct LaneState {
     turn: tokio::sync::Mutex<()>,
     published: PublishedManifest,
     /// The position that the session's commit engine kept at its last
-    /// release, or `None` after the engine dropped it or found the session
-    /// fenced. A caller locks it only to store or copy the position, so it
+    /// release, or `None` after the engine dropped it or the session lost
+    /// its writer epoch. A caller locks it only to store or copy the position, so it
     /// never waits for `published` with this locked.
     kept: Mutex<Option<WriterPosition>>,
 }
@@ -62,8 +64,9 @@ impl PublicationLane {
         }
     }
 
-    /// Returns the newest manifest that the session published, which every
-    /// copy of the session's position follows.
+    /// Returns the session's status with the newest manifest that the
+    /// session published, which every copy of the session's position
+    /// follows.
     pub fn published_manifest(&self) -> &PublishedManifest {
         &self.0.published
     }
@@ -100,10 +103,16 @@ impl LaneGuard<'_> {
         Arc::ptr_eq(&self.lane.0, &lane.0)
     }
 
-    /// Records `published`, a manifest that a publication of the lane or a
-    /// claim published, as the session's newest published manifest.
+    /// Records `published`, a manifest that a publication of the lane
+    /// published, as the session's newest published manifest.
     pub(crate) fn record(&self, published: &Held<LoadedManifest>) {
         self.lane.0.published.record(published);
+    }
+
+    /// Returns the epoch of the session of `namespace`, which the lane's
+    /// publications send their manifest puts through.
+    pub(crate) fn epoch<'a, S>(&'a self, namespace: &'a NamespaceStore<S>) -> SessionEpoch<'a> {
+        SessionEpoch::new(&self.lane.0.published, namespace)
     }
 
     /// Returns the manifest that a publication planned from `planned`
@@ -180,6 +189,12 @@ impl LaneTurn<'_> {
     /// Returns the position that the publication builds on.
     pub fn position(&self) -> &WriterPosition {
         &self.position
+    }
+
+    /// Returns the epoch of the session of `namespace`, which the
+    /// publication sends its manifest put through (see [`LaneGuard::epoch`]).
+    pub(crate) fn epoch<'a, S>(&'a self, namespace: &'a NamespaceStore<S>) -> SessionEpoch<'a> {
+        self.guard.epoch(namespace)
     }
 
     /// Records `published` (see [`LaneGuard::record`]) and ends the turn.

@@ -2,7 +2,7 @@
 
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
-use crate::manifest::publish::ManifestChange;
+use crate::manifest::publish::{ManifestChange, ManifestSender};
 use crate::manifest::PublicationReport;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Checked;
@@ -75,6 +75,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .update_live_manifest(
                 basis,
                 &clock,
+                ManifestSender::ClaimOrInitialization,
                 |mut payload: NamespaceManifestPayload| async move {
                     payload.writer_epoch = payload.writer_epoch.successor().map_err(|_| {
                         CoreError::NamespaceCorrupt(format!(

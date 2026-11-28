@@ -348,7 +348,7 @@ impl NamespacePublisher {
         match *self.session.lock() {
             WriterSessionStatus::Fenced(_) => NamespaceSessionStatus::Fenced,
             WriterSessionStatus::NamespaceGone => NamespaceSessionStatus::Closed,
-            WriterSessionStatus::Unacquired | WriterSessionStatus::Acquired(_) => {
+            WriterSessionStatus::Unacquired | WriterSessionStatus::Acquired { .. } => {
                 NamespaceSessionStatus::Open
             }
         }
@@ -508,15 +508,17 @@ impl NamespacePublisher {
             self.drop_view_after_panic(&mut engine);
             return;
         }
-        let position = self.read_position.prepare(engine.read_position());
+        let position = self.read_position.prepare(engine.writer_position());
         match position {
             Some(position) => self.read_position.store(position),
             None => {
                 // When the slot had a position, the engine found a change it
                 // can't follow, such as another writer's claim, so the position
-                // that just became the cached head may be out of date. (After
-                // a commit's WAL put whose outcome the session didn't learn,
-                // the publish path drops the head itself.)
+                // that just became the cached head may be out of date. (A put
+                // of either queue that ends while the session has no epoch
+                // drops the cached head itself before its caller hears the
+                // outcome, whether or not the slot had a position, see
+                // `SessionEpoch` in core.)
                 if self.read_position.clear() {
                     self.context
                         .runtime_core

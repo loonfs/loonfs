@@ -4,6 +4,7 @@
 //! size of what it compacts.
 
 use super::*;
+use crate::commit::session_epoch::SessionEpoch;
 use crate::compaction::group_compaction::{run_metadata_compaction, GroupCompactionReport};
 use crate::compaction::plan::MetadataCompactionSpec;
 use crate::compaction::plan::{group_run_descriptors, plan_group};
@@ -424,12 +425,14 @@ async fn try_finalize_streaming_compaction<S: ObjectStore + ?Sized>(
     result: &GroupCompactionReport,
     cancellation: &MaintenanceCancellation,
 ) -> crate::Result<CompactionUnitOutcome> {
+    let session = crate::publish::PublishedManifest::default();
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
     let timer = Arc::new(StdMonotonicTimer::default());
     let publication = CompactionPublication {
         compaction: OperationClock::start(0, timer.clone()),
         publication: OperationClock::start(0, timer.clone()),
+        epoch: &SessionEpoch::new(&session, &namespace),
     };
-    let namespace = crate::test_support::namespace_store(store, namespace_id);
     namespace
         .finalize_metadata_compaction(
             current_basis(&namespace).await,
@@ -2721,14 +2724,16 @@ async fn an_expired_job_and_a_deletion_each_prevent_publication() {
     )
     .await
     .expect("compact");
+    let session = crate::publish::PublishedManifest::default();
+    let store = RecordingStore::new(store, KeyPredicate::any());
+    let finalizing = crate::test_support::namespace_store(&store, &namespace);
     let timer = Arc::new(ManualClock::stepping(1_000));
     let publication = CompactionPublication {
         compaction: OperationClock::start(0, timer.clone()),
         publication: OperationClock::start(0, timer.clone()),
+        epoch: &SessionEpoch::new(&session, &finalizing),
     };
-    let store = RecordingStore::new(store, KeyPredicate::any());
     timer.set_ms(METADATA_COMPACTION_BUDGET_MS + 1);
-    let finalizing = crate::test_support::namespace_store(&store, &namespace);
     let outcome = finalizing
         .finalize_metadata_compaction(
             current_basis(&finalizing).await,
@@ -2800,10 +2805,16 @@ async fn two_groups_publish_after_a_number_conflict() {
     let first_keys = input_keys_now(&store, &namespace, &first).await;
     let second_keys = input_keys_now(&store, &namespace, &second).await;
     let cancellation = MaintenanceCancellation::default();
+    let session = crate::publish::PublishedManifest::default();
+    let session_namespace = crate::test_support::namespace_store(
+        LocalFsStore::new(directory.path()).expect("store"),
+        &namespace,
+    );
     let timer = Arc::new(StdMonotonicTimer::default());
     let publication = CompactionPublication {
         compaction: OperationClock::start(0, timer.clone()),
         publication: OperationClock::start(0, timer.clone()),
+        epoch: &SessionEpoch::new(&session, &session_namespace),
     };
     let first_output = run_compaction(
         &store,
@@ -2936,14 +2947,17 @@ async fn a_stopped_retry_returns_its_outcome_whatever_manifest_won() {
         let finalizing = crate::test_support::namespace_store(&store, &namespace);
         let first_basis = current_basis(&finalizing).await;
         let second_basis = current_basis(&finalizing).await;
+        let session = crate::publish::PublishedManifest::default();
         let clock = Arc::new(ManualClock::stepping(0));
         let first_publication = CompactionPublication {
             compaction: OperationClock::start(0, clock.clone()),
             publication: OperationClock::start(0, clock.clone()),
+            epoch: &SessionEpoch::new(&session, &finalizing),
         };
         let second_publication = CompactionPublication {
             compaction: OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
             publication: OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
+            epoch: &SessionEpoch::new(&session, &finalizing),
         };
         let stop = MaintenanceCancellation::default();
         store.block_next();

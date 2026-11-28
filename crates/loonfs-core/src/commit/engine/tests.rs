@@ -336,7 +336,7 @@ async fn a_stored_manifest_below_the_sessions_writer_epoch_is_corrupt() {
             .remove(0)
             .expect("the session's first commit acquires its epoch");
         let acquired = match &*engine.position.lock_session() {
-            WriterSessionStatus::Acquired(acquired) => acquired.clone(),
+            WriterSessionStatus::Acquired { writer, .. } => writer.clone(),
             other => panic!("{entry}: the session holds its epoch: {other:?}"),
         };
         let current = crate::test_support::namespace_store(&store, &namespace_id)
@@ -693,7 +693,7 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
             crate::wal::WalPublishError::NumberTaken
         ))]
     );
-    assert!(engine.read_position().is_none());
+    assert!(engine.writer_position().is_none());
     let operations = store.take();
     assert!(
         matches!(operations.as_slice(), [put] if is_wal_put(put, &namespace_id)),
@@ -895,7 +895,7 @@ async fn a_writer_moved_after_its_own_compaction_keeps_its_tail() {
     );
     assert_eq!(
         engine
-            .read_position()
+            .writer_position()
             .expect("put succeeded")
             .read_basis()
             .basis,
@@ -957,7 +957,7 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
         delta.wal_tail.map(|tail| tail.source),
         Some(TailSource::Cached)
     );
-    let written = engine.read_position().expect("put succeeded");
+    let written = engine.writer_position().expect("put succeeded");
     assert_eq!(
         written.read_basis().basis.manifest(),
         &published.manifest().manifest()
@@ -1267,7 +1267,7 @@ async fn a_commit_engine_fold_claims_first_and_then_folds_from_its_position() {
     assert_eq!(claimed.current.manifest().payload().writer_epoch, epoch);
     assert_matches!(
         &*engine.session_status().lock(),
-        WriterSessionStatus::Acquired(acquired) if acquired.writer_epoch == epoch
+        WriterSessionStatus::Acquired { writer, .. } if writer.writer_epoch == epoch
     );
 
     publish_one(&mut engine, &writer, "alpha").await;
@@ -1350,7 +1350,7 @@ async fn a_commit_engine_fold_claims_first_and_then_folds_from_its_position() {
     assert!(failing_engine.writer_position().is_none());
     assert_matches!(
         &*failing_engine.session_status().lock(),
-        WriterSessionStatus::Acquired(acquired) if acquired.writer_epoch == epoch
+        WriterSessionStatus::Acquired { writer, .. } if writer.writer_epoch == epoch
     );
 
     // Another writer's commit fences the session, and the session's next

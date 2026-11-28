@@ -231,6 +231,10 @@ pub(crate) async fn publish_rewritten<S: ObjectStore + ?Sized>(
             &CompactionPublication {
                 compaction: OperationClock::start(0, Arc::clone(&timer)),
                 publication: OperationClock::start(0, timer),
+                epoch: &crate::commit::session_epoch::SessionEpoch::new(
+                    &crate::publish::PublishedManifest::default(),
+                    &namespace,
+                ),
             },
         )
         .await
